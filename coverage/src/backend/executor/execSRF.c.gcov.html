@@ -1,0 +1,1046 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/execSRF.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - execSRF.c<span style="font-size: 80%;"> (source / <a href="execSRF.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">269</td>
+            <td class="headerCovTableEntry">288</td>
+            <td class="headerCovTableEntryHi">93.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * execSRF.c
+<span class="lineNum">       4 </span>            :  *    Routines implementing the API for set-returning functions
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * This file serves nodeFunctionscan.c and nodeProjectSet.c, providing
+<span class="lineNum">       7 </span>            :  * common code for calling set-returning functions according to the
+<span class="lineNum">       8 </span>            :  * ReturnSetInfo API.
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      11 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * IDENTIFICATION
+<span class="lineNum">      15 </span>            :  *    src/backend/executor/execSRF.c
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      18 </span>            :  */
+<span class="lineNum">      19 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      20 </span>            : 
+<span class="lineNum">      21 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;catalog/objectaccess.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;executor/execdebug.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;funcapi.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;parser/parse_coerce.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/acl.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;utils/typcache.h&quot;
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : 
+<span class="lineNum">      36 </span>            : /* static function decls */
+<span class="lineNum">      37 </span>            : static void init_sexpr(Oid foid, Oid input_collation, Expr *node,
+<span class="lineNum">      38 </span>            :                        SetExprState *sexpr, PlanState *parent,
+<span class="lineNum">      39 </span>            :                        MemoryContext sexprCxt, bool allowSRF, bool needDescForSRF);
+<span class="lineNum">      40 </span>            : static void ShutdownSetExpr(Datum arg);
+<span class="lineNum">      41 </span>            : static void ExecEvalFuncArgs(FunctionCallInfo fcinfo,
+<span class="lineNum">      42 </span>            :                              List *argList, ExprContext *econtext);
+<span class="lineNum">      43 </span>            : static void ExecPrepareTuplestoreResult(SetExprState *sexpr,
+<span class="lineNum">      44 </span>            :                                         ExprContext *econtext,
+<span class="lineNum">      45 </span>            :                                         Tuplestorestate *resultStore,
+<span class="lineNum">      46 </span>            :                                         TupleDesc resultDesc);
+<span class="lineNum">      47 </span>            : static void tupledesc_match(TupleDesc dst_tupdesc, TupleDesc src_tupdesc);
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : 
+<span class="lineNum">      50 </span>            : /*
+<span class="lineNum">      51 </span>            :  * Prepare function call in FROM (ROWS FROM) for execution.
+<span class="lineNum">      52 </span>            :  *
+<span class="lineNum">      53 </span>            :  * This is used by nodeFunctionscan.c.
+<a name="54"><span class="lineNum">      54 </span>            :  */</a>
+<span class="lineNum">      55 </span>            : SetExprState *
+<span class="lineNum">      56 </span><span class="lineCov">       5468 : ExecInitTableFunctionResult(Expr *expr,</span>
+<span class="lineNum">      57 </span>            :                             ExprContext *econtext, PlanState *parent)
+<span class="lineNum">      58 </span>            : {
+<span class="lineNum">      59 </span><span class="lineCov">       5468 :     SetExprState *state = makeNode(SetExprState);</span>
+<span class="lineNum">      60 </span>            : 
+<span class="lineNum">      61 </span><span class="lineCov">       5468 :     state-&gt;funcReturnsSet = false;</span>
+<span class="lineNum">      62 </span><span class="lineCov">       5468 :     state-&gt;expr = expr;</span>
+<span class="lineNum">      63 </span><span class="lineCov">       5468 :     state-&gt;func.fn_oid = InvalidOid;</span>
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            :     /*
+<span class="lineNum">      66 </span>            :      * Normally the passed expression tree will be a FuncExpr, since the
+<span class="lineNum">      67 </span>            :      * grammar only allows a function call at the top level of a table
+<span class="lineNum">      68 </span>            :      * function reference.  However, if the function doesn't return set then
+<span class="lineNum">      69 </span>            :      * the planner might have replaced the function call via constant-folding
+<span class="lineNum">      70 </span>            :      * or inlining.  So if we see any other kind of expression node, execute
+<span class="lineNum">      71 </span>            :      * it via the general ExecEvalExpr() code.  That code path will not
+<span class="lineNum">      72 </span>            :      * support set-returning functions buried in the expression, though.
+<span class="lineNum">      73 </span>            :      */
+<span class="lineNum">      74 </span><span class="lineCov">       5468 :     if (IsA(expr, FuncExpr))</span>
+<span class="lineNum">      75 </span>            :     {
+<span class="lineNum">      76 </span><span class="lineCov">       5446 :         FuncExpr   *func = (FuncExpr *) expr;</span>
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span><span class="lineCov">       5446 :         state-&gt;funcReturnsSet = func-&gt;funcretset;</span>
+<span class="lineNum">      79 </span><span class="lineCov">       5446 :         state-&gt;args = ExecInitExprList(func-&gt;args, parent);</span>
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span><span class="lineCov">       5446 :         init_sexpr(func-&gt;funcid, func-&gt;inputcollid, expr, state, parent,</span>
+<span class="lineNum">      82 </span><span class="lineCov">       5446 :                    econtext-&gt;ecxt_per_query_memory, func-&gt;funcretset, false);</span>
+<span class="lineNum">      83 </span>            :     }
+<span class="lineNum">      84 </span>            :     else
+<span class="lineNum">      85 </span>            :     {
+<span class="lineNum">      86 </span><span class="lineCov">         22 :         state-&gt;elidedFuncState = ExecInitExpr(expr, parent);</span>
+<span class="lineNum">      87 </span>            :     }
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span><span class="lineCov">       5468 :     return state;</span>
+<span class="lineNum">      90 </span>            : }
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span>            : /*
+<span class="lineNum">      93 </span>            :  *      ExecMakeTableFunctionResult
+<span class="lineNum">      94 </span>            :  *
+<span class="lineNum">      95 </span>            :  * Evaluate a table function, producing a materialized result in a Tuplestore
+<span class="lineNum">      96 </span>            :  * object.
+<span class="lineNum">      97 </span>            :  *
+<span class="lineNum">      98 </span>            :  * This is used by nodeFunctionscan.c.
+<a name="99"><span class="lineNum">      99 </span>            :  */</a>
+<span class="lineNum">     100 </span>            : Tuplestorestate *
+<span class="lineNum">     101 </span><span class="lineCov">      31554 : ExecMakeTableFunctionResult(SetExprState *setexpr,</span>
+<span class="lineNum">     102 </span>            :                             ExprContext *econtext,
+<span class="lineNum">     103 </span>            :                             MemoryContext argContext,
+<span class="lineNum">     104 </span>            :                             TupleDesc expectedDesc,
+<span class="lineNum">     105 </span>            :                             bool randomAccess)
+<span class="lineNum">     106 </span>            : {
+<span class="lineNum">     107 </span><span class="lineCov">      31554 :     Tuplestorestate *tupstore = NULL;</span>
+<span class="lineNum">     108 </span><span class="lineCov">      31554 :     TupleDesc   tupdesc = NULL;</span>
+<span class="lineNum">     109 </span>            :     Oid         funcrettype;
+<span class="lineNum">     110 </span>            :     bool        returnsTuple;
+<span class="lineNum">     111 </span><span class="lineCov">      31554 :     bool        returnsSet = false;</span>
+<span class="lineNum">     112 </span>            :     FunctionCallInfo fcinfo;
+<span class="lineNum">     113 </span>            :     PgStat_FunctionCallUsage fcusage;
+<span class="lineNum">     114 </span>            :     ReturnSetInfo rsinfo;
+<span class="lineNum">     115 </span>            :     HeapTupleData tmptup;
+<span class="lineNum">     116 </span>            :     MemoryContext callerContext;
+<span class="lineNum">     117 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">     118 </span><span class="lineCov">      31554 :     bool        first_time = true;</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span><span class="lineCov">      31554 :     callerContext = CurrentMemoryContext;</span>
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span><span class="lineCov">      31554 :     funcrettype = exprType((Node *) setexpr-&gt;expr);</span>
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span><span class="lineCov">      31554 :     returnsTuple = type_is_rowtype(funcrettype);</span>
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span>            :     /*
+<span class="lineNum">     127 </span>            :      * Prepare a resultinfo node for communication.  We always do this even if
+<span class="lineNum">     128 </span>            :      * not expecting a set result, so that we can pass expectedDesc.  In the
+<span class="lineNum">     129 </span>            :      * generic-expression case, the expression doesn't actually get to see the
+<span class="lineNum">     130 </span>            :      * resultinfo, but set it up anyway because we use some of the fields as
+<span class="lineNum">     131 </span>            :      * our own state variables.
+<span class="lineNum">     132 </span>            :      */
+<span class="lineNum">     133 </span><span class="lineCov">      31554 :     rsinfo.type = T_ReturnSetInfo;</span>
+<span class="lineNum">     134 </span><span class="lineCov">      31554 :     rsinfo.econtext = econtext;</span>
+<span class="lineNum">     135 </span><span class="lineCov">      31554 :     rsinfo.expectedDesc = expectedDesc;</span>
+<span class="lineNum">     136 </span><span class="lineCov">      31554 :     rsinfo.allowedModes = (int) (SFRM_ValuePerCall | SFRM_Materialize | SFRM_Materialize_Preferred);</span>
+<span class="lineNum">     137 </span><span class="lineCov">      31554 :     if (randomAccess)</span>
+<span class="lineNum">     138 </span><span class="lineCov">         74 :         rsinfo.allowedModes |= (int) SFRM_Materialize_Random;</span>
+<span class="lineNum">     139 </span><span class="lineCov">      31554 :     rsinfo.returnMode = SFRM_ValuePerCall;</span>
+<span class="lineNum">     140 </span>            :     /* isDone is filled below */
+<span class="lineNum">     141 </span><span class="lineCov">      31554 :     rsinfo.setResult = NULL;</span>
+<span class="lineNum">     142 </span><span class="lineCov">      31554 :     rsinfo.setDesc = NULL;</span>
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span><span class="lineCov">      31554 :     fcinfo = palloc(SizeForFunctionCallInfo(list_length(setexpr-&gt;args)));</span>
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span>            :     /*
+<span class="lineNum">     147 </span>            :      * Normally the passed expression tree will be a SetExprState, since the
+<span class="lineNum">     148 </span>            :      * grammar only allows a function call at the top level of a table
+<span class="lineNum">     149 </span>            :      * function reference.  However, if the function doesn't return set then
+<span class="lineNum">     150 </span>            :      * the planner might have replaced the function call via constant-folding
+<span class="lineNum">     151 </span>            :      * or inlining.  So if we see any other kind of expression node, execute
+<span class="lineNum">     152 </span>            :      * it via the general ExecEvalExpr() code; the only difference is that we
+<span class="lineNum">     153 </span>            :      * don't get a chance to pass a special ReturnSetInfo to any functions
+<span class="lineNum">     154 </span>            :      * buried in the expression.
+<span class="lineNum">     155 </span>            :      */
+<span class="lineNum">     156 </span><span class="lineCov">      31554 :     if (!setexpr-&gt;elidedFuncState)</span>
+<span class="lineNum">     157 </span>            :     {
+<span class="lineNum">     158 </span>            :         /*
+<span class="lineNum">     159 </span>            :          * This path is similar to ExecMakeFunctionResultSet.
+<span class="lineNum">     160 </span>            :          */
+<span class="lineNum">     161 </span><span class="lineCov">      31530 :         returnsSet = setexpr-&gt;funcReturnsSet;</span>
+<span class="lineNum">     162 </span><span class="lineCov">      31530 :         InitFunctionCallInfoData(*fcinfo, &amp;(setexpr-&gt;func),</span>
+<span class="lineNum">     163 </span>            :                                  list_length(setexpr-&gt;args),
+<span class="lineNum">     164 </span>            :                                  setexpr-&gt;fcinfo-&gt;fncollation,
+<span class="lineNum">     165 </span>            :                                  NULL, (Node *) &amp;rsinfo);
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span>            :         /*
+<span class="lineNum">     168 </span>            :          * Evaluate the function's argument list.
+<span class="lineNum">     169 </span>            :          *
+<span class="lineNum">     170 </span>            :          * We can't do this in the per-tuple context: the argument values
+<span class="lineNum">     171 </span>            :          * would disappear when we reset that context in the inner loop.  And
+<span class="lineNum">     172 </span>            :          * the caller's CurrentMemoryContext is typically a query-lifespan
+<span class="lineNum">     173 </span>            :          * context, so we don't want to leak memory there.  We require the
+<span class="lineNum">     174 </span>            :          * caller to pass a separate memory context that can be used for this,
+<span class="lineNum">     175 </span>            :          * and can be reset each time through to avoid bloat.
+<span class="lineNum">     176 </span>            :          */
+<span class="lineNum">     177 </span><span class="lineCov">      31530 :         MemoryContextReset(argContext);</span>
+<span class="lineNum">     178 </span><span class="lineCov">      31530 :         oldcontext = MemoryContextSwitchTo(argContext);</span>
+<span class="lineNum">     179 </span><span class="lineCov">      31530 :         ExecEvalFuncArgs(fcinfo, setexpr-&gt;args, econtext);</span>
+<span class="lineNum">     180 </span><span class="lineCov">      31530 :         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     181 </span>            : 
+<span class="lineNum">     182 </span>            :         /*
+<span class="lineNum">     183 </span>            :          * If function is strict, and there are any NULL arguments, skip
+<span class="lineNum">     184 </span>            :          * calling the function and act like it returned NULL (or an empty
+<span class="lineNum">     185 </span>            :          * set, in the returns-set case).
+<span class="lineNum">     186 </span>            :          */
+<span class="lineNum">     187 </span><span class="lineCov">      31530 :         if (setexpr-&gt;func.fn_strict)</span>
+<span class="lineNum">     188 </span>            :         {
+<span class="lineNum">     189 </span>            :             int         i;
+<span class="lineNum">     190 </span>            : 
+<span class="lineNum">     191 </span><span class="lineCov">      90024 :             for (i = 0; i &lt; fcinfo-&gt;nargs; i++)</span>
+<span class="lineNum">     192 </span>            :             {
+<span class="lineNum">     193 </span><span class="lineCov">      59892 :                 if (fcinfo-&gt;args[i].isnull)</span>
+<span class="lineNum">     194 </span><span class="lineCov">        340 :                     goto no_function_result;</span>
+<span class="lineNum">     195 </span>            :             }
+<span class="lineNum">     196 </span>            :         }
+<span class="lineNum">     197 </span>            :     }
+<span class="lineNum">     198 </span>            :     else
+<span class="lineNum">     199 </span>            :     {
+<span class="lineNum">     200 </span>            :         /* Treat setexpr as a generic expression */
+<span class="lineNum">     201 </span><span class="lineCov">         24 :         InitFunctionCallInfoData(*fcinfo, NULL, 0, InvalidOid, NULL, NULL);</span>
+<span class="lineNum">     202 </span>            :     }
+<span class="lineNum">     203 </span>            : 
+<span class="lineNum">     204 </span>            :     /*
+<span class="lineNum">     205 </span>            :      * Switch to short-lived context for calling the function or expression.
+<span class="lineNum">     206 </span>            :      */
+<span class="lineNum">     207 </span><span class="lineCov">      31214 :     MemoryContextSwitchTo(econtext-&gt;ecxt_per_tuple_memory);</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span>            :     /*
+<span class="lineNum">     210 </span>            :      * Loop to handle the ValuePerCall protocol (which is also the same
+<span class="lineNum">     211 </span>            :      * behavior needed in the generic ExecEvalExpr path).
+<span class="lineNum">     212 </span>            :      */
+<span class="lineNum">     213 </span>            :     for (;;)
+<span class="lineNum">     214 </span>            :     {
+<span class="lineNum">     215 </span>            :         Datum       result;
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span><span class="lineCov">    1791374 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span>            :         /*
+<span class="lineNum">     220 </span>            :          * reset per-tuple memory context before each call of the function or
+<span class="lineNum">     221 </span>            :          * expression. This cleans up any local memory the function may leak
+<span class="lineNum">     222 </span>            :          * when called.
+<span class="lineNum">     223 </span>            :          */
+<span class="lineNum">     224 </span><span class="lineCov">    1791374 :         ResetExprContext(econtext);</span>
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span>            :         /* Call the function or expression one time */
+<span class="lineNum">     227 </span><span class="lineCov">    1791374 :         if (!setexpr-&gt;elidedFuncState)</span>
+<span class="lineNum">     228 </span>            :         {
+<span class="lineNum">     229 </span><span class="lineCov">    1791350 :             pgstat_init_function_usage(fcinfo, &amp;fcusage);</span>
+<span class="lineNum">     230 </span>            : 
+<span class="lineNum">     231 </span><span class="lineCov">    1791350 :             fcinfo-&gt;isnull = false;</span>
+<span class="lineNum">     232 </span><span class="lineCov">    1791350 :             rsinfo.isDone = ExprSingleResult;</span>
+<span class="lineNum">     233 </span><span class="lineCov">    1791350 :             result = FunctionCallInvoke(fcinfo);</span>
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span><span class="lineCov">    1791200 :             pgstat_end_function_usage(&amp;fcusage,</span>
+<span class="lineNum">     236 </span><span class="lineCov">    1791200 :                                       rsinfo.isDone != ExprMultipleResult);</span>
+<span class="lineNum">     237 </span>            :         }
+<span class="lineNum">     238 </span>            :         else
+<span class="lineNum">     239 </span>            :         {
+<span class="lineNum">     240 </span><span class="lineCov">         24 :             result =</span>
+<span class="lineNum">     241 </span><span class="lineCov">         24 :                 ExecEvalExpr(setexpr-&gt;elidedFuncState, econtext, &amp;fcinfo-&gt;isnull);</span>
+<span class="lineNum">     242 </span><span class="lineCov">         24 :             rsinfo.isDone = ExprSingleResult;</span>
+<span class="lineNum">     243 </span>            :         }
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span>            :         /* Which protocol does function want to use? */
+<span class="lineNum">     246 </span><span class="lineCov">    1791224 :         if (rsinfo.returnMode == SFRM_ValuePerCall)</span>
+<span class="lineNum">     247 </span>            :         {
+<span class="lineNum">     248 </span>            :             /*
+<span class="lineNum">     249 </span>            :              * Check for end of result set.
+<span class="lineNum">     250 </span>            :              */
+<span class="lineNum">     251 </span><span class="lineCov">    1790278 :             if (rsinfo.isDone == ExprEndResult)</span>
+<span class="lineNum">     252 </span><span class="lineCov">      58152 :                 break;</span>
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span>            :             /*
+<span class="lineNum">     255 </span>            :              * If first time through, build tuplestore for result.  For a
+<span class="lineNum">     256 </span>            :              * scalar function result type, also make a suitable tupdesc.
+<span class="lineNum">     257 </span>            :              */
+<span class="lineNum">     258 </span><span class="lineCov">    1763190 :             if (first_time)</span>
+<span class="lineNum">     259 </span>            :             {
+<span class="lineNum">     260 </span><span class="lineCov">      20068 :                 oldcontext = MemoryContextSwitchTo(econtext-&gt;ecxt_per_query_memory);</span>
+<span class="lineNum">     261 </span><span class="lineCov">      20068 :                 tupstore = tuplestore_begin_heap(randomAccess, false, work_mem);</span>
+<span class="lineNum">     262 </span><span class="lineCov">      20068 :                 rsinfo.setResult = tupstore;</span>
+<span class="lineNum">     263 </span><span class="lineCov">      20068 :                 if (!returnsTuple)</span>
+<span class="lineNum">     264 </span>            :                 {
+<span class="lineNum">     265 </span><span class="lineCov">      19176 :                     tupdesc = CreateTemplateTupleDesc(1);</span>
+<span class="lineNum">     266 </span><span class="lineCov">      19176 :                     TupleDescInitEntry(tupdesc,</span>
+<span class="lineNum">     267 </span>            :                                        (AttrNumber) 1,
+<span class="lineNum">     268 </span>            :                                        &quot;column&quot;,
+<span class="lineNum">     269 </span>            :                                        funcrettype,
+<span class="lineNum">     270 </span>            :                                        -1,
+<span class="lineNum">     271 </span>            :                                        0);
+<span class="lineNum">     272 </span><span class="lineCov">      19176 :                     rsinfo.setDesc = tupdesc;</span>
+<span class="lineNum">     273 </span>            :                 }
+<span class="lineNum">     274 </span><span class="lineCov">      20068 :                 MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     275 </span>            :             }
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span>            :             /*
+<span class="lineNum">     278 </span>            :              * Store current resultset item.
+<span class="lineNum">     279 </span>            :              */
+<span class="lineNum">     280 </span><span class="lineCov">    1763190 :             if (returnsTuple)</span>
+<span class="lineNum">     281 </span>            :             {
+<span class="lineNum">     282 </span><span class="lineCov">      10154 :                 if (!fcinfo-&gt;isnull)</span>
+<span class="lineNum">     283 </span>            :                 {
+<span class="lineNum">     284 </span><span class="lineCov">      10144 :                     HeapTupleHeader td = DatumGetHeapTupleHeader(result);</span>
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span><span class="lineCov">      10144 :                     if (tupdesc == NULL)</span>
+<span class="lineNum">     287 </span>            :                     {
+<span class="lineNum">     288 </span>            :                         /*
+<span class="lineNum">     289 </span>            :                          * This is the first non-NULL result from the
+<span class="lineNum">     290 </span>            :                          * function.  Use the type info embedded in the
+<span class="lineNum">     291 </span>            :                          * rowtype Datum to look up the needed tupdesc.  Make
+<span class="lineNum">     292 </span>            :                          * a copy for the query.
+<span class="lineNum">     293 </span>            :                          */
+<span class="lineNum">     294 </span><span class="lineCov">        890 :                         oldcontext = MemoryContextSwitchTo(econtext-&gt;ecxt_per_query_memory);</span>
+<span class="lineNum">     295 </span><span class="lineCov">        890 :                         tupdesc = lookup_rowtype_tupdesc_copy(HeapTupleHeaderGetTypeId(td),</span>
+<span class="lineNum">     296 </span>            :                                                               HeapTupleHeaderGetTypMod(td));
+<span class="lineNum">     297 </span><span class="lineCov">        890 :                         rsinfo.setDesc = tupdesc;</span>
+<span class="lineNum">     298 </span><span class="lineCov">        890 :                         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     299 </span>            :                     }
+<span class="lineNum">     300 </span>            :                     else
+<span class="lineNum">     301 </span>            :                     {
+<span class="lineNum">     302 </span>            :                         /*
+<span class="lineNum">     303 </span>            :                          * Verify all later returned rows have same subtype;
+<span class="lineNum">     304 </span>            :                          * necessary in case the type is RECORD.
+<span class="lineNum">     305 </span>            :                          */
+<span class="lineNum">     306 </span><span class="lineCov">      18508 :                         if (HeapTupleHeaderGetTypeId(td) != tupdesc-&gt;tdtypeid ||</span>
+<span class="lineNum">     307 </span><span class="lineCov">       9254 :                             HeapTupleHeaderGetTypMod(td) != tupdesc-&gt;tdtypmod)</span>
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :                             ereport(ERROR,</span>
+<span class="lineNum">     309 </span>            :                                     (errcode(ERRCODE_DATATYPE_MISMATCH),
+<span class="lineNum">     310 </span>            :                                      errmsg(&quot;rows returned by function are not all of the same row type&quot;)));
+<span class="lineNum">     311 </span>            :                     }
+<span class="lineNum">     312 </span>            : 
+<span class="lineNum">     313 </span>            :                     /*
+<span class="lineNum">     314 </span>            :                      * tuplestore_puttuple needs a HeapTuple not a bare
+<span class="lineNum">     315 </span>            :                      * HeapTupleHeader, but it doesn't need all the fields.
+<span class="lineNum">     316 </span>            :                      */
+<span class="lineNum">     317 </span><span class="lineCov">      10144 :                     tmptup.t_len = HeapTupleHeaderGetDatumLength(td);</span>
+<span class="lineNum">     318 </span><span class="lineCov">      10144 :                     tmptup.t_data = td;</span>
+<span class="lineNum">     319 </span>            : 
+<span class="lineNum">     320 </span><span class="lineCov">      10144 :                     tuplestore_puttuple(tupstore, &amp;tmptup);</span>
+<span class="lineNum">     321 </span>            :                 }
+<span class="lineNum">     322 </span>            :                 else
+<span class="lineNum">     323 </span>            :                 {
+<span class="lineNum">     324 </span>            :                     /*
+<span class="lineNum">     325 </span>            :                      * NULL result from a tuple-returning function; expand it
+<span class="lineNum">     326 </span>            :                      * to a row of all nulls.  We rely on the expectedDesc to
+<span class="lineNum">     327 </span>            :                      * form such rows.  (Note: this would be problematic if
+<span class="lineNum">     328 </span>            :                      * tuplestore_putvalues saved the tdtypeid/tdtypmod from
+<span class="lineNum">     329 </span>            :                      * the provided descriptor, since that might not match
+<span class="lineNum">     330 </span>            :                      * what we get from the function itself.  But it doesn't.)
+<span class="lineNum">     331 </span>            :                      */
+<span class="lineNum">     332 </span><span class="lineCov">         10 :                     int         natts = expectedDesc-&gt;natts;</span>
+<span class="lineNum">     333 </span>            :                     bool       *nullflags;
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span><span class="lineCov">         10 :                     nullflags = (bool *) palloc(natts * sizeof(bool));</span>
+<span class="lineNum">     336 </span><span class="lineCov">         10 :                     memset(nullflags, true, natts * sizeof(bool));</span>
+<span class="lineNum">     337 </span><span class="lineCov">         10 :                     tuplestore_putvalues(tupstore, expectedDesc, NULL, nullflags);</span>
+<span class="lineNum">     338 </span>            :                 }
+<span class="lineNum">     339 </span>            :             }
+<span class="lineNum">     340 </span>            :             else
+<span class="lineNum">     341 </span>            :             {
+<span class="lineNum">     342 </span>            :                 /* Scalar-type case: just store the function result */
+<span class="lineNum">     343 </span><span class="lineCov">    1753036 :                 tuplestore_putvalues(tupstore, tupdesc, &amp;result, &amp;fcinfo-&gt;isnull);</span>
+<span class="lineNum">     344 </span>            :             }
+<span class="lineNum">     345 </span>            : 
+<span class="lineNum">     346 </span>            :             /*
+<span class="lineNum">     347 </span>            :              * Are we done?
+<span class="lineNum">     348 </span>            :              */
+<span class="lineNum">     349 </span><span class="lineCov">    1763190 :             if (rsinfo.isDone != ExprMultipleResult)</span>
+<span class="lineNum">     350 </span><span class="lineCov">       3030 :                 break;</span>
+<span class="lineNum">     351 </span>            :         }
+<span class="lineNum">     352 </span><span class="lineCov">        946 :         else if (rsinfo.returnMode == SFRM_Materialize)</span>
+<span class="lineNum">     353 </span>            :         {
+<span class="lineNum">     354 </span>            :             /* check we're on the same page as the function author */
+<span class="lineNum">     355 </span><span class="lineCov">        946 :             if (!first_time || rsinfo.isDone != ExprSingleResult)</span>
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     357 </span>            :                         (errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+<span class="lineNum">     358 </span>            :                          errmsg(&quot;table-function protocol for materialize mode was not followed&quot;)));
+<span class="lineNum">     359 </span>            :             /* Done evaluating the set result */
+<span class="lineNum">     360 </span><span class="lineCov">        946 :             break;</span>
+<span class="lineNum">     361 </span>            :         }
+<span class="lineNum">     362 </span>            :         else
+<span class="lineNum">     363 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     364 </span>            :                     (errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+<span class="lineNum">     365 </span>            :                      errmsg(&quot;unrecognized table-function returnMode: %d&quot;,
+<span class="lineNum">     366 </span>            :                             (int) rsinfo.returnMode)));
+<span class="lineNum">     367 </span>            : 
+<span class="lineNum">     368 </span><span class="lineCov">    1760160 :         first_time = false;</span>
+<span class="lineNum">     369 </span><span class="lineCov">    1760160 :     }</span>
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span>            : no_function_result:
+<span class="lineNum">     372 </span>            : 
+<span class="lineNum">     373 </span>            :     /*
+<span class="lineNum">     374 </span>            :      * If we got nothing from the function (ie, an empty-set or NULL result),
+<span class="lineNum">     375 </span>            :      * we have to create the tuplestore to return, and if it's a
+<span class="lineNum">     376 </span>            :      * non-set-returning function then insert a single all-nulls row.  As
+<span class="lineNum">     377 </span>            :      * above, we depend on the expectedDesc to manufacture the dummy row.
+<span class="lineNum">     378 </span>            :      */
+<span class="lineNum">     379 </span><span class="lineCov">      31404 :     if (rsinfo.setResult == NULL)</span>
+<span class="lineNum">     380 </span>            :     {
+<span class="lineNum">     381 </span><span class="lineCov">      10390 :         MemoryContextSwitchTo(econtext-&gt;ecxt_per_query_memory);</span>
+<span class="lineNum">     382 </span><span class="lineCov">      10390 :         tupstore = tuplestore_begin_heap(randomAccess, false, work_mem);</span>
+<span class="lineNum">     383 </span><span class="lineCov">      10390 :         rsinfo.setResult = tupstore;</span>
+<span class="lineNum">     384 </span><span class="lineCov">      10390 :         if (!returnsSet)</span>
+<span class="lineNum">     385 </span>            :         {
+<span class="lineNum">     386 </span><span class="lineNoCov">          0 :             int         natts = expectedDesc-&gt;natts;</span>
+<span class="lineNum">     387 </span>            :             bool       *nullflags;
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :             MemoryContextSwitchTo(econtext-&gt;ecxt_per_tuple_memory);</span>
+<span class="lineNum">     390 </span><span class="lineNoCov">          0 :             nullflags = (bool *) palloc(natts * sizeof(bool));</span>
+<span class="lineNum">     391 </span><span class="lineNoCov">          0 :             memset(nullflags, true, natts * sizeof(bool));</span>
+<span class="lineNum">     392 </span><span class="lineNoCov">          0 :             tuplestore_putvalues(tupstore, expectedDesc, NULL, nullflags);</span>
+<span class="lineNum">     393 </span>            :         }
+<span class="lineNum">     394 </span>            :     }
+<span class="lineNum">     395 </span>            : 
+<span class="lineNum">     396 </span>            :     /*
+<span class="lineNum">     397 </span>            :      * If function provided a tupdesc, cross-check it.  We only really need to
+<span class="lineNum">     398 </span>            :      * do this for functions returning RECORD, but might as well do it always.
+<span class="lineNum">     399 </span>            :      */
+<span class="lineNum">     400 </span><span class="lineCov">      31404 :     if (rsinfo.setDesc)</span>
+<span class="lineNum">     401 </span>            :     {
+<span class="lineNum">     402 </span><span class="lineCov">      21010 :         tupledesc_match(expectedDesc, rsinfo.setDesc);</span>
+<span class="lineNum">     403 </span>            : 
+<span class="lineNum">     404 </span>            :         /*
+<span class="lineNum">     405 </span>            :          * If it is a dynamically-allocated TupleDesc, free it: it is
+<span class="lineNum">     406 </span>            :          * typically allocated in a per-query context, so we must avoid
+<span class="lineNum">     407 </span>            :          * leaking it across multiple usages.
+<span class="lineNum">     408 </span>            :          */
+<span class="lineNum">     409 </span><span class="lineCov">      20990 :         if (rsinfo.setDesc-&gt;tdrefcount == -1)</span>
+<span class="lineNum">     410 </span><span class="lineCov">      20990 :             FreeTupleDesc(rsinfo.setDesc);</span>
+<span class="lineNum">     411 </span>            :     }
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span><span class="lineCov">      31384 :     MemoryContextSwitchTo(callerContext);</span>
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span>            :     /* All done, pass back the tuplestore */
+<span class="lineNum">     416 </span><span class="lineCov">      31384 :     return rsinfo.setResult;</span>
+<span class="lineNum">     417 </span>            : }
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span>            : /*
+<span class="lineNum">     421 </span>            :  * Prepare targetlist SRF function call for execution.
+<span class="lineNum">     422 </span>            :  *
+<span class="lineNum">     423 </span>            :  * This is used by nodeProjectSet.c.
+<a name="424"><span class="lineNum">     424 </span>            :  */</a>
+<span class="lineNum">     425 </span>            : SetExprState *
+<span class="lineNum">     426 </span><span class="lineCov">       1408 : ExecInitFunctionResultSet(Expr *expr,</span>
+<span class="lineNum">     427 </span>            :                           ExprContext *econtext, PlanState *parent)
+<span class="lineNum">     428 </span>            : {
+<span class="lineNum">     429 </span><span class="lineCov">       1408 :     SetExprState *state = makeNode(SetExprState);</span>
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span><span class="lineCov">       1408 :     state-&gt;funcReturnsSet = true;</span>
+<span class="lineNum">     432 </span><span class="lineCov">       1408 :     state-&gt;expr = expr;</span>
+<span class="lineNum">     433 </span><span class="lineCov">       1408 :     state-&gt;func.fn_oid = InvalidOid;</span>
+<span class="lineNum">     434 </span>            : 
+<span class="lineNum">     435 </span>            :     /*
+<span class="lineNum">     436 </span>            :      * Initialize metadata.  The expression node could be either a FuncExpr or
+<span class="lineNum">     437 </span>            :      * an OpExpr.
+<span class="lineNum">     438 </span>            :      */
+<span class="lineNum">     439 </span><span class="lineCov">       1408 :     if (IsA(expr, FuncExpr))</span>
+<span class="lineNum">     440 </span>            :     {
+<span class="lineNum">     441 </span><span class="lineCov">       1406 :         FuncExpr   *func = (FuncExpr *) expr;</span>
+<span class="lineNum">     442 </span>            : 
+<span class="lineNum">     443 </span><span class="lineCov">       1406 :         state-&gt;args = ExecInitExprList(func-&gt;args, parent);</span>
+<span class="lineNum">     444 </span><span class="lineCov">       1406 :         init_sexpr(func-&gt;funcid, func-&gt;inputcollid, expr, state, parent,</span>
+<span class="lineNum">     445 </span>            :                    econtext-&gt;ecxt_per_query_memory, true, true);
+<span class="lineNum">     446 </span>            :     }
+<span class="lineNum">     447 </span><span class="lineCov">          2 :     else if (IsA(expr, OpExpr))</span>
+<span class="lineNum">     448 </span>            :     {
+<span class="lineNum">     449 </span><span class="lineCov">          2 :         OpExpr     *op = (OpExpr *) expr;</span>
+<span class="lineNum">     450 </span>            : 
+<span class="lineNum">     451 </span><span class="lineCov">          2 :         state-&gt;args = ExecInitExprList(op-&gt;args, parent);</span>
+<span class="lineNum">     452 </span><span class="lineCov">          2 :         init_sexpr(op-&gt;opfuncid, op-&gt;inputcollid, expr, state, parent,</span>
+<span class="lineNum">     453 </span>            :                    econtext-&gt;ecxt_per_query_memory, true, true);
+<span class="lineNum">     454 </span>            :     }
+<span class="lineNum">     455 </span>            :     else
+<span class="lineNum">     456 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;unrecognized node type: %d&quot;,</span>
+<span class="lineNum">     457 </span>            :              (int) nodeTag(expr));
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span>            :     /* shouldn't get here unless the selected function returns set */
+<span class="lineNum">     460 </span><span class="lineCov">       1408 :     Assert(state-&gt;func.fn_retset);</span>
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span><span class="lineCov">       1408 :     return state;</span>
+<span class="lineNum">     463 </span>            : }
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span>            : /*
+<span class="lineNum">     466 </span>            :  *      ExecMakeFunctionResultSet
+<span class="lineNum">     467 </span>            :  *
+<span class="lineNum">     468 </span>            :  * Evaluate the arguments to a set-returning function and then call the
+<span class="lineNum">     469 </span>            :  * function itself.  The argument expressions may not contain set-returning
+<span class="lineNum">     470 </span>            :  * functions (the planner is supposed to have separated evaluation for those).
+<span class="lineNum">     471 </span>            :  *
+<span class="lineNum">     472 </span>            :  * This should be called in a short-lived (per-tuple) context, argContext
+<span class="lineNum">     473 </span>            :  * needs to live until all rows have been returned (i.e. *isDone set to
+<span class="lineNum">     474 </span>            :  * ExprEndResult or ExprSingleResult).
+<span class="lineNum">     475 </span>            :  *
+<span class="lineNum">     476 </span>            :  * This is used by nodeProjectSet.c.
+<a name="477"><span class="lineNum">     477 </span>            :  */</a>
+<span class="lineNum">     478 </span>            : Datum
+<span class="lineNum">     479 </span><span class="lineCov">     160826 : ExecMakeFunctionResultSet(SetExprState *fcache,</span>
+<span class="lineNum">     480 </span>            :                           ExprContext *econtext,
+<span class="lineNum">     481 </span>            :                           MemoryContext argContext,
+<span class="lineNum">     482 </span>            :                           bool *isNull,
+<span class="lineNum">     483 </span>            :                           ExprDoneCond *isDone)
+<span class="lineNum">     484 </span>            : {
+<span class="lineNum">     485 </span>            :     List       *arguments;
+<span class="lineNum">     486 </span>            :     Datum       result;
+<span class="lineNum">     487 </span>            :     FunctionCallInfo fcinfo;
+<span class="lineNum">     488 </span>            :     PgStat_FunctionCallUsage fcusage;
+<span class="lineNum">     489 </span>            :     ReturnSetInfo rsinfo;
+<span class="lineNum">     490 </span>            :     bool        callit;
+<span class="lineNum">     491 </span>            :     int         i;
+<span class="lineNum">     492 </span>            : 
+<span class="lineNum">     493 </span>            : restart:
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span>            :     /* Guard against stack overflow due to overly complex expressions */
+<span class="lineNum">     496 </span><span class="lineCov">     160826 :     check_stack_depth();</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span>            :     /*
+<span class="lineNum">     499 </span>            :      * If a previous call of the function returned a set result in the form of
+<span class="lineNum">     500 </span>            :      * a tuplestore, continue reading rows from the tuplestore until it's
+<span class="lineNum">     501 </span>            :      * empty.
+<span class="lineNum">     502 </span>            :      */
+<span class="lineNum">     503 </span><span class="lineCov">     160826 :     if (fcache-&gt;funcResultStore)</span>
+<span class="lineNum">     504 </span>            :     {
+<span class="lineNum">     505 </span><span class="lineCov">      24168 :         TupleTableSlot *slot = fcache-&gt;funcResultSlot;</span>
+<span class="lineNum">     506 </span>            :         MemoryContext oldContext;
+<span class="lineNum">     507 </span>            :         bool        foundTup;
+<span class="lineNum">     508 </span>            : 
+<span class="lineNum">     509 </span>            :         /*
+<span class="lineNum">     510 </span>            :          * Have to make sure tuple in slot lives long enough, otherwise
+<span class="lineNum">     511 </span>            :          * clearing the slot could end up trying to free something already
+<span class="lineNum">     512 </span>            :          * freed.
+<span class="lineNum">     513 </span>            :          */
+<span class="lineNum">     514 </span><span class="lineCov">      24168 :         oldContext = MemoryContextSwitchTo(slot-&gt;tts_mcxt);</span>
+<span class="lineNum">     515 </span><span class="lineCov">      24168 :         foundTup = tuplestore_gettupleslot(fcache-&gt;funcResultStore, true, false,</span>
+<span class="lineNum">     516 </span>            :                                            fcache-&gt;funcResultSlot);
+<span class="lineNum">     517 </span><span class="lineCov">      24168 :         MemoryContextSwitchTo(oldContext);</span>
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span><span class="lineCov">      24168 :         if (foundTup)</span>
+<span class="lineNum">     520 </span>            :         {
+<span class="lineNum">     521 </span><span class="lineCov">      19916 :             *isDone = ExprMultipleResult;</span>
+<span class="lineNum">     522 </span><span class="lineCov">      19916 :             if (fcache-&gt;funcReturnsTuple)</span>
+<span class="lineNum">     523 </span>            :             {
+<span class="lineNum">     524 </span>            :                 /* We must return the whole tuple as a Datum. */
+<span class="lineNum">     525 </span><span class="lineCov">      19268 :                 *isNull = false;</span>
+<span class="lineNum">     526 </span><span class="lineCov">      19268 :                 return ExecFetchSlotHeapTupleDatum(fcache-&gt;funcResultSlot);</span>
+<span class="lineNum">     527 </span>            :             }
+<span class="lineNum">     528 </span>            :             else
+<span class="lineNum">     529 </span>            :             {
+<span class="lineNum">     530 </span>            :                 /* Extract the first column and return it as a scalar. */
+<span class="lineNum">     531 </span><span class="lineCov">        648 :                 return slot_getattr(fcache-&gt;funcResultSlot, 1, isNull);</span>
+<span class="lineNum">     532 </span>            :             }
+<span class="lineNum">     533 </span>            :         }
+<span class="lineNum">     534 </span>            :         /* Exhausted the tuplestore, so clean up */
+<span class="lineNum">     535 </span><span class="lineCov">       4252 :         tuplestore_end(fcache-&gt;funcResultStore);</span>
+<span class="lineNum">     536 </span><span class="lineCov">       4252 :         fcache-&gt;funcResultStore = NULL;</span>
+<span class="lineNum">     537 </span><span class="lineCov">       4252 :         *isDone = ExprEndResult;</span>
+<span class="lineNum">     538 </span><span class="lineCov">       4252 :         *isNull = true;</span>
+<span class="lineNum">     539 </span><span class="lineCov">       4252 :         return (Datum) 0;</span>
+<span class="lineNum">     540 </span>            :     }
+<span class="lineNum">     541 </span>            : 
+<span class="lineNum">     542 </span>            :     /*
+<span class="lineNum">     543 </span>            :      * arguments is a list of expressions to evaluate before passing to the
+<span class="lineNum">     544 </span>            :      * function manager.  We skip the evaluation if it was already done in the
+<span class="lineNum">     545 </span>            :      * previous call (ie, we are continuing the evaluation of a set-valued
+<span class="lineNum">     546 </span>            :      * function).  Otherwise, collect the current argument values into fcinfo.
+<span class="lineNum">     547 </span>            :      *
+<span class="lineNum">     548 </span>            :      * The arguments have to live in a context that lives at least until all
+<span class="lineNum">     549 </span>            :      * rows from this SRF have been returned, otherwise ValuePerCall SRFs
+<span class="lineNum">     550 </span>            :      * would reference freed memory after the first returned row.
+<span class="lineNum">     551 </span>            :      */
+<span class="lineNum">     552 </span><span class="lineCov">     136658 :     fcinfo = fcache-&gt;fcinfo;</span>
+<span class="lineNum">     553 </span><span class="lineCov">     136658 :     arguments = fcache-&gt;args;</span>
+<span class="lineNum">     554 </span><span class="lineCov">     136658 :     if (!fcache-&gt;setArgsValid)</span>
+<span class="lineNum">     555 </span>            :     {
+<span class="lineNum">     556 </span><span class="lineCov">      16292 :         MemoryContext oldContext = MemoryContextSwitchTo(argContext);</span>
+<span class="lineNum">     557 </span>            : 
+<span class="lineNum">     558 </span><span class="lineCov">      16292 :         ExecEvalFuncArgs(fcinfo, arguments, econtext);</span>
+<span class="lineNum">     559 </span><span class="lineCov">      16292 :         MemoryContextSwitchTo(oldContext);</span>
+<span class="lineNum">     560 </span>            :     }
+<span class="lineNum">     561 </span>            :     else
+<span class="lineNum">     562 </span>            :     {
+<span class="lineNum">     563 </span>            :         /* Reset flag (we may set it again below) */
+<span class="lineNum">     564 </span><span class="lineCov">     120366 :         fcache-&gt;setArgsValid = false;</span>
+<span class="lineNum">     565 </span>            :     }
+<span class="lineNum">     566 </span>            : 
+<span class="lineNum">     567 </span>            :     /*
+<span class="lineNum">     568 </span>            :      * Now call the function, passing the evaluated parameter values.
+<span class="lineNum">     569 </span>            :      */
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span>            :     /* Prepare a resultinfo node for communication. */
+<span class="lineNum">     572 </span><span class="lineCov">     136658 :     fcinfo-&gt;resultinfo = (Node *) &amp;rsinfo;</span>
+<span class="lineNum">     573 </span><span class="lineCov">     136658 :     rsinfo.type = T_ReturnSetInfo;</span>
+<span class="lineNum">     574 </span><span class="lineCov">     136658 :     rsinfo.econtext = econtext;</span>
+<span class="lineNum">     575 </span><span class="lineCov">     136658 :     rsinfo.expectedDesc = fcache-&gt;funcResultDesc;</span>
+<span class="lineNum">     576 </span><span class="lineCov">     136658 :     rsinfo.allowedModes = (int) (SFRM_ValuePerCall | SFRM_Materialize);</span>
+<span class="lineNum">     577 </span>            :     /* note we do not set SFRM_Materialize_Random or _Preferred */
+<span class="lineNum">     578 </span><span class="lineCov">     136658 :     rsinfo.returnMode = SFRM_ValuePerCall;</span>
+<span class="lineNum">     579 </span>            :     /* isDone is filled below */
+<span class="lineNum">     580 </span><span class="lineCov">     136658 :     rsinfo.setResult = NULL;</span>
+<span class="lineNum">     581 </span><span class="lineCov">     136658 :     rsinfo.setDesc = NULL;</span>
+<span class="lineNum">     582 </span>            : 
+<span class="lineNum">     583 </span>            :     /*
+<span class="lineNum">     584 </span>            :      * If function is strict, and there are any NULL arguments, skip calling
+<span class="lineNum">     585 </span>            :      * the function.
+<span class="lineNum">     586 </span>            :      */
+<span class="lineNum">     587 </span><span class="lineCov">     136658 :     callit = true;</span>
+<span class="lineNum">     588 </span><span class="lineCov">     136658 :     if (fcache-&gt;func.fn_strict)</span>
+<span class="lineNum">     589 </span>            :     {
+<span class="lineNum">     590 </span><span class="lineCov">     378940 :         for (i = 0; i &lt; fcinfo-&gt;nargs; i++)</span>
+<span class="lineNum">     591 </span>            :         {
+<span class="lineNum">     592 </span><span class="lineCov">     249422 :             if (fcinfo-&gt;args[i].isnull)</span>
+<span class="lineNum">     593 </span>            :             {
+<span class="lineNum">     594 </span><span class="lineCov">       5858 :                 callit = false;</span>
+<span class="lineNum">     595 </span><span class="lineCov">       5858 :                 break;</span>
+<span class="lineNum">     596 </span>            :             }
+<span class="lineNum">     597 </span>            :         }
+<span class="lineNum">     598 </span>            :     }
+<span class="lineNum">     599 </span>            : 
+<span class="lineNum">     600 </span><span class="lineCov">     136658 :     if (callit)</span>
+<span class="lineNum">     601 </span>            :     {
+<span class="lineNum">     602 </span><span class="lineCov">     130800 :         pgstat_init_function_usage(fcinfo, &amp;fcusage);</span>
+<span class="lineNum">     603 </span>            : 
+<span class="lineNum">     604 </span><span class="lineCov">     130800 :         fcinfo-&gt;isnull = false;</span>
+<span class="lineNum">     605 </span><span class="lineCov">     130800 :         rsinfo.isDone = ExprSingleResult;</span>
+<span class="lineNum">     606 </span><span class="lineCov">     130800 :         result = FunctionCallInvoke(fcinfo);</span>
+<span class="lineNum">     607 </span><span class="lineCov">     130642 :         *isNull = fcinfo-&gt;isnull;</span>
+<span class="lineNum">     608 </span><span class="lineCov">     130642 :         *isDone = rsinfo.isDone;</span>
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span><span class="lineCov">     130642 :         pgstat_end_function_usage(&amp;fcusage,</span>
+<span class="lineNum">     611 </span><span class="lineCov">     130642 :                                   rsinfo.isDone != ExprMultipleResult);</span>
+<span class="lineNum">     612 </span>            :     }
+<span class="lineNum">     613 </span>            :     else
+<span class="lineNum">     614 </span>            :     {
+<span class="lineNum">     615 </span>            :         /* for a strict SRF, result for NULL is an empty set */
+<span class="lineNum">     616 </span><span class="lineCov">       5858 :         result = (Datum) 0;</span>
+<span class="lineNum">     617 </span><span class="lineCov">       5858 :         *isNull = true;</span>
+<span class="lineNum">     618 </span><span class="lineCov">       5858 :         *isDone = ExprEndResult;</span>
+<span class="lineNum">     619 </span>            :     }
+<span class="lineNum">     620 </span>            : 
+<span class="lineNum">     621 </span>            :     /* Which protocol does function want to use? */
+<span class="lineNum">     622 </span><span class="lineCov">     136500 :     if (rsinfo.returnMode == SFRM_ValuePerCall)</span>
+<span class="lineNum">     623 </span>            :     {
+<span class="lineNum">     624 </span><span class="lineCov">     132236 :         if (*isDone != ExprEndResult)</span>
+<span class="lineNum">     625 </span>            :         {
+<span class="lineNum">     626 </span>            :             /*
+<span class="lineNum">     627 </span>            :              * Save the current argument values to re-use on the next call.
+<span class="lineNum">     628 </span>            :              */
+<span class="lineNum">     629 </span><span class="lineCov">     120382 :             if (*isDone == ExprMultipleResult)</span>
+<span class="lineNum">     630 </span>            :             {
+<span class="lineNum">     631 </span><span class="lineCov">     120382 :                 fcache-&gt;setArgsValid = true;</span>
+<span class="lineNum">     632 </span>            :                 /* Register cleanup callback if we didn't already */
+<span class="lineNum">     633 </span><span class="lineCov">     120382 :                 if (!fcache-&gt;shutdown_reg)</span>
+<span class="lineNum">     634 </span>            :                 {
+<span class="lineNum">     635 </span><span class="lineCov">       1154 :                     RegisterExprContextCallback(econtext,</span>
+<span class="lineNum">     636 </span>            :                                                 ShutdownSetExpr,
+<span class="lineNum">     637 </span>            :                                                 PointerGetDatum(fcache));
+<span class="lineNum">     638 </span><span class="lineCov">       1154 :                     fcache-&gt;shutdown_reg = true;</span>
+<span class="lineNum">     639 </span>            :                 }
+<span class="lineNum">     640 </span>            :             }
+<span class="lineNum">     641 </span>            :         }
+<span class="lineNum">     642 </span>            :     }
+<span class="lineNum">     643 </span><span class="lineCov">       4264 :     else if (rsinfo.returnMode == SFRM_Materialize)</span>
+<span class="lineNum">     644 </span>            :     {
+<span class="lineNum">     645 </span>            :         /* check we're on the same page as the function author */
+<span class="lineNum">     646 </span><span class="lineCov">       4264 :         if (rsinfo.isDone != ExprSingleResult)</span>
+<span class="lineNum">     647 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     648 </span>            :                     (errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+<span class="lineNum">     649 </span>            :                      errmsg(&quot;table-function protocol for materialize mode was not followed&quot;)));
+<span class="lineNum">     650 </span><span class="lineCov">       4264 :         if (rsinfo.setResult != NULL)</span>
+<span class="lineNum">     651 </span>            :         {
+<span class="lineNum">     652 </span>            :             /* prepare to return values from the tuplestore */
+<span class="lineNum">     653 </span><span class="lineCov">       4258 :             ExecPrepareTuplestoreResult(fcache, econtext,</span>
+<span class="lineNum">     654 </span>            :                                         rsinfo.setResult,
+<span class="lineNum">     655 </span>            :                                         rsinfo.setDesc);
+<span class="lineNum">     656 </span>            :             /* loop back to top to start returning from tuplestore */
+<span class="lineNum">     657 </span><span class="lineCov">       4258 :             goto restart;</span>
+<span class="lineNum">     658 </span>            :         }
+<span class="lineNum">     659 </span>            :         /* if setResult was left null, treat it as empty set */
+<span class="lineNum">     660 </span><span class="lineCov">          6 :         *isDone = ExprEndResult;</span>
+<span class="lineNum">     661 </span><span class="lineCov">          6 :         *isNull = true;</span>
+<span class="lineNum">     662 </span><span class="lineCov">          6 :         result = (Datum) 0;</span>
+<span class="lineNum">     663 </span>            :     }
+<span class="lineNum">     664 </span>            :     else
+<span class="lineNum">     665 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     666 </span>            :                 (errcode(ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED),
+<span class="lineNum">     667 </span>            :                  errmsg(&quot;unrecognized table-function returnMode: %d&quot;,
+<span class="lineNum">     668 </span>            :                         (int) rsinfo.returnMode)));
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span><span class="lineCov">     132242 :     return result;</span>
+<span class="lineNum">     671 </span>            : }
+<span class="lineNum">     672 </span>            : 
+<span class="lineNum">     673 </span>            : 
+<span class="lineNum">     674 </span>            : /*
+<span class="lineNum">     675 </span>            :  * init_sexpr - initialize a SetExprState node during first use
+<a name="676"><span class="lineNum">     676 </span>            :  */</a>
+<span class="lineNum">     677 </span>            : static void
+<span class="lineNum">     678 </span><span class="lineCov">       6854 : init_sexpr(Oid foid, Oid input_collation, Expr *node,</span>
+<span class="lineNum">     679 </span>            :            SetExprState *sexpr, PlanState *parent,
+<span class="lineNum">     680 </span>            :            MemoryContext sexprCxt, bool allowSRF, bool needDescForSRF)
+<span class="lineNum">     681 </span>            : {
+<span class="lineNum">     682 </span>            :     AclResult   aclresult;
+<span class="lineNum">     683 </span><span class="lineCov">       6854 :     size_t      numargs = list_length(sexpr-&gt;args);</span>
+<span class="lineNum">     684 </span>            : 
+<span class="lineNum">     685 </span>            :     /* Check permission to call function */
+<span class="lineNum">     686 </span><span class="lineCov">       6854 :     aclresult = pg_proc_aclcheck(foid, GetUserId(), ACL_EXECUTE);</span>
+<span class="lineNum">     687 </span><span class="lineCov">       6854 :     if (aclresult != ACLCHECK_OK)</span>
+<span class="lineNum">     688 </span><span class="lineNoCov">          0 :         aclcheck_error(aclresult, OBJECT_FUNCTION, get_func_name(foid));</span>
+<span class="lineNum">     689 </span><span class="lineCov">       6854 :     InvokeFunctionExecuteHook(foid);</span>
+<span class="lineNum">     690 </span>            : 
+<span class="lineNum">     691 </span>            :     /*
+<span class="lineNum">     692 </span>            :      * Safety check on nargs.  Under normal circumstances this should never
+<span class="lineNum">     693 </span>            :      * fail, as parser should check sooner.  But possibly it might fail if
+<span class="lineNum">     694 </span>            :      * server has been compiled with FUNC_MAX_ARGS smaller than some functions
+<span class="lineNum">     695 </span>            :      * declared in pg_proc?
+<span class="lineNum">     696 </span>            :      */
+<span class="lineNum">     697 </span><span class="lineCov">       6854 :     if (list_length(sexpr-&gt;args) &gt; FUNC_MAX_ARGS)</span>
+<span class="lineNum">     698 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     699 </span>            :                 (errcode(ERRCODE_TOO_MANY_ARGUMENTS),
+<span class="lineNum">     700 </span>            :                  errmsg_plural(&quot;cannot pass more than %d argument to a function&quot;,
+<span class="lineNum">     701 </span>            :                                &quot;cannot pass more than %d arguments to a function&quot;,
+<span class="lineNum">     702 </span>            :                                FUNC_MAX_ARGS,
+<span class="lineNum">     703 </span>            :                                FUNC_MAX_ARGS)));
+<span class="lineNum">     704 </span>            : 
+<span class="lineNum">     705 </span>            :     /* Set up the primary fmgr lookup information */
+<span class="lineNum">     706 </span><span class="lineCov">       6854 :     fmgr_info_cxt(foid, &amp;(sexpr-&gt;func), sexprCxt);</span>
+<span class="lineNum">     707 </span><span class="lineCov">       6854 :     fmgr_info_set_expr((Node *) sexpr-&gt;expr, &amp;(sexpr-&gt;func));</span>
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span>            :     /* Initialize the function call parameter struct as well */
+<span class="lineNum">     710 </span><span class="lineCov">       6854 :     sexpr-&gt;fcinfo =</span>
+<span class="lineNum">     711 </span><span class="lineCov">       6854 :         (FunctionCallInfo) palloc(SizeForFunctionCallInfo(numargs));</span>
+<span class="lineNum">     712 </span><span class="lineCov">       6854 :     InitFunctionCallInfoData(*sexpr-&gt;fcinfo, &amp;(sexpr-&gt;func),</span>
+<span class="lineNum">     713 </span>            :                              numargs,
+<span class="lineNum">     714 </span>            :                              input_collation, NULL, NULL);
+<span class="lineNum">     715 </span>            : 
+<span class="lineNum">     716 </span>            :     /* If function returns set, check if that's allowed by caller */
+<span class="lineNum">     717 </span><span class="lineCov">       6854 :     if (sexpr-&gt;func.fn_retset &amp;&amp; !allowSRF)</span>
+<span class="lineNum">     718 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     719 </span>            :                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     720 </span>            :                  errmsg(&quot;set-valued function called in context that cannot accept a set&quot;),
+<span class="lineNum">     721 </span>            :                  parent ? executor_errposition(parent-&gt;state,
+<span class="lineNum">     722 </span>            :                                                exprLocation((Node *) node)) : 0));
+<span class="lineNum">     723 </span>            : 
+<span class="lineNum">     724 </span>            :     /* Otherwise, caller should have marked the sexpr correctly */
+<span class="lineNum">     725 </span><span class="lineCov">       6854 :     Assert(sexpr-&gt;func.fn_retset == sexpr-&gt;funcReturnsSet);</span>
+<span class="lineNum">     726 </span>            : 
+<span class="lineNum">     727 </span>            :     /* If function returns set, prepare expected tuple descriptor */
+<span class="lineNum">     728 </span><span class="lineCov">       6854 :     if (sexpr-&gt;func.fn_retset &amp;&amp; needDescForSRF)</span>
+<span class="lineNum">     729 </span><span class="lineCov">       1408 :     {</span>
+<span class="lineNum">     730 </span>            :         TypeFuncClass functypclass;
+<span class="lineNum">     731 </span>            :         Oid         funcrettype;
+<span class="lineNum">     732 </span>            :         TupleDesc   tupdesc;
+<span class="lineNum">     733 </span>            :         MemoryContext oldcontext;
+<span class="lineNum">     734 </span>            : 
+<span class="lineNum">     735 </span><span class="lineCov">       1408 :         functypclass = get_expr_result_type(sexpr-&gt;func.fn_expr,</span>
+<span class="lineNum">     736 </span>            :                                             &amp;funcrettype,
+<span class="lineNum">     737 </span>            :                                             &amp;tupdesc);
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span>            :         /* Must save tupdesc in sexpr's context */
+<span class="lineNum">     740 </span><span class="lineCov">       1408 :         oldcontext = MemoryContextSwitchTo(sexprCxt);</span>
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span><span class="lineCov">       1408 :         if (functypclass == TYPEFUNC_COMPOSITE ||</span>
+<span class="lineNum">     743 </span>            :             functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
+<span class="lineNum">     744 </span>            :         {
+<span class="lineNum">     745 </span>            :             /* Composite data type, e.g. a table's row type */
+<span class="lineNum">     746 </span><span class="lineCov">        128 :             Assert(tupdesc);</span>
+<span class="lineNum">     747 </span>            :             /* Must copy it out of typcache for safety */
+<span class="lineNum">     748 </span><span class="lineCov">        128 :             sexpr-&gt;funcResultDesc = CreateTupleDescCopy(tupdesc);</span>
+<span class="lineNum">     749 </span><span class="lineCov">        128 :             sexpr-&gt;funcReturnsTuple = true;</span>
+<span class="lineNum">     750 </span>            :         }
+<span class="lineNum">     751 </span><span class="lineCov">       1280 :         else if (functypclass == TYPEFUNC_SCALAR)</span>
+<span class="lineNum">     752 </span>            :         {
+<span class="lineNum">     753 </span>            :             /* Base data type, i.e. scalar */
+<span class="lineNum">     754 </span><span class="lineCov">       1256 :             tupdesc = CreateTemplateTupleDesc(1);</span>
+<span class="lineNum">     755 </span><span class="lineCov">       1256 :             TupleDescInitEntry(tupdesc,</span>
+<span class="lineNum">     756 </span>            :                                (AttrNumber) 1,
+<span class="lineNum">     757 </span>            :                                NULL,
+<span class="lineNum">     758 </span>            :                                funcrettype,
+<span class="lineNum">     759 </span>            :                                -1,
+<span class="lineNum">     760 </span>            :                                0);
+<span class="lineNum">     761 </span><span class="lineCov">       1256 :             sexpr-&gt;funcResultDesc = tupdesc;</span>
+<span class="lineNum">     762 </span><span class="lineCov">       1256 :             sexpr-&gt;funcReturnsTuple = false;</span>
+<span class="lineNum">     763 </span>            :         }
+<span class="lineNum">     764 </span><span class="lineCov">         24 :         else if (functypclass == TYPEFUNC_RECORD)</span>
+<span class="lineNum">     765 </span>            :         {
+<span class="lineNum">     766 </span>            :             /* This will work if function doesn't need an expectedDesc */
+<span class="lineNum">     767 </span><span class="lineCov">         24 :             sexpr-&gt;funcResultDesc = NULL;</span>
+<span class="lineNum">     768 </span><span class="lineCov">         24 :             sexpr-&gt;funcReturnsTuple = true;</span>
+<span class="lineNum">     769 </span>            :         }
+<span class="lineNum">     770 </span>            :         else
+<span class="lineNum">     771 </span>            :         {
+<span class="lineNum">     772 </span>            :             /* Else, we will fail if function needs an expectedDesc */
+<span class="lineNum">     773 </span><span class="lineNoCov">          0 :             sexpr-&gt;funcResultDesc = NULL;</span>
+<span class="lineNum">     774 </span>            :         }
+<span class="lineNum">     775 </span>            : 
+<span class="lineNum">     776 </span><span class="lineCov">       1408 :         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     777 </span>            :     }
+<span class="lineNum">     778 </span>            :     else
+<span class="lineNum">     779 </span><span class="lineCov">       5446 :         sexpr-&gt;funcResultDesc = NULL;</span>
+<span class="lineNum">     780 </span>            : 
+<span class="lineNum">     781 </span>            :     /* Initialize additional state */
+<span class="lineNum">     782 </span><span class="lineCov">       6854 :     sexpr-&gt;funcResultStore = NULL;</span>
+<span class="lineNum">     783 </span><span class="lineCov">       6854 :     sexpr-&gt;funcResultSlot = NULL;</span>
+<span class="lineNum">     784 </span><span class="lineCov">       6854 :     sexpr-&gt;shutdown_reg = false;</span>
+<span class="lineNum">     785 </span><span class="lineCov">       6854 : }</span>
+<span class="lineNum">     786 </span>            : 
+<span class="lineNum">     787 </span>            : /*
+<span class="lineNum">     788 </span>            :  * callback function in case a SetExprState needs to be shut down before it
+<span class="lineNum">     789 </span>            :  * has been run to completion
+<a name="790"><span class="lineNum">     790 </span>            :  */</a>
+<span class="lineNum">     791 </span>            : static void
+<span class="lineNum">     792 </span><span class="lineCov">       1358 : ShutdownSetExpr(Datum arg)</span>
+<span class="lineNum">     793 </span>            : {
+<span class="lineNum">     794 </span><span class="lineCov">       1358 :     SetExprState *sexpr = castNode(SetExprState, DatumGetPointer(arg));</span>
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span>            :     /* If we have a slot, make sure it's let go of any tuplestore pointer */
+<span class="lineNum">     797 </span><span class="lineCov">       1358 :     if (sexpr-&gt;funcResultSlot)</span>
+<span class="lineNum">     798 </span><span class="lineCov">        206 :         ExecClearTuple(sexpr-&gt;funcResultSlot);</span>
+<span class="lineNum">     799 </span>            : 
+<span class="lineNum">     800 </span>            :     /* Release any open tuplestore */
+<span class="lineNum">     801 </span><span class="lineCov">       1358 :     if (sexpr-&gt;funcResultStore)</span>
+<span class="lineNum">     802 </span><span class="lineCov">          6 :         tuplestore_end(sexpr-&gt;funcResultStore);</span>
+<span class="lineNum">     803 </span><span class="lineCov">       1358 :     sexpr-&gt;funcResultStore = NULL;</span>
+<span class="lineNum">     804 </span>            : 
+<span class="lineNum">     805 </span>            :     /* Clear any active set-argument state */
+<span class="lineNum">     806 </span><span class="lineCov">       1358 :     sexpr-&gt;setArgsValid = false;</span>
+<span class="lineNum">     807 </span>            : 
+<span class="lineNum">     808 </span>            :     /* execUtils will deregister the callback... */
+<span class="lineNum">     809 </span><span class="lineCov">       1358 :     sexpr-&gt;shutdown_reg = false;</span>
+<span class="lineNum">     810 </span><span class="lineCov">       1358 : }</span>
+<span class="lineNum">     811 </span>            : 
+<span class="lineNum">     812 </span>            : /*
+<span class="lineNum">     813 </span>            :  * Evaluate arguments for a function.
+<a name="814"><span class="lineNum">     814 </span>            :  */</a>
+<span class="lineNum">     815 </span>            : static void
+<span class="lineNum">     816 </span><span class="lineCov">      47822 : ExecEvalFuncArgs(FunctionCallInfo fcinfo,</span>
+<span class="lineNum">     817 </span>            :                  List *argList,
+<span class="lineNum">     818 </span>            :                  ExprContext *econtext)
+<span class="lineNum">     819 </span>            : {
+<span class="lineNum">     820 </span>            :     int         i;
+<span class="lineNum">     821 </span>            :     ListCell   *arg;
+<span class="lineNum">     822 </span>            : 
+<span class="lineNum">     823 </span><span class="lineCov">      47822 :     i = 0;</span>
+<span class="lineNum">     824 </span><span class="lineCov">     128010 :     foreach(arg, argList)</span>
+<span class="lineNum">     825 </span>            :     {
+<span class="lineNum">     826 </span><span class="lineCov">      80188 :         ExprState  *argstate = (ExprState *) lfirst(arg);</span>
+<span class="lineNum">     827 </span>            : 
+<span class="lineNum">     828 </span><span class="lineCov">      80188 :         fcinfo-&gt;args[i].value = ExecEvalExpr(argstate,</span>
+<span class="lineNum">     829 </span>            :                                              econtext,
+<span class="lineNum">     830 </span>            :                                              &amp;fcinfo-&gt;args[i].isnull);
+<span class="lineNum">     831 </span><span class="lineCov">      80188 :         i++;</span>
+<span class="lineNum">     832 </span>            :     }
+<span class="lineNum">     833 </span>            : 
+<span class="lineNum">     834 </span><span class="lineCov">      47822 :     Assert(i == fcinfo-&gt;nargs);</span>
+<span class="lineNum">     835 </span><span class="lineCov">      47822 : }</span>
+<span class="lineNum">     836 </span>            : 
+<span class="lineNum">     837 </span>            : /*
+<span class="lineNum">     838 </span>            :  *      ExecPrepareTuplestoreResult
+<span class="lineNum">     839 </span>            :  *
+<span class="lineNum">     840 </span>            :  * Subroutine for ExecMakeFunctionResultSet: prepare to extract rows from a
+<span class="lineNum">     841 </span>            :  * tuplestore function result.  We must set up a funcResultSlot (unless
+<span class="lineNum">     842 </span>            :  * already done in a previous call cycle) and verify that the function
+<span class="lineNum">     843 </span>            :  * returned the expected tuple descriptor.
+<a name="844"><span class="lineNum">     844 </span>            :  */</a>
+<span class="lineNum">     845 </span>            : static void
+<span class="lineNum">     846 </span><span class="lineCov">       4258 : ExecPrepareTuplestoreResult(SetExprState *sexpr,</span>
+<span class="lineNum">     847 </span>            :                             ExprContext *econtext,
+<span class="lineNum">     848 </span>            :                             Tuplestorestate *resultStore,
+<span class="lineNum">     849 </span>            :                             TupleDesc resultDesc)
+<span class="lineNum">     850 </span>            : {
+<span class="lineNum">     851 </span><span class="lineCov">       4258 :     sexpr-&gt;funcResultStore = resultStore;</span>
+<span class="lineNum">     852 </span>            : 
+<span class="lineNum">     853 </span><span class="lineCov">       4258 :     if (sexpr-&gt;funcResultSlot == NULL)</span>
+<span class="lineNum">     854 </span>            :     {
+<span class="lineNum">     855 </span>            :         /* Create a slot so we can read data out of the tuplestore */
+<span class="lineNum">     856 </span>            :         TupleDesc   slotDesc;
+<span class="lineNum">     857 </span>            :         MemoryContext oldcontext;
+<span class="lineNum">     858 </span>            : 
+<span class="lineNum">     859 </span><span class="lineCov">        206 :         oldcontext = MemoryContextSwitchTo(sexpr-&gt;func.fn_mcxt);</span>
+<span class="lineNum">     860 </span>            : 
+<span class="lineNum">     861 </span>            :         /*
+<span class="lineNum">     862 </span>            :          * If we were not able to determine the result rowtype from context,
+<span class="lineNum">     863 </span>            :          * and the function didn't return a tupdesc, we have to fail.
+<span class="lineNum">     864 </span>            :          */
+<span class="lineNum">     865 </span><span class="lineCov">        206 :         if (sexpr-&gt;funcResultDesc)</span>
+<span class="lineNum">     866 </span><span class="lineCov">        192 :             slotDesc = sexpr-&gt;funcResultDesc;</span>
+<span class="lineNum">     867 </span><span class="lineCov">         14 :         else if (resultDesc)</span>
+<span class="lineNum">     868 </span>            :         {
+<span class="lineNum">     869 </span>            :             /* don't assume resultDesc is long-lived */
+<span class="lineNum">     870 </span><span class="lineCov">         14 :             slotDesc = CreateTupleDescCopy(resultDesc);</span>
+<span class="lineNum">     871 </span>            :         }
+<span class="lineNum">     872 </span>            :         else
+<span class="lineNum">     873 </span>            :         {
+<span class="lineNum">     874 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     875 </span>            :                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     876 </span>            :                      errmsg(&quot;function returning setof record called in &quot;
+<span class="lineNum">     877 </span>            :                             &quot;context that cannot accept type record&quot;)));
+<span class="lineNum">     878 </span>            :             slotDesc = NULL;    /* keep compiler quiet */
+<span class="lineNum">     879 </span>            :         }
+<span class="lineNum">     880 </span>            : 
+<span class="lineNum">     881 </span><span class="lineCov">        206 :         sexpr-&gt;funcResultSlot = MakeSingleTupleTableSlot(slotDesc,</span>
+<span class="lineNum">     882 </span>            :                                                          &amp;TTSOpsMinimalTuple);
+<span class="lineNum">     883 </span><span class="lineCov">        206 :         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     884 </span>            :     }
+<span class="lineNum">     885 </span>            : 
+<span class="lineNum">     886 </span>            :     /*
+<span class="lineNum">     887 </span>            :      * If function provided a tupdesc, cross-check it.  We only really need to
+<span class="lineNum">     888 </span>            :      * do this for functions returning RECORD, but might as well do it always.
+<span class="lineNum">     889 </span>            :      */
+<span class="lineNum">     890 </span><span class="lineCov">       4258 :     if (resultDesc)</span>
+<span class="lineNum">     891 </span>            :     {
+<span class="lineNum">     892 </span><span class="lineCov">       4258 :         if (sexpr-&gt;funcResultDesc)</span>
+<span class="lineNum">     893 </span><span class="lineCov">       4240 :             tupledesc_match(sexpr-&gt;funcResultDesc, resultDesc);</span>
+<span class="lineNum">     894 </span>            : 
+<span class="lineNum">     895 </span>            :         /*
+<span class="lineNum">     896 </span>            :          * If it is a dynamically-allocated TupleDesc, free it: it is
+<span class="lineNum">     897 </span>            :          * typically allocated in a per-query context, so we must avoid
+<span class="lineNum">     898 </span>            :          * leaking it across multiple usages.
+<span class="lineNum">     899 </span>            :          */
+<span class="lineNum">     900 </span><span class="lineCov">       4258 :         if (resultDesc-&gt;tdrefcount == -1)</span>
+<span class="lineNum">     901 </span><span class="lineCov">       4258 :             FreeTupleDesc(resultDesc);</span>
+<span class="lineNum">     902 </span>            :     }
+<span class="lineNum">     903 </span>            : 
+<span class="lineNum">     904 </span>            :     /* Register cleanup callback if we didn't already */
+<span class="lineNum">     905 </span><span class="lineCov">       4258 :     if (!sexpr-&gt;shutdown_reg)</span>
+<span class="lineNum">     906 </span>            :     {
+<span class="lineNum">     907 </span><span class="lineCov">        206 :         RegisterExprContextCallback(econtext,</span>
+<span class="lineNum">     908 </span>            :                                     ShutdownSetExpr,
+<span class="lineNum">     909 </span>            :                                     PointerGetDatum(sexpr));
+<span class="lineNum">     910 </span><span class="lineCov">        206 :         sexpr-&gt;shutdown_reg = true;</span>
+<span class="lineNum">     911 </span>            :     }
+<span class="lineNum">     912 </span><span class="lineCov">       4258 : }</span>
+<span class="lineNum">     913 </span>            : 
+<span class="lineNum">     914 </span>            : /*
+<span class="lineNum">     915 </span>            :  * Check that function result tuple type (src_tupdesc) matches or can
+<span class="lineNum">     916 </span>            :  * be considered to match what the query expects (dst_tupdesc). If
+<span class="lineNum">     917 </span>            :  * they don't match, ereport.
+<span class="lineNum">     918 </span>            :  *
+<span class="lineNum">     919 </span>            :  * We really only care about number of attributes and data type.
+<span class="lineNum">     920 </span>            :  * Also, we can ignore type mismatch on columns that are dropped in the
+<span class="lineNum">     921 </span>            :  * destination type, so long as the physical storage matches.  This is
+<span class="lineNum">     922 </span>            :  * helpful in some cases involving out-of-date cached plans.
+<a name="923"><span class="lineNum">     923 </span>            :  */</a>
+<span class="lineNum">     924 </span>            : static void
+<span class="lineNum">     925 </span><span class="lineCov">      25250 : tupledesc_match(TupleDesc dst_tupdesc, TupleDesc src_tupdesc)</span>
+<span class="lineNum">     926 </span>            : {
+<span class="lineNum">     927 </span>            :     int         i;
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineCov">      25250 :     if (dst_tupdesc-&gt;natts != src_tupdesc-&gt;natts)</span>
+<span class="lineNum">     930 </span><span class="lineCov">         10 :         ereport(ERROR,</span>
+<span class="lineNum">     931 </span>            :                 (errcode(ERRCODE_DATATYPE_MISMATCH),
+<span class="lineNum">     932 </span>            :                  errmsg(&quot;function return row and query-specified return row do not match&quot;),
+<span class="lineNum">     933 </span>            :                  errdetail_plural(&quot;Returned row contains %d attribute, but query expects %d.&quot;,
+<span class="lineNum">     934 </span>            :                                   &quot;Returned row contains %d attributes, but query expects %d.&quot;,
+<span class="lineNum">     935 </span>            :                                   src_tupdesc-&gt;natts,
+<span class="lineNum">     936 </span>            :                                   src_tupdesc-&gt;natts, dst_tupdesc-&gt;natts)));
+<span class="lineNum">     937 </span>            : 
+<span class="lineNum">     938 </span><span class="lineCov">      62052 :     for (i = 0; i &lt; dst_tupdesc-&gt;natts; i++)</span>
+<span class="lineNum">     939 </span>            :     {
+<span class="lineNum">     940 </span><span class="lineCov">      36822 :         Form_pg_attribute dattr = TupleDescAttr(dst_tupdesc, i);</span>
+<span class="lineNum">     941 </span><span class="lineCov">      36822 :         Form_pg_attribute sattr = TupleDescAttr(src_tupdesc, i);</span>
+<span class="lineNum">     942 </span>            : 
+<span class="lineNum">     943 </span><span class="lineCov">      36822 :         if (IsBinaryCoercible(sattr-&gt;atttypid, dattr-&gt;atttypid))</span>
+<span class="lineNum">     944 </span><span class="lineCov">      36812 :             continue;           /* no worries */</span>
+<span class="lineNum">     945 </span><span class="lineCov">         10 :         if (!dattr-&gt;attisdropped)</span>
+<span class="lineNum">     946 </span><span class="lineCov">         10 :             ereport(ERROR,</span>
+<span class="lineNum">     947 </span>            :                     (errcode(ERRCODE_DATATYPE_MISMATCH),
+<span class="lineNum">     948 </span>            :                      errmsg(&quot;function return row and query-specified return row do not match&quot;),
+<span class="lineNum">     949 </span>            :                      errdetail(&quot;Returned type %s at ordinal position %d, but query expects %s.&quot;,
+<span class="lineNum">     950 </span>            :                                format_type_be(sattr-&gt;atttypid),
+<span class="lineNum">     951 </span>            :                                i + 1,
+<span class="lineNum">     952 </span>            :                                format_type_be(dattr-&gt;atttypid))));
+<span class="lineNum">     953 </span>            : 
+<span class="lineNum">     954 </span><span class="lineNoCov">          0 :         if (dattr-&gt;attlen != sattr-&gt;attlen ||</span>
+<span class="lineNum">     955 </span><span class="lineNoCov">          0 :             dattr-&gt;attalign != sattr-&gt;attalign)</span>
+<span class="lineNum">     956 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     957 </span>            :                     (errcode(ERRCODE_DATATYPE_MISMATCH),
+<span class="lineNum">     958 </span>            :                      errmsg(&quot;function return row and query-specified return row do not match&quot;),
+<span class="lineNum">     959 </span>            :                      errdetail(&quot;Physical storage mismatch on dropped attribute at ordinal position %d.&quot;,
+<span class="lineNum">     960 </span>            :                                i + 1)));
+<span class="lineNum">     961 </span>            :     }
+<span class="lineNum">     962 </span><span class="lineCov">      25230 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

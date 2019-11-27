@@ -1,0 +1,793 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/statistics/mvdistinct.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/statistics</a> - mvdistinct.c<span style="font-size: 80%;"> (source / <a href="mvdistinct.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">201</td>
+            <td class="headerCovTableEntry">218</td>
+            <td class="headerCovTableEntryHi">92.2 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntry">17</td>
+            <td class="headerCovTableEntryMed">82.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * mvdistinct.c
+<span class="lineNum">       4 </span>            :  *    POSTGRES multivariate ndistinct coefficients
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Estimating number of groups in a combination of columns (e.g. for GROUP BY)
+<span class="lineNum">       7 </span>            :  * is tricky, and the estimation error is often significant.
+<span class="lineNum">       8 </span>            : 
+<span class="lineNum">       9 </span>            :  * The multivariate ndistinct coefficients address this by storing ndistinct
+<span class="lineNum">      10 </span>            :  * estimates for combinations of the user-specified columns.  So for example
+<span class="lineNum">      11 </span>            :  * given a statistics object on three columns (a,b,c), this module estimates
+<span class="lineNum">      12 </span>            :  * and stores n-distinct for (a,b), (a,c), (b,c) and (a,b,c).  The per-column
+<span class="lineNum">      13 </span>            :  * estimates are already available in pg_statistic.
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      17 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  * IDENTIFICATION
+<span class="lineNum">      20 </span>            :  *    src/backend/statistics/mvdistinct.c
+<span class="lineNum">      21 </span>            :  *
+<span class="lineNum">      22 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      23 </span>            :  */
+<span class="lineNum">      24 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : #include &lt;math.h&gt;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;catalog/pg_statistic_ext.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;catalog/pg_statistic_ext_data.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;lib/stringinfo.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;statistics/extended_stats_internal.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;statistics/statistics.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;utils/fmgrprotos.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;utils/syscache.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;utils/typcache.h&quot;
+<span class="lineNum">      38 </span>            : 
+<span class="lineNum">      39 </span>            : static double ndistinct_for_combination(double totalrows, int numrows,
+<span class="lineNum">      40 </span>            :                                         HeapTuple *rows, VacAttrStats **stats,
+<span class="lineNum">      41 </span>            :                                         int k, int *combination);
+<span class="lineNum">      42 </span>            : static double estimate_ndistinct(double totalrows, int numrows, int d, int f1);
+<span class="lineNum">      43 </span>            : static int  n_choose_k(int n, int k);
+<span class="lineNum">      44 </span>            : static int  num_combinations(int n);
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span>            : /* size of the struct header fields (magic, type, nitems) */
+<span class="lineNum">      47 </span>            : #define SizeOfHeader        (3 * sizeof(uint32))
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : /* size of a serialized ndistinct item (coefficient, natts, atts) */
+<span class="lineNum">      50 </span>            : #define SizeOfItem(natts) \
+<span class="lineNum">      51 </span>            :     (sizeof(double) + sizeof(int) + (natts) * sizeof(AttrNumber))
+<span class="lineNum">      52 </span>            : 
+<span class="lineNum">      53 </span>            : /* minimal size of a ndistinct item (with two attributes) */
+<span class="lineNum">      54 </span>            : #define MinSizeOfItem   SizeOfItem(2)
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : /* minimal size of mvndistinct, when all items are minimal */
+<span class="lineNum">      57 </span>            : #define MinSizeOfItems(nitems)  \
+<span class="lineNum">      58 </span>            :     (SizeOfHeader + (nitems) * MinSizeOfItem)
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            : /* Combination generator API */
+<span class="lineNum">      61 </span>            : 
+<span class="lineNum">      62 </span>            : /* internal state for generator of k-combinations of n elements */
+<span class="lineNum">      63 </span>            : typedef struct CombinationGenerator
+<span class="lineNum">      64 </span>            : {
+<span class="lineNum">      65 </span>            :     int         k;              /* size of the combination */
+<span class="lineNum">      66 </span>            :     int         n;              /* total number of elements */
+<span class="lineNum">      67 </span>            :     int         current;        /* index of the next combination to return */
+<span class="lineNum">      68 </span>            :     int         ncombinations;  /* number of combinations (size of array) */
+<span class="lineNum">      69 </span>            :     int        *combinations;   /* array of pre-built combinations */
+<span class="lineNum">      70 </span>            : } CombinationGenerator;
+<span class="lineNum">      71 </span>            : 
+<span class="lineNum">      72 </span>            : static CombinationGenerator *generator_init(int n, int k);
+<span class="lineNum">      73 </span>            : static void generator_free(CombinationGenerator *state);
+<span class="lineNum">      74 </span>            : static int *generator_next(CombinationGenerator *state);
+<span class="lineNum">      75 </span>            : static void generate_combinations(CombinationGenerator *state);
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            : /*
+<span class="lineNum">      79 </span>            :  * statext_ndistinct_build
+<span class="lineNum">      80 </span>            :  *      Compute ndistinct coefficient for the combination of attributes.
+<span class="lineNum">      81 </span>            :  *
+<span class="lineNum">      82 </span>            :  * This computes the ndistinct estimate using the same estimator used
+<span class="lineNum">      83 </span>            :  * in analyze.c and then computes the coefficient.
+<a name="84"><span class="lineNum">      84 </span>            :  */</a>
+<span class="lineNum">      85 </span>            : MVNDistinct *
+<span class="lineNum">      86 </span><span class="lineCov">          8 : statext_ndistinct_build(double totalrows, int numrows, HeapTuple *rows,</span>
+<span class="lineNum">      87 </span>            :                         Bitmapset *attrs, VacAttrStats **stats)
+<span class="lineNum">      88 </span>            : {
+<span class="lineNum">      89 </span>            :     MVNDistinct *result;
+<span class="lineNum">      90 </span>            :     int         k;
+<span class="lineNum">      91 </span>            :     int         itemcnt;
+<span class="lineNum">      92 </span><span class="lineCov">          8 :     int         numattrs = bms_num_members(attrs);</span>
+<span class="lineNum">      93 </span><span class="lineCov">          8 :     int         numcombs = num_combinations(numattrs);</span>
+<span class="lineNum">      94 </span>            : 
+<span class="lineNum">      95 </span><span class="lineCov">          8 :     result = palloc(offsetof(MVNDistinct, items) +</span>
+<span class="lineNum">      96 </span>            :                     numcombs * sizeof(MVNDistinctItem));
+<span class="lineNum">      97 </span><span class="lineCov">          8 :     result-&gt;magic = STATS_NDISTINCT_MAGIC;</span>
+<span class="lineNum">      98 </span><span class="lineCov">          8 :     result-&gt;type = STATS_NDISTINCT_TYPE_BASIC;</span>
+<span class="lineNum">      99 </span><span class="lineCov">          8 :     result-&gt;nitems = numcombs;</span>
+<span class="lineNum">     100 </span>            : 
+<span class="lineNum">     101 </span><span class="lineCov">          8 :     itemcnt = 0;</span>
+<span class="lineNum">     102 </span><span class="lineCov">         20 :     for (k = 2; k &lt;= numattrs; k++)</span>
+<span class="lineNum">     103 </span>            :     {
+<span class="lineNum">     104 </span>            :         int        *combination;
+<span class="lineNum">     105 </span>            :         CombinationGenerator *generator;
+<span class="lineNum">     106 </span>            : 
+<span class="lineNum">     107 </span>            :         /* generate combinations of K out of N elements */
+<span class="lineNum">     108 </span><span class="lineCov">         12 :         generator = generator_init(numattrs, k);</span>
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span><span class="lineCov">         12 :         while ((combination = generator_next(generator)))</span>
+<span class="lineNum">     111 </span>            :         {
+<span class="lineNum">     112 </span><span class="lineCov">         20 :             MVNDistinctItem *item = &amp;result-&gt;items[itemcnt];</span>
+<span class="lineNum">     113 </span>            :             int         j;
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span><span class="lineCov">         20 :             item-&gt;attrs = NULL;</span>
+<span class="lineNum">     116 </span><span class="lineCov">         64 :             for (j = 0; j &lt; k; j++)</span>
+<span class="lineNum">     117 </span><span class="lineCov">         44 :                 item-&gt;attrs = bms_add_member(item-&gt;attrs,</span>
+<span class="lineNum">     118 </span><span class="lineCov">         44 :                                              stats[combination[j]]-&gt;attr-&gt;attnum);</span>
+<span class="lineNum">     119 </span><span class="lineCov">         20 :             item-&gt;ndistinct =</span>
+<span class="lineNum">     120 </span><span class="lineCov">         20 :                 ndistinct_for_combination(totalrows, numrows, rows,</span>
+<span class="lineNum">     121 </span>            :                                           stats, k, combination);
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span><span class="lineCov">         20 :             itemcnt++;</span>
+<span class="lineNum">     124 </span><span class="lineCov">         20 :             Assert(itemcnt &lt;= result-&gt;nitems);</span>
+<span class="lineNum">     125 </span>            :         }
+<span class="lineNum">     126 </span>            : 
+<span class="lineNum">     127 </span><span class="lineCov">         12 :         generator_free(generator);</span>
+<span class="lineNum">     128 </span>            :     }
+<span class="lineNum">     129 </span>            : 
+<span class="lineNum">     130 </span>            :     /* must consume exactly the whole output array */
+<span class="lineNum">     131 </span><span class="lineCov">          8 :     Assert(itemcnt == result-&gt;nitems);</span>
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span><span class="lineCov">          8 :     return result;</span>
+<span class="lineNum">     134 </span>            : }
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span>            : /*
+<span class="lineNum">     137 </span>            :  * statext_ndistinct_load
+<span class="lineNum">     138 </span>            :  *      Load the ndistinct value for the indicated pg_statistic_ext tuple
+<a name="139"><span class="lineNum">     139 </span>            :  */</a>
+<span class="lineNum">     140 </span>            : MVNDistinct *
+<span class="lineNum">     141 </span><span class="lineCov">         20 : statext_ndistinct_load(Oid mvoid)</span>
+<span class="lineNum">     142 </span>            : {
+<span class="lineNum">     143 </span>            :     MVNDistinct *result;
+<span class="lineNum">     144 </span>            :     bool        isnull;
+<span class="lineNum">     145 </span>            :     Datum       ndist;
+<span class="lineNum">     146 </span>            :     HeapTuple   htup;
+<span class="lineNum">     147 </span>            : 
+<span class="lineNum">     148 </span><span class="lineCov">         20 :     htup = SearchSysCache1(STATEXTDATASTXOID, ObjectIdGetDatum(mvoid));</span>
+<span class="lineNum">     149 </span><span class="lineCov">         20 :     if (!HeapTupleIsValid(htup))</span>
+<span class="lineNum">     150 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cache lookup failed for statistics object %u&quot;, mvoid);</span>
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineCov">         20 :     ndist = SysCacheGetAttr(STATEXTDATASTXOID, htup,</span>
+<span class="lineNum">     153 </span>            :                             Anum_pg_statistic_ext_data_stxdndistinct, &amp;isnull);
+<span class="lineNum">     154 </span><span class="lineCov">         20 :     if (isnull)</span>
+<span class="lineNum">     155 </span><span class="lineNoCov">          0 :         elog(ERROR,</span>
+<span class="lineNum">     156 </span>            :              &quot;requested statistic kind \&quot;%c\&quot; is not yet built for statistics object %u&quot;,
+<span class="lineNum">     157 </span>            :              STATS_EXT_NDISTINCT, mvoid);
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span><span class="lineCov">         20 :     result = statext_ndistinct_deserialize(DatumGetByteaPP(ndist));</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span><span class="lineCov">         20 :     ReleaseSysCache(htup);</span>
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span><span class="lineCov">         20 :     return result;</span>
+<span class="lineNum">     164 </span>            : }
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span>            : /*
+<span class="lineNum">     167 </span>            :  * statext_ndistinct_serialize
+<span class="lineNum">     168 </span>            :  *      serialize ndistinct to the on-disk bytea format
+<a name="169"><span class="lineNum">     169 </span>            :  */</a>
+<span class="lineNum">     170 </span>            : bytea *
+<span class="lineNum">     171 </span><span class="lineCov">          8 : statext_ndistinct_serialize(MVNDistinct *ndistinct)</span>
+<span class="lineNum">     172 </span>            : {
+<span class="lineNum">     173 </span>            :     int         i;
+<span class="lineNum">     174 </span>            :     bytea      *output;
+<span class="lineNum">     175 </span>            :     char       *tmp;
+<span class="lineNum">     176 </span>            :     Size        len;
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span><span class="lineCov">          8 :     Assert(ndistinct-&gt;magic == STATS_NDISTINCT_MAGIC);</span>
+<span class="lineNum">     179 </span><span class="lineCov">          8 :     Assert(ndistinct-&gt;type == STATS_NDISTINCT_TYPE_BASIC);</span>
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span>            :     /*
+<span class="lineNum">     182 </span>            :      * Base size is size of scalar fields in the struct, plus one base struct
+<span class="lineNum">     183 </span>            :      * for each item, including number of items for each.
+<span class="lineNum">     184 </span>            :      */
+<span class="lineNum">     185 </span><span class="lineCov">          8 :     len = VARHDRSZ + SizeOfHeader;</span>
+<span class="lineNum">     186 </span>            : 
+<span class="lineNum">     187 </span>            :     /* and also include space for the actual attribute numbers */
+<span class="lineNum">     188 </span><span class="lineCov">         28 :     for (i = 0; i &lt; ndistinct-&gt;nitems; i++)</span>
+<span class="lineNum">     189 </span>            :     {
+<span class="lineNum">     190 </span>            :         int         nmembers;
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span><span class="lineCov">         20 :         nmembers = bms_num_members(ndistinct-&gt;items[i].attrs);</span>
+<span class="lineNum">     193 </span><span class="lineCov">         20 :         Assert(nmembers &gt;= 2);</span>
+<span class="lineNum">     194 </span>            : 
+<span class="lineNum">     195 </span><span class="lineCov">         20 :         len += SizeOfItem(nmembers);</span>
+<span class="lineNum">     196 </span>            :     }
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span><span class="lineCov">          8 :     output = (bytea *) palloc(len);</span>
+<span class="lineNum">     199 </span><span class="lineCov">          8 :     SET_VARSIZE(output, len);</span>
+<span class="lineNum">     200 </span>            : 
+<span class="lineNum">     201 </span><span class="lineCov">          8 :     tmp = VARDATA(output);</span>
+<span class="lineNum">     202 </span>            : 
+<span class="lineNum">     203 </span>            :     /* Store the base struct values (magic, type, nitems) */
+<span class="lineNum">     204 </span><span class="lineCov">          8 :     memcpy(tmp, &amp;ndistinct-&gt;magic, sizeof(uint32));</span>
+<span class="lineNum">     205 </span><span class="lineCov">          8 :     tmp += sizeof(uint32);</span>
+<span class="lineNum">     206 </span><span class="lineCov">          8 :     memcpy(tmp, &amp;ndistinct-&gt;type, sizeof(uint32));</span>
+<span class="lineNum">     207 </span><span class="lineCov">          8 :     tmp += sizeof(uint32);</span>
+<span class="lineNum">     208 </span><span class="lineCov">          8 :     memcpy(tmp, &amp;ndistinct-&gt;nitems, sizeof(uint32));</span>
+<span class="lineNum">     209 </span><span class="lineCov">          8 :     tmp += sizeof(uint32);</span>
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span>            :     /*
+<span class="lineNum">     212 </span>            :      * store number of attributes and attribute numbers for each entry
+<span class="lineNum">     213 </span>            :      */
+<span class="lineNum">     214 </span><span class="lineCov">         28 :     for (i = 0; i &lt; ndistinct-&gt;nitems; i++)</span>
+<span class="lineNum">     215 </span>            :     {
+<span class="lineNum">     216 </span><span class="lineCov">         20 :         MVNDistinctItem item = ndistinct-&gt;items[i];</span>
+<span class="lineNum">     217 </span><span class="lineCov">         20 :         int         nmembers = bms_num_members(item.attrs);</span>
+<span class="lineNum">     218 </span>            :         int         x;
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span><span class="lineCov">         20 :         memcpy(tmp, &amp;item.ndistinct, sizeof(double));</span>
+<span class="lineNum">     221 </span><span class="lineCov">         20 :         tmp += sizeof(double);</span>
+<span class="lineNum">     222 </span><span class="lineCov">         20 :         memcpy(tmp, &amp;nmembers, sizeof(int));</span>
+<span class="lineNum">     223 </span><span class="lineCov">         20 :         tmp += sizeof(int);</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span><span class="lineCov">         20 :         x = -1;</span>
+<span class="lineNum">     226 </span><span class="lineCov">         84 :         while ((x = bms_next_member(item.attrs, x)) &gt;= 0)</span>
+<span class="lineNum">     227 </span>            :         {
+<span class="lineNum">     228 </span><span class="lineCov">         44 :             AttrNumber  value = (AttrNumber) x;</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span><span class="lineCov">         44 :             memcpy(tmp, &amp;value, sizeof(AttrNumber));</span>
+<span class="lineNum">     231 </span><span class="lineCov">         44 :             tmp += sizeof(AttrNumber);</span>
+<span class="lineNum">     232 </span>            :         }
+<span class="lineNum">     233 </span>            : 
+<span class="lineNum">     234 </span>            :         /* protect against overflows */
+<span class="lineNum">     235 </span><span class="lineCov">         20 :         Assert(tmp &lt;= ((char *) output + len));</span>
+<span class="lineNum">     236 </span>            :     }
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span>            :     /* check we used exactly the expected space */
+<span class="lineNum">     239 </span><span class="lineCov">          8 :     Assert(tmp == ((char *) output + len));</span>
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span><span class="lineCov">          8 :     return output;</span>
+<span class="lineNum">     242 </span>            : }
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            : /*
+<span class="lineNum">     245 </span>            :  * statext_ndistinct_deserialize
+<span class="lineNum">     246 </span>            :  *      Read an on-disk bytea format MVNDistinct to in-memory format
+<a name="247"><span class="lineNum">     247 </span>            :  */</a>
+<span class="lineNum">     248 </span>            : MVNDistinct *
+<span class="lineNum">     249 </span><span class="lineCov">         24 : statext_ndistinct_deserialize(bytea *data)</span>
+<span class="lineNum">     250 </span>            : {
+<span class="lineNum">     251 </span>            :     int         i;
+<span class="lineNum">     252 </span>            :     Size        minimum_size;
+<span class="lineNum">     253 </span>            :     MVNDistinct ndist;
+<span class="lineNum">     254 </span>            :     MVNDistinct *ndistinct;
+<span class="lineNum">     255 </span>            :     char       *tmp;
+<span class="lineNum">     256 </span>            : 
+<span class="lineNum">     257 </span><span class="lineCov">         24 :     if (data == NULL)</span>
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span>            :     /* we expect at least the basic fields of MVNDistinct struct */
+<span class="lineNum">     261 </span><span class="lineCov">         24 :     if (VARSIZE_ANY_EXHDR(data) &lt; SizeOfHeader)</span>
+<span class="lineNum">     262 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;invalid MVNDistinct size %zd (expected at least %zd)&quot;,</span>
+<span class="lineNum">     263 </span>            :              VARSIZE_ANY_EXHDR(data), SizeOfHeader);
+<span class="lineNum">     264 </span>            : 
+<span class="lineNum">     265 </span>            :     /* initialize pointer to the data part (skip the varlena header) */
+<span class="lineNum">     266 </span><span class="lineCov">         24 :     tmp = VARDATA_ANY(data);</span>
+<span class="lineNum">     267 </span>            : 
+<span class="lineNum">     268 </span>            :     /* read the header fields and perform basic sanity checks */
+<span class="lineNum">     269 </span><span class="lineCov">         24 :     memcpy(&amp;ndist.magic, tmp, sizeof(uint32));</span>
+<span class="lineNum">     270 </span><span class="lineCov">         24 :     tmp += sizeof(uint32);</span>
+<span class="lineNum">     271 </span><span class="lineCov">         24 :     memcpy(&amp;ndist.type, tmp, sizeof(uint32));</span>
+<span class="lineNum">     272 </span><span class="lineCov">         24 :     tmp += sizeof(uint32);</span>
+<span class="lineNum">     273 </span><span class="lineCov">         24 :     memcpy(&amp;ndist.nitems, tmp, sizeof(uint32));</span>
+<span class="lineNum">     274 </span><span class="lineCov">         24 :     tmp += sizeof(uint32);</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span><span class="lineCov">         24 :     if (ndist.magic != STATS_NDISTINCT_MAGIC)</span>
+<span class="lineNum">     277 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;invalid ndistinct magic %08x (expected %08x)&quot;,</span>
+<span class="lineNum">     278 </span>            :              ndist.magic, STATS_NDISTINCT_MAGIC);
+<span class="lineNum">     279 </span><span class="lineCov">         24 :     if (ndist.type != STATS_NDISTINCT_TYPE_BASIC)</span>
+<span class="lineNum">     280 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;invalid ndistinct type %d (expected %d)&quot;,</span>
+<span class="lineNum">     281 </span>            :              ndist.type, STATS_NDISTINCT_TYPE_BASIC);
+<span class="lineNum">     282 </span><span class="lineCov">         24 :     if (ndist.nitems == 0)</span>
+<span class="lineNum">     283 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;invalid zero-length item array in MVNDistinct&quot;);</span>
+<span class="lineNum">     284 </span>            : 
+<span class="lineNum">     285 </span>            :     /* what minimum bytea size do we expect for those parameters */
+<span class="lineNum">     286 </span><span class="lineCov">         24 :     minimum_size = MinSizeOfItems(ndist.nitems);</span>
+<span class="lineNum">     287 </span><span class="lineCov">         24 :     if (VARSIZE_ANY_EXHDR(data) &lt; minimum_size)</span>
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;invalid MVNDistinct size %zd (expected at least %zd)&quot;,</span>
+<span class="lineNum">     289 </span>            :              VARSIZE_ANY_EXHDR(data), minimum_size);
+<span class="lineNum">     290 </span>            : 
+<span class="lineNum">     291 </span>            :     /*
+<span class="lineNum">     292 </span>            :      * Allocate space for the ndistinct items (no space for each item's
+<span class="lineNum">     293 </span>            :      * attnos: those live in bitmapsets allocated separately)
+<span class="lineNum">     294 </span>            :      */
+<span class="lineNum">     295 </span><span class="lineCov">         24 :     ndistinct = palloc0(MAXALIGN(offsetof(MVNDistinct, items)) +</span>
+<span class="lineNum">     296 </span><span class="lineCov">         24 :                         (ndist.nitems * sizeof(MVNDistinctItem)));</span>
+<span class="lineNum">     297 </span><span class="lineCov">         24 :     ndistinct-&gt;magic = ndist.magic;</span>
+<span class="lineNum">     298 </span><span class="lineCov">         24 :     ndistinct-&gt;type = ndist.type;</span>
+<span class="lineNum">     299 </span><span class="lineCov">         24 :     ndistinct-&gt;nitems = ndist.nitems;</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span><span class="lineCov">        120 :     for (i = 0; i &lt; ndistinct-&gt;nitems; i++)</span>
+<span class="lineNum">     302 </span>            :     {
+<span class="lineNum">     303 </span><span class="lineCov">         96 :         MVNDistinctItem *item = &amp;ndistinct-&gt;items[i];</span>
+<span class="lineNum">     304 </span>            :         int         nelems;
+<span class="lineNum">     305 </span>            : 
+<span class="lineNum">     306 </span><span class="lineCov">         96 :         item-&gt;attrs = NULL;</span>
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span>            :         /* ndistinct value */
+<span class="lineNum">     309 </span><span class="lineCov">         96 :         memcpy(&amp;item-&gt;ndistinct, tmp, sizeof(double));</span>
+<span class="lineNum">     310 </span><span class="lineCov">         96 :         tmp += sizeof(double);</span>
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span>            :         /* number of attributes */
+<span class="lineNum">     313 </span><span class="lineCov">         96 :         memcpy(&amp;nelems, tmp, sizeof(int));</span>
+<span class="lineNum">     314 </span><span class="lineCov">         96 :         tmp += sizeof(int);</span>
+<span class="lineNum">     315 </span><span class="lineCov">         96 :         Assert((nelems &gt;= 2) &amp;&amp; (nelems &lt;= STATS_MAX_DIMENSIONS));</span>
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span><span class="lineCov">        408 :         while (nelems-- &gt; 0)</span>
+<span class="lineNum">     318 </span>            :         {
+<span class="lineNum">     319 </span>            :             AttrNumber  attno;
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span><span class="lineCov">        216 :             memcpy(&amp;attno, tmp, sizeof(AttrNumber));</span>
+<span class="lineNum">     322 </span><span class="lineCov">        216 :             tmp += sizeof(AttrNumber);</span>
+<span class="lineNum">     323 </span><span class="lineCov">        216 :             item-&gt;attrs = bms_add_member(item-&gt;attrs, attno);</span>
+<span class="lineNum">     324 </span>            :         }
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span>            :         /* still within the bytea */
+<span class="lineNum">     327 </span><span class="lineCov">         96 :         Assert(tmp &lt;= ((char *) data + VARSIZE_ANY(data)));</span>
+<span class="lineNum">     328 </span>            :     }
+<span class="lineNum">     329 </span>            : 
+<span class="lineNum">     330 </span>            :     /* we should have consumed the whole bytea exactly */
+<span class="lineNum">     331 </span><span class="lineCov">         24 :     Assert(tmp == ((char *) data + VARSIZE_ANY(data)));</span>
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span><span class="lineCov">         24 :     return ndistinct;</span>
+<span class="lineNum">     334 </span>            : }
+<span class="lineNum">     335 </span>            : 
+<span class="lineNum">     336 </span>            : /*
+<span class="lineNum">     337 </span>            :  * pg_ndistinct_in
+<span class="lineNum">     338 </span>            :  *      input routine for type pg_ndistinct
+<span class="lineNum">     339 </span>            :  *
+<span class="lineNum">     340 </span>            :  * pg_ndistinct is real enough to be a table column, but it has no
+<span class="lineNum">     341 </span>            :  * operations of its own, and disallows input (just like pg_node_tree).
+<a name="342"><span class="lineNum">     342 </span>            :  */</a>
+<span class="lineNum">     343 </span>            : Datum
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 : pg_ndistinct_in(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     345 </span>            : {
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :     ereport(ERROR,</span>
+<span class="lineNum">     347 </span>            :             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     348 </span>            :              errmsg(&quot;cannot accept a value of type %s&quot;, &quot;pg_ndistinct&quot;)));
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span>            :     PG_RETURN_VOID();           /* keep compiler quiet */
+<span class="lineNum">     351 </span>            : }
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span>            : /*
+<span class="lineNum">     354 </span>            :  * pg_ndistinct
+<span class="lineNum">     355 </span>            :  *      output routine for type pg_ndistinct
+<span class="lineNum">     356 </span>            :  *
+<span class="lineNum">     357 </span>            :  * Produces a human-readable representation of the value.
+<a name="358"><span class="lineNum">     358 </span>            :  */</a>
+<span class="lineNum">     359 </span>            : Datum
+<span class="lineNum">     360 </span><span class="lineCov">          4 : pg_ndistinct_out(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     361 </span>            : {
+<span class="lineNum">     362 </span><span class="lineCov">          4 :     bytea      *data = PG_GETARG_BYTEA_PP(0);</span>
+<span class="lineNum">     363 </span><span class="lineCov">          4 :     MVNDistinct *ndist = statext_ndistinct_deserialize(data);</span>
+<span class="lineNum">     364 </span>            :     int         i;
+<span class="lineNum">     365 </span>            :     StringInfoData str;
+<span class="lineNum">     366 </span>            : 
+<span class="lineNum">     367 </span><span class="lineCov">          4 :     initStringInfo(&amp;str);</span>
+<span class="lineNum">     368 </span><span class="lineCov">          4 :     appendStringInfoChar(&amp;str, '{');</span>
+<span class="lineNum">     369 </span>            : 
+<span class="lineNum">     370 </span><span class="lineCov">         20 :     for (i = 0; i &lt; ndist-&gt;nitems; i++)</span>
+<span class="lineNum">     371 </span>            :     {
+<span class="lineNum">     372 </span><span class="lineCov">         16 :         MVNDistinctItem item = ndist-&gt;items[i];</span>
+<span class="lineNum">     373 </span><span class="lineCov">         16 :         int         x = -1;</span>
+<span class="lineNum">     374 </span><span class="lineCov">         16 :         bool        first = true;</span>
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span><span class="lineCov">         16 :         if (i &gt; 0)</span>
+<span class="lineNum">     377 </span><span class="lineCov">         12 :             appendStringInfoString(&amp;str, &quot;, &quot;);</span>
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span><span class="lineCov">         68 :         while ((x = bms_next_member(item.attrs, x)) &gt;= 0)</span>
+<span class="lineNum">     380 </span>            :         {
+<span class="lineNum">     381 </span><span class="lineCov">         36 :             appendStringInfo(&amp;str, &quot;%s%d&quot;, first ? &quot;\&quot;&quot; : &quot;, &quot;, x);</span>
+<span class="lineNum">     382 </span><span class="lineCov">         36 :             first = false;</span>
+<span class="lineNum">     383 </span>            :         }
+<span class="lineNum">     384 </span><span class="lineCov">         16 :         appendStringInfo(&amp;str, &quot;\&quot;: %d&quot;, (int) item.ndistinct);</span>
+<span class="lineNum">     385 </span>            :     }
+<span class="lineNum">     386 </span>            : 
+<span class="lineNum">     387 </span><span class="lineCov">          4 :     appendStringInfoChar(&amp;str, '}');</span>
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span><span class="lineCov">          4 :     PG_RETURN_CSTRING(str.data);</span>
+<span class="lineNum">     390 </span>            : }
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span>            : /*
+<span class="lineNum">     393 </span>            :  * pg_ndistinct_recv
+<span class="lineNum">     394 </span>            :  *      binary input routine for type pg_ndistinct
+<a name="395"><span class="lineNum">     395 </span>            :  */</a>
+<span class="lineNum">     396 </span>            : Datum
+<span class="lineNum">     397 </span><span class="lineNoCov">          0 : pg_ndistinct_recv(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     398 </span>            : {
+<span class="lineNum">     399 </span><span class="lineNoCov">          0 :     ereport(ERROR,</span>
+<span class="lineNum">     400 </span>            :             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     401 </span>            :              errmsg(&quot;cannot accept a value of type %s&quot;, &quot;pg_ndistinct&quot;)));
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span>            :     PG_RETURN_VOID();           /* keep compiler quiet */
+<span class="lineNum">     404 </span>            : }
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span>            : /*
+<span class="lineNum">     407 </span>            :  * pg_ndistinct_send
+<span class="lineNum">     408 </span>            :  *      binary output routine for type pg_ndistinct
+<span class="lineNum">     409 </span>            :  *
+<span class="lineNum">     410 </span>            :  * n-distinct is serialized into a bytea value, so let's send that.
+<a name="411"><span class="lineNum">     411 </span>            :  */</a>
+<span class="lineNum">     412 </span>            : Datum
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 : pg_ndistinct_send(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     414 </span>            : {
+<span class="lineNum">     415 </span><span class="lineNoCov">          0 :     return byteasend(fcinfo);</span>
+<span class="lineNum">     416 </span>            : }
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span>            : /*
+<span class="lineNum">     419 </span>            :  * ndistinct_for_combination
+<span class="lineNum">     420 </span>            :  *      Estimates number of distinct values in a combination of columns.
+<span class="lineNum">     421 </span>            :  *
+<span class="lineNum">     422 </span>            :  * This uses the same ndistinct estimator as compute_scalar_stats() in
+<span class="lineNum">     423 </span>            :  * ANALYZE, i.e.,
+<span class="lineNum">     424 </span>            :  *      n*d / (n - f1 + f1*n/N)
+<span class="lineNum">     425 </span>            :  *
+<span class="lineNum">     426 </span>            :  * except that instead of values in a single column we are dealing with
+<span class="lineNum">     427 </span>            :  * combination of multiple columns.
+<a name="428"><span class="lineNum">     428 </span>            :  */</a>
+<span class="lineNum">     429 </span>            : static double
+<span class="lineNum">     430 </span><span class="lineCov">         20 : ndistinct_for_combination(double totalrows, int numrows, HeapTuple *rows,</span>
+<span class="lineNum">     431 </span>            :                           VacAttrStats **stats, int k, int *combination)
+<span class="lineNum">     432 </span>            : {
+<span class="lineNum">     433 </span>            :     int         i,
+<span class="lineNum">     434 </span>            :                 j;
+<span class="lineNum">     435 </span>            :     int         f1,
+<span class="lineNum">     436 </span>            :                 cnt,
+<span class="lineNum">     437 </span>            :                 d;
+<span class="lineNum">     438 </span>            :     bool       *isnull;
+<span class="lineNum">     439 </span>            :     Datum      *values;
+<span class="lineNum">     440 </span>            :     SortItem   *items;
+<span class="lineNum">     441 </span>            :     MultiSortSupport mss;
+<span class="lineNum">     442 </span>            : 
+<span class="lineNum">     443 </span><span class="lineCov">         20 :     mss = multi_sort_init(k);</span>
+<span class="lineNum">     444 </span>            : 
+<span class="lineNum">     445 </span>            :     /*
+<span class="lineNum">     446 </span>            :      * In order to determine the number of distinct elements, create separate
+<span class="lineNum">     447 </span>            :      * values[]/isnull[] arrays with all the data we have, then sort them
+<span class="lineNum">     448 </span>            :      * using the specified column combination as dimensions.  We could try to
+<span class="lineNum">     449 </span>            :      * sort in place, but it'd probably be more complex and bug-prone.
+<span class="lineNum">     450 </span>            :      */
+<span class="lineNum">     451 </span><span class="lineCov">         20 :     items = (SortItem *) palloc(numrows * sizeof(SortItem));</span>
+<span class="lineNum">     452 </span><span class="lineCov">         20 :     values = (Datum *) palloc0(sizeof(Datum) * numrows * k);</span>
+<span class="lineNum">     453 </span><span class="lineCov">         20 :     isnull = (bool *) palloc0(sizeof(bool) * numrows * k);</span>
+<span class="lineNum">     454 </span>            : 
+<span class="lineNum">     455 </span><span class="lineCov">      50022 :     for (i = 0; i &lt; numrows; i++)</span>
+<span class="lineNum">     456 </span>            :     {
+<span class="lineNum">     457 </span><span class="lineCov">      50002 :         items[i].values = &amp;values[i * k];</span>
+<span class="lineNum">     458 </span><span class="lineCov">      50002 :         items[i].isnull = &amp;isnull[i * k];</span>
+<span class="lineNum">     459 </span>            :     }
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span>            :     /*
+<span class="lineNum">     462 </span>            :      * For each dimension, set up sort-support and fill in the values from the
+<span class="lineNum">     463 </span>            :      * sample data.
+<span class="lineNum">     464 </span>            :      *
+<span class="lineNum">     465 </span>            :      * We use the column data types' default sort operators and collations;
+<span class="lineNum">     466 </span>            :      * perhaps at some point it'd be worth using column-specific collations?
+<span class="lineNum">     467 </span>            :      */
+<span class="lineNum">     468 </span><span class="lineCov">         64 :     for (i = 0; i &lt; k; i++)</span>
+<span class="lineNum">     469 </span>            :     {
+<span class="lineNum">     470 </span><span class="lineCov">         44 :         VacAttrStats *colstat = stats[combination[i]];</span>
+<span class="lineNum">     471 </span>            :         TypeCacheEntry *type;
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span><span class="lineCov">         44 :         type = lookup_type_cache(colstat-&gt;attrtypid, TYPECACHE_LT_OPR);</span>
+<span class="lineNum">     474 </span><span class="lineCov">         44 :         if (type-&gt;lt_opr == InvalidOid) /* shouldn't happen */</span>
+<span class="lineNum">     475 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;cache lookup failed for ordering operator for type %u&quot;,</span>
+<span class="lineNum">     476 </span>            :                  colstat-&gt;attrtypid);
+<span class="lineNum">     477 </span>            : 
+<span class="lineNum">     478 </span>            :         /* prepare the sort function for this dimension */
+<span class="lineNum">     479 </span><span class="lineCov">         44 :         multi_sort_add_dimension(mss, i, type-&gt;lt_opr, colstat-&gt;attrcollid);</span>
+<span class="lineNum">     480 </span>            : 
+<span class="lineNum">     481 </span>            :         /* accumulate all the data for this dimension into the arrays */
+<span class="lineNum">     482 </span><span class="lineCov">     112048 :         for (j = 0; j &lt; numrows; j++)</span>
+<span class="lineNum">     483 </span>            :         {
+<span class="lineNum">     484 </span><span class="lineCov">     224008 :             items[j].values[i] =</span>
+<span class="lineNum">     485 </span><span class="lineCov">     112004 :                 heap_getattr(rows[j],</span>
+<span class="lineNum">     486 </span>            :                              colstat-&gt;attr-&gt;attnum,
+<span class="lineNum">     487 </span>            :                              colstat-&gt;tupDesc,
+<span class="lineNum">     488 </span>            :                              &amp;items[j].isnull[i]);
+<span class="lineNum">     489 </span>            :         }
+<span class="lineNum">     490 </span>            :     }
+<span class="lineNum">     491 </span>            : 
+<span class="lineNum">     492 </span>            :     /* We can sort the array now ... */
+<span class="lineNum">     493 </span><span class="lineCov">         20 :     qsort_arg((void *) items, numrows, sizeof(SortItem),</span>
+<span class="lineNum">     494 </span>            :               multi_sort_compare, mss);
+<span class="lineNum">     495 </span>            : 
+<span class="lineNum">     496 </span>            :     /* ... and count the number of distinct combinations */
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span><span class="lineCov">         20 :     f1 = 0;</span>
+<span class="lineNum">     499 </span><span class="lineCov">         20 :     cnt = 1;</span>
+<span class="lineNum">     500 </span><span class="lineCov">         20 :     d = 1;</span>
+<span class="lineNum">     501 </span><span class="lineCov">      50002 :     for (i = 1; i &lt; numrows; i++)</span>
+<span class="lineNum">     502 </span>            :     {
+<span class="lineNum">     503 </span><span class="lineCov">      49982 :         if (multi_sort_compare(&amp;items[i], &amp;items[i - 1], mss) != 0)</span>
+<span class="lineNum">     504 </span>            :         {
+<span class="lineNum">     505 </span><span class="lineCov">      22034 :             if (cnt == 1)</span>
+<span class="lineNum">     506 </span><span class="lineCov">      12194 :                 f1 += 1;</span>
+<span class="lineNum">     507 </span>            : 
+<span class="lineNum">     508 </span><span class="lineCov">      22034 :             d++;</span>
+<span class="lineNum">     509 </span><span class="lineCov">      22034 :             cnt = 0;</span>
+<span class="lineNum">     510 </span>            :         }
+<span class="lineNum">     511 </span>            : 
+<span class="lineNum">     512 </span><span class="lineCov">      49982 :         cnt += 1;</span>
+<span class="lineNum">     513 </span>            :     }
+<span class="lineNum">     514 </span>            : 
+<span class="lineNum">     515 </span><span class="lineCov">         20 :     if (cnt == 1)</span>
+<span class="lineNum">     516 </span><span class="lineCov">         16 :         f1 += 1;</span>
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span><span class="lineCov">         20 :     return estimate_ndistinct(totalrows, numrows, d, f1);</span>
+<span class="lineNum">     519 </span>            : }
+<span class="lineNum">     520 </span>            : 
+<a name="521"><span class="lineNum">     521 </span>            : /* The Duj1 estimator (already used in analyze.c). */</a>
+<span class="lineNum">     522 </span>            : static double
+<span class="lineNum">     523 </span><span class="lineCov">         20 : estimate_ndistinct(double totalrows, int numrows, int d, int f1)</span>
+<span class="lineNum">     524 </span>            : {
+<span class="lineNum">     525 </span>            :     double      numer,
+<span class="lineNum">     526 </span>            :                 denom,
+<span class="lineNum">     527 </span>            :                 ndistinct;
+<span class="lineNum">     528 </span>            : 
+<span class="lineNum">     529 </span><span class="lineCov">         20 :     numer = (double) numrows * (double) d;</span>
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span><span class="lineCov">         40 :     denom = (double) (numrows - f1) +</span>
+<span class="lineNum">     532 </span><span class="lineCov">         20 :         (double) f1 * (double) numrows / totalrows;</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span><span class="lineCov">         20 :     ndistinct = numer / denom;</span>
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span>            :     /* Clamp to sane range in case of roundoff error */
+<span class="lineNum">     537 </span><span class="lineCov">         20 :     if (ndistinct &lt; (double) d)</span>
+<span class="lineNum">     538 </span><span class="lineNoCov">          0 :         ndistinct = (double) d;</span>
+<span class="lineNum">     539 </span>            : 
+<span class="lineNum">     540 </span><span class="lineCov">         20 :     if (ndistinct &gt; totalrows)</span>
+<span class="lineNum">     541 </span><span class="lineNoCov">          0 :         ndistinct = totalrows;</span>
+<span class="lineNum">     542 </span>            : 
+<span class="lineNum">     543 </span><span class="lineCov">         20 :     return floor(ndistinct + 0.5);</span>
+<span class="lineNum">     544 </span>            : }
+<span class="lineNum">     545 </span>            : 
+<span class="lineNum">     546 </span>            : /*
+<span class="lineNum">     547 </span>            :  * n_choose_k
+<span class="lineNum">     548 </span>            :  *      computes binomial coefficients using an algorithm that is both
+<span class="lineNum">     549 </span>            :  *      efficient and prevents overflows
+<a name="550"><span class="lineNum">     550 </span>            :  */</a>
+<span class="lineNum">     551 </span>            : static int
+<span class="lineNum">     552 </span><span class="lineCov">         12 : n_choose_k(int n, int k)</span>
+<span class="lineNum">     553 </span>            : {
+<span class="lineNum">     554 </span>            :     int         d,
+<span class="lineNum">     555 </span>            :                 r;
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span><span class="lineCov">         12 :     Assert((k &gt; 0) &amp;&amp; (n &gt;= k));</span>
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span>            :     /* use symmetry of the binomial coefficients */
+<span class="lineNum">     560 </span><span class="lineCov">         12 :     k = Min(k, n - k);</span>
+<span class="lineNum">     561 </span>            : 
+<span class="lineNum">     562 </span><span class="lineCov">         12 :     r = 1;</span>
+<span class="lineNum">     563 </span><span class="lineCov">         16 :     for (d = 1; d &lt;= k; ++d)</span>
+<span class="lineNum">     564 </span>            :     {
+<span class="lineNum">     565 </span><span class="lineCov">          4 :         r *= n--;</span>
+<span class="lineNum">     566 </span><span class="lineCov">          4 :         r /= d;</span>
+<span class="lineNum">     567 </span>            :     }
+<span class="lineNum">     568 </span>            : 
+<span class="lineNum">     569 </span><span class="lineCov">         12 :     return r;</span>
+<span class="lineNum">     570 </span>            : }
+<span class="lineNum">     571 </span>            : 
+<span class="lineNum">     572 </span>            : /*
+<span class="lineNum">     573 </span>            :  * num_combinations
+<span class="lineNum">     574 </span>            :  *      number of combinations, excluding single-value combinations
+<a name="575"><span class="lineNum">     575 </span>            :  */</a>
+<span class="lineNum">     576 </span>            : static int
+<span class="lineNum">     577 </span><span class="lineCov">          8 : num_combinations(int n)</span>
+<span class="lineNum">     578 </span>            : {
+<span class="lineNum">     579 </span>            :     int         k;
+<span class="lineNum">     580 </span><span class="lineCov">          8 :     int         ncombs = 1;</span>
+<span class="lineNum">     581 </span>            : 
+<span class="lineNum">     582 </span><span class="lineCov">         28 :     for (k = 1; k &lt;= n; k++)</span>
+<span class="lineNum">     583 </span><span class="lineCov">         20 :         ncombs *= 2;</span>
+<span class="lineNum">     584 </span>            : 
+<span class="lineNum">     585 </span><span class="lineCov">          8 :     ncombs -= (n + 1);</span>
+<span class="lineNum">     586 </span>            : 
+<span class="lineNum">     587 </span><span class="lineCov">          8 :     return ncombs;</span>
+<span class="lineNum">     588 </span>            : }
+<span class="lineNum">     589 </span>            : 
+<span class="lineNum">     590 </span>            : /*
+<span class="lineNum">     591 </span>            :  * generator_init
+<span class="lineNum">     592 </span>            :  *      initialize the generator of combinations
+<span class="lineNum">     593 </span>            :  *
+<span class="lineNum">     594 </span>            :  * The generator produces combinations of K elements in the interval (0..N).
+<span class="lineNum">     595 </span>            :  * We prebuild all the combinations in this method, which is simpler than
+<span class="lineNum">     596 </span>            :  * generating them on the fly.
+<a name="597"><span class="lineNum">     597 </span>            :  */</a>
+<span class="lineNum">     598 </span>            : static CombinationGenerator *
+<span class="lineNum">     599 </span><span class="lineCov">         12 : generator_init(int n, int k)</span>
+<span class="lineNum">     600 </span>            : {
+<span class="lineNum">     601 </span>            :     CombinationGenerator *state;
+<span class="lineNum">     602 </span>            : 
+<span class="lineNum">     603 </span><span class="lineCov">         12 :     Assert((n &gt;= k) &amp;&amp; (k &gt; 0));</span>
+<span class="lineNum">     604 </span>            : 
+<span class="lineNum">     605 </span>            :     /* allocate the generator state as a single chunk of memory */
+<span class="lineNum">     606 </span><span class="lineCov">         12 :     state = (CombinationGenerator *) palloc(sizeof(CombinationGenerator));</span>
+<span class="lineNum">     607 </span>            : 
+<span class="lineNum">     608 </span><span class="lineCov">         12 :     state-&gt;ncombinations = n_choose_k(n, k);</span>
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span>            :     /* pre-allocate space for all combinations */
+<span class="lineNum">     611 </span><span class="lineCov">         12 :     state-&gt;combinations = (int *) palloc(sizeof(int) * k * state-&gt;ncombinations);</span>
+<span class="lineNum">     612 </span>            : 
+<span class="lineNum">     613 </span><span class="lineCov">         12 :     state-&gt;current = 0;</span>
+<span class="lineNum">     614 </span><span class="lineCov">         12 :     state-&gt;k = k;</span>
+<span class="lineNum">     615 </span><span class="lineCov">         12 :     state-&gt;n = n;</span>
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span>            :     /* now actually pre-generate all the combinations of K elements */
+<span class="lineNum">     618 </span><span class="lineCov">         12 :     generate_combinations(state);</span>
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span>            :     /* make sure we got the expected number of combinations */
+<span class="lineNum">     621 </span><span class="lineCov">         12 :     Assert(state-&gt;current == state-&gt;ncombinations);</span>
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span>            :     /* reset the number, so we start with the first one */
+<span class="lineNum">     624 </span><span class="lineCov">         12 :     state-&gt;current = 0;</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span><span class="lineCov">         12 :     return state;</span>
+<span class="lineNum">     627 </span>            : }
+<span class="lineNum">     628 </span>            : 
+<span class="lineNum">     629 </span>            : /*
+<span class="lineNum">     630 </span>            :  * generator_next
+<span class="lineNum">     631 </span>            :  *      returns the next combination from the prebuilt list
+<span class="lineNum">     632 </span>            :  *
+<span class="lineNum">     633 </span>            :  * Returns a combination of K array indexes (0 .. N), as specified to
+<span class="lineNum">     634 </span>            :  * generator_init), or NULL when there are no more combination.
+<a name="635"><span class="lineNum">     635 </span>            :  */</a>
+<span class="lineNum">     636 </span>            : static int *
+<span class="lineNum">     637 </span><span class="lineCov">         32 : generator_next(CombinationGenerator *state)</span>
+<span class="lineNum">     638 </span>            : {
+<span class="lineNum">     639 </span><span class="lineCov">         32 :     if (state-&gt;current == state-&gt;ncombinations)</span>
+<span class="lineNum">     640 </span><span class="lineCov">         12 :         return NULL;</span>
+<span class="lineNum">     641 </span>            : 
+<span class="lineNum">     642 </span><span class="lineCov">         20 :     return &amp;state-&gt;combinations[state-&gt;k * state-&gt;current++];</span>
+<span class="lineNum">     643 </span>            : }
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span>            : /*
+<span class="lineNum">     646 </span>            :  * generator_free
+<span class="lineNum">     647 </span>            :  *      free the internal state of the generator
+<span class="lineNum">     648 </span>            :  *
+<span class="lineNum">     649 </span>            :  * Releases the generator internal state (pre-built combinations).
+<a name="650"><span class="lineNum">     650 </span>            :  */</a>
+<span class="lineNum">     651 </span>            : static void
+<span class="lineNum">     652 </span><span class="lineCov">         12 : generator_free(CombinationGenerator *state)</span>
+<span class="lineNum">     653 </span>            : {
+<span class="lineNum">     654 </span><span class="lineCov">         12 :     pfree(state-&gt;combinations);</span>
+<span class="lineNum">     655 </span><span class="lineCov">         12 :     pfree(state);</span>
+<span class="lineNum">     656 </span><span class="lineCov">         12 : }</span>
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span>            : /*
+<span class="lineNum">     659 </span>            :  * generate_combinations_recurse
+<span class="lineNum">     660 </span>            :  *      given a prefix, generate all possible combinations
+<span class="lineNum">     661 </span>            :  *
+<span class="lineNum">     662 </span>            :  * Given a prefix (first few elements of the combination), generate following
+<span class="lineNum">     663 </span>            :  * elements recursively. We generate the combinations in lexicographic order,
+<span class="lineNum">     664 </span>            :  * which eliminates permutations of the same combination.
+<a name="665"><span class="lineNum">     665 </span>            :  */</a>
+<span class="lineNum">     666 </span>            : static void
+<span class="lineNum">     667 </span><span class="lineCov">         76 : generate_combinations_recurse(CombinationGenerator *state,</span>
+<span class="lineNum">     668 </span>            :                               int index, int start, int *current)
+<span class="lineNum">     669 </span>            : {
+<span class="lineNum">     670 </span>            :     /* If we haven't filled all the elements, simply recurse. */
+<span class="lineNum">     671 </span><span class="lineCov">         76 :     if (index &lt; state-&gt;k)</span>
+<span class="lineNum">     672 </span>            :     {
+<span class="lineNum">     673 </span>            :         int         i;
+<span class="lineNum">     674 </span>            : 
+<span class="lineNum">     675 </span>            :         /*
+<span class="lineNum">     676 </span>            :          * The values have to be in ascending order, so make sure we start
+<span class="lineNum">     677 </span>            :          * with the value passed by parameter.
+<span class="lineNum">     678 </span>            :          */
+<span class="lineNum">     679 </span>            : 
+<span class="lineNum">     680 </span><span class="lineCov">        120 :         for (i = start; i &lt; state-&gt;n; i++)</span>
+<span class="lineNum">     681 </span>            :         {
+<span class="lineNum">     682 </span><span class="lineCov">         64 :             current[index] = i;</span>
+<span class="lineNum">     683 </span><span class="lineCov">         64 :             generate_combinations_recurse(state, (index + 1), (i + 1), current);</span>
+<span class="lineNum">     684 </span>            :         }
+<span class="lineNum">     685 </span>            : 
+<span class="lineNum">     686 </span><span class="lineCov">        132 :         return;</span>
+<span class="lineNum">     687 </span>            :     }
+<span class="lineNum">     688 </span>            :     else
+<span class="lineNum">     689 </span>            :     {
+<span class="lineNum">     690 </span>            :         /* we got a valid combination, add it to the array */
+<span class="lineNum">     691 </span><span class="lineCov">         20 :         memcpy(&amp;state-&gt;combinations[(state-&gt;k * state-&gt;current)],</span>
+<span class="lineNum">     692 </span><span class="lineCov">         20 :                current, state-&gt;k * sizeof(int));</span>
+<span class="lineNum">     693 </span><span class="lineCov">         20 :         state-&gt;current++;</span>
+<span class="lineNum">     694 </span>            :     }
+<span class="lineNum">     695 </span>            : }
+<span class="lineNum">     696 </span>            : 
+<span class="lineNum">     697 </span>            : /*
+<span class="lineNum">     698 </span>            :  * generate_combinations
+<span class="lineNum">     699 </span>            :  *      generate all k-combinations of N elements
+<a name="700"><span class="lineNum">     700 </span>            :  */</a>
+<span class="lineNum">     701 </span>            : static void
+<span class="lineNum">     702 </span><span class="lineCov">         12 : generate_combinations(CombinationGenerator *state)</span>
+<span class="lineNum">     703 </span>            : {
+<span class="lineNum">     704 </span><span class="lineCov">         12 :     int        *current = (int *) palloc0(sizeof(int) * state-&gt;k);</span>
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span><span class="lineCov">         12 :     generate_combinations_recurse(state, 0, 0, current);</span>
+<span class="lineNum">     707 </span>            : 
+<span class="lineNum">     708 </span><span class="lineCov">         12 :     pfree(current);</span>
+<span class="lineNum">     709 </span><span class="lineCov">         12 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

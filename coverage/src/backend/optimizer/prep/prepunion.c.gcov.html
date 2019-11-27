@@ -1,0 +1,1507 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/optimizer/prep/prepunion.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/optimizer/prep</a> - prepunion.c<span style="font-size: 80%;"> (source / <a href="prepunion.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">328</td>
+            <td class="headerCovTableEntry">362</td>
+            <td class="headerCovTableEntryHi">90.6 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * prepunion.c
+<span class="lineNum">       4 </span>            :  *    Routines to plan set-operation queries.  The filename is a leftover
+<span class="lineNum">       5 </span>            :  *    from a time when only UNIONs were implemented.
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * There are two code paths in the planner for set-operation queries.
+<span class="lineNum">       8 </span>            :  * If a subquery consists entirely of simple UNION ALL operations, it
+<span class="lineNum">       9 </span>            :  * is converted into an &quot;append relation&quot;.  Otherwise, it is handled
+<span class="lineNum">      10 </span>            :  * by the general code in this module (plan_set_operations and its
+<span class="lineNum">      11 </span>            :  * subroutines).  There is some support code here for the append-relation
+<span class="lineNum">      12 </span>            :  * case, but most of the heavy lifting for that is done elsewhere,
+<span class="lineNum">      13 </span>            :  * notably in prepjointree.c and allpaths.c.
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      16 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      17 </span>            :  *
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  * IDENTIFICATION
+<span class="lineNum">      20 </span>            :  *    src/backend/optimizer/prep/prepunion.c
+<span class="lineNum">      21 </span>            :  *
+<span class="lineNum">      22 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      23 </span>            :  */
+<span class="lineNum">      24 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;access/sysattr.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;catalog/partition.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;catalog/pg_inherits.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;nodes/makefuncs.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;optimizer/cost.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;optimizer/pathnode.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;optimizer/paths.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;optimizer/planmain.h&quot;
+<span class="lineNum">      38 </span>            : #include &quot;optimizer/planner.h&quot;
+<span class="lineNum">      39 </span>            : #include &quot;optimizer/prep.h&quot;
+<span class="lineNum">      40 </span>            : #include &quot;optimizer/tlist.h&quot;
+<span class="lineNum">      41 </span>            : #include &quot;parser/parse_coerce.h&quot;
+<span class="lineNum">      42 </span>            : #include &quot;parser/parsetree.h&quot;
+<span class="lineNum">      43 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      44 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      45 </span>            : #include &quot;utils/selfuncs.h&quot;
+<span class="lineNum">      46 </span>            : #include &quot;utils/syscache.h&quot;
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : static RelOptInfo *recurse_set_operations(Node *setOp, PlannerInfo *root,
+<span class="lineNum">      50 </span>            :                                           List *colTypes, List *colCollations,
+<span class="lineNum">      51 </span>            :                                           bool junkOK,
+<span class="lineNum">      52 </span>            :                                           int flag, List *refnames_tlist,
+<span class="lineNum">      53 </span>            :                                           List **pTargetList,
+<span class="lineNum">      54 </span>            :                                           double *pNumGroups);
+<span class="lineNum">      55 </span>            : static RelOptInfo *generate_recursion_path(SetOperationStmt *setOp,
+<span class="lineNum">      56 </span>            :                                            PlannerInfo *root,
+<span class="lineNum">      57 </span>            :                                            List *refnames_tlist,
+<span class="lineNum">      58 </span>            :                                            List **pTargetList);
+<span class="lineNum">      59 </span>            : static RelOptInfo *generate_union_paths(SetOperationStmt *op, PlannerInfo *root,
+<span class="lineNum">      60 </span>            :                                         List *refnames_tlist,
+<span class="lineNum">      61 </span>            :                                         List **pTargetList);
+<span class="lineNum">      62 </span>            : static RelOptInfo *generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,
+<span class="lineNum">      63 </span>            :                                            List *refnames_tlist,
+<span class="lineNum">      64 </span>            :                                            List **pTargetList);
+<span class="lineNum">      65 </span>            : static List *plan_union_children(PlannerInfo *root,
+<span class="lineNum">      66 </span>            :                                  SetOperationStmt *top_union,
+<span class="lineNum">      67 </span>            :                                  List *refnames_tlist,
+<span class="lineNum">      68 </span>            :                                  List **tlist_list);
+<span class="lineNum">      69 </span>            : static Path *make_union_unique(SetOperationStmt *op, Path *path, List *tlist,
+<span class="lineNum">      70 </span>            :                                PlannerInfo *root);
+<span class="lineNum">      71 </span>            : static void postprocess_setop_rel(PlannerInfo *root, RelOptInfo *rel);
+<span class="lineNum">      72 </span>            : static bool choose_hashed_setop(PlannerInfo *root, List *groupClauses,
+<span class="lineNum">      73 </span>            :                                 Path *input_path,
+<span class="lineNum">      74 </span>            :                                 double dNumGroups, double dNumOutputRows,
+<span class="lineNum">      75 </span>            :                                 const char *construct);
+<span class="lineNum">      76 </span>            : static List *generate_setop_tlist(List *colTypes, List *colCollations,
+<span class="lineNum">      77 </span>            :                                   int flag,
+<span class="lineNum">      78 </span>            :                                   Index varno,
+<span class="lineNum">      79 </span>            :                                   bool hack_constants,
+<span class="lineNum">      80 </span>            :                                   List *input_tlist,
+<span class="lineNum">      81 </span>            :                                   List *refnames_tlist);
+<span class="lineNum">      82 </span>            : static List *generate_append_tlist(List *colTypes, List *colCollations,
+<span class="lineNum">      83 </span>            :                                    bool flag,
+<span class="lineNum">      84 </span>            :                                    List *input_tlists,
+<span class="lineNum">      85 </span>            :                                    List *refnames_tlist);
+<span class="lineNum">      86 </span>            : static List *generate_setop_grouplist(SetOperationStmt *op, List *targetlist);
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span>            : /*
+<span class="lineNum">      90 </span>            :  * plan_set_operations
+<span class="lineNum">      91 </span>            :  *
+<span class="lineNum">      92 </span>            :  *    Plans the queries for a tree of set operations (UNION/INTERSECT/EXCEPT)
+<span class="lineNum">      93 </span>            :  *
+<span class="lineNum">      94 </span>            :  * This routine only deals with the setOperations tree of the given query.
+<span class="lineNum">      95 </span>            :  * Any top-level ORDER BY requested in root-&gt;parse-&gt;sortClause will be handled
+<span class="lineNum">      96 </span>            :  * when we return to grouping_planner; likewise for LIMIT.
+<span class="lineNum">      97 </span>            :  *
+<span class="lineNum">      98 </span>            :  * What we return is an &quot;upperrel&quot; RelOptInfo containing at least one Path
+<span class="lineNum">      99 </span>            :  * that implements the set-operation tree.  In addition, root-&gt;processed_tlist
+<span class="lineNum">     100 </span>            :  * receives a targetlist representing the output of the topmost setop node.
+<a name="101"><span class="lineNum">     101 </span>            :  */</a>
+<span class="lineNum">     102 </span>            : RelOptInfo *
+<span class="lineNum">     103 </span><span class="lineCov">       1220 : plan_set_operations(PlannerInfo *root)</span>
+<span class="lineNum">     104 </span>            : {
+<span class="lineNum">     105 </span><span class="lineCov">       1220 :     Query      *parse = root-&gt;parse;</span>
+<span class="lineNum">     106 </span><span class="lineCov">       1220 :     SetOperationStmt *topop = castNode(SetOperationStmt, parse-&gt;setOperations);</span>
+<span class="lineNum">     107 </span>            :     Node       *node;
+<span class="lineNum">     108 </span>            :     RangeTblEntry *leftmostRTE;
+<span class="lineNum">     109 </span>            :     Query      *leftmostQuery;
+<span class="lineNum">     110 </span>            :     RelOptInfo *setop_rel;
+<span class="lineNum">     111 </span>            :     List       *top_tlist;
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span><span class="lineCov">       1220 :     Assert(topop);</span>
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span>            :     /* check for unsupported stuff */
+<span class="lineNum">     116 </span><span class="lineCov">       1220 :     Assert(parse-&gt;jointree-&gt;fromlist == NIL);</span>
+<span class="lineNum">     117 </span><span class="lineCov">       1220 :     Assert(parse-&gt;jointree-&gt;quals == NULL);</span>
+<span class="lineNum">     118 </span><span class="lineCov">       1220 :     Assert(parse-&gt;groupClause == NIL);</span>
+<span class="lineNum">     119 </span><span class="lineCov">       1220 :     Assert(parse-&gt;havingQual == NULL);</span>
+<span class="lineNum">     120 </span><span class="lineCov">       1220 :     Assert(parse-&gt;windowClause == NIL);</span>
+<span class="lineNum">     121 </span><span class="lineCov">       1220 :     Assert(parse-&gt;distinctClause == NIL);</span>
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span>            :     /*
+<span class="lineNum">     124 </span>            :      * In the outer query level, we won't have any true equivalences to deal
+<span class="lineNum">     125 </span>            :      * with; but we do want to be able to make pathkeys, which will require
+<span class="lineNum">     126 </span>            :      * single-member EquivalenceClasses.  Indicate that EC merging is complete
+<span class="lineNum">     127 </span>            :      * so that pathkeys.c won't complain.
+<span class="lineNum">     128 </span>            :      */
+<span class="lineNum">     129 </span><span class="lineCov">       1220 :     Assert(root-&gt;eq_classes == NIL);</span>
+<span class="lineNum">     130 </span><span class="lineCov">       1220 :     root-&gt;ec_merging_done = true;</span>
+<span class="lineNum">     131 </span>            : 
+<span class="lineNum">     132 </span>            :     /*
+<span class="lineNum">     133 </span>            :      * We'll need to build RelOptInfos for each of the leaf subqueries, which
+<span class="lineNum">     134 </span>            :      * are RTE_SUBQUERY rangetable entries in this Query.  Prepare the index
+<span class="lineNum">     135 </span>            :      * arrays for those, and for AppendRelInfos in case they're needed.
+<span class="lineNum">     136 </span>            :      */
+<span class="lineNum">     137 </span><span class="lineCov">       1220 :     setup_simple_rel_arrays(root);</span>
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span>            :     /*
+<span class="lineNum">     140 </span>            :      * Find the leftmost component Query.  We need to use its column names for
+<span class="lineNum">     141 </span>            :      * all generated tlists (else SELECT INTO won't work right).
+<span class="lineNum">     142 </span>            :      */
+<span class="lineNum">     143 </span><span class="lineCov">       1220 :     node = topop-&gt;larg;</span>
+<span class="lineNum">     144 </span><span class="lineCov">       2470 :     while (node &amp;&amp; IsA(node, SetOperationStmt))</span>
+<span class="lineNum">     145 </span><span class="lineCov">         30 :         node = ((SetOperationStmt *) node)-&gt;larg;</span>
+<span class="lineNum">     146 </span><span class="lineCov">       1220 :     Assert(node &amp;&amp; IsA(node, RangeTblRef));</span>
+<span class="lineNum">     147 </span><span class="lineCov">       1220 :     leftmostRTE = root-&gt;simple_rte_array[((RangeTblRef *) node)-&gt;rtindex];</span>
+<span class="lineNum">     148 </span><span class="lineCov">       1220 :     leftmostQuery = leftmostRTE-&gt;subquery;</span>
+<span class="lineNum">     149 </span><span class="lineCov">       1220 :     Assert(leftmostQuery != NULL);</span>
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span>            :     /*
+<span class="lineNum">     152 </span>            :      * If the topmost node is a recursive union, it needs special processing.
+<span class="lineNum">     153 </span>            :      */
+<span class="lineNum">     154 </span><span class="lineCov">       1220 :     if (root-&gt;hasRecursion)</span>
+<span class="lineNum">     155 </span>            :     {
+<span class="lineNum">     156 </span><span class="lineCov">         88 :         setop_rel = generate_recursion_path(topop, root,</span>
+<span class="lineNum">     157 </span>            :                                             leftmostQuery-&gt;targetList,
+<span class="lineNum">     158 </span>            :                                             &amp;top_tlist);
+<span class="lineNum">     159 </span>            :     }
+<span class="lineNum">     160 </span>            :     else
+<span class="lineNum">     161 </span>            :     {
+<span class="lineNum">     162 </span>            :         /*
+<span class="lineNum">     163 </span>            :          * Recurse on setOperations tree to generate paths for set ops. The
+<span class="lineNum">     164 </span>            :          * final output paths should have just the column types shown as the
+<span class="lineNum">     165 </span>            :          * output from the top-level node, plus possibly resjunk working
+<span class="lineNum">     166 </span>            :          * columns (we can rely on upper-level nodes to deal with that).
+<span class="lineNum">     167 </span>            :          */
+<span class="lineNum">     168 </span><span class="lineCov">       1132 :         setop_rel = recurse_set_operations((Node *) topop, root,</span>
+<span class="lineNum">     169 </span>            :                                            topop-&gt;colTypes, topop-&gt;colCollations,
+<span class="lineNum">     170 </span>            :                                            true, -1,
+<span class="lineNum">     171 </span>            :                                            leftmostQuery-&gt;targetList,
+<span class="lineNum">     172 </span>            :                                            &amp;top_tlist,
+<span class="lineNum">     173 </span>            :                                            NULL);
+<span class="lineNum">     174 </span>            :     }
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span>            :     /* Must return the built tlist into root-&gt;processed_tlist. */
+<span class="lineNum">     177 </span><span class="lineCov">       1220 :     root-&gt;processed_tlist = top_tlist;</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span><span class="lineCov">       1220 :     return setop_rel;</span>
+<span class="lineNum">     180 </span>            : }
+<span class="lineNum">     181 </span>            : 
+<span class="lineNum">     182 </span>            : /*
+<span class="lineNum">     183 </span>            :  * recurse_set_operations
+<span class="lineNum">     184 </span>            :  *    Recursively handle one step in a tree of set operations
+<span class="lineNum">     185 </span>            :  *
+<span class="lineNum">     186 </span>            :  * colTypes: OID list of set-op's result column datatypes
+<span class="lineNum">     187 </span>            :  * colCollations: OID list of set-op's result column collations
+<span class="lineNum">     188 </span>            :  * junkOK: if true, child resjunk columns may be left in the result
+<span class="lineNum">     189 </span>            :  * flag: if &gt;= 0, add a resjunk output column indicating value of flag
+<span class="lineNum">     190 </span>            :  * refnames_tlist: targetlist to take column names from
+<span class="lineNum">     191 </span>            :  *
+<span class="lineNum">     192 </span>            :  * Returns a RelOptInfo for the subtree, as well as these output parameters:
+<span class="lineNum">     193 </span>            :  * *pTargetList: receives the fully-fledged tlist for the subtree's top plan
+<span class="lineNum">     194 </span>            :  * *pNumGroups: if not NULL, we estimate the number of distinct groups
+<span class="lineNum">     195 </span>            :  *      in the result, and store it there
+<span class="lineNum">     196 </span>            :  *
+<span class="lineNum">     197 </span>            :  * The pTargetList output parameter is mostly redundant with the pathtarget
+<span class="lineNum">     198 </span>            :  * of the returned RelOptInfo, but for the moment we need it because much of
+<span class="lineNum">     199 </span>            :  * the logic in this file depends on flag columns being marked resjunk.
+<span class="lineNum">     200 </span>            :  * Pending a redesign of how that works, this is the easy way out.
+<span class="lineNum">     201 </span>            :  *
+<span class="lineNum">     202 </span>            :  * We don't have to care about typmods here: the only allowed difference
+<span class="lineNum">     203 </span>            :  * between set-op input and output typmods is input is a specific typmod
+<span class="lineNum">     204 </span>            :  * and output is -1, and that does not require a coercion.
+<a name="205"><span class="lineNum">     205 </span>            :  */</a>
+<span class="lineNum">     206 </span>            : static RelOptInfo *
+<span class="lineNum">     207 </span><span class="lineCov">       3632 : recurse_set_operations(Node *setOp, PlannerInfo *root,</span>
+<span class="lineNum">     208 </span>            :                        List *colTypes, List *colCollations,
+<span class="lineNum">     209 </span>            :                        bool junkOK,
+<span class="lineNum">     210 </span>            :                        int flag, List *refnames_tlist,
+<span class="lineNum">     211 </span>            :                        List **pTargetList,
+<span class="lineNum">     212 </span>            :                        double *pNumGroups)
+<span class="lineNum">     213 </span>            : {
+<span class="lineNum">     214 </span><span class="lineCov">       3632 :     RelOptInfo *rel = NULL;     /* keep compiler quiet */</span>
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span>            :     /* Guard against stack overflow due to overly complex setop nests */
+<span class="lineNum">     217 </span><span class="lineCov">       3632 :     check_stack_depth();</span>
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span><span class="lineCov">       3632 :     if (IsA(setOp, RangeTblRef))</span>
+<span class="lineNum">     220 </span>            :     {
+<span class="lineNum">     221 </span><span class="lineCov">       2476 :         RangeTblRef *rtr = (RangeTblRef *) setOp;</span>
+<span class="lineNum">     222 </span><span class="lineCov">       2476 :         RangeTblEntry *rte = root-&gt;simple_rte_array[rtr-&gt;rtindex];</span>
+<span class="lineNum">     223 </span><span class="lineCov">       2476 :         Query      *subquery = rte-&gt;subquery;</span>
+<span class="lineNum">     224 </span>            :         PlannerInfo *subroot;
+<span class="lineNum">     225 </span>            :         RelOptInfo *final_rel;
+<span class="lineNum">     226 </span>            :         Path       *subpath;
+<span class="lineNum">     227 </span>            :         Path       *path;
+<span class="lineNum">     228 </span>            :         List       *tlist;
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span><span class="lineCov">       2476 :         Assert(subquery != NULL);</span>
+<span class="lineNum">     231 </span>            : 
+<span class="lineNum">     232 </span>            :         /* Build a RelOptInfo for this leaf subquery. */
+<span class="lineNum">     233 </span><span class="lineCov">       2476 :         rel = build_simple_rel(root, rtr-&gt;rtindex, NULL);</span>
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span>            :         /* plan_params should not be in use in current query level */
+<span class="lineNum">     236 </span><span class="lineCov">       2476 :         Assert(root-&gt;plan_params == NIL);</span>
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span>            :         /* Generate a subroot and Paths for the subquery */
+<span class="lineNum">     239 </span><span class="lineCov">       2476 :         subroot = rel-&gt;subroot = subquery_planner(root-&gt;glob, subquery,</span>
+<span class="lineNum">     240 </span>            :                                                   root,
+<span class="lineNum">     241 </span>            :                                                   false,
+<span class="lineNum">     242 </span>            :                                                   root-&gt;tuple_fraction);
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            :         /*
+<span class="lineNum">     245 </span>            :          * It should not be possible for the primitive query to contain any
+<span class="lineNum">     246 </span>            :          * cross-references to other primitive queries in the setop tree.
+<span class="lineNum">     247 </span>            :          */
+<span class="lineNum">     248 </span><span class="lineCov">       2476 :         if (root-&gt;plan_params)</span>
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unexpected outer reference in set operation subquery&quot;);</span>
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span>            :         /* Figure out the appropriate target list for this subquery. */
+<span class="lineNum">     252 </span><span class="lineCov">       4952 :         tlist = generate_setop_tlist(colTypes, colCollations,</span>
+<span class="lineNum">     253 </span>            :                                      flag,
+<span class="lineNum">     254 </span><span class="lineCov">       2476 :                                      rtr-&gt;rtindex,</span>
+<span class="lineNum">     255 </span>            :                                      true,
+<span class="lineNum">     256 </span>            :                                      subroot-&gt;processed_tlist,
+<span class="lineNum">     257 </span>            :                                      refnames_tlist);
+<span class="lineNum">     258 </span><span class="lineCov">       2476 :         rel-&gt;reltarget = create_pathtarget(root, tlist);</span>
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span>            :         /* Return the fully-fledged tlist to caller, too */
+<span class="lineNum">     261 </span><span class="lineCov">       2476 :         *pTargetList = tlist;</span>
+<span class="lineNum">     262 </span>            : 
+<span class="lineNum">     263 </span>            :         /*
+<span class="lineNum">     264 </span>            :          * Mark rel with estimated output rows, width, etc.  Note that we have
+<span class="lineNum">     265 </span>            :          * to do this before generating outer-query paths, else
+<span class="lineNum">     266 </span>            :          * cost_subqueryscan is not happy.
+<span class="lineNum">     267 </span>            :          */
+<span class="lineNum">     268 </span><span class="lineCov">       2476 :         set_subquery_size_estimates(root, rel);</span>
+<span class="lineNum">     269 </span>            : 
+<span class="lineNum">     270 </span>            :         /*
+<span class="lineNum">     271 </span>            :          * Since we may want to add a partial path to this relation, we must
+<span class="lineNum">     272 </span>            :          * set its consider_parallel flag correctly.
+<span class="lineNum">     273 </span>            :          */
+<span class="lineNum">     274 </span><span class="lineCov">       2476 :         final_rel = fetch_upper_rel(subroot, UPPERREL_FINAL, NULL);</span>
+<span class="lineNum">     275 </span><span class="lineCov">       2476 :         rel-&gt;consider_parallel = final_rel-&gt;consider_parallel;</span>
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span>            :         /*
+<span class="lineNum">     278 </span>            :          * For the moment, we consider only a single Path for the subquery.
+<span class="lineNum">     279 </span>            :          * This should change soon (make it look more like
+<span class="lineNum">     280 </span>            :          * set_subquery_pathlist).
+<span class="lineNum">     281 </span>            :          */
+<span class="lineNum">     282 </span><span class="lineCov">       2476 :         subpath = get_cheapest_fractional_path(final_rel,</span>
+<span class="lineNum">     283 </span>            :                                                root-&gt;tuple_fraction);
+<span class="lineNum">     284 </span>            : 
+<span class="lineNum">     285 </span>            :         /*
+<span class="lineNum">     286 </span>            :          * Stick a SubqueryScanPath atop that.
+<span class="lineNum">     287 </span>            :          *
+<span class="lineNum">     288 </span>            :          * We don't bother to determine the subquery's output ordering since
+<span class="lineNum">     289 </span>            :          * it won't be reflected in the set-op result anyhow; so just label
+<span class="lineNum">     290 </span>            :          * the SubqueryScanPath with nil pathkeys.  (XXX that should change
+<span class="lineNum">     291 </span>            :          * soon too, likely.)
+<span class="lineNum">     292 </span>            :          */
+<span class="lineNum">     293 </span><span class="lineCov">       2476 :         path = (Path *) create_subqueryscan_path(root, rel, subpath,</span>
+<span class="lineNum">     294 </span>            :                                                  NIL, NULL);
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span><span class="lineCov">       2476 :         add_path(rel, path);</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span>            :         /*
+<span class="lineNum">     299 </span>            :          * If we have a partial path for the child relation, we can use that
+<span class="lineNum">     300 </span>            :          * to build a partial path for this relation.  But there's no point in
+<span class="lineNum">     301 </span>            :          * considering any path but the cheapest.
+<span class="lineNum">     302 </span>            :          */
+<span class="lineNum">     303 </span><span class="lineCov">       4560 :         if (rel-&gt;consider_parallel &amp;&amp; bms_is_empty(rel-&gt;lateral_relids) &amp;&amp;</span>
+<span class="lineNum">     304 </span><span class="lineCov">       2084 :             final_rel-&gt;partial_pathlist != NIL)</span>
+<span class="lineNum">     305 </span>            :         {
+<span class="lineNum">     306 </span>            :             Path       *partial_subpath;
+<span class="lineNum">     307 </span>            :             Path       *partial_path;
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span><span class="lineNoCov">          0 :             partial_subpath = linitial(final_rel-&gt;partial_pathlist);</span>
+<span class="lineNum">     310 </span><span class="lineNoCov">          0 :             partial_path = (Path *)</span>
+<span class="lineNum">     311 </span>            :                 create_subqueryscan_path(root, rel, partial_subpath,
+<span class="lineNum">     312 </span>            :                                          NIL, NULL);
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :             add_partial_path(rel, partial_path);</span>
+<span class="lineNum">     314 </span>            :         }
+<span class="lineNum">     315 </span>            : 
+<span class="lineNum">     316 </span>            :         /*
+<span class="lineNum">     317 </span>            :          * Estimate number of groups if caller wants it.  If the subquery used
+<span class="lineNum">     318 </span>            :          * grouping or aggregation, its output is probably mostly unique
+<span class="lineNum">     319 </span>            :          * anyway; otherwise do statistical estimation.
+<span class="lineNum">     320 </span>            :          *
+<span class="lineNum">     321 </span>            :          * XXX you don't really want to know about this: we do the estimation
+<span class="lineNum">     322 </span>            :          * using the subquery's original targetlist expressions, not the
+<span class="lineNum">     323 </span>            :          * subroot-&gt;processed_tlist which might seem more appropriate.  The
+<span class="lineNum">     324 </span>            :          * reason is that if the subquery is itself a setop, it may return a
+<span class="lineNum">     325 </span>            :          * processed_tlist containing &quot;varno 0&quot; Vars generated by
+<span class="lineNum">     326 </span>            :          * generate_append_tlist, and those would confuse estimate_num_groups
+<span class="lineNum">     327 </span>            :          * mightily.  We ought to get rid of the &quot;varno 0&quot; hack, but that
+<span class="lineNum">     328 </span>            :          * requires a redesign of the parsetree representation of setops, so
+<span class="lineNum">     329 </span>            :          * that there can be an RTE corresponding to each setop's output.
+<span class="lineNum">     330 </span>            :          */
+<span class="lineNum">     331 </span><span class="lineCov">       2476 :         if (pNumGroups)</span>
+<span class="lineNum">     332 </span>            :         {
+<span class="lineNum">     333 </span><span class="lineCov">       4040 :             if (subquery-&gt;groupClause || subquery-&gt;groupingSets ||</span>
+<span class="lineNum">     334 </span><span class="lineCov">       4036 :                 subquery-&gt;distinctClause ||</span>
+<span class="lineNum">     335 </span><span class="lineCov">       4032 :                 subroot-&gt;hasHavingQual || subquery-&gt;hasAggs)</span>
+<span class="lineNum">     336 </span><span class="lineCov">          4 :                 *pNumGroups = subpath-&gt;rows;</span>
+<span class="lineNum">     337 </span>            :             else
+<span class="lineNum">     338 </span><span class="lineCov">       2016 :                 *pNumGroups = estimate_num_groups(subroot,</span>
+<span class="lineNum">     339 </span>            :                                                   get_tlist_exprs(subquery-&gt;targetList, false),
+<span class="lineNum">     340 </span>            :                                                   subpath-&gt;rows,
+<span class="lineNum">     341 </span>            :                                                   NULL);
+<span class="lineNum">     342 </span>            :         }
+<span class="lineNum">     343 </span>            :     }
+<span class="lineNum">     344 </span><span class="lineCov">       1156 :     else if (IsA(setOp, SetOperationStmt))</span>
+<span class="lineNum">     345 </span>            :     {
+<span class="lineNum">     346 </span><span class="lineCov">       1156 :         SetOperationStmt *op = (SetOperationStmt *) setOp;</span>
+<span class="lineNum">     347 </span>            : 
+<span class="lineNum">     348 </span>            :         /* UNIONs are much different from INTERSECT/EXCEPT */
+<span class="lineNum">     349 </span><span class="lineCov">       1156 :         if (op-&gt;op == SETOP_UNION)</span>
+<span class="lineNum">     350 </span><span class="lineCov">        140 :             rel = generate_union_paths(op, root,</span>
+<span class="lineNum">     351 </span>            :                                        refnames_tlist,
+<span class="lineNum">     352 </span>            :                                        pTargetList);
+<span class="lineNum">     353 </span>            :         else
+<span class="lineNum">     354 </span><span class="lineCov">       1016 :             rel = generate_nonunion_paths(op, root,</span>
+<span class="lineNum">     355 </span>            :                                           refnames_tlist,
+<span class="lineNum">     356 </span>            :                                           pTargetList);
+<span class="lineNum">     357 </span><span class="lineCov">       1156 :         if (pNumGroups)</span>
+<span class="lineNum">     358 </span><span class="lineCov">         12 :             *pNumGroups = rel-&gt;rows;</span>
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span>            :         /*
+<span class="lineNum">     361 </span>            :          * If necessary, add a Result node to project the caller-requested
+<span class="lineNum">     362 </span>            :          * output columns.
+<span class="lineNum">     363 </span>            :          *
+<span class="lineNum">     364 </span>            :          * XXX you don't really want to know about this: setrefs.c will apply
+<span class="lineNum">     365 </span>            :          * fix_upper_expr() to the Result node's tlist. This would fail if the
+<span class="lineNum">     366 </span>            :          * Vars generated by generate_setop_tlist() were not exactly equal()
+<span class="lineNum">     367 </span>            :          * to the corresponding tlist entries of the subplan. However, since
+<span class="lineNum">     368 </span>            :          * the subplan was generated by generate_union_paths() or
+<span class="lineNum">     369 </span>            :          * generate_nonunion_paths(), and hence its tlist was generated by
+<span class="lineNum">     370 </span>            :          * generate_append_tlist(), this will work.  We just tell
+<span class="lineNum">     371 </span>            :          * generate_setop_tlist() to use varno 0.
+<span class="lineNum">     372 </span>            :          */
+<span class="lineNum">     373 </span><span class="lineCov">       2300 :         if (flag &gt;= 0 ||</span>
+<span class="lineNum">     374 </span><span class="lineCov">       2282 :             !tlist_same_datatypes(*pTargetList, colTypes, junkOK) ||</span>
+<span class="lineNum">     375 </span><span class="lineCov">       1138 :             !tlist_same_collations(*pTargetList, colCollations, junkOK))</span>
+<span class="lineNum">     376 </span>            :         {
+<span class="lineNum">     377 </span>            :             PathTarget *target;
+<span class="lineNum">     378 </span>            :             ListCell   *lc;
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span><span class="lineCov">         18 :             *pTargetList = generate_setop_tlist(colTypes, colCollations,</span>
+<span class="lineNum">     381 </span>            :                                                 flag,
+<span class="lineNum">     382 </span>            :                                                 0,
+<span class="lineNum">     383 </span>            :                                                 false,
+<span class="lineNum">     384 </span>            :                                                 *pTargetList,
+<span class="lineNum">     385 </span>            :                                                 refnames_tlist);
+<span class="lineNum">     386 </span><span class="lineCov">         18 :             target = create_pathtarget(root, *pTargetList);</span>
+<span class="lineNum">     387 </span>            : 
+<span class="lineNum">     388 </span>            :             /* Apply projection to each path */
+<span class="lineNum">     389 </span><span class="lineCov">         36 :             foreach(lc, rel-&gt;pathlist)</span>
+<span class="lineNum">     390 </span>            :             {
+<span class="lineNum">     391 </span><span class="lineCov">         18 :                 Path       *subpath = (Path *) lfirst(lc);</span>
+<span class="lineNum">     392 </span>            :                 Path       *path;
+<span class="lineNum">     393 </span>            : 
+<span class="lineNum">     394 </span><span class="lineCov">         18 :                 Assert(subpath-&gt;param_info == NULL);</span>
+<span class="lineNum">     395 </span><span class="lineCov">         18 :                 path = apply_projection_to_path(root, subpath-&gt;parent,</span>
+<span class="lineNum">     396 </span>            :                                                 subpath, target);
+<span class="lineNum">     397 </span>            :                 /* If we had to add a Result, path is different from subpath */
+<span class="lineNum">     398 </span><span class="lineCov">         18 :                 if (path != subpath)</span>
+<span class="lineNum">     399 </span><span class="lineCov">         18 :                     lfirst(lc) = path;</span>
+<span class="lineNum">     400 </span>            :             }
+<span class="lineNum">     401 </span>            : 
+<span class="lineNum">     402 </span>            :             /* Apply projection to each partial path */
+<span class="lineNum">     403 </span><span class="lineCov">         18 :             foreach(lc, rel-&gt;partial_pathlist)</span>
+<span class="lineNum">     404 </span>            :             {
+<span class="lineNum">     405 </span><span class="lineNoCov">          0 :                 Path       *subpath = (Path *) lfirst(lc);</span>
+<span class="lineNum">     406 </span>            :                 Path       *path;
+<span class="lineNum">     407 </span>            : 
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :                 Assert(subpath-&gt;param_info == NULL);</span>
+<span class="lineNum">     409 </span>            : 
+<span class="lineNum">     410 </span>            :                 /* avoid apply_projection_to_path, in case of multiple refs */
+<span class="lineNum">     411 </span><span class="lineNoCov">          0 :                 path = (Path *) create_projection_path(root, subpath-&gt;parent,</span>
+<span class="lineNum">     412 </span>            :                                                        subpath, target);
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :                 lfirst(lc) = path;</span>
+<span class="lineNum">     414 </span>            :             }
+<span class="lineNum">     415 </span>            :         }
+<span class="lineNum">     416 </span>            :     }
+<span class="lineNum">     417 </span>            :     else
+<span class="lineNum">     418 </span>            :     {
+<span class="lineNum">     419 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;unrecognized node type: %d&quot;,</span>
+<span class="lineNum">     420 </span>            :              (int) nodeTag(setOp));
+<span class="lineNum">     421 </span>            :         *pTargetList = NIL;
+<span class="lineNum">     422 </span>            :     }
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineCov">       3632 :     postprocess_setop_rel(root, rel);</span>
+<span class="lineNum">     425 </span>            : 
+<span class="lineNum">     426 </span><span class="lineCov">       3632 :     return rel;</span>
+<span class="lineNum">     427 </span>            : }
+<span class="lineNum">     428 </span>            : 
+<span class="lineNum">     429 </span>            : /*
+<span class="lineNum">     430 </span>            :  * Generate paths for a recursive UNION node
+<a name="431"><span class="lineNum">     431 </span>            :  */</a>
+<span class="lineNum">     432 </span>            : static RelOptInfo *
+<span class="lineNum">     433 </span><span class="lineCov">         88 : generate_recursion_path(SetOperationStmt *setOp, PlannerInfo *root,</span>
+<span class="lineNum">     434 </span>            :                         List *refnames_tlist,
+<span class="lineNum">     435 </span>            :                         List **pTargetList)
+<span class="lineNum">     436 </span>            : {
+<span class="lineNum">     437 </span>            :     RelOptInfo *result_rel;
+<span class="lineNum">     438 </span>            :     Path       *path;
+<span class="lineNum">     439 </span>            :     RelOptInfo *lrel,
+<span class="lineNum">     440 </span>            :                *rrel;
+<span class="lineNum">     441 </span>            :     Path       *lpath;
+<span class="lineNum">     442 </span>            :     Path       *rpath;
+<span class="lineNum">     443 </span>            :     List       *lpath_tlist;
+<span class="lineNum">     444 </span>            :     List       *rpath_tlist;
+<span class="lineNum">     445 </span>            :     List       *tlist;
+<span class="lineNum">     446 </span>            :     List       *groupList;
+<span class="lineNum">     447 </span>            :     double      dNumGroups;
+<span class="lineNum">     448 </span>            : 
+<span class="lineNum">     449 </span>            :     /* Parser should have rejected other cases */
+<span class="lineNum">     450 </span><span class="lineCov">         88 :     if (setOp-&gt;op != SETOP_UNION)</span>
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;only UNION queries can be recursive&quot;);</span>
+<span class="lineNum">     452 </span>            :     /* Worktable ID should be assigned */
+<span class="lineNum">     453 </span><span class="lineCov">         88 :     Assert(root-&gt;wt_param_id &gt;= 0);</span>
+<span class="lineNum">     454 </span>            : 
+<span class="lineNum">     455 </span>            :     /*
+<span class="lineNum">     456 </span>            :      * Unlike a regular UNION node, process the left and right inputs
+<span class="lineNum">     457 </span>            :      * separately without any intention of combining them into one Append.
+<span class="lineNum">     458 </span>            :      */
+<span class="lineNum">     459 </span><span class="lineCov">         88 :     lrel = recurse_set_operations(setOp-&gt;larg, root,</span>
+<span class="lineNum">     460 </span>            :                                   setOp-&gt;colTypes, setOp-&gt;colCollations,
+<span class="lineNum">     461 </span>            :                                   false, -1,
+<span class="lineNum">     462 </span>            :                                   refnames_tlist,
+<span class="lineNum">     463 </span>            :                                   &amp;lpath_tlist,
+<span class="lineNum">     464 </span>            :                                   NULL);
+<span class="lineNum">     465 </span><span class="lineCov">         88 :     lpath = lrel-&gt;cheapest_total_path;</span>
+<span class="lineNum">     466 </span>            :     /* The right path will want to look at the left one ... */
+<span class="lineNum">     467 </span><span class="lineCov">         88 :     root-&gt;non_recursive_path = lpath;</span>
+<span class="lineNum">     468 </span><span class="lineCov">         88 :     rrel = recurse_set_operations(setOp-&gt;rarg, root,</span>
+<span class="lineNum">     469 </span>            :                                   setOp-&gt;colTypes, setOp-&gt;colCollations,
+<span class="lineNum">     470 </span>            :                                   false, -1,
+<span class="lineNum">     471 </span>            :                                   refnames_tlist,
+<span class="lineNum">     472 </span>            :                                   &amp;rpath_tlist,
+<span class="lineNum">     473 </span>            :                                   NULL);
+<span class="lineNum">     474 </span><span class="lineCov">         88 :     rpath = rrel-&gt;cheapest_total_path;</span>
+<span class="lineNum">     475 </span><span class="lineCov">         88 :     root-&gt;non_recursive_path = NULL;</span>
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span>            :     /*
+<span class="lineNum">     478 </span>            :      * Generate tlist for RecursiveUnion path node --- same as in Append cases
+<span class="lineNum">     479 </span>            :      */
+<span class="lineNum">     480 </span><span class="lineCov">         88 :     tlist = generate_append_tlist(setOp-&gt;colTypes, setOp-&gt;colCollations, false,</span>
+<span class="lineNum">     481 </span><span class="lineCov">         88 :                                   list_make2(lpath_tlist, rpath_tlist),</span>
+<span class="lineNum">     482 </span>            :                                   refnames_tlist);
+<span class="lineNum">     483 </span>            : 
+<span class="lineNum">     484 </span><span class="lineCov">         88 :     *pTargetList = tlist;</span>
+<span class="lineNum">     485 </span>            : 
+<span class="lineNum">     486 </span>            :     /* Build result relation. */
+<span class="lineNum">     487 </span><span class="lineCov">         88 :     result_rel = fetch_upper_rel(root, UPPERREL_SETOP,</span>
+<span class="lineNum">     488 </span><span class="lineCov">         88 :                                  bms_union(lrel-&gt;relids, rrel-&gt;relids));</span>
+<span class="lineNum">     489 </span><span class="lineCov">         88 :     result_rel-&gt;reltarget = create_pathtarget(root, tlist);</span>
+<span class="lineNum">     490 </span>            : 
+<span class="lineNum">     491 </span>            :     /*
+<span class="lineNum">     492 </span>            :      * If UNION, identify the grouping operators
+<span class="lineNum">     493 </span>            :      */
+<span class="lineNum">     494 </span><span class="lineCov">         88 :     if (setOp-&gt;all)</span>
+<span class="lineNum">     495 </span>            :     {
+<span class="lineNum">     496 </span><span class="lineCov">         80 :         groupList = NIL;</span>
+<span class="lineNum">     497 </span><span class="lineCov">         80 :         dNumGroups = 0;</span>
+<span class="lineNum">     498 </span>            :     }
+<span class="lineNum">     499 </span>            :     else
+<span class="lineNum">     500 </span>            :     {
+<span class="lineNum">     501 </span>            :         /* Identify the grouping semantics */
+<span class="lineNum">     502 </span><span class="lineCov">          8 :         groupList = generate_setop_grouplist(setOp, tlist);</span>
+<span class="lineNum">     503 </span>            : 
+<span class="lineNum">     504 </span>            :         /* We only support hashing here */
+<span class="lineNum">     505 </span><span class="lineCov">          8 :         if (!grouping_is_hashable(groupList))</span>
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     507 </span>            :                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     508 </span>            :                      errmsg(&quot;could not implement recursive UNION&quot;),
+<span class="lineNum">     509 </span>            :                      errdetail(&quot;All column datatypes must be hashable.&quot;)));
+<span class="lineNum">     510 </span>            : 
+<span class="lineNum">     511 </span>            :         /*
+<span class="lineNum">     512 </span>            :          * For the moment, take the number of distinct groups as equal to the
+<span class="lineNum">     513 </span>            :          * total input size, ie, the worst case.
+<span class="lineNum">     514 </span>            :          */
+<span class="lineNum">     515 </span><span class="lineCov">          8 :         dNumGroups = lpath-&gt;rows + rpath-&gt;rows * 10;</span>
+<span class="lineNum">     516 </span>            :     }
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span>            :     /*
+<span class="lineNum">     519 </span>            :      * And make the path node.
+<span class="lineNum">     520 </span>            :      */
+<span class="lineNum">     521 </span><span class="lineCov">        176 :     path = (Path *) create_recursiveunion_path(root,</span>
+<span class="lineNum">     522 </span>            :                                                result_rel,
+<span class="lineNum">     523 </span>            :                                                lpath,
+<span class="lineNum">     524 </span>            :                                                rpath,
+<span class="lineNum">     525 </span><span class="lineCov">         88 :                                                result_rel-&gt;reltarget,</span>
+<span class="lineNum">     526 </span>            :                                                groupList,
+<span class="lineNum">     527 </span>            :                                                root-&gt;wt_param_id,
+<span class="lineNum">     528 </span>            :                                                dNumGroups);
+<span class="lineNum">     529 </span>            : 
+<span class="lineNum">     530 </span><span class="lineCov">         88 :     add_path(result_rel, path);</span>
+<span class="lineNum">     531 </span><span class="lineCov">         88 :     postprocess_setop_rel(root, result_rel);</span>
+<span class="lineNum">     532 </span><span class="lineCov">         88 :     return result_rel;</span>
+<span class="lineNum">     533 </span>            : }
+<span class="lineNum">     534 </span>            : 
+<span class="lineNum">     535 </span>            : /*
+<span class="lineNum">     536 </span>            :  * Generate paths for a UNION or UNION ALL node
+<a name="537"><span class="lineNum">     537 </span>            :  */</a>
+<span class="lineNum">     538 </span>            : static RelOptInfo *
+<span class="lineNum">     539 </span><span class="lineCov">        140 : generate_union_paths(SetOperationStmt *op, PlannerInfo *root,</span>
+<span class="lineNum">     540 </span>            :                      List *refnames_tlist,
+<span class="lineNum">     541 </span>            :                      List **pTargetList)
+<span class="lineNum">     542 </span>            : {
+<span class="lineNum">     543 </span><span class="lineCov">        140 :     Relids      relids = NULL;</span>
+<span class="lineNum">     544 </span>            :     RelOptInfo *result_rel;
+<span class="lineNum">     545 </span><span class="lineCov">        140 :     double      save_fraction = root-&gt;tuple_fraction;</span>
+<span class="lineNum">     546 </span>            :     ListCell   *lc;
+<span class="lineNum">     547 </span><span class="lineCov">        140 :     List       *pathlist = NIL;</span>
+<span class="lineNum">     548 </span><span class="lineCov">        140 :     List       *partial_pathlist = NIL;</span>
+<span class="lineNum">     549 </span><span class="lineCov">        140 :     bool        partial_paths_valid = true;</span>
+<span class="lineNum">     550 </span><span class="lineCov">        140 :     bool        consider_parallel = true;</span>
+<span class="lineNum">     551 </span>            :     List       *rellist;
+<span class="lineNum">     552 </span>            :     List       *tlist_list;
+<span class="lineNum">     553 </span>            :     List       *tlist;
+<span class="lineNum">     554 </span>            :     Path       *path;
+<span class="lineNum">     555 </span>            : 
+<span class="lineNum">     556 </span>            :     /*
+<span class="lineNum">     557 </span>            :      * If plain UNION, tell children to fetch all tuples.
+<span class="lineNum">     558 </span>            :      *
+<span class="lineNum">     559 </span>            :      * Note: in UNION ALL, we pass the top-level tuple_fraction unmodified to
+<span class="lineNum">     560 </span>            :      * each arm of the UNION ALL.  One could make a case for reducing the
+<span class="lineNum">     561 </span>            :      * tuple fraction for later arms (discounting by the expected size of the
+<span class="lineNum">     562 </span>            :      * earlier arms' results) but it seems not worth the trouble. The normal
+<span class="lineNum">     563 </span>            :      * case where tuple_fraction isn't already zero is a LIMIT at top level,
+<span class="lineNum">     564 </span>            :      * and passing it down as-is is usually enough to get the desired result
+<span class="lineNum">     565 </span>            :      * of preferring fast-start plans.
+<span class="lineNum">     566 </span>            :      */
+<span class="lineNum">     567 </span><span class="lineCov">        140 :     if (!op-&gt;all)</span>
+<span class="lineNum">     568 </span><span class="lineCov">        110 :         root-&gt;tuple_fraction = 0.0;</span>
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span>            :     /*
+<span class="lineNum">     571 </span>            :      * If any of my children are identical UNION nodes (same op, all-flag, and
+<span class="lineNum">     572 </span>            :      * colTypes) then they can be merged into this node so that we generate
+<span class="lineNum">     573 </span>            :      * only one Append and unique-ification for the lot.  Recurse to find such
+<span class="lineNum">     574 </span>            :      * nodes and compute their children's paths.
+<span class="lineNum">     575 </span>            :      */
+<span class="lineNum">     576 </span><span class="lineCov">        140 :     rellist = plan_union_children(root, op, refnames_tlist, &amp;tlist_list);</span>
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span>            :     /*
+<span class="lineNum">     579 </span>            :      * Generate tlist for Append plan node.
+<span class="lineNum">     580 </span>            :      *
+<span class="lineNum">     581 </span>            :      * The tlist for an Append plan isn't important as far as the Append is
+<span class="lineNum">     582 </span>            :      * concerned, but we must make it look real anyway for the benefit of the
+<span class="lineNum">     583 </span>            :      * next plan level up.
+<span class="lineNum">     584 </span>            :      */
+<span class="lineNum">     585 </span><span class="lineCov">        140 :     tlist = generate_append_tlist(op-&gt;colTypes, op-&gt;colCollations, false,</span>
+<span class="lineNum">     586 </span>            :                                   tlist_list, refnames_tlist);
+<span class="lineNum">     587 </span>            : 
+<span class="lineNum">     588 </span><span class="lineCov">        140 :     *pTargetList = tlist;</span>
+<span class="lineNum">     589 </span>            : 
+<span class="lineNum">     590 </span>            :     /* Build path lists and relid set. */
+<span class="lineNum">     591 </span><span class="lineCov">        432 :     foreach(lc, rellist)</span>
+<span class="lineNum">     592 </span>            :     {
+<span class="lineNum">     593 </span><span class="lineCov">        292 :         RelOptInfo *rel = lfirst(lc);</span>
+<span class="lineNum">     594 </span>            : 
+<span class="lineNum">     595 </span><span class="lineCov">        292 :         pathlist = lappend(pathlist, rel-&gt;cheapest_total_path);</span>
+<span class="lineNum">     596 </span>            : 
+<span class="lineNum">     597 </span><span class="lineCov">        292 :         if (consider_parallel)</span>
+<span class="lineNum">     598 </span>            :         {
+<span class="lineNum">     599 </span><span class="lineCov">        188 :             if (!rel-&gt;consider_parallel)</span>
+<span class="lineNum">     600 </span>            :             {
+<span class="lineNum">     601 </span><span class="lineCov">         96 :                 consider_parallel = false;</span>
+<span class="lineNum">     602 </span><span class="lineCov">         96 :                 partial_paths_valid = false;</span>
+<span class="lineNum">     603 </span>            :             }
+<span class="lineNum">     604 </span><span class="lineCov">         92 :             else if (rel-&gt;partial_pathlist == NIL)</span>
+<span class="lineNum">     605 </span><span class="lineCov">         92 :                 partial_paths_valid = false;</span>
+<span class="lineNum">     606 </span>            :             else
+<span class="lineNum">     607 </span><span class="lineNoCov">          0 :                 partial_pathlist = lappend(partial_pathlist,</span>
+<span class="lineNum">     608 </span><span class="lineNoCov">          0 :                                            linitial(rel-&gt;partial_pathlist));</span>
+<span class="lineNum">     609 </span>            :         }
+<span class="lineNum">     610 </span>            : 
+<span class="lineNum">     611 </span><span class="lineCov">        292 :         relids = bms_union(relids, rel-&gt;relids);</span>
+<span class="lineNum">     612 </span>            :     }
+<span class="lineNum">     613 </span>            : 
+<span class="lineNum">     614 </span>            :     /* Build result relation. */
+<span class="lineNum">     615 </span><span class="lineCov">        140 :     result_rel = fetch_upper_rel(root, UPPERREL_SETOP, relids);</span>
+<span class="lineNum">     616 </span><span class="lineCov">        140 :     result_rel-&gt;reltarget = create_pathtarget(root, tlist);</span>
+<span class="lineNum">     617 </span><span class="lineCov">        140 :     result_rel-&gt;consider_parallel = consider_parallel;</span>
+<span class="lineNum">     618 </span>            : 
+<span class="lineNum">     619 </span>            :     /*
+<span class="lineNum">     620 </span>            :      * Append the child results together.
+<span class="lineNum">     621 </span>            :      */
+<span class="lineNum">     622 </span><span class="lineCov">        140 :     path = (Path *) create_append_path(root, result_rel, pathlist, NIL,</span>
+<span class="lineNum">     623 </span>            :                                        NIL, NULL, 0, false, NIL, -1);
+<span class="lineNum">     624 </span>            : 
+<span class="lineNum">     625 </span>            :     /*
+<span class="lineNum">     626 </span>            :      * For UNION ALL, we just need the Append path.  For UNION, need to add
+<span class="lineNum">     627 </span>            :      * node(s) to remove duplicates.
+<span class="lineNum">     628 </span>            :      */
+<span class="lineNum">     629 </span><span class="lineCov">        140 :     if (!op-&gt;all)</span>
+<span class="lineNum">     630 </span><span class="lineCov">        110 :         path = make_union_unique(op, path, tlist, root);</span>
+<span class="lineNum">     631 </span>            : 
+<span class="lineNum">     632 </span><span class="lineCov">        140 :     add_path(result_rel, path);</span>
+<span class="lineNum">     633 </span>            : 
+<span class="lineNum">     634 </span>            :     /*
+<span class="lineNum">     635 </span>            :      * Estimate number of groups.  For now we just assume the output is unique
+<span class="lineNum">     636 </span>            :      * --- this is certainly true for the UNION case, and we want worst-case
+<span class="lineNum">     637 </span>            :      * estimates anyway.
+<span class="lineNum">     638 </span>            :      */
+<span class="lineNum">     639 </span><span class="lineCov">        140 :     result_rel-&gt;rows = path-&gt;rows;</span>
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span>            :     /*
+<span class="lineNum">     642 </span>            :      * Now consider doing the same thing using the partial paths plus Append
+<span class="lineNum">     643 </span>            :      * plus Gather.
+<span class="lineNum">     644 </span>            :      */
+<span class="lineNum">     645 </span><span class="lineCov">        140 :     if (partial_paths_valid)</span>
+<span class="lineNum">     646 </span>            :     {
+<span class="lineNum">     647 </span>            :         Path       *ppath;
+<span class="lineNum">     648 </span>            :         ListCell   *lc;
+<span class="lineNum">     649 </span><span class="lineNoCov">          0 :         int         parallel_workers = 0;</span>
+<span class="lineNum">     650 </span>            : 
+<span class="lineNum">     651 </span>            :         /* Find the highest number of workers requested for any subpath. */
+<span class="lineNum">     652 </span><span class="lineNoCov">          0 :         foreach(lc, partial_pathlist)</span>
+<span class="lineNum">     653 </span>            :         {
+<span class="lineNum">     654 </span><span class="lineNoCov">          0 :             Path       *path = lfirst(lc);</span>
+<span class="lineNum">     655 </span>            : 
+<span class="lineNum">     656 </span><span class="lineNoCov">          0 :             parallel_workers = Max(parallel_workers, path-&gt;parallel_workers);</span>
+<span class="lineNum">     657 </span>            :         }
+<span class="lineNum">     658 </span><span class="lineNoCov">          0 :         Assert(parallel_workers &gt; 0);</span>
+<span class="lineNum">     659 </span>            : 
+<span class="lineNum">     660 </span>            :         /*
+<span class="lineNum">     661 </span>            :          * If the use of parallel append is permitted, always request at least
+<span class="lineNum">     662 </span>            :          * log2(# of children) paths.  We assume it can be useful to have
+<span class="lineNum">     663 </span>            :          * extra workers in this case because they will be spread out across
+<span class="lineNum">     664 </span>            :          * the children.  The precise formula is just a guess; see
+<span class="lineNum">     665 </span>            :          * add_paths_to_append_rel.
+<span class="lineNum">     666 </span>            :          */
+<span class="lineNum">     667 </span><span class="lineNoCov">          0 :         if (enable_parallel_append)</span>
+<span class="lineNum">     668 </span>            :         {
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :             parallel_workers = Max(parallel_workers,</span>
+<span class="lineNum">     670 </span>            :                                    fls(list_length(partial_pathlist)));
+<span class="lineNum">     671 </span><span class="lineNoCov">          0 :             parallel_workers = Min(parallel_workers,</span>
+<span class="lineNum">     672 </span>            :                                    max_parallel_workers_per_gather);
+<span class="lineNum">     673 </span>            :         }
+<span class="lineNum">     674 </span><span class="lineNoCov">          0 :         Assert(parallel_workers &gt; 0);</span>
+<span class="lineNum">     675 </span>            : 
+<span class="lineNum">     676 </span><span class="lineNoCov">          0 :         ppath = (Path *)</span>
+<span class="lineNum">     677 </span><span class="lineNoCov">          0 :             create_append_path(root, result_rel, NIL, partial_pathlist,</span>
+<span class="lineNum">     678 </span>            :                                NIL, NULL,
+<span class="lineNum">     679 </span>            :                                parallel_workers, enable_parallel_append,
+<span class="lineNum">     680 </span>            :                                NIL, -1);
+<span class="lineNum">     681 </span><span class="lineNoCov">          0 :         ppath = (Path *)</span>
+<span class="lineNum">     682 </span>            :             create_gather_path(root, result_rel, ppath,
+<span class="lineNum">     683 </span><span class="lineNoCov">          0 :                                result_rel-&gt;reltarget, NULL, NULL);</span>
+<span class="lineNum">     684 </span><span class="lineNoCov">          0 :         if (!op-&gt;all)</span>
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 :             ppath = make_union_unique(op, ppath, tlist, root);</span>
+<span class="lineNum">     686 </span><span class="lineNoCov">          0 :         add_path(result_rel, ppath);</span>
+<span class="lineNum">     687 </span>            :     }
+<span class="lineNum">     688 </span>            : 
+<span class="lineNum">     689 </span>            :     /* Undo effects of possibly forcing tuple_fraction to 0 */
+<span class="lineNum">     690 </span><span class="lineCov">        140 :     root-&gt;tuple_fraction = save_fraction;</span>
+<span class="lineNum">     691 </span>            : 
+<span class="lineNum">     692 </span><span class="lineCov">        140 :     return result_rel;</span>
+<span class="lineNum">     693 </span>            : }
+<span class="lineNum">     694 </span>            : 
+<span class="lineNum">     695 </span>            : /*
+<span class="lineNum">     696 </span>            :  * Generate paths for an INTERSECT, INTERSECT ALL, EXCEPT, or EXCEPT ALL node
+<a name="697"><span class="lineNum">     697 </span>            :  */</a>
+<span class="lineNum">     698 </span>            : static RelOptInfo *
+<span class="lineNum">     699 </span><span class="lineCov">       1016 : generate_nonunion_paths(SetOperationStmt *op, PlannerInfo *root,</span>
+<span class="lineNum">     700 </span>            :                         List *refnames_tlist,
+<span class="lineNum">     701 </span>            :                         List **pTargetList)
+<span class="lineNum">     702 </span>            : {
+<span class="lineNum">     703 </span>            :     RelOptInfo *result_rel;
+<span class="lineNum">     704 </span>            :     RelOptInfo *lrel,
+<span class="lineNum">     705 </span>            :                *rrel;
+<span class="lineNum">     706 </span><span class="lineCov">       1016 :     double      save_fraction = root-&gt;tuple_fraction;</span>
+<span class="lineNum">     707 </span>            :     Path       *lpath,
+<span class="lineNum">     708 </span>            :                *rpath,
+<span class="lineNum">     709 </span>            :                *path;
+<span class="lineNum">     710 </span>            :     List       *lpath_tlist,
+<span class="lineNum">     711 </span>            :                *rpath_tlist,
+<span class="lineNum">     712 </span>            :                *tlist_list,
+<span class="lineNum">     713 </span>            :                *tlist,
+<span class="lineNum">     714 </span>            :                *groupList,
+<span class="lineNum">     715 </span>            :                *pathlist;
+<span class="lineNum">     716 </span>            :     double      dLeftGroups,
+<span class="lineNum">     717 </span>            :                 dRightGroups,
+<span class="lineNum">     718 </span>            :                 dNumGroups,
+<span class="lineNum">     719 </span>            :                 dNumOutputRows;
+<span class="lineNum">     720 </span>            :     bool        use_hash;
+<span class="lineNum">     721 </span>            :     SetOpCmd    cmd;
+<span class="lineNum">     722 </span>            :     int         firstFlag;
+<span class="lineNum">     723 </span>            : 
+<span class="lineNum">     724 </span>            :     /*
+<span class="lineNum">     725 </span>            :      * Tell children to fetch all tuples.
+<span class="lineNum">     726 </span>            :      */
+<span class="lineNum">     727 </span><span class="lineCov">       1016 :     root-&gt;tuple_fraction = 0.0;</span>
+<span class="lineNum">     728 </span>            : 
+<span class="lineNum">     729 </span>            :     /* Recurse on children, ensuring their outputs are marked */
+<span class="lineNum">     730 </span><span class="lineCov">       1016 :     lrel = recurse_set_operations(op-&gt;larg, root,</span>
+<span class="lineNum">     731 </span>            :                                   op-&gt;colTypes, op-&gt;colCollations,
+<span class="lineNum">     732 </span>            :                                   false, 0,
+<span class="lineNum">     733 </span>            :                                   refnames_tlist,
+<span class="lineNum">     734 </span>            :                                   &amp;lpath_tlist,
+<span class="lineNum">     735 </span>            :                                   &amp;dLeftGroups);
+<span class="lineNum">     736 </span><span class="lineCov">       1016 :     lpath = lrel-&gt;cheapest_total_path;</span>
+<span class="lineNum">     737 </span><span class="lineCov">       1016 :     rrel = recurse_set_operations(op-&gt;rarg, root,</span>
+<span class="lineNum">     738 </span>            :                                   op-&gt;colTypes, op-&gt;colCollations,
+<span class="lineNum">     739 </span>            :                                   false, 1,
+<span class="lineNum">     740 </span>            :                                   refnames_tlist,
+<span class="lineNum">     741 </span>            :                                   &amp;rpath_tlist,
+<span class="lineNum">     742 </span>            :                                   &amp;dRightGroups);
+<span class="lineNum">     743 </span><span class="lineCov">       1016 :     rpath = rrel-&gt;cheapest_total_path;</span>
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span>            :     /* Undo effects of forcing tuple_fraction to 0 */
+<span class="lineNum">     746 </span><span class="lineCov">       1016 :     root-&gt;tuple_fraction = save_fraction;</span>
+<span class="lineNum">     747 </span>            : 
+<span class="lineNum">     748 </span>            :     /*
+<span class="lineNum">     749 </span>            :      * For EXCEPT, we must put the left input first.  For INTERSECT, either
+<span class="lineNum">     750 </span>            :      * order should give the same results, and we prefer to put the smaller
+<span class="lineNum">     751 </span>            :      * input first in order to minimize the size of the hash table in the
+<span class="lineNum">     752 </span>            :      * hashing case.  &quot;Smaller&quot; means the one with the fewer groups.
+<span class="lineNum">     753 </span>            :      */
+<span class="lineNum">     754 </span><span class="lineCov">       1016 :     if (op-&gt;op == SETOP_EXCEPT || dLeftGroups &lt;= dRightGroups)</span>
+<span class="lineNum">     755 </span>            :     {
+<span class="lineNum">     756 </span><span class="lineCov">       1006 :         pathlist = list_make2(lpath, rpath);</span>
+<span class="lineNum">     757 </span><span class="lineCov">       1006 :         tlist_list = list_make2(lpath_tlist, rpath_tlist);</span>
+<span class="lineNum">     758 </span><span class="lineCov">       1006 :         firstFlag = 0;</span>
+<span class="lineNum">     759 </span>            :     }
+<span class="lineNum">     760 </span>            :     else
+<span class="lineNum">     761 </span>            :     {
+<span class="lineNum">     762 </span><span class="lineCov">         10 :         pathlist = list_make2(rpath, lpath);</span>
+<span class="lineNum">     763 </span><span class="lineCov">         10 :         tlist_list = list_make2(rpath_tlist, lpath_tlist);</span>
+<span class="lineNum">     764 </span><span class="lineCov">         10 :         firstFlag = 1;</span>
+<span class="lineNum">     765 </span>            :     }
+<span class="lineNum">     766 </span>            : 
+<span class="lineNum">     767 </span>            :     /*
+<span class="lineNum">     768 </span>            :      * Generate tlist for Append plan node.
+<span class="lineNum">     769 </span>            :      *
+<span class="lineNum">     770 </span>            :      * The tlist for an Append plan isn't important as far as the Append is
+<span class="lineNum">     771 </span>            :      * concerned, but we must make it look real anyway for the benefit of the
+<span class="lineNum">     772 </span>            :      * next plan level up.  In fact, it has to be real enough that the flag
+<span class="lineNum">     773 </span>            :      * column is shown as a variable not a constant, else setrefs.c will get
+<span class="lineNum">     774 </span>            :      * confused.
+<span class="lineNum">     775 </span>            :      */
+<span class="lineNum">     776 </span><span class="lineCov">       1016 :     tlist = generate_append_tlist(op-&gt;colTypes, op-&gt;colCollations, true,</span>
+<span class="lineNum">     777 </span>            :                                   tlist_list, refnames_tlist);
+<span class="lineNum">     778 </span>            : 
+<span class="lineNum">     779 </span><span class="lineCov">       1016 :     *pTargetList = tlist;</span>
+<span class="lineNum">     780 </span>            : 
+<span class="lineNum">     781 </span>            :     /* Build result relation. */
+<span class="lineNum">     782 </span><span class="lineCov">       1016 :     result_rel = fetch_upper_rel(root, UPPERREL_SETOP,</span>
+<span class="lineNum">     783 </span><span class="lineCov">       1016 :                                  bms_union(lrel-&gt;relids, rrel-&gt;relids));</span>
+<span class="lineNum">     784 </span><span class="lineCov">       1016 :     result_rel-&gt;reltarget = create_pathtarget(root, tlist);</span>
+<span class="lineNum">     785 </span>            : 
+<span class="lineNum">     786 </span>            :     /*
+<span class="lineNum">     787 </span>            :      * Append the child results together.
+<span class="lineNum">     788 </span>            :      */
+<span class="lineNum">     789 </span><span class="lineCov">       1016 :     path = (Path *) create_append_path(root, result_rel, pathlist, NIL,</span>
+<span class="lineNum">     790 </span>            :                                        NIL, NULL, 0, false, NIL, -1);
+<span class="lineNum">     791 </span>            : 
+<span class="lineNum">     792 </span>            :     /* Identify the grouping semantics */
+<span class="lineNum">     793 </span><span class="lineCov">       1016 :     groupList = generate_setop_grouplist(op, tlist);</span>
+<span class="lineNum">     794 </span>            : 
+<span class="lineNum">     795 </span>            :     /*
+<span class="lineNum">     796 </span>            :      * Estimate number of distinct groups that we'll need hashtable entries
+<span class="lineNum">     797 </span>            :      * for; this is the size of the left-hand input for EXCEPT, or the smaller
+<span class="lineNum">     798 </span>            :      * input for INTERSECT.  Also estimate the number of eventual output rows.
+<span class="lineNum">     799 </span>            :      * In non-ALL cases, we estimate each group produces one output row; in
+<span class="lineNum">     800 </span>            :      * ALL cases use the relevant relation size.  These are worst-case
+<span class="lineNum">     801 </span>            :      * estimates, of course, but we need to be conservative.
+<span class="lineNum">     802 </span>            :      */
+<span class="lineNum">     803 </span><span class="lineCov">       1016 :     if (op-&gt;op == SETOP_EXCEPT)</span>
+<span class="lineNum">     804 </span>            :     {
+<span class="lineNum">     805 </span><span class="lineCov">        970 :         dNumGroups = dLeftGroups;</span>
+<span class="lineNum">     806 </span><span class="lineCov">        970 :         dNumOutputRows = op-&gt;all ? lpath-&gt;rows : dNumGroups;</span>
+<span class="lineNum">     807 </span>            :     }
+<span class="lineNum">     808 </span>            :     else
+<span class="lineNum">     809 </span>            :     {
+<span class="lineNum">     810 </span><span class="lineCov">         46 :         dNumGroups = Min(dLeftGroups, dRightGroups);</span>
+<span class="lineNum">     811 </span><span class="lineCov">         46 :         dNumOutputRows = op-&gt;all ? Min(lpath-&gt;rows, rpath-&gt;rows) : dNumGroups;</span>
+<span class="lineNum">     812 </span>            :     }
+<span class="lineNum">     813 </span>            : 
+<span class="lineNum">     814 </span>            :     /*
+<span class="lineNum">     815 </span>            :      * Decide whether to hash or sort, and add a sort node if needed.
+<span class="lineNum">     816 </span>            :      */
+<span class="lineNum">     817 </span><span class="lineCov">       1016 :     use_hash = choose_hashed_setop(root, groupList, path,</span>
+<span class="lineNum">     818 </span>            :                                    dNumGroups, dNumOutputRows,
+<span class="lineNum">     819 </span><span class="lineCov">       1016 :                                    (op-&gt;op == SETOP_INTERSECT) ? &quot;INTERSECT&quot; : &quot;EXCEPT&quot;);</span>
+<span class="lineNum">     820 </span>            : 
+<span class="lineNum">     821 </span><span class="lineCov">       1016 :     if (groupList &amp;&amp; !use_hash)</span>
+<span class="lineNum">     822 </span><span class="lineCov">        346 :         path = (Path *) create_sort_path(root,</span>
+<span class="lineNum">     823 </span>            :                                          result_rel,
+<span class="lineNum">     824 </span>            :                                          path,
+<span class="lineNum">     825 </span>            :                                          make_pathkeys_for_sortclauses(root,
+<span class="lineNum">     826 </span>            :                                                                        groupList,
+<span class="lineNum">     827 </span>            :                                                                        tlist),
+<span class="lineNum">     828 </span>            :                                          -1.0);
+<span class="lineNum">     829 </span>            : 
+<span class="lineNum">     830 </span>            :     /*
+<span class="lineNum">     831 </span>            :      * Finally, add a SetOp path node to generate the correct output.
+<span class="lineNum">     832 </span>            :      */
+<span class="lineNum">     833 </span><span class="lineCov">       1016 :     switch (op-&gt;op)</span>
+<span class="lineNum">     834 </span>            :     {
+<span class="lineNum">     835 </span>            :         case SETOP_INTERSECT:
+<span class="lineNum">     836 </span><span class="lineCov">         46 :             cmd = op-&gt;all ? SETOPCMD_INTERSECT_ALL : SETOPCMD_INTERSECT;</span>
+<span class="lineNum">     837 </span><span class="lineCov">         46 :             break;</span>
+<span class="lineNum">     838 </span>            :         case SETOP_EXCEPT:
+<span class="lineNum">     839 </span><span class="lineCov">        970 :             cmd = op-&gt;all ? SETOPCMD_EXCEPT_ALL : SETOPCMD_EXCEPT;</span>
+<span class="lineNum">     840 </span><span class="lineCov">        970 :             break;</span>
+<span class="lineNum">     841 </span>            :         default:
+<span class="lineNum">     842 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized set op: %d&quot;, (int) op-&gt;op);</span>
+<span class="lineNum">     843 </span>            :             cmd = SETOPCMD_INTERSECT;   /* keep compiler quiet */
+<span class="lineNum">     844 </span>            :             break;
+<span class="lineNum">     845 </span>            :     }
+<span class="lineNum">     846 </span><span class="lineCov">       2032 :     path = (Path *) create_setop_path(root,</span>
+<span class="lineNum">     847 </span>            :                                       result_rel,
+<span class="lineNum">     848 </span>            :                                       path,
+<span class="lineNum">     849 </span>            :                                       cmd,
+<span class="lineNum">     850 </span>            :                                       use_hash ? SETOP_HASHED : SETOP_SORTED,
+<span class="lineNum">     851 </span>            :                                       groupList,
+<span class="lineNum">     852 </span><span class="lineCov">       1016 :                                       list_length(op-&gt;colTypes) + 1,</span>
+<span class="lineNum">     853 </span>            :                                       use_hash ? firstFlag : -1,
+<span class="lineNum">     854 </span>            :                                       dNumGroups,
+<span class="lineNum">     855 </span>            :                                       dNumOutputRows);
+<span class="lineNum">     856 </span>            : 
+<span class="lineNum">     857 </span><span class="lineCov">       1016 :     result_rel-&gt;rows = path-&gt;rows;</span>
+<span class="lineNum">     858 </span><span class="lineCov">       1016 :     add_path(result_rel, path);</span>
+<span class="lineNum">     859 </span><span class="lineCov">       1016 :     return result_rel;</span>
+<span class="lineNum">     860 </span>            : }
+<span class="lineNum">     861 </span>            : 
+<span class="lineNum">     862 </span>            : /*
+<span class="lineNum">     863 </span>            :  * Pull up children of a UNION node that are identically-propertied UNIONs.
+<span class="lineNum">     864 </span>            :  *
+<span class="lineNum">     865 </span>            :  * NOTE: we can also pull a UNION ALL up into a UNION, since the distinct
+<span class="lineNum">     866 </span>            :  * output rows will be lost anyway.
+<span class="lineNum">     867 </span>            :  *
+<span class="lineNum">     868 </span>            :  * NOTE: currently, we ignore collations while determining if a child has
+<span class="lineNum">     869 </span>            :  * the same properties.  This is semantically sound only so long as all
+<span class="lineNum">     870 </span>            :  * collations have the same notion of equality.  It is valid from an
+<span class="lineNum">     871 </span>            :  * implementation standpoint because we don't care about the ordering of
+<span class="lineNum">     872 </span>            :  * a UNION child's result: UNION ALL results are always unordered, and
+<span class="lineNum">     873 </span>            :  * generate_union_paths will force a fresh sort if the top level is a UNION.
+<a name="874"><span class="lineNum">     874 </span>            :  */</a>
+<span class="lineNum">     875 </span>            : static List *
+<span class="lineNum">     876 </span><span class="lineCov">        140 : plan_union_children(PlannerInfo *root,</span>
+<span class="lineNum">     877 </span>            :                     SetOperationStmt *top_union,
+<span class="lineNum">     878 </span>            :                     List *refnames_tlist,
+<span class="lineNum">     879 </span>            :                     List **tlist_list)
+<span class="lineNum">     880 </span>            : {
+<span class="lineNum">     881 </span><span class="lineCov">        140 :     List       *pending_rels = list_make1(top_union);</span>
+<span class="lineNum">     882 </span><span class="lineCov">        140 :     List       *result = NIL;</span>
+<span class="lineNum">     883 </span>            :     List       *child_tlist;
+<span class="lineNum">     884 </span>            : 
+<span class="lineNum">     885 </span><span class="lineCov">        140 :     *tlist_list = NIL;</span>
+<span class="lineNum">     886 </span>            : 
+<span class="lineNum">     887 </span><span class="lineCov">        724 :     while (pending_rels != NIL)</span>
+<span class="lineNum">     888 </span>            :     {
+<span class="lineNum">     889 </span><span class="lineCov">        444 :         Node       *setOp = linitial(pending_rels);</span>
+<span class="lineNum">     890 </span>            : 
+<span class="lineNum">     891 </span><span class="lineCov">        444 :         pending_rels = list_delete_first(pending_rels);</span>
+<span class="lineNum">     892 </span>            : 
+<span class="lineNum">     893 </span><span class="lineCov">        444 :         if (IsA(setOp, SetOperationStmt))</span>
+<span class="lineNum">     894 </span>            :         {
+<span class="lineNum">     895 </span><span class="lineCov">        162 :             SetOperationStmt *op = (SetOperationStmt *) setOp;</span>
+<span class="lineNum">     896 </span>            : 
+<span class="lineNum">     897 </span><span class="lineCov">        322 :             if (op-&gt;op == top_union-&gt;op &amp;&amp;</span>
+<span class="lineNum">     898 </span><span class="lineCov">        322 :                 (op-&gt;all == top_union-&gt;all || op-&gt;all) &amp;&amp;</span>
+<span class="lineNum">     899 </span><span class="lineCov">        156 :                 equal(op-&gt;colTypes, top_union-&gt;colTypes))</span>
+<span class="lineNum">     900 </span>            :             {
+<span class="lineNum">     901 </span>            :                 /* Same UNION, so fold children into parent */
+<span class="lineNum">     902 </span><span class="lineCov">        152 :                 pending_rels = lcons(op-&gt;rarg, pending_rels);</span>
+<span class="lineNum">     903 </span><span class="lineCov">        152 :                 pending_rels = lcons(op-&gt;larg, pending_rels);</span>
+<span class="lineNum">     904 </span><span class="lineCov">        152 :                 continue;</span>
+<span class="lineNum">     905 </span>            :             }
+<span class="lineNum">     906 </span>            :         }
+<span class="lineNum">     907 </span>            : 
+<span class="lineNum">     908 </span>            :         /*
+<span class="lineNum">     909 </span>            :          * Not same, so plan this child separately.
+<span class="lineNum">     910 </span>            :          *
+<span class="lineNum">     911 </span>            :          * Note we disallow any resjunk columns in child results.  This is
+<span class="lineNum">     912 </span>            :          * necessary since the Append node that implements the union won't do
+<span class="lineNum">     913 </span>            :          * any projection, and upper levels will get confused if some of our
+<span class="lineNum">     914 </span>            :          * output tuples have junk and some don't.  This case only arises when
+<span class="lineNum">     915 </span>            :          * we have an EXCEPT or INTERSECT as child, else there won't be
+<span class="lineNum">     916 </span>            :          * resjunk anyway.
+<span class="lineNum">     917 </span>            :          */
+<span class="lineNum">     918 </span><span class="lineCov">        292 :         result = lappend(result, recurse_set_operations(setOp, root,</span>
+<span class="lineNum">     919 </span>            :                                                         top_union-&gt;colTypes,
+<span class="lineNum">     920 </span>            :                                                         top_union-&gt;colCollations,
+<span class="lineNum">     921 </span>            :                                                         false, -1,
+<span class="lineNum">     922 </span>            :                                                         refnames_tlist,
+<span class="lineNum">     923 </span>            :                                                         &amp;child_tlist,
+<span class="lineNum">     924 </span>            :                                                         NULL));
+<span class="lineNum">     925 </span><span class="lineCov">        292 :         *tlist_list = lappend(*tlist_list, child_tlist);</span>
+<span class="lineNum">     926 </span>            :     }
+<span class="lineNum">     927 </span>            : 
+<span class="lineNum">     928 </span><span class="lineCov">        140 :     return result;</span>
+<span class="lineNum">     929 </span>            : }
+<span class="lineNum">     930 </span>            : 
+<span class="lineNum">     931 </span>            : /*
+<span class="lineNum">     932 </span>            :  * Add nodes to the given path tree to unique-ify the result of a UNION.
+<a name="933"><span class="lineNum">     933 </span>            :  */</a>
+<span class="lineNum">     934 </span>            : static Path *
+<span class="lineNum">     935 </span><span class="lineCov">        110 : make_union_unique(SetOperationStmt *op, Path *path, List *tlist,</span>
+<span class="lineNum">     936 </span>            :                   PlannerInfo *root)
+<span class="lineNum">     937 </span>            : {
+<span class="lineNum">     938 </span><span class="lineCov">        110 :     RelOptInfo *result_rel = fetch_upper_rel(root, UPPERREL_SETOP, NULL);</span>
+<span class="lineNum">     939 </span>            :     List       *groupList;
+<span class="lineNum">     940 </span>            :     double      dNumGroups;
+<span class="lineNum">     941 </span>            : 
+<span class="lineNum">     942 </span>            :     /* Identify the grouping semantics */
+<span class="lineNum">     943 </span><span class="lineCov">        110 :     groupList = generate_setop_grouplist(op, tlist);</span>
+<span class="lineNum">     944 </span>            : 
+<span class="lineNum">     945 </span>            :     /*
+<span class="lineNum">     946 </span>            :      * XXX for the moment, take the number of distinct groups as equal to the
+<span class="lineNum">     947 </span>            :      * total input size, ie, the worst case.  This is too conservative, but we
+<span class="lineNum">     948 </span>            :      * don't want to risk having the hashtable overrun memory; also, it's not
+<span class="lineNum">     949 </span>            :      * clear how to get a decent estimate of the true size.  One should note
+<span class="lineNum">     950 </span>            :      * as well the propensity of novices to write UNION rather than UNION ALL
+<span class="lineNum">     951 </span>            :      * even when they don't expect any duplicates...
+<span class="lineNum">     952 </span>            :      */
+<span class="lineNum">     953 </span><span class="lineCov">        110 :     dNumGroups = path-&gt;rows;</span>
+<span class="lineNum">     954 </span>            : 
+<span class="lineNum">     955 </span>            :     /* Decide whether to hash or sort */
+<span class="lineNum">     956 </span><span class="lineCov">        110 :     if (choose_hashed_setop(root, groupList, path,</span>
+<span class="lineNum">     957 </span>            :                             dNumGroups, dNumGroups,
+<span class="lineNum">     958 </span>            :                             &quot;UNION&quot;))
+<span class="lineNum">     959 </span>            :     {
+<span class="lineNum">     960 </span>            :         /* Hashed aggregate plan --- no sort needed */
+<span class="lineNum">     961 </span><span class="lineCov">         58 :         path = (Path *) create_agg_path(root,</span>
+<span class="lineNum">     962 </span>            :                                         result_rel,
+<span class="lineNum">     963 </span>            :                                         path,
+<span class="lineNum">     964 </span>            :                                         create_pathtarget(root, tlist),
+<span class="lineNum">     965 </span>            :                                         AGG_HASHED,
+<span class="lineNum">     966 </span>            :                                         AGGSPLIT_SIMPLE,
+<span class="lineNum">     967 </span>            :                                         groupList,
+<span class="lineNum">     968 </span>            :                                         NIL,
+<span class="lineNum">     969 </span>            :                                         NULL,
+<span class="lineNum">     970 </span>            :                                         dNumGroups);
+<span class="lineNum">     971 </span>            :     }
+<span class="lineNum">     972 </span>            :     else
+<span class="lineNum">     973 </span>            :     {
+<span class="lineNum">     974 </span>            :         /* Sort and Unique */
+<span class="lineNum">     975 </span><span class="lineCov">         52 :         if (groupList)</span>
+<span class="lineNum">     976 </span><span class="lineCov">         46 :             path = (Path *)</span>
+<span class="lineNum">     977 </span><span class="lineCov">         46 :                 create_sort_path(root,</span>
+<span class="lineNum">     978 </span>            :                                  result_rel,
+<span class="lineNum">     979 </span>            :                                  path,
+<span class="lineNum">     980 </span>            :                                  make_pathkeys_for_sortclauses(root,
+<span class="lineNum">     981 </span>            :                                                                groupList,
+<span class="lineNum">     982 </span>            :                                                                tlist),
+<span class="lineNum">     983 </span>            :                                  -1.0);
+<span class="lineNum">     984 </span><span class="lineCov">         52 :         path = (Path *) create_upper_unique_path(root,</span>
+<span class="lineNum">     985 </span>            :                                                  result_rel,
+<span class="lineNum">     986 </span>            :                                                  path,
+<span class="lineNum">     987 </span><span class="lineCov">         52 :                                                  list_length(path-&gt;pathkeys),</span>
+<span class="lineNum">     988 </span>            :                                                  dNumGroups);
+<span class="lineNum">     989 </span>            :     }
+<span class="lineNum">     990 </span>            : 
+<span class="lineNum">     991 </span><span class="lineCov">        110 :     return path;</span>
+<span class="lineNum">     992 </span>            : }
+<span class="lineNum">     993 </span>            : 
+<span class="lineNum">     994 </span>            : /*
+<span class="lineNum">     995 </span>            :  * postprocess_setop_rel - perform steps required after adding paths
+<a name="996"><span class="lineNum">     996 </span>            :  */</a>
+<span class="lineNum">     997 </span>            : static void
+<span class="lineNum">     998 </span><span class="lineCov">       3720 : postprocess_setop_rel(PlannerInfo *root, RelOptInfo *rel)</span>
+<span class="lineNum">     999 </span>            : {
+<span class="lineNum">    1000 </span>            :     /*
+<span class="lineNum">    1001 </span>            :      * We don't currently worry about allowing FDWs to contribute paths to
+<span class="lineNum">    1002 </span>            :      * this relation, but give extensions a chance.
+<span class="lineNum">    1003 </span>            :      */
+<span class="lineNum">    1004 </span><span class="lineCov">       3720 :     if (create_upper_paths_hook)</span>
+<span class="lineNum">    1005 </span><span class="lineNoCov">          0 :         (*create_upper_paths_hook) (root, UPPERREL_SETOP,</span>
+<span class="lineNum">    1006 </span>            :                                     NULL, rel, NULL);
+<span class="lineNum">    1007 </span>            : 
+<span class="lineNum">    1008 </span>            :     /* Select cheapest path */
+<span class="lineNum">    1009 </span><span class="lineCov">       3720 :     set_cheapest(rel);</span>
+<span class="lineNum">    1010 </span><span class="lineCov">       3720 : }</span>
+<span class="lineNum">    1011 </span>            : 
+<span class="lineNum">    1012 </span>            : /*
+<span class="lineNum">    1013 </span>            :  * choose_hashed_setop - should we use hashing for a set operation?
+<a name="1014"><span class="lineNum">    1014 </span>            :  */</a>
+<span class="lineNum">    1015 </span>            : static bool
+<span class="lineNum">    1016 </span><span class="lineCov">       1126 : choose_hashed_setop(PlannerInfo *root, List *groupClauses,</span>
+<span class="lineNum">    1017 </span>            :                     Path *input_path,
+<span class="lineNum">    1018 </span>            :                     double dNumGroups, double dNumOutputRows,
+<span class="lineNum">    1019 </span>            :                     const char *construct)
+<span class="lineNum">    1020 </span>            : {
+<span class="lineNum">    1021 </span><span class="lineCov">       1126 :     int         numGroupCols = list_length(groupClauses);</span>
+<span class="lineNum">    1022 </span>            :     bool        can_sort;
+<span class="lineNum">    1023 </span>            :     bool        can_hash;
+<span class="lineNum">    1024 </span>            :     Size        hashentrysize;
+<span class="lineNum">    1025 </span>            :     Path        hashed_p;
+<span class="lineNum">    1026 </span>            :     Path        sorted_p;
+<span class="lineNum">    1027 </span>            :     double      tuple_fraction;
+<span class="lineNum">    1028 </span>            : 
+<span class="lineNum">    1029 </span>            :     /* Check whether the operators support sorting or hashing */
+<span class="lineNum">    1030 </span><span class="lineCov">       1126 :     can_sort = grouping_is_sortable(groupClauses);</span>
+<span class="lineNum">    1031 </span><span class="lineCov">       1126 :     can_hash = grouping_is_hashable(groupClauses);</span>
+<span class="lineNum">    1032 </span><span class="lineCov">       1126 :     if (can_hash &amp;&amp; can_sort)</span>
+<span class="lineNum">    1033 </span>            :     {
+<span class="lineNum">    1034 </span>            :         /* we have a meaningful choice to make, continue ... */
+<span class="lineNum">    1035 </span>            :     }
+<span class="lineNum">    1036 </span><span class="lineCov">          4 :     else if (can_hash)</span>
+<span class="lineNum">    1037 </span><span class="lineCov">          2 :         return true;</span>
+<span class="lineNum">    1038 </span><span class="lineCov">          2 :     else if (can_sort)</span>
+<span class="lineNum">    1039 </span><span class="lineCov">          2 :         return false;</span>
+<span class="lineNum">    1040 </span>            :     else
+<span class="lineNum">    1041 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">    1042 </span>            :                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">    1043 </span>            :         /* translator: %s is UNION, INTERSECT, or EXCEPT */
+<span class="lineNum">    1044 </span>            :                  errmsg(&quot;could not implement %s&quot;, construct),
+<span class="lineNum">    1045 </span>            :                  errdetail(&quot;Some of the datatypes only support hashing, while others only support sorting.&quot;)));
+<span class="lineNum">    1046 </span>            : 
+<span class="lineNum">    1047 </span>            :     /* Prefer sorting when enable_hashagg is off */
+<span class="lineNum">    1048 </span><span class="lineCov">       1122 :     if (!enable_hashagg)</span>
+<span class="lineNum">    1049 </span><span class="lineCov">         22 :         return false;</span>
+<span class="lineNum">    1050 </span>            : 
+<span class="lineNum">    1051 </span>            :     /*
+<span class="lineNum">    1052 </span>            :      * Don't do it if it doesn't look like the hashtable will fit into
+<span class="lineNum">    1053 </span>            :      * work_mem.
+<span class="lineNum">    1054 </span>            :      */
+<span class="lineNum">    1055 </span><span class="lineCov">       1100 :     hashentrysize = MAXALIGN(input_path-&gt;pathtarget-&gt;width) + MAXALIGN(SizeofMinimalTupleHeader);</span>
+<span class="lineNum">    1056 </span>            : 
+<span class="lineNum">    1057 </span><span class="lineCov">       1100 :     if (hashentrysize * dNumGroups &gt; work_mem * 1024L)</span>
+<span class="lineNum">    1058 </span><span class="lineCov">        336 :         return false;</span>
+<span class="lineNum">    1059 </span>            : 
+<span class="lineNum">    1060 </span>            :     /*
+<span class="lineNum">    1061 </span>            :      * See if the estimated cost is no more than doing it the other way.
+<span class="lineNum">    1062 </span>            :      *
+<span class="lineNum">    1063 </span>            :      * We need to consider input_plan + hashagg versus input_plan + sort +
+<span class="lineNum">    1064 </span>            :      * group.  Note that the actual result plan might involve a SetOp or
+<span class="lineNum">    1065 </span>            :      * Unique node, not Agg or Group, but the cost estimates for Agg and Group
+<span class="lineNum">    1066 </span>            :      * should be close enough for our purposes here.
+<span class="lineNum">    1067 </span>            :      *
+<span class="lineNum">    1068 </span>            :      * These path variables are dummies that just hold cost fields; we don't
+<span class="lineNum">    1069 </span>            :      * make actual Paths for these steps.
+<span class="lineNum">    1070 </span>            :      */
+<span class="lineNum">    1071 </span><span class="lineCov">        764 :     cost_agg(&amp;hashed_p, root, AGG_HASHED, NULL,</span>
+<span class="lineNum">    1072 </span>            :              numGroupCols, dNumGroups,
+<span class="lineNum">    1073 </span>            :              NIL,
+<span class="lineNum">    1074 </span>            :              input_path-&gt;startup_cost, input_path-&gt;total_cost,
+<span class="lineNum">    1075 </span>            :              input_path-&gt;rows);
+<span class="lineNum">    1076 </span>            : 
+<span class="lineNum">    1077 </span>            :     /*
+<span class="lineNum">    1078 </span>            :      * Now for the sorted case.  Note that the input is *always* unsorted,
+<span class="lineNum">    1079 </span>            :      * since it was made by appending unrelated sub-relations together.
+<span class="lineNum">    1080 </span>            :      */
+<span class="lineNum">    1081 </span><span class="lineCov">        764 :     sorted_p.startup_cost = input_path-&gt;startup_cost;</span>
+<span class="lineNum">    1082 </span><span class="lineCov">        764 :     sorted_p.total_cost = input_path-&gt;total_cost;</span>
+<span class="lineNum">    1083 </span>            :     /* XXX cost_sort doesn't actually look at pathkeys, so just pass NIL */
+<span class="lineNum">    1084 </span><span class="lineCov">       1528 :     cost_sort(&amp;sorted_p, root, NIL, sorted_p.total_cost,</span>
+<span class="lineNum">    1085 </span><span class="lineCov">        764 :               input_path-&gt;rows, input_path-&gt;pathtarget-&gt;width,</span>
+<span class="lineNum">    1086 </span>            :               0.0, work_mem, -1.0);
+<span class="lineNum">    1087 </span><span class="lineCov">        764 :     cost_group(&amp;sorted_p, root, numGroupCols, dNumGroups,</span>
+<span class="lineNum">    1088 </span>            :                NIL,
+<span class="lineNum">    1089 </span>            :                sorted_p.startup_cost, sorted_p.total_cost,
+<span class="lineNum">    1090 </span>            :                input_path-&gt;rows);
+<span class="lineNum">    1091 </span>            : 
+<span class="lineNum">    1092 </span>            :     /*
+<span class="lineNum">    1093 </span>            :      * Now make the decision using the top-level tuple fraction.  First we
+<span class="lineNum">    1094 </span>            :      * have to convert an absolute count (LIMIT) into fractional form.
+<span class="lineNum">    1095 </span>            :      */
+<span class="lineNum">    1096 </span><span class="lineCov">        764 :     tuple_fraction = root-&gt;tuple_fraction;</span>
+<span class="lineNum">    1097 </span><span class="lineCov">        764 :     if (tuple_fraction &gt;= 1.0)</span>
+<span class="lineNum">    1098 </span><span class="lineNoCov">          0 :         tuple_fraction /= dNumOutputRows;</span>
+<span class="lineNum">    1099 </span>            : 
+<span class="lineNum">    1100 </span><span class="lineCov">        764 :     if (compare_fractional_path_costs(&amp;hashed_p, &amp;sorted_p,</span>
+<span class="lineNum">    1101 </span>            :                                       tuple_fraction) &lt; 0)
+<span class="lineNum">    1102 </span>            :     {
+<span class="lineNum">    1103 </span>            :         /* Hashed is cheaper, so use it */
+<span class="lineNum">    1104 </span><span class="lineCov">        716 :         return true;</span>
+<span class="lineNum">    1105 </span>            :     }
+<span class="lineNum">    1106 </span><span class="lineCov">         48 :     return false;</span>
+<span class="lineNum">    1107 </span>            : }
+<span class="lineNum">    1108 </span>            : 
+<span class="lineNum">    1109 </span>            : /*
+<span class="lineNum">    1110 </span>            :  * Generate targetlist for a set-operation plan node
+<span class="lineNum">    1111 </span>            :  *
+<span class="lineNum">    1112 </span>            :  * colTypes: OID list of set-op's result column datatypes
+<span class="lineNum">    1113 </span>            :  * colCollations: OID list of set-op's result column collations
+<span class="lineNum">    1114 </span>            :  * flag: -1 if no flag column needed, 0 or 1 to create a const flag column
+<span class="lineNum">    1115 </span>            :  * varno: varno to use in generated Vars
+<span class="lineNum">    1116 </span>            :  * hack_constants: true to copy up constants (see comments in code)
+<span class="lineNum">    1117 </span>            :  * input_tlist: targetlist of this node's input node
+<span class="lineNum">    1118 </span>            :  * refnames_tlist: targetlist to take column names from
+<a name="1119"><span class="lineNum">    1119 </span>            :  */</a>
+<span class="lineNum">    1120 </span>            : static List *
+<span class="lineNum">    1121 </span><span class="lineCov">       2494 : generate_setop_tlist(List *colTypes, List *colCollations,</span>
+<span class="lineNum">    1122 </span>            :                      int flag,
+<span class="lineNum">    1123 </span>            :                      Index varno,
+<span class="lineNum">    1124 </span>            :                      bool hack_constants,
+<span class="lineNum">    1125 </span>            :                      List *input_tlist,
+<span class="lineNum">    1126 </span>            :                      List *refnames_tlist)
+<span class="lineNum">    1127 </span>            : {
+<span class="lineNum">    1128 </span><span class="lineCov">       2494 :     List       *tlist = NIL;</span>
+<span class="lineNum">    1129 </span><span class="lineCov">       2494 :     int         resno = 1;</span>
+<span class="lineNum">    1130 </span>            :     ListCell   *ctlc,
+<span class="lineNum">    1131 </span>            :                *cclc,
+<span class="lineNum">    1132 </span>            :                *itlc,
+<span class="lineNum">    1133 </span>            :                *rtlc;
+<span class="lineNum">    1134 </span>            :     TargetEntry *tle;
+<span class="lineNum">    1135 </span>            :     Node       *expr;
+<span class="lineNum">    1136 </span>            : 
+<span class="lineNum">    1137 </span><span class="lineCov">      10404 :     forfour(ctlc, colTypes, cclc, colCollations,</span>
+<span class="lineNum">    1138 </span>            :             itlc, input_tlist, rtlc, refnames_tlist)
+<span class="lineNum">    1139 </span>            :     {
+<span class="lineNum">    1140 </span><span class="lineCov">       7910 :         Oid         colType = lfirst_oid(ctlc);</span>
+<span class="lineNum">    1141 </span><span class="lineCov">       7910 :         Oid         colColl = lfirst_oid(cclc);</span>
+<span class="lineNum">    1142 </span><span class="lineCov">       7910 :         TargetEntry *inputtle = (TargetEntry *) lfirst(itlc);</span>
+<span class="lineNum">    1143 </span><span class="lineCov">       7910 :         TargetEntry *reftle = (TargetEntry *) lfirst(rtlc);</span>
+<span class="lineNum">    1144 </span>            : 
+<span class="lineNum">    1145 </span><span class="lineCov">       7910 :         Assert(inputtle-&gt;resno == resno);</span>
+<span class="lineNum">    1146 </span><span class="lineCov">       7910 :         Assert(reftle-&gt;resno == resno);</span>
+<span class="lineNum">    1147 </span><span class="lineCov">       7910 :         Assert(!inputtle-&gt;resjunk);</span>
+<span class="lineNum">    1148 </span><span class="lineCov">       7910 :         Assert(!reftle-&gt;resjunk);</span>
+<span class="lineNum">    1149 </span>            : 
+<span class="lineNum">    1150 </span>            :         /*
+<span class="lineNum">    1151 </span>            :          * Generate columns referencing input columns and having appropriate
+<span class="lineNum">    1152 </span>            :          * data types and column names.  Insert datatype coercions where
+<span class="lineNum">    1153 </span>            :          * necessary.
+<span class="lineNum">    1154 </span>            :          *
+<span class="lineNum">    1155 </span>            :          * HACK: constants in the input's targetlist are copied up as-is
+<span class="lineNum">    1156 </span>            :          * rather than being referenced as subquery outputs.  This is mainly
+<span class="lineNum">    1157 </span>            :          * to ensure that when we try to coerce them to the output column's
+<span class="lineNum">    1158 </span>            :          * datatype, the right things happen for UNKNOWN constants.  But do
+<span class="lineNum">    1159 </span>            :          * this only at the first level of subquery-scan plans; we don't want
+<span class="lineNum">    1160 </span>            :          * phony constants appearing in the output tlists of upper-level
+<span class="lineNum">    1161 </span>            :          * nodes!
+<span class="lineNum">    1162 </span>            :          */
+<span class="lineNum">    1163 </span><span class="lineCov">       7910 :         if (hack_constants &amp;&amp; inputtle-&gt;expr &amp;&amp; IsA(inputtle-&gt;expr, Const))</span>
+<span class="lineNum">    1164 </span><span class="lineCov">        322 :             expr = (Node *) inputtle-&gt;expr;</span>
+<span class="lineNum">    1165 </span>            :         else
+<span class="lineNum">    1166 </span><span class="lineCov">      30352 :             expr = (Node *) makeVar(varno,</span>
+<span class="lineNum">    1167 </span><span class="lineCov">       7588 :                                     inputtle-&gt;resno,</span>
+<span class="lineNum">    1168 </span><span class="lineCov">       7588 :                                     exprType((Node *) inputtle-&gt;expr),</span>
+<span class="lineNum">    1169 </span><span class="lineCov">       7588 :                                     exprTypmod((Node *) inputtle-&gt;expr),</span>
+<span class="lineNum">    1170 </span><span class="lineCov">       7588 :                                     exprCollation((Node *) inputtle-&gt;expr),</span>
+<span class="lineNum">    1171 </span>            :                                     0);
+<span class="lineNum">    1172 </span>            : 
+<span class="lineNum">    1173 </span><span class="lineCov">       7910 :         if (exprType(expr) != colType)</span>
+<span class="lineNum">    1174 </span>            :         {
+<span class="lineNum">    1175 </span>            :             /*
+<span class="lineNum">    1176 </span>            :              * Note: it's not really cool to be applying coerce_to_common_type
+<span class="lineNum">    1177 </span>            :              * here; one notable point is that assign_expr_collations never
+<span class="lineNum">    1178 </span>            :              * gets run on any generated nodes.  For the moment that's not a
+<span class="lineNum">    1179 </span>            :              * problem because we force the correct exposed collation below.
+<span class="lineNum">    1180 </span>            :              * It would likely be best to make the parser generate the correct
+<span class="lineNum">    1181 </span>            :              * output tlist for every set-op to begin with, though.
+<span class="lineNum">    1182 </span>            :              */
+<span class="lineNum">    1183 </span><span class="lineCov">         48 :             expr = coerce_to_common_type(NULL,  /* no UNKNOWNs here */</span>
+<span class="lineNum">    1184 </span>            :                                          expr,
+<span class="lineNum">    1185 </span>            :                                          colType,
+<span class="lineNum">    1186 </span>            :                                          &quot;UNION/INTERSECT/EXCEPT&quot;);
+<span class="lineNum">    1187 </span>            :         }
+<span class="lineNum">    1188 </span>            : 
+<span class="lineNum">    1189 </span>            :         /*
+<span class="lineNum">    1190 </span>            :          * Ensure the tlist entry's exposed collation matches the set-op. This
+<span class="lineNum">    1191 </span>            :          * is necessary because plan_set_operations() reports the result
+<span class="lineNum">    1192 </span>            :          * ordering as a list of SortGroupClauses, which don't carry collation
+<span class="lineNum">    1193 </span>            :          * themselves but just refer to tlist entries.  If we don't show the
+<span class="lineNum">    1194 </span>            :          * right collation then planner.c might do the wrong thing in
+<span class="lineNum">    1195 </span>            :          * higher-level queries.
+<span class="lineNum">    1196 </span>            :          *
+<span class="lineNum">    1197 </span>            :          * Note we use RelabelType, not CollateExpr, since this expression
+<span class="lineNum">    1198 </span>            :          * will reach the executor without any further processing.
+<span class="lineNum">    1199 </span>            :          */
+<span class="lineNum">    1200 </span><span class="lineCov">       7910 :         if (exprCollation(expr) != colColl)</span>
+<span class="lineNum">    1201 </span>            :         {
+<span class="lineNum">    1202 </span><span class="lineCov">          8 :             expr = (Node *) makeRelabelType((Expr *) expr,</span>
+<span class="lineNum">    1203 </span>            :                                             exprType(expr),
+<span class="lineNum">    1204 </span>            :                                             exprTypmod(expr),
+<span class="lineNum">    1205 </span>            :                                             colColl,
+<span class="lineNum">    1206 </span>            :                                             COERCE_IMPLICIT_CAST);
+<span class="lineNum">    1207 </span>            :         }
+<span class="lineNum">    1208 </span>            : 
+<span class="lineNum">    1209 </span><span class="lineCov">      15820 :         tle = makeTargetEntry((Expr *) expr,</span>
+<span class="lineNum">    1210 </span><span class="lineCov">       7910 :                               (AttrNumber) resno++,</span>
+<span class="lineNum">    1211 </span><span class="lineCov">       7910 :                               pstrdup(reftle-&gt;resname),</span>
+<span class="lineNum">    1212 </span>            :                               false);
+<span class="lineNum">    1213 </span>            : 
+<span class="lineNum">    1214 </span>            :         /*
+<span class="lineNum">    1215 </span>            :          * By convention, all non-resjunk columns in a setop tree have
+<span class="lineNum">    1216 </span>            :          * ressortgroupref equal to their resno.  In some cases the ref isn't
+<span class="lineNum">    1217 </span>            :          * needed, but this is a cleaner way than modifying the tlist later.
+<span class="lineNum">    1218 </span>            :          */
+<span class="lineNum">    1219 </span><span class="lineCov">       7910 :         tle-&gt;ressortgroupref = tle-&gt;resno;</span>
+<span class="lineNum">    1220 </span>            : 
+<span class="lineNum">    1221 </span><span class="lineCov">       7910 :         tlist = lappend(tlist, tle);</span>
+<span class="lineNum">    1222 </span>            :     }
+<span class="lineNum">    1223 </span>            : 
+<span class="lineNum">    1224 </span><span class="lineCov">       2494 :     if (flag &gt;= 0)</span>
+<span class="lineNum">    1225 </span>            :     {
+<span class="lineNum">    1226 </span>            :         /* Add a resjunk flag column */
+<span class="lineNum">    1227 </span>            :         /* flag value is the given constant */
+<span class="lineNum">    1228 </span><span class="lineCov">       2032 :         expr = (Node *) makeConst(INT4OID,</span>
+<span class="lineNum">    1229 </span>            :                                   -1,
+<span class="lineNum">    1230 </span>            :                                   InvalidOid,
+<span class="lineNum">    1231 </span>            :                                   sizeof(int32),
+<span class="lineNum">    1232 </span>            :                                   Int32GetDatum(flag),
+<span class="lineNum">    1233 </span>            :                                   false,
+<span class="lineNum">    1234 </span>            :                                   true);
+<span class="lineNum">    1235 </span><span class="lineCov">       4064 :         tle = makeTargetEntry((Expr *) expr,</span>
+<span class="lineNum">    1236 </span><span class="lineCov">       2032 :                               (AttrNumber) resno++,</span>
+<span class="lineNum">    1237 </span>            :                               pstrdup(&quot;flag&quot;),
+<span class="lineNum">    1238 </span>            :                               true);
+<span class="lineNum">    1239 </span><span class="lineCov">       2032 :         tlist = lappend(tlist, tle);</span>
+<span class="lineNum">    1240 </span>            :     }
+<span class="lineNum">    1241 </span>            : 
+<span class="lineNum">    1242 </span><span class="lineCov">       2494 :     return tlist;</span>
+<span class="lineNum">    1243 </span>            : }
+<span class="lineNum">    1244 </span>            : 
+<span class="lineNum">    1245 </span>            : /*
+<span class="lineNum">    1246 </span>            :  * Generate targetlist for a set-operation Append node
+<span class="lineNum">    1247 </span>            :  *
+<span class="lineNum">    1248 </span>            :  * colTypes: OID list of set-op's result column datatypes
+<span class="lineNum">    1249 </span>            :  * colCollations: OID list of set-op's result column collations
+<span class="lineNum">    1250 </span>            :  * flag: true to create a flag column copied up from subplans
+<span class="lineNum">    1251 </span>            :  * input_tlists: list of tlists for sub-plans of the Append
+<span class="lineNum">    1252 </span>            :  * refnames_tlist: targetlist to take column names from
+<span class="lineNum">    1253 </span>            :  *
+<span class="lineNum">    1254 </span>            :  * The entries in the Append's targetlist should always be simple Vars;
+<span class="lineNum">    1255 </span>            :  * we just have to make sure they have the right datatypes/typmods/collations.
+<span class="lineNum">    1256 </span>            :  * The Vars are always generated with varno 0.
+<span class="lineNum">    1257 </span>            :  *
+<span class="lineNum">    1258 </span>            :  * XXX a problem with the varno-zero approach is that set_pathtarget_cost_width
+<span class="lineNum">    1259 </span>            :  * cannot figure out a realistic width for the tlist we make here.  But we
+<span class="lineNum">    1260 </span>            :  * ought to refactor this code to produce a PathTarget directly, anyway.
+<a name="1261"><span class="lineNum">    1261 </span>            :  */</a>
+<span class="lineNum">    1262 </span>            : static List *
+<span class="lineNum">    1263 </span><span class="lineCov">       1244 : generate_append_tlist(List *colTypes, List *colCollations,</span>
+<span class="lineNum">    1264 </span>            :                       bool flag,
+<span class="lineNum">    1265 </span>            :                       List *input_tlists,
+<span class="lineNum">    1266 </span>            :                       List *refnames_tlist)
+<span class="lineNum">    1267 </span>            : {
+<span class="lineNum">    1268 </span><span class="lineCov">       1244 :     List       *tlist = NIL;</span>
+<span class="lineNum">    1269 </span><span class="lineCov">       1244 :     int         resno = 1;</span>
+<span class="lineNum">    1270 </span>            :     ListCell   *curColType;
+<span class="lineNum">    1271 </span>            :     ListCell   *curColCollation;
+<span class="lineNum">    1272 </span>            :     ListCell   *ref_tl_item;
+<span class="lineNum">    1273 </span>            :     int         colindex;
+<span class="lineNum">    1274 </span>            :     TargetEntry *tle;
+<span class="lineNum">    1275 </span>            :     Node       *expr;
+<span class="lineNum">    1276 </span>            :     ListCell   *tlistl;
+<span class="lineNum">    1277 </span>            :     int32      *colTypmods;
+<span class="lineNum">    1278 </span>            : 
+<span class="lineNum">    1279 </span>            :     /*
+<span class="lineNum">    1280 </span>            :      * First extract typmods to use.
+<span class="lineNum">    1281 </span>            :      *
+<span class="lineNum">    1282 </span>            :      * If the inputs all agree on type and typmod of a particular column, use
+<span class="lineNum">    1283 </span>            :      * that typmod; else use -1.
+<span class="lineNum">    1284 </span>            :      */
+<span class="lineNum">    1285 </span><span class="lineCov">       1244 :     colTypmods = (int32 *) palloc(list_length(colTypes) * sizeof(int32));</span>
+<span class="lineNum">    1286 </span>            : 
+<span class="lineNum">    1287 </span><span class="lineCov">       3744 :     foreach(tlistl, input_tlists)</span>
+<span class="lineNum">    1288 </span>            :     {
+<span class="lineNum">    1289 </span><span class="lineCov">       2500 :         List       *subtlist = (List *) lfirst(tlistl);</span>
+<span class="lineNum">    1290 </span>            :         ListCell   *subtlistl;
+<span class="lineNum">    1291 </span>            : 
+<span class="lineNum">    1292 </span><span class="lineCov">       2500 :         curColType = list_head(colTypes);</span>
+<span class="lineNum">    1293 </span><span class="lineCov">       2500 :         colindex = 0;</span>
+<span class="lineNum">    1294 </span><span class="lineCov">      12452 :         foreach(subtlistl, subtlist)</span>
+<span class="lineNum">    1295 </span>            :         {
+<span class="lineNum">    1296 </span><span class="lineCov">       9952 :             TargetEntry *subtle = (TargetEntry *) lfirst(subtlistl);</span>
+<span class="lineNum">    1297 </span>            : 
+<span class="lineNum">    1298 </span><span class="lineCov">       9952 :             if (subtle-&gt;resjunk)</span>
+<span class="lineNum">    1299 </span><span class="lineCov">       2032 :                 continue;</span>
+<span class="lineNum">    1300 </span><span class="lineCov">       7920 :             Assert(curColType != NULL);</span>
+<span class="lineNum">    1301 </span><span class="lineCov">       7920 :             if (exprType((Node *) subtle-&gt;expr) == lfirst_oid(curColType))</span>
+<span class="lineNum">    1302 </span>            :             {
+<span class="lineNum">    1303 </span>            :                 /* If first subplan, copy the typmod; else compare */
+<span class="lineNum">    1304 </span><span class="lineCov">       7920 :                 int32       subtypmod = exprTypmod((Node *) subtle-&gt;expr);</span>
+<span class="lineNum">    1305 </span>            : 
+<span class="lineNum">    1306 </span><span class="lineCov">       7920 :                 if (tlistl == list_head(input_tlists))</span>
+<span class="lineNum">    1307 </span><span class="lineCov">       3954 :                     colTypmods[colindex] = subtypmod;</span>
+<span class="lineNum">    1308 </span><span class="lineCov">       3966 :                 else if (subtypmod != colTypmods[colindex])</span>
+<span class="lineNum">    1309 </span><span class="lineCov">          4 :                     colTypmods[colindex] = -1;</span>
+<span class="lineNum">    1310 </span>            :             }
+<span class="lineNum">    1311 </span>            :             else
+<span class="lineNum">    1312 </span>            :             {
+<span class="lineNum">    1313 </span>            :                 /* types disagree, so force typmod to -1 */
+<span class="lineNum">    1314 </span><span class="lineNoCov">          0 :                 colTypmods[colindex] = -1;</span>
+<span class="lineNum">    1315 </span>            :             }
+<span class="lineNum">    1316 </span><span class="lineCov">       7920 :             curColType = lnext(colTypes, curColType);</span>
+<span class="lineNum">    1317 </span><span class="lineCov">       7920 :             colindex++;</span>
+<span class="lineNum">    1318 </span>            :         }
+<span class="lineNum">    1319 </span><span class="lineCov">       2500 :         Assert(curColType == NULL);</span>
+<span class="lineNum">    1320 </span>            :     }
+<span class="lineNum">    1321 </span>            : 
+<span class="lineNum">    1322 </span>            :     /*
+<span class="lineNum">    1323 </span>            :      * Now we can build the tlist for the Append.
+<span class="lineNum">    1324 </span>            :      */
+<span class="lineNum">    1325 </span><span class="lineCov">       1244 :     colindex = 0;</span>
+<span class="lineNum">    1326 </span><span class="lineCov">       5198 :     forthree(curColType, colTypes, curColCollation, colCollations,</span>
+<span class="lineNum">    1327 </span>            :              ref_tl_item, refnames_tlist)
+<span class="lineNum">    1328 </span>            :     {
+<span class="lineNum">    1329 </span><span class="lineCov">       3954 :         Oid         colType = lfirst_oid(curColType);</span>
+<span class="lineNum">    1330 </span><span class="lineCov">       3954 :         int32       colTypmod = colTypmods[colindex++];</span>
+<span class="lineNum">    1331 </span><span class="lineCov">       3954 :         Oid         colColl = lfirst_oid(curColCollation);</span>
+<span class="lineNum">    1332 </span><span class="lineCov">       3954 :         TargetEntry *reftle = (TargetEntry *) lfirst(ref_tl_item);</span>
+<span class="lineNum">    1333 </span>            : 
+<span class="lineNum">    1334 </span><span class="lineCov">       3954 :         Assert(reftle-&gt;resno == resno);</span>
+<span class="lineNum">    1335 </span><span class="lineCov">       3954 :         Assert(!reftle-&gt;resjunk);</span>
+<span class="lineNum">    1336 </span><span class="lineCov">       3954 :         expr = (Node *) makeVar(0,</span>
+<span class="lineNum">    1337 </span>            :                                 resno,
+<span class="lineNum">    1338 </span>            :                                 colType,
+<span class="lineNum">    1339 </span>            :                                 colTypmod,
+<span class="lineNum">    1340 </span>            :                                 colColl,
+<span class="lineNum">    1341 </span>            :                                 0);
+<span class="lineNum">    1342 </span><span class="lineCov">       7908 :         tle = makeTargetEntry((Expr *) expr,</span>
+<span class="lineNum">    1343 </span><span class="lineCov">       3954 :                               (AttrNumber) resno++,</span>
+<span class="lineNum">    1344 </span><span class="lineCov">       3954 :                               pstrdup(reftle-&gt;resname),</span>
+<span class="lineNum">    1345 </span>            :                               false);
+<span class="lineNum">    1346 </span>            : 
+<span class="lineNum">    1347 </span>            :         /*
+<span class="lineNum">    1348 </span>            :          * By convention, all non-resjunk columns in a setop tree have
+<span class="lineNum">    1349 </span>            :          * ressortgroupref equal to their resno.  In some cases the ref isn't
+<span class="lineNum">    1350 </span>            :          * needed, but this is a cleaner way than modifying the tlist later.
+<span class="lineNum">    1351 </span>            :          */
+<span class="lineNum">    1352 </span><span class="lineCov">       3954 :         tle-&gt;ressortgroupref = tle-&gt;resno;</span>
+<span class="lineNum">    1353 </span>            : 
+<span class="lineNum">    1354 </span><span class="lineCov">       3954 :         tlist = lappend(tlist, tle);</span>
+<span class="lineNum">    1355 </span>            :     }
+<span class="lineNum">    1356 </span>            : 
+<span class="lineNum">    1357 </span><span class="lineCov">       1244 :     if (flag)</span>
+<span class="lineNum">    1358 </span>            :     {
+<span class="lineNum">    1359 </span>            :         /* Add a resjunk flag column */
+<span class="lineNum">    1360 </span>            :         /* flag value is shown as copied up from subplan */
+<span class="lineNum">    1361 </span><span class="lineCov">       1016 :         expr = (Node *) makeVar(0,</span>
+<span class="lineNum">    1362 </span>            :                                 resno,
+<span class="lineNum">    1363 </span>            :                                 INT4OID,
+<span class="lineNum">    1364 </span>            :                                 -1,
+<span class="lineNum">    1365 </span>            :                                 InvalidOid,
+<span class="lineNum">    1366 </span>            :                                 0);
+<span class="lineNum">    1367 </span><span class="lineCov">       2032 :         tle = makeTargetEntry((Expr *) expr,</span>
+<span class="lineNum">    1368 </span><span class="lineCov">       1016 :                               (AttrNumber) resno++,</span>
+<span class="lineNum">    1369 </span>            :                               pstrdup(&quot;flag&quot;),
+<span class="lineNum">    1370 </span>            :                               true);
+<span class="lineNum">    1371 </span><span class="lineCov">       1016 :         tlist = lappend(tlist, tle);</span>
+<span class="lineNum">    1372 </span>            :     }
+<span class="lineNum">    1373 </span>            : 
+<span class="lineNum">    1374 </span><span class="lineCov">       1244 :     pfree(colTypmods);</span>
+<span class="lineNum">    1375 </span>            : 
+<span class="lineNum">    1376 </span><span class="lineCov">       1244 :     return tlist;</span>
+<span class="lineNum">    1377 </span>            : }
+<span class="lineNum">    1378 </span>            : 
+<span class="lineNum">    1379 </span>            : /*
+<span class="lineNum">    1380 </span>            :  * generate_setop_grouplist
+<span class="lineNum">    1381 </span>            :  *      Build a SortGroupClause list defining the sort/grouping properties
+<span class="lineNum">    1382 </span>            :  *      of the setop's output columns.
+<span class="lineNum">    1383 </span>            :  *
+<span class="lineNum">    1384 </span>            :  * Parse analysis already determined the properties and built a suitable
+<span class="lineNum">    1385 </span>            :  * list, except that the entries do not have sortgrouprefs set because
+<span class="lineNum">    1386 </span>            :  * the parser output representation doesn't include a tlist for each
+<span class="lineNum">    1387 </span>            :  * setop.  So what we need to do here is copy that list and install
+<span class="lineNum">    1388 </span>            :  * proper sortgrouprefs into it (copying those from the targetlist).
+<a name="1389"><span class="lineNum">    1389 </span>            :  */</a>
+<span class="lineNum">    1390 </span>            : static List *
+<span class="lineNum">    1391 </span><span class="lineCov">       1134 : generate_setop_grouplist(SetOperationStmt *op, List *targetlist)</span>
+<span class="lineNum">    1392 </span>            : {
+<span class="lineNum">    1393 </span><span class="lineCov">       1134 :     List       *grouplist = copyObject(op-&gt;groupClauses);</span>
+<span class="lineNum">    1394 </span>            :     ListCell   *lg;
+<span class="lineNum">    1395 </span>            :     ListCell   *lt;
+<span class="lineNum">    1396 </span>            : 
+<span class="lineNum">    1397 </span><span class="lineCov">       1134 :     lg = list_head(grouplist);</span>
+<span class="lineNum">    1398 </span><span class="lineCov">       5920 :     foreach(lt, targetlist)</span>
+<span class="lineNum">    1399 </span>            :     {
+<span class="lineNum">    1400 </span><span class="lineCov">       4786 :         TargetEntry *tle = (TargetEntry *) lfirst(lt);</span>
+<span class="lineNum">    1401 </span>            :         SortGroupClause *sgc;
+<span class="lineNum">    1402 </span>            : 
+<span class="lineNum">    1403 </span><span class="lineCov">       4786 :         if (tle-&gt;resjunk)</span>
+<span class="lineNum">    1404 </span>            :         {
+<span class="lineNum">    1405 </span>            :             /* resjunk columns should not have sortgrouprefs */
+<span class="lineNum">    1406 </span><span class="lineCov">       1016 :             Assert(tle-&gt;ressortgroupref == 0);</span>
+<span class="lineNum">    1407 </span><span class="lineCov">       1016 :             continue;           /* ignore resjunk columns */</span>
+<span class="lineNum">    1408 </span>            :         }
+<span class="lineNum">    1409 </span>            : 
+<span class="lineNum">    1410 </span>            :         /* non-resjunk columns should have sortgroupref = resno */
+<span class="lineNum">    1411 </span><span class="lineCov">       3770 :         Assert(tle-&gt;ressortgroupref == tle-&gt;resno);</span>
+<span class="lineNum">    1412 </span>            : 
+<span class="lineNum">    1413 </span>            :         /* non-resjunk columns should have grouping clauses */
+<span class="lineNum">    1414 </span><span class="lineCov">       3770 :         Assert(lg != NULL);</span>
+<span class="lineNum">    1415 </span><span class="lineCov">       3770 :         sgc = (SortGroupClause *) lfirst(lg);</span>
+<span class="lineNum">    1416 </span><span class="lineCov">       3770 :         lg = lnext(grouplist, lg);</span>
+<span class="lineNum">    1417 </span><span class="lineCov">       3770 :         Assert(sgc-&gt;tleSortGroupRef == 0);</span>
+<span class="lineNum">    1418 </span>            : 
+<span class="lineNum">    1419 </span><span class="lineCov">       3770 :         sgc-&gt;tleSortGroupRef = tle-&gt;ressortgroupref;</span>
+<span class="lineNum">    1420 </span>            :     }
+<span class="lineNum">    1421 </span><span class="lineCov">       1134 :     Assert(lg == NULL);</span>
+<span class="lineNum">    1422 </span><span class="lineCov">       1134 :     return grouplist;</span>
+<span class="lineNum">    1423 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

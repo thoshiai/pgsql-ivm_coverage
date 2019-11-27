@@ -1,0 +1,896 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/bin/pg_rewind/filemap.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/bin/pg_rewind</a> - filemap.c<span style="font-size: 80%;"> (source / <a href="filemap.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">261</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * filemap.c
+<span class="lineNum">       4 </span>            :  *    A data structure for keeping track of files that have changed.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Copyright (c) 2013-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">       9 </span>            :  */
+<span class="lineNum">      10 </span>            : 
+<span class="lineNum">      11 </span>            : #include &quot;postgres_fe.h&quot;
+<span class="lineNum">      12 </span>            : 
+<span class="lineNum">      13 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      14 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : #include &quot;catalog/pg_tablespace_d.h&quot;
+<span class="lineNum">      17 </span>            : #include &quot;common/string.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;datapagemap.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;filemap.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;pg_rewind.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;storage/fd.h&quot;
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : filemap_t  *filemap = NULL;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : static bool isRelDataFile(const char *path);
+<span class="lineNum">      26 </span>            : static char *datasegpath(RelFileNode rnode, ForkNumber forknum,
+<span class="lineNum">      27 </span>            :                          BlockNumber segno);
+<span class="lineNum">      28 </span>            : static int  path_cmp(const void *a, const void *b);
+<span class="lineNum">      29 </span>            : static int  final_filemap_cmp(const void *a, const void *b);
+<span class="lineNum">      30 </span>            : static void filemap_list_to_array(filemap_t *map);
+<span class="lineNum">      31 </span>            : static bool check_file_excluded(const char *path, bool is_source);
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /*
+<span class="lineNum">      34 </span>            :  * The contents of these directories are removed or recreated during server
+<span class="lineNum">      35 </span>            :  * start so they are not included in data processed by pg_rewind.
+<span class="lineNum">      36 </span>            :  *
+<span class="lineNum">      37 </span>            :  * Note: those lists should be kept in sync with what basebackup.c provides.
+<span class="lineNum">      38 </span>            :  * Some of the values, contrary to what basebackup.c uses, are hardcoded as
+<span class="lineNum">      39 </span>            :  * they are defined in backend-only headers.  So this list is maintained
+<span class="lineNum">      40 </span>            :  * with a best effort in mind.
+<span class="lineNum">      41 </span>            :  */
+<span class="lineNum">      42 </span>            : static const char *excludeDirContents[] =
+<span class="lineNum">      43 </span>            : {
+<span class="lineNum">      44 </span>            :     /*
+<span class="lineNum">      45 </span>            :      * Skip temporary statistics files. PG_STAT_TMP_DIR must be skipped even
+<span class="lineNum">      46 </span>            :      * when stats_temp_directory is set because PGSS_TEXT_FILE is always
+<span class="lineNum">      47 </span>            :      * created there.
+<span class="lineNum">      48 </span>            :      */
+<span class="lineNum">      49 </span>            :     &quot;pg_stat_tmp&quot;,                /* defined as PG_STAT_TMP_DIR */
+<span class="lineNum">      50 </span>            : 
+<span class="lineNum">      51 </span>            :     /*
+<span class="lineNum">      52 </span>            :      * It is generally not useful to backup the contents of this directory
+<span class="lineNum">      53 </span>            :      * even if the intention is to restore to another master. See backup.sgml
+<span class="lineNum">      54 </span>            :      * for a more detailed description.
+<span class="lineNum">      55 </span>            :      */
+<span class="lineNum">      56 </span>            :     &quot;pg_replslot&quot;,
+<span class="lineNum">      57 </span>            : 
+<span class="lineNum">      58 </span>            :     /* Contents removed on startup, see dsm_cleanup_for_mmap(). */
+<span class="lineNum">      59 </span>            :     &quot;pg_dynshmem&quot;,                /* defined as PG_DYNSHMEM_DIR */
+<span class="lineNum">      60 </span>            : 
+<span class="lineNum">      61 </span>            :     /* Contents removed on startup, see AsyncShmemInit(). */
+<span class="lineNum">      62 </span>            :     &quot;pg_notify&quot;,
+<span class="lineNum">      63 </span>            : 
+<span class="lineNum">      64 </span>            :     /*
+<span class="lineNum">      65 </span>            :      * Old contents are loaded for possible debugging but are not required for
+<span class="lineNum">      66 </span>            :      * normal operation, see OldSerXidInit().
+<span class="lineNum">      67 </span>            :      */
+<span class="lineNum">      68 </span>            :     &quot;pg_serial&quot;,
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span>            :     /* Contents removed on startup, see DeleteAllExportedSnapshotFiles(). */
+<span class="lineNum">      71 </span>            :     &quot;pg_snapshots&quot;,
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            :     /* Contents zeroed on startup, see StartupSUBTRANS(). */
+<span class="lineNum">      74 </span>            :     &quot;pg_subtrans&quot;,
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            :     /* end of list */
+<span class="lineNum">      77 </span>            :     NULL
+<span class="lineNum">      78 </span>            : };
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            : /*
+<span class="lineNum">      81 </span>            :  * List of files excluded from filemap processing.
+<span class="lineNum">      82 </span>            :  */
+<span class="lineNum">      83 </span>            : static const char *excludeFiles[] =
+<span class="lineNum">      84 </span>            : {
+<span class="lineNum">      85 </span>            :     /* Skip auto conf temporary file. */
+<span class="lineNum">      86 </span>            :     &quot;postgresql.auto.conf.tmp&quot;, /* defined as PG_AUTOCONF_FILENAME */
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            :     /* Skip current log file temporary file */
+<span class="lineNum">      89 </span>            :     &quot;current_logfiles.tmp&quot;,       /* defined as LOG_METAINFO_DATAFILE_TMP */
+<span class="lineNum">      90 </span>            : 
+<span class="lineNum">      91 </span>            :     /* Skip relation cache because it is rebuilt on startup */
+<span class="lineNum">      92 </span>            :     &quot;pg_internal.init&quot;,           /* defined as RELCACHE_INIT_FILENAME */
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span>            :     /*
+<span class="lineNum">      95 </span>            :      * If there's a backup_label or tablespace_map file, it belongs to a
+<span class="lineNum">      96 </span>            :      * backup started by the user with pg_start_backup().  It is *not* correct
+<span class="lineNum">      97 </span>            :      * for this backup.  Our backup_label is written later on separately.
+<span class="lineNum">      98 </span>            :      */
+<span class="lineNum">      99 </span>            :     &quot;backup_label&quot;,               /* defined as BACKUP_LABEL_FILE */
+<span class="lineNum">     100 </span>            :     &quot;tablespace_map&quot;,         /* defined as TABLESPACE_MAP */
+<span class="lineNum">     101 </span>            : 
+<span class="lineNum">     102 </span>            :     &quot;postmaster.pid&quot;,
+<span class="lineNum">     103 </span>            :     &quot;postmaster.opts&quot;,
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span>            :     /* end of list */
+<span class="lineNum">     106 </span>            :     NULL
+<span class="lineNum">     107 </span>            : };
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            : /*
+<span class="lineNum">     110 </span>            :  * Create a new file map (stored in the global pointer &quot;filemap&quot;).
+<a name="111"><span class="lineNum">     111 </span>            :  */</a>
+<span class="lineNum">     112 </span>            : void
+<span class="lineNum">     113 </span><span class="lineNoCov">          0 : filemap_create(void)</span>
+<span class="lineNum">     114 </span>            : {
+<span class="lineNum">     115 </span>            :     filemap_t  *map;
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span><span class="lineNoCov">          0 :     map = pg_malloc(sizeof(filemap_t));</span>
+<span class="lineNum">     118 </span><span class="lineNoCov">          0 :     map-&gt;first = map-&gt;last = NULL;</span>
+<span class="lineNum">     119 </span><span class="lineNoCov">          0 :     map-&gt;nlist = 0;</span>
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :     map-&gt;array = NULL;</span>
+<span class="lineNum">     121 </span><span class="lineNoCov">          0 :     map-&gt;narray = 0;</span>
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span><span class="lineNoCov">          0 :     Assert(filemap == NULL);</span>
+<span class="lineNum">     124 </span><span class="lineNoCov">          0 :     filemap = map;</span>
+<span class="lineNum">     125 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     126 </span>            : 
+<span class="lineNum">     127 </span>            : /*
+<span class="lineNum">     128 </span>            :  * Callback for processing source file list.
+<span class="lineNum">     129 </span>            :  *
+<span class="lineNum">     130 </span>            :  * This is called once for every file in the source server. We decide what
+<span class="lineNum">     131 </span>            :  * action needs to be taken for the file, depending on whether the file
+<span class="lineNum">     132 </span>            :  * exists in the target and whether the size matches.
+<a name="133"><span class="lineNum">     133 </span>            :  */</a>
+<span class="lineNum">     134 </span>            : void
+<span class="lineNum">     135 </span><span class="lineNoCov">          0 : process_source_file(const char *path, file_type_t type, size_t newsize,</span>
+<span class="lineNum">     136 </span>            :                     const char *link_target)
+<span class="lineNum">     137 </span>            : {
+<span class="lineNum">     138 </span>            :     bool        exists;
+<span class="lineNum">     139 </span>            :     char        localpath[MAXPGPATH];
+<span class="lineNum">     140 </span>            :     struct stat statbuf;
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 :     filemap_t  *map = filemap;</span>
+<span class="lineNum">     142 </span><span class="lineNoCov">          0 :     file_action_t action = FILE_ACTION_NONE;</span>
+<span class="lineNum">     143 </span><span class="lineNoCov">          0 :     size_t      oldsize = 0;</span>
+<span class="lineNum">     144 </span>            :     file_entry_t *entry;
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span><span class="lineNoCov">          0 :     Assert(map-&gt;array == NULL);</span>
+<span class="lineNum">     147 </span>            : 
+<span class="lineNum">     148 </span>            :     /*
+<span class="lineNum">     149 </span>            :      * Skip any files matching the exclusion filters. This has the effect to
+<span class="lineNum">     150 </span>            :      * remove all those files on the target.
+<span class="lineNum">     151 </span>            :      */
+<span class="lineNum">     152 </span><span class="lineNoCov">          0 :     if (check_file_excluded(path, true))</span>
+<span class="lineNum">     153 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            :     /*
+<span class="lineNum">     156 </span>            :      * Pretend that pg_wal is a directory, even if it's really a symlink. We
+<span class="lineNum">     157 </span>            :      * don't want to mess with the symlink itself, nor complain if it's a
+<span class="lineNum">     158 </span>            :      * symlink in source but not in target or vice versa.
+<span class="lineNum">     159 </span>            :      */
+<span class="lineNum">     160 </span><span class="lineNoCov">          0 :     if (strcmp(path, &quot;pg_wal&quot;) == 0 &amp;&amp; type == FILE_TYPE_SYMLINK)</span>
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :         type = FILE_TYPE_DIRECTORY;</span>
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span>            :     /*
+<span class="lineNum">     164 </span>            :      * Skip temporary files, .../pgsql_tmp/... and .../pgsql_tmp.* in source.
+<span class="lineNum">     165 </span>            :      * This has the effect that all temporary files in the destination will be
+<span class="lineNum">     166 </span>            :      * removed.
+<span class="lineNum">     167 </span>            :      */
+<span class="lineNum">     168 </span><span class="lineNoCov">          0 :     if (strstr(path, &quot;/&quot; PG_TEMP_FILE_PREFIX) != NULL)</span>
+<span class="lineNum">     169 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     170 </span><span class="lineNoCov">          0 :     if (strstr(path, &quot;/&quot; PG_TEMP_FILES_DIR &quot;/&quot;) != NULL)</span>
+<span class="lineNum">     171 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     172 </span>            : 
+<span class="lineNum">     173 </span>            :     /*
+<span class="lineNum">     174 </span>            :      * sanity check: a filename that looks like a data file better be a
+<span class="lineNum">     175 </span>            :      * regular file
+<span class="lineNum">     176 </span>            :      */
+<span class="lineNum">     177 </span><span class="lineNoCov">          0 :     if (type != FILE_TYPE_REGULAR &amp;&amp; isRelDataFile(path))</span>
+<span class="lineNum">     178 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;data file \&quot;%s\&quot; in source is not a regular file&quot;, path);</span>
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span><span class="lineNoCov">          0 :     snprintf(localpath, sizeof(localpath), &quot;%s/%s&quot;, datadir_target, path);</span>
+<span class="lineNum">     181 </span>            : 
+<span class="lineNum">     182 </span>            :     /* Does the corresponding file exist in the target data dir? */
+<span class="lineNum">     183 </span><span class="lineNoCov">          0 :     if (lstat(localpath, &amp;statbuf) &lt; 0)</span>
+<span class="lineNum">     184 </span>            :     {
+<span class="lineNum">     185 </span><span class="lineNoCov">          0 :         if (errno != ENOENT)</span>
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;could not stat file \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     187 </span>            :                      localpath);
+<span class="lineNum">     188 </span>            : 
+<span class="lineNum">     189 </span><span class="lineNoCov">          0 :         exists = false;</span>
+<span class="lineNum">     190 </span>            :     }
+<span class="lineNum">     191 </span>            :     else
+<span class="lineNum">     192 </span><span class="lineNoCov">          0 :         exists = true;</span>
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span><span class="lineNoCov">          0 :     switch (type)</span>
+<span class="lineNum">     195 </span>            :     {
+<span class="lineNum">     196 </span>            :         case FILE_TYPE_DIRECTORY:
+<span class="lineNum">     197 </span><span class="lineNoCov">          0 :             if (exists &amp;&amp; !S_ISDIR(statbuf.st_mode) &amp;&amp; strcmp(path, &quot;pg_wal&quot;) != 0)</span>
+<span class="lineNum">     198 </span>            :             {
+<span class="lineNum">     199 </span>            :                 /* it's a directory in source, but not in target. Strange.. */
+<span class="lineNum">     200 </span><span class="lineNoCov">          0 :                 pg_fatal(&quot;\&quot;%s\&quot; is not a directory&quot;, localpath);</span>
+<span class="lineNum">     201 </span>            :             }
+<span class="lineNum">     202 </span>            : 
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :             if (!exists)</span>
+<span class="lineNum">     204 </span><span class="lineNoCov">          0 :                 action = FILE_ACTION_CREATE;</span>
+<span class="lineNum">     205 </span>            :             else
+<span class="lineNum">     206 </span><span class="lineNoCov">          0 :                 action = FILE_ACTION_NONE;</span>
+<span class="lineNum">     207 </span><span class="lineNoCov">          0 :             oldsize = 0;</span>
+<span class="lineNum">     208 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     209 </span>            : 
+<span class="lineNum">     210 </span>            :         case FILE_TYPE_SYMLINK:
+<span class="lineNum">     211 </span><span class="lineNoCov">          0 :             if (exists &amp;&amp;</span>
+<span class="lineNum">     212 </span>            : #ifndef WIN32
+<span class="lineNum">     213 </span><span class="lineNoCov">          0 :                 !S_ISLNK(statbuf.st_mode)</span>
+<span class="lineNum">     214 </span>            : #else
+<span class="lineNum">     215 </span>            :                 !pgwin32_is_junction(localpath)
+<span class="lineNum">     216 </span>            : #endif
+<span class="lineNum">     217 </span>            :                 )
+<span class="lineNum">     218 </span>            :             {
+<span class="lineNum">     219 </span>            :                 /*
+<span class="lineNum">     220 </span>            :                  * It's a symbolic link in source, but not in target.
+<span class="lineNum">     221 </span>            :                  * Strange..
+<span class="lineNum">     222 </span>            :                  */
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 :                 pg_fatal(&quot;\&quot;%s\&quot; is not a symbolic link&quot;, localpath);</span>
+<span class="lineNum">     224 </span>            :             }
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineNoCov">          0 :             if (!exists)</span>
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :                 action = FILE_ACTION_CREATE;</span>
+<span class="lineNum">     228 </span>            :             else
+<span class="lineNum">     229 </span><span class="lineNoCov">          0 :                 action = FILE_ACTION_NONE;</span>
+<span class="lineNum">     230 </span><span class="lineNoCov">          0 :             oldsize = 0;</span>
+<span class="lineNum">     231 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     232 </span>            : 
+<span class="lineNum">     233 </span>            :         case FILE_TYPE_REGULAR:
+<span class="lineNum">     234 </span><span class="lineNoCov">          0 :             if (exists &amp;&amp; !S_ISREG(statbuf.st_mode))</span>
+<span class="lineNum">     235 </span><span class="lineNoCov">          0 :                 pg_fatal(&quot;\&quot;%s\&quot; is not a regular file&quot;, localpath);</span>
+<span class="lineNum">     236 </span>            : 
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 :             if (!exists || !isRelDataFile(path))</span>
+<span class="lineNum">     238 </span>            :             {
+<span class="lineNum">     239 </span>            :                 /*
+<span class="lineNum">     240 </span>            :                  * File exists in source, but not in target. Or it's a
+<span class="lineNum">     241 </span>            :                  * non-data file that we have no special processing for. Copy
+<span class="lineNum">     242 </span>            :                  * it in toto.
+<span class="lineNum">     243 </span>            :                  *
+<span class="lineNum">     244 </span>            :                  * An exception: PG_VERSIONs should be identical, but avoid
+<span class="lineNum">     245 </span>            :                  * overwriting it for paranoia.
+<span class="lineNum">     246 </span>            :                  */
+<span class="lineNum">     247 </span><span class="lineNoCov">          0 :                 if (pg_str_endswith(path, &quot;PG_VERSION&quot;))</span>
+<span class="lineNum">     248 </span>            :                 {
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :                     action = FILE_ACTION_NONE;</span>
+<span class="lineNum">     250 </span><span class="lineNoCov">          0 :                     oldsize = statbuf.st_size;</span>
+<span class="lineNum">     251 </span>            :                 }
+<span class="lineNum">     252 </span>            :                 else
+<span class="lineNum">     253 </span>            :                 {
+<span class="lineNum">     254 </span><span class="lineNoCov">          0 :                     action = FILE_ACTION_COPY;</span>
+<span class="lineNum">     255 </span><span class="lineNoCov">          0 :                     oldsize = 0;</span>
+<span class="lineNum">     256 </span>            :                 }
+<span class="lineNum">     257 </span>            :             }
+<span class="lineNum">     258 </span>            :             else
+<span class="lineNum">     259 </span>            :             {
+<span class="lineNum">     260 </span>            :                 /*
+<span class="lineNum">     261 </span>            :                  * It's a data file that exists in both.
+<span class="lineNum">     262 </span>            :                  *
+<span class="lineNum">     263 </span>            :                  * If it's larger in target, we can truncate it. There will
+<span class="lineNum">     264 </span>            :                  * also be a WAL record of the truncation in the source
+<span class="lineNum">     265 </span>            :                  * system, so WAL replay would eventually truncate the target
+<span class="lineNum">     266 </span>            :                  * too, but we might as well do it now.
+<span class="lineNum">     267 </span>            :                  *
+<span class="lineNum">     268 </span>            :                  * If it's smaller in the target, it means that it has been
+<span class="lineNum">     269 </span>            :                  * truncated in the target, or enlarged in the source, or
+<span class="lineNum">     270 </span>            :                  * both. If it was truncated in the target, we need to copy
+<span class="lineNum">     271 </span>            :                  * the missing tail from the source system. If it was enlarged
+<span class="lineNum">     272 </span>            :                  * in the source system, there will be WAL records in the
+<span class="lineNum">     273 </span>            :                  * source system for the new blocks, so we wouldn't need to
+<span class="lineNum">     274 </span>            :                  * copy them here. But we don't know which scenario we're
+<span class="lineNum">     275 </span>            :                  * dealing with, and there's no harm in copying the missing
+<span class="lineNum">     276 </span>            :                  * blocks now, so do it now.
+<span class="lineNum">     277 </span>            :                  *
+<span class="lineNum">     278 </span>            :                  * If it's the same size, do nothing here. Any blocks modified
+<span class="lineNum">     279 </span>            :                  * in the target will be copied based on parsing the target
+<span class="lineNum">     280 </span>            :                  * system's WAL, and any blocks modified in the source will be
+<span class="lineNum">     281 </span>            :                  * updated after rewinding, when the source system's WAL is
+<span class="lineNum">     282 </span>            :                  * replayed.
+<span class="lineNum">     283 </span>            :                  */
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :                 oldsize = statbuf.st_size;</span>
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :                 if (oldsize &lt; newsize)</span>
+<span class="lineNum">     286 </span><span class="lineNoCov">          0 :                     action = FILE_ACTION_COPY_TAIL;</span>
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :                 else if (oldsize &gt; newsize)</span>
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :                     action = FILE_ACTION_TRUNCATE;</span>
+<span class="lineNum">     289 </span>            :                 else
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :                     action = FILE_ACTION_NONE;</span>
+<span class="lineNum">     291 </span>            :             }
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     293 </span>            :     }
+<span class="lineNum">     294 </span>            : 
+<span class="lineNum">     295 </span>            :     /* Create a new entry for this file */
+<span class="lineNum">     296 </span><span class="lineNoCov">          0 :     entry = pg_malloc(sizeof(file_entry_t));</span>
+<span class="lineNum">     297 </span><span class="lineNoCov">          0 :     entry-&gt;path = pg_strdup(path);</span>
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :     entry-&gt;type = type;</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :     entry-&gt;action = action;</span>
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :     entry-&gt;oldsize = oldsize;</span>
+<span class="lineNum">     301 </span><span class="lineNoCov">          0 :     entry-&gt;newsize = newsize;</span>
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :     entry-&gt;link_target = link_target ? pg_strdup(link_target) : NULL;</span>
+<span class="lineNum">     303 </span><span class="lineNoCov">          0 :     entry-&gt;next = NULL;</span>
+<span class="lineNum">     304 </span><span class="lineNoCov">          0 :     entry-&gt;pagemap.bitmap = NULL;</span>
+<span class="lineNum">     305 </span><span class="lineNoCov">          0 :     entry-&gt;pagemap.bitmapsize = 0;</span>
+<span class="lineNum">     306 </span><span class="lineNoCov">          0 :     entry-&gt;isrelfile = isRelDataFile(path);</span>
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :     if (map-&gt;last)</span>
+<span class="lineNum">     309 </span>            :     {
+<span class="lineNum">     310 </span><span class="lineNoCov">          0 :         map-&gt;last-&gt;next = entry;</span>
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :         map-&gt;last = entry;</span>
+<span class="lineNum">     312 </span>            :     }
+<span class="lineNum">     313 </span>            :     else
+<span class="lineNum">     314 </span><span class="lineNoCov">          0 :         map-&gt;first = map-&gt;last = entry;</span>
+<span class="lineNum">     315 </span><span class="lineNoCov">          0 :     map-&gt;nlist++;</span>
+<span class="lineNum">     316 </span>            : }
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span>            : /*
+<span class="lineNum">     319 </span>            :  * Callback for processing target file list.
+<span class="lineNum">     320 </span>            :  *
+<span class="lineNum">     321 </span>            :  * All source files must be already processed before calling this. This only
+<span class="lineNum">     322 </span>            :  * marks target data directory's files that didn't exist in the source for
+<span class="lineNum">     323 </span>            :  * deletion.
+<a name="324"><span class="lineNum">     324 </span>            :  */</a>
+<span class="lineNum">     325 </span>            : void
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 : process_target_file(const char *path, file_type_t type, size_t oldsize,</span>
+<span class="lineNum">     327 </span>            :                     const char *link_target)
+<span class="lineNum">     328 </span>            : {
+<span class="lineNum">     329 </span>            :     bool        exists;
+<span class="lineNum">     330 </span>            :     char        localpath[MAXPGPATH];
+<span class="lineNum">     331 </span>            :     struct stat statbuf;
+<span class="lineNum">     332 </span>            :     file_entry_t key;
+<span class="lineNum">     333 </span>            :     file_entry_t *key_ptr;
+<span class="lineNum">     334 </span><span class="lineNoCov">          0 :     filemap_t  *map = filemap;</span>
+<span class="lineNum">     335 </span>            :     file_entry_t *entry;
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span>            :     /*
+<span class="lineNum">     338 </span>            :      * Do not apply any exclusion filters here.  This has advantage to remove
+<span class="lineNum">     339 </span>            :      * from the target data folder all paths which have been filtered out from
+<span class="lineNum">     340 </span>            :      * the source data folder when processing the source files.
+<span class="lineNum">     341 </span>            :      */
+<span class="lineNum">     342 </span>            : 
+<span class="lineNum">     343 </span><span class="lineNoCov">          0 :     snprintf(localpath, sizeof(localpath), &quot;%s/%s&quot;, datadir_target, path);</span>
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :     if (lstat(localpath, &amp;statbuf) &lt; 0)</span>
+<span class="lineNum">     345 </span>            :     {
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :         if (errno != ENOENT)</span>
+<span class="lineNum">     347 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;could not stat file \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     348 </span>            :                      localpath);
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span><span class="lineNoCov">          0 :         exists = false;</span>
+<span class="lineNum">     351 </span>            :     }
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span><span class="lineNoCov">          0 :     if (map-&gt;array == NULL)</span>
+<span class="lineNum">     354 </span>            :     {
+<span class="lineNum">     355 </span>            :         /* on first call, initialize lookup array */
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :         if (map-&gt;nlist == 0)</span>
+<span class="lineNum">     357 </span>            :         {
+<span class="lineNum">     358 </span>            :             /* should not happen */
+<span class="lineNum">     359 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;source file list is empty&quot;);</span>
+<span class="lineNum">     360 </span>            :         }
+<span class="lineNum">     361 </span>            : 
+<span class="lineNum">     362 </span><span class="lineNoCov">          0 :         filemap_list_to_array(map);</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span><span class="lineNoCov">          0 :         Assert(map-&gt;array != NULL);</span>
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span><span class="lineNoCov">          0 :         qsort(map-&gt;array, map-&gt;narray, sizeof(file_entry_t *), path_cmp);</span>
+<span class="lineNum">     367 </span>            :     }
+<span class="lineNum">     368 </span>            : 
+<span class="lineNum">     369 </span>            :     /*
+<span class="lineNum">     370 </span>            :      * Like in process_source_file, pretend that xlog is always a  directory.
+<span class="lineNum">     371 </span>            :      */
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :     if (strcmp(path, &quot;pg_wal&quot;) == 0 &amp;&amp; type == FILE_TYPE_SYMLINK)</span>
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 :         type = FILE_TYPE_DIRECTORY;</span>
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :     key.path = (char *) path;</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :     key_ptr = &amp;key;</span>
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :     exists = (bsearch(&amp;key_ptr, map-&gt;array, map-&gt;narray, sizeof(file_entry_t *),</span>
+<span class="lineNum">     378 </span>            :                       path_cmp) != NULL);
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span>            :     /* Remove any file or folder that doesn't exist in the source system. */
+<span class="lineNum">     381 </span><span class="lineNoCov">          0 :     if (!exists)</span>
+<span class="lineNum">     382 </span>            :     {
+<span class="lineNum">     383 </span><span class="lineNoCov">          0 :         entry = pg_malloc(sizeof(file_entry_t));</span>
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :         entry-&gt;path = pg_strdup(path);</span>
+<span class="lineNum">     385 </span><span class="lineNoCov">          0 :         entry-&gt;type = type;</span>
+<span class="lineNum">     386 </span><span class="lineNoCov">          0 :         entry-&gt;action = FILE_ACTION_REMOVE;</span>
+<span class="lineNum">     387 </span><span class="lineNoCov">          0 :         entry-&gt;oldsize = oldsize;</span>
+<span class="lineNum">     388 </span><span class="lineNoCov">          0 :         entry-&gt;newsize = 0;</span>
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :         entry-&gt;link_target = link_target ? pg_strdup(link_target) : NULL;</span>
+<span class="lineNum">     390 </span><span class="lineNoCov">          0 :         entry-&gt;next = NULL;</span>
+<span class="lineNum">     391 </span><span class="lineNoCov">          0 :         entry-&gt;pagemap.bitmap = NULL;</span>
+<span class="lineNum">     392 </span><span class="lineNoCov">          0 :         entry-&gt;pagemap.bitmapsize = 0;</span>
+<span class="lineNum">     393 </span><span class="lineNoCov">          0 :         entry-&gt;isrelfile = isRelDataFile(path);</span>
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span><span class="lineNoCov">          0 :         if (map-&gt;last == NULL)</span>
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :             map-&gt;first = entry;</span>
+<span class="lineNum">     397 </span>            :         else
+<span class="lineNum">     398 </span><span class="lineNoCov">          0 :             map-&gt;last-&gt;next = entry;</span>
+<span class="lineNum">     399 </span><span class="lineNoCov">          0 :         map-&gt;last = entry;</span>
+<span class="lineNum">     400 </span><span class="lineNoCov">          0 :         map-&gt;nlist++;</span>
+<span class="lineNum">     401 </span>            :     }
+<span class="lineNum">     402 </span>            :     else
+<span class="lineNum">     403 </span>            :     {
+<span class="lineNum">     404 </span>            :         /*
+<span class="lineNum">     405 </span>            :          * We already handled all files that exist in the source system in
+<span class="lineNum">     406 </span>            :          * process_source_file().
+<span class="lineNum">     407 </span>            :          */
+<span class="lineNum">     408 </span>            :     }
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span>            : /*
+<span class="lineNum">     412 </span>            :  * This callback gets called while we read the WAL in the target, for every
+<span class="lineNum">     413 </span>            :  * block that have changed in the target system. It makes note of all the
+<span class="lineNum">     414 </span>            :  * changed blocks in the pagemap of the file.
+<a name="415"><span class="lineNum">     415 </span>            :  */</a>
+<span class="lineNum">     416 </span>            : void
+<span class="lineNum">     417 </span><span class="lineNoCov">          0 : process_block_change(ForkNumber forknum, RelFileNode rnode, BlockNumber blkno)</span>
+<span class="lineNum">     418 </span>            : {
+<span class="lineNum">     419 </span>            :     char       *path;
+<span class="lineNum">     420 </span>            :     file_entry_t key;
+<span class="lineNum">     421 </span>            :     file_entry_t *key_ptr;
+<span class="lineNum">     422 </span>            :     file_entry_t *entry;
+<span class="lineNum">     423 </span>            :     BlockNumber blkno_inseg;
+<span class="lineNum">     424 </span>            :     int         segno;
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :     filemap_t  *map = filemap;</span>
+<span class="lineNum">     426 </span>            :     file_entry_t **e;
+<span class="lineNum">     427 </span>            : 
+<span class="lineNum">     428 </span><span class="lineNoCov">          0 :     Assert(map-&gt;array);</span>
+<span class="lineNum">     429 </span>            : 
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :     segno = blkno / RELSEG_SIZE;</span>
+<span class="lineNum">     431 </span><span class="lineNoCov">          0 :     blkno_inseg = blkno % RELSEG_SIZE;</span>
+<span class="lineNum">     432 </span>            : 
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 :     path = datasegpath(rnode, forknum, segno);</span>
+<span class="lineNum">     434 </span>            : 
+<span class="lineNum">     435 </span><span class="lineNoCov">          0 :     key.path = (char *) path;</span>
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :     key_ptr = &amp;key;</span>
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span><span class="lineNoCov">          0 :     e = bsearch(&amp;key_ptr, map-&gt;array, map-&gt;narray, sizeof(file_entry_t *),</span>
+<span class="lineNum">     439 </span>            :                 path_cmp);
+<span class="lineNum">     440 </span><span class="lineNoCov">          0 :     if (e)</span>
+<span class="lineNum">     441 </span><span class="lineNoCov">          0 :         entry = *e;</span>
+<span class="lineNum">     442 </span>            :     else
+<span class="lineNum">     443 </span><span class="lineNoCov">          0 :         entry = NULL;</span>
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :     pfree(path);</span>
+<span class="lineNum">     445 </span>            : 
+<span class="lineNum">     446 </span><span class="lineNoCov">          0 :     if (entry)</span>
+<span class="lineNum">     447 </span>            :     {
+<span class="lineNum">     448 </span><span class="lineNoCov">          0 :         Assert(entry-&gt;isrelfile);</span>
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span><span class="lineNoCov">          0 :         switch (entry-&gt;action)</span>
+<span class="lineNum">     451 </span>            :         {
+<span class="lineNum">     452 </span>            :             case FILE_ACTION_NONE:
+<span class="lineNum">     453 </span>            :             case FILE_ACTION_TRUNCATE:
+<span class="lineNum">     454 </span>            :                 /* skip if we're truncating away the modified block anyway */
+<span class="lineNum">     455 </span><span class="lineNoCov">          0 :                 if ((blkno_inseg + 1) * BLCKSZ &lt;= entry-&gt;newsize)</span>
+<span class="lineNum">     456 </span><span class="lineNoCov">          0 :                     datapagemap_add(&amp;entry-&gt;pagemap, blkno_inseg);</span>
+<span class="lineNum">     457 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span>            :             case FILE_ACTION_COPY_TAIL:
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span>            :                 /*
+<span class="lineNum">     462 </span>            :                  * skip the modified block if it is part of the &quot;tail&quot; that
+<span class="lineNum">     463 </span>            :                  * we're copying anyway.
+<span class="lineNum">     464 </span>            :                  */
+<span class="lineNum">     465 </span><span class="lineNoCov">          0 :                 if ((blkno_inseg + 1) * BLCKSZ &lt;= entry-&gt;oldsize)</span>
+<span class="lineNum">     466 </span><span class="lineNoCov">          0 :                     datapagemap_add(&amp;entry-&gt;pagemap, blkno_inseg);</span>
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span>            :             case FILE_ACTION_COPY:
+<span class="lineNum">     470 </span>            :             case FILE_ACTION_REMOVE:
+<span class="lineNum">     471 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span>            :             case FILE_ACTION_CREATE:
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :                 pg_fatal(&quot;unexpected page modification for directory or symbolic link \&quot;%s\&quot;&quot;, entry-&gt;path);</span>
+<span class="lineNum">     475 </span>            :         }
+<span class="lineNum">     476 </span>            :     }
+<span class="lineNum">     477 </span>            :     else
+<span class="lineNum">     478 </span>            :     {
+<span class="lineNum">     479 </span>            :         /*
+<span class="lineNum">     480 </span>            :          * If we don't have any record of this file in the file map, it means
+<span class="lineNum">     481 </span>            :          * that it's a relation that doesn't exist in the source system, and
+<span class="lineNum">     482 </span>            :          * it was subsequently removed in the target system, too. We can
+<span class="lineNum">     483 </span>            :          * safely ignore it.
+<span class="lineNum">     484 </span>            :          */
+<span class="lineNum">     485 </span>            :     }
+<span class="lineNum">     486 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     487 </span>            : 
+<span class="lineNum">     488 </span>            : /*
+<span class="lineNum">     489 </span>            :  * Is this the path of file that pg_rewind can skip copying?
+<a name="490"><span class="lineNum">     490 </span>            :  */</a>
+<span class="lineNum">     491 </span>            : static bool
+<span class="lineNum">     492 </span><span class="lineNoCov">          0 : check_file_excluded(const char *path, bool is_source)</span>
+<span class="lineNum">     493 </span>            : {
+<span class="lineNum">     494 </span>            :     char        localpath[MAXPGPATH];
+<span class="lineNum">     495 </span>            :     int         excludeIdx;
+<span class="lineNum">     496 </span>            :     const char *filename;
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span>            :     /* check individual files... */
+<span class="lineNum">     499 </span><span class="lineNoCov">          0 :     for (excludeIdx = 0; excludeFiles[excludeIdx] != NULL; excludeIdx++)</span>
+<span class="lineNum">     500 </span>            :     {
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :         filename = last_dir_separator(path);</span>
+<span class="lineNum">     502 </span><span class="lineNoCov">          0 :         if (filename == NULL)</span>
+<span class="lineNum">     503 </span><span class="lineNoCov">          0 :             filename = path;</span>
+<span class="lineNum">     504 </span>            :         else
+<span class="lineNum">     505 </span><span class="lineNoCov">          0 :             filename++;</span>
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :         if (strcmp(filename, excludeFiles[excludeIdx]) == 0)</span>
+<span class="lineNum">     507 </span>            :         {
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 :             if (is_source)</span>
+<span class="lineNum">     509 </span><span class="lineNoCov">          0 :                 pg_log_debug(&quot;entry \&quot;%s\&quot; excluded from source file list&quot;,</span>
+<span class="lineNum">     510 </span>            :                              path);
+<span class="lineNum">     511 </span>            :             else
+<span class="lineNum">     512 </span><span class="lineNoCov">          0 :                 pg_log_debug(&quot;entry \&quot;%s\&quot; excluded from target file list&quot;,</span>
+<span class="lineNum">     513 </span>            :                              path);
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :             return true;</span>
+<span class="lineNum">     515 </span>            :         }
+<span class="lineNum">     516 </span>            :     }
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span>            :     /*
+<span class="lineNum">     519 </span>            :      * ... And check some directories.  Note that this includes any contents
+<span class="lineNum">     520 </span>            :      * within the directories themselves.
+<span class="lineNum">     521 </span>            :      */
+<span class="lineNum">     522 </span><span class="lineNoCov">          0 :     for (excludeIdx = 0; excludeDirContents[excludeIdx] != NULL; excludeIdx++)</span>
+<span class="lineNum">     523 </span>            :     {
+<span class="lineNum">     524 </span><span class="lineNoCov">          0 :         snprintf(localpath, sizeof(localpath), &quot;%s/&quot;,</span>
+<span class="lineNum">     525 </span>            :                  excludeDirContents[excludeIdx]);
+<span class="lineNum">     526 </span><span class="lineNoCov">          0 :         if (strstr(path, localpath) == path)</span>
+<span class="lineNum">     527 </span>            :         {
+<span class="lineNum">     528 </span><span class="lineNoCov">          0 :             if (is_source)</span>
+<span class="lineNum">     529 </span><span class="lineNoCov">          0 :                 pg_log_debug(&quot;entry \&quot;%s\&quot; excluded from source file list&quot;,</span>
+<span class="lineNum">     530 </span>            :                              path);
+<span class="lineNum">     531 </span>            :             else
+<span class="lineNum">     532 </span><span class="lineNoCov">          0 :                 pg_log_debug(&quot;entry \&quot;%s\&quot; excluded from target file list&quot;,</span>
+<span class="lineNum">     533 </span>            :                              path);
+<span class="lineNum">     534 </span><span class="lineNoCov">          0 :             return true;</span>
+<span class="lineNum">     535 </span>            :         }
+<span class="lineNum">     536 </span>            :     }
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">     539 </span>            : }
+<span class="lineNum">     540 </span>            : 
+<span class="lineNum">     541 </span>            : /*
+<span class="lineNum">     542 </span>            :  * Convert the linked list of entries in map-&gt;first/last to the array,
+<span class="lineNum">     543 </span>            :  * map-&gt;array.
+<a name="544"><span class="lineNum">     544 </span>            :  */</a>
+<span class="lineNum">     545 </span>            : static void
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 : filemap_list_to_array(filemap_t *map)</span>
+<span class="lineNum">     547 </span>            : {
+<span class="lineNum">     548 </span>            :     int         narray;
+<span class="lineNum">     549 </span>            :     file_entry_t *entry,
+<span class="lineNum">     550 </span>            :                *next;
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :     map-&gt;array = (file_entry_t **)</span>
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :         pg_realloc(map-&gt;array,</span>
+<span class="lineNum">     554 </span><span class="lineNoCov">          0 :                    (map-&gt;nlist + map-&gt;narray) * sizeof(file_entry_t *));</span>
+<span class="lineNum">     555 </span>            : 
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :     narray = map-&gt;narray;</span>
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 :     for (entry = map-&gt;first; entry != NULL; entry = next)</span>
+<span class="lineNum">     558 </span>            :     {
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :         map-&gt;array[narray++] = entry;</span>
+<span class="lineNum">     560 </span><span class="lineNoCov">          0 :         next = entry-&gt;next;</span>
+<span class="lineNum">     561 </span><span class="lineNoCov">          0 :         entry-&gt;next = NULL;</span>
+<span class="lineNum">     562 </span>            :     }
+<span class="lineNum">     563 </span><span class="lineNoCov">          0 :     Assert(narray == map-&gt;nlist + map-&gt;narray);</span>
+<span class="lineNum">     564 </span><span class="lineNoCov">          0 :     map-&gt;narray = narray;</span>
+<span class="lineNum">     565 </span><span class="lineNoCov">          0 :     map-&gt;nlist = 0;</span>
+<span class="lineNum">     566 </span><span class="lineNoCov">          0 :     map-&gt;first = map-&gt;last = NULL;</span>
+<span class="lineNum">     567 </span><span class="lineNoCov">          0 : }</span>
+<a name="568"><span class="lineNum">     568 </span>            : </a>
+<span class="lineNum">     569 </span>            : void
+<span class="lineNum">     570 </span><span class="lineNoCov">          0 : filemap_finalize(void)</span>
+<span class="lineNum">     571 </span>            : {
+<span class="lineNum">     572 </span><span class="lineNoCov">          0 :     filemap_t  *map = filemap;</span>
+<span class="lineNum">     573 </span>            : 
+<span class="lineNum">     574 </span><span class="lineNoCov">          0 :     filemap_list_to_array(map);</span>
+<span class="lineNum">     575 </span><span class="lineNoCov">          0 :     qsort(map-&gt;array, map-&gt;narray, sizeof(file_entry_t *),</span>
+<span class="lineNum">     576 </span>            :           final_filemap_cmp);
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 : }</span>
+<a name="578"><span class="lineNum">     578 </span>            : </a>
+<span class="lineNum">     579 </span>            : static const char *
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 : action_to_str(file_action_t action)</span>
+<span class="lineNum">     581 </span>            : {
+<span class="lineNum">     582 </span><span class="lineNoCov">          0 :     switch (action)</span>
+<span class="lineNum">     583 </span>            :     {
+<span class="lineNum">     584 </span>            :         case FILE_ACTION_NONE:
+<span class="lineNum">     585 </span><span class="lineNoCov">          0 :             return &quot;NONE&quot;;</span>
+<span class="lineNum">     586 </span>            :         case FILE_ACTION_COPY:
+<span class="lineNum">     587 </span><span class="lineNoCov">          0 :             return &quot;COPY&quot;;</span>
+<span class="lineNum">     588 </span>            :         case FILE_ACTION_TRUNCATE:
+<span class="lineNum">     589 </span><span class="lineNoCov">          0 :             return &quot;TRUNCATE&quot;;</span>
+<span class="lineNum">     590 </span>            :         case FILE_ACTION_COPY_TAIL:
+<span class="lineNum">     591 </span><span class="lineNoCov">          0 :             return &quot;COPY_TAIL&quot;;</span>
+<span class="lineNum">     592 </span>            :         case FILE_ACTION_CREATE:
+<span class="lineNum">     593 </span><span class="lineNoCov">          0 :             return &quot;CREATE&quot;;</span>
+<span class="lineNum">     594 </span>            :         case FILE_ACTION_REMOVE:
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :             return &quot;REMOVE&quot;;</span>
+<span class="lineNum">     596 </span>            : 
+<span class="lineNum">     597 </span>            :         default:
+<span class="lineNum">     598 </span><span class="lineNoCov">          0 :             return &quot;unknown&quot;;</span>
+<span class="lineNum">     599 </span>            :     }
+<span class="lineNum">     600 </span>            : }
+<span class="lineNum">     601 </span>            : 
+<span class="lineNum">     602 </span>            : /*
+<span class="lineNum">     603 </span>            :  * Calculate the totals needed for progress reports.
+<a name="604"><span class="lineNum">     604 </span>            :  */</a>
+<span class="lineNum">     605 </span>            : void
+<span class="lineNum">     606 </span><span class="lineNoCov">          0 : calculate_totals(void)</span>
+<span class="lineNum">     607 </span>            : {
+<span class="lineNum">     608 </span>            :     file_entry_t *entry;
+<span class="lineNum">     609 </span>            :     int         i;
+<span class="lineNum">     610 </span><span class="lineNoCov">          0 :     filemap_t  *map = filemap;</span>
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :     map-&gt;total_size = 0;</span>
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :     map-&gt;fetch_size = 0;</span>
+<span class="lineNum">     614 </span>            : 
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; map-&gt;narray; i++)</span>
+<span class="lineNum">     616 </span>            :     {
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :         entry = map-&gt;array[i];</span>
+<span class="lineNum">     618 </span>            : 
+<span class="lineNum">     619 </span><span class="lineNoCov">          0 :         if (entry-&gt;type != FILE_TYPE_REGULAR)</span>
+<span class="lineNum">     620 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     621 </span>            : 
+<span class="lineNum">     622 </span><span class="lineNoCov">          0 :         map-&gt;total_size += entry-&gt;newsize;</span>
+<span class="lineNum">     623 </span>            : 
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :         if (entry-&gt;action == FILE_ACTION_COPY)</span>
+<span class="lineNum">     625 </span>            :         {
+<span class="lineNum">     626 </span><span class="lineNoCov">          0 :             map-&gt;fetch_size += entry-&gt;newsize;</span>
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     628 </span>            :         }
+<span class="lineNum">     629 </span>            : 
+<span class="lineNum">     630 </span><span class="lineNoCov">          0 :         if (entry-&gt;action == FILE_ACTION_COPY_TAIL)</span>
+<span class="lineNum">     631 </span><span class="lineNoCov">          0 :             map-&gt;fetch_size += (entry-&gt;newsize - entry-&gt;oldsize);</span>
+<span class="lineNum">     632 </span>            : 
+<span class="lineNum">     633 </span><span class="lineNoCov">          0 :         if (entry-&gt;pagemap.bitmapsize &gt; 0)</span>
+<span class="lineNum">     634 </span>            :         {
+<span class="lineNum">     635 </span>            :             datapagemap_iterator_t *iter;
+<span class="lineNum">     636 </span>            :             BlockNumber blk;
+<span class="lineNum">     637 </span>            : 
+<span class="lineNum">     638 </span><span class="lineNoCov">          0 :             iter = datapagemap_iterate(&amp;entry-&gt;pagemap);</span>
+<span class="lineNum">     639 </span><span class="lineNoCov">          0 :             while (datapagemap_next(iter, &amp;blk))</span>
+<span class="lineNum">     640 </span><span class="lineNoCov">          0 :                 map-&gt;fetch_size += BLCKSZ;</span>
+<span class="lineNum">     641 </span>            : 
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :             pg_free(iter);</span>
+<span class="lineNum">     643 </span>            :         }
+<span class="lineNum">     644 </span>            :     }
+<span class="lineNum">     645 </span><span class="lineNoCov">          0 : }</span>
+<a name="646"><span class="lineNum">     646 </span>            : </a>
+<span class="lineNum">     647 </span>            : void
+<span class="lineNum">     648 </span><span class="lineNoCov">          0 : print_filemap(void)</span>
+<span class="lineNum">     649 </span>            : {
+<span class="lineNum">     650 </span><span class="lineNoCov">          0 :     filemap_t  *map = filemap;</span>
+<span class="lineNum">     651 </span>            :     file_entry_t *entry;
+<span class="lineNum">     652 </span>            :     int         i;
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; map-&gt;narray; i++)</span>
+<span class="lineNum">     655 </span>            :     {
+<span class="lineNum">     656 </span><span class="lineNoCov">          0 :         entry = map-&gt;array[i];</span>
+<span class="lineNum">     657 </span><span class="lineNoCov">          0 :         if (entry-&gt;action != FILE_ACTION_NONE ||</span>
+<span class="lineNum">     658 </span><span class="lineNoCov">          0 :             entry-&gt;pagemap.bitmapsize &gt; 0)</span>
+<span class="lineNum">     659 </span>            :         {
+<span class="lineNum">     660 </span><span class="lineNoCov">          0 :             pg_log_debug(&quot;%s (%s)&quot;, entry-&gt;path,</span>
+<span class="lineNum">     661 </span>            :                          action_to_str(entry-&gt;action));
+<span class="lineNum">     662 </span>            : 
+<span class="lineNum">     663 </span><span class="lineNoCov">          0 :             if (entry-&gt;pagemap.bitmapsize &gt; 0)</span>
+<span class="lineNum">     664 </span><span class="lineNoCov">          0 :                 datapagemap_print(&amp;entry-&gt;pagemap);</span>
+<span class="lineNum">     665 </span>            :         }
+<span class="lineNum">     666 </span>            :     }
+<span class="lineNum">     667 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     668 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span>            : /*
+<span class="lineNum">     671 </span>            :  * Does it look like a relation data file?
+<span class="lineNum">     672 </span>            :  *
+<span class="lineNum">     673 </span>            :  * For our purposes, only files belonging to the main fork are considered
+<span class="lineNum">     674 </span>            :  * relation files. Other forks are always copied in toto, because we cannot
+<span class="lineNum">     675 </span>            :  * reliably track changes to them, because WAL only contains block references
+<span class="lineNum">     676 </span>            :  * for the main fork.
+<a name="677"><span class="lineNum">     677 </span>            :  */</a>
+<span class="lineNum">     678 </span>            : static bool
+<span class="lineNum">     679 </span><span class="lineNoCov">          0 : isRelDataFile(const char *path)</span>
+<span class="lineNum">     680 </span>            : {
+<span class="lineNum">     681 </span>            :     RelFileNode rnode;
+<span class="lineNum">     682 </span>            :     unsigned int segNo;
+<span class="lineNum">     683 </span>            :     int         nmatch;
+<span class="lineNum">     684 </span>            :     bool        matched;
+<span class="lineNum">     685 </span>            : 
+<span class="lineNum">     686 </span>            :     /*----
+<span class="lineNum">     687 </span>            :      * Relation data files can be in one of the following directories:
+<span class="lineNum">     688 </span>            :      *
+<span class="lineNum">     689 </span>            :      * global/
+<span class="lineNum">     690 </span>            :      *      shared relations
+<span class="lineNum">     691 </span>            :      *
+<span class="lineNum">     692 </span>            :      * base/&lt;db oid&gt;/
+<span class="lineNum">     693 </span>            :      *      regular relations, default tablespace
+<span class="lineNum">     694 </span>            :      *
+<span class="lineNum">     695 </span>            :      * pg_tblspc/&lt;tblspc oid&gt;/&lt;tblspc version&gt;/
+<span class="lineNum">     696 </span>            :      *      within a non-default tablespace (the name of the directory
+<span class="lineNum">     697 </span>            :      *      depends on version)
+<span class="lineNum">     698 </span>            :      *
+<span class="lineNum">     699 </span>            :      * And the relation data files themselves have a filename like:
+<span class="lineNum">     700 </span>            :      *
+<span class="lineNum">     701 </span>            :      * &lt;oid&gt;.&lt;segment number&gt;
+<span class="lineNum">     702 </span>            :      *
+<span class="lineNum">     703 </span>            :      *----
+<span class="lineNum">     704 </span>            :      */
+<span class="lineNum">     705 </span><span class="lineNoCov">          0 :     rnode.spcNode = InvalidOid;</span>
+<span class="lineNum">     706 </span><span class="lineNoCov">          0 :     rnode.dbNode = InvalidOid;</span>
+<span class="lineNum">     707 </span><span class="lineNoCov">          0 :     rnode.relNode = InvalidOid;</span>
+<span class="lineNum">     708 </span><span class="lineNoCov">          0 :     segNo = 0;</span>
+<span class="lineNum">     709 </span><span class="lineNoCov">          0 :     matched = false;</span>
+<span class="lineNum">     710 </span>            : 
+<span class="lineNum">     711 </span><span class="lineNoCov">          0 :     nmatch = sscanf(path, &quot;global/%u.%u&quot;, &amp;rnode.relNode, &amp;segNo);</span>
+<span class="lineNum">     712 </span><span class="lineNoCov">          0 :     if (nmatch == 1 || nmatch == 2)</span>
+<span class="lineNum">     713 </span>            :     {
+<span class="lineNum">     714 </span><span class="lineNoCov">          0 :         rnode.spcNode = GLOBALTABLESPACE_OID;</span>
+<span class="lineNum">     715 </span><span class="lineNoCov">          0 :         rnode.dbNode = 0;</span>
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :         matched = true;</span>
+<span class="lineNum">     717 </span>            :     }
+<span class="lineNum">     718 </span>            :     else
+<span class="lineNum">     719 </span>            :     {
+<span class="lineNum">     720 </span><span class="lineNoCov">          0 :         nmatch = sscanf(path, &quot;base/%u/%u.%u&quot;,</span>
+<span class="lineNum">     721 </span>            :                         &amp;rnode.dbNode, &amp;rnode.relNode, &amp;segNo);
+<span class="lineNum">     722 </span><span class="lineNoCov">          0 :         if (nmatch == 2 || nmatch == 3)</span>
+<span class="lineNum">     723 </span>            :         {
+<span class="lineNum">     724 </span><span class="lineNoCov">          0 :             rnode.spcNode = DEFAULTTABLESPACE_OID;</span>
+<span class="lineNum">     725 </span><span class="lineNoCov">          0 :             matched = true;</span>
+<span class="lineNum">     726 </span>            :         }
+<span class="lineNum">     727 </span>            :         else
+<span class="lineNum">     728 </span>            :         {
+<span class="lineNum">     729 </span><span class="lineNoCov">          0 :             nmatch = sscanf(path, &quot;pg_tblspc/%u/&quot; TABLESPACE_VERSION_DIRECTORY &quot;/%u/%u.%u&quot;,</span>
+<span class="lineNum">     730 </span>            :                             &amp;rnode.spcNode, &amp;rnode.dbNode, &amp;rnode.relNode,
+<span class="lineNum">     731 </span>            :                             &amp;segNo);
+<span class="lineNum">     732 </span><span class="lineNoCov">          0 :             if (nmatch == 3 || nmatch == 4)</span>
+<span class="lineNum">     733 </span><span class="lineNoCov">          0 :                 matched = true;</span>
+<span class="lineNum">     734 </span>            :         }
+<span class="lineNum">     735 </span>            :     }
+<span class="lineNum">     736 </span>            : 
+<span class="lineNum">     737 </span>            :     /*
+<span class="lineNum">     738 </span>            :      * The sscanf tests above can match files that have extra characters at
+<span class="lineNum">     739 </span>            :      * the end. To eliminate such cases, cross-check that GetRelationPath
+<span class="lineNum">     740 </span>            :      * creates the exact same filename, when passed the RelFileNode
+<span class="lineNum">     741 </span>            :      * information we extracted from the filename.
+<span class="lineNum">     742 </span>            :      */
+<span class="lineNum">     743 </span><span class="lineNoCov">          0 :     if (matched)</span>
+<span class="lineNum">     744 </span>            :     {
+<span class="lineNum">     745 </span><span class="lineNoCov">          0 :         char       *check_path = datasegpath(rnode, MAIN_FORKNUM, segNo);</span>
+<span class="lineNum">     746 </span>            : 
+<span class="lineNum">     747 </span><span class="lineNoCov">          0 :         if (strcmp(check_path, path) != 0)</span>
+<span class="lineNum">     748 </span><span class="lineNoCov">          0 :             matched = false;</span>
+<span class="lineNum">     749 </span>            : 
+<span class="lineNum">     750 </span><span class="lineNoCov">          0 :         pfree(check_path);</span>
+<span class="lineNum">     751 </span>            :     }
+<span class="lineNum">     752 </span>            : 
+<span class="lineNum">     753 </span><span class="lineNoCov">          0 :     return matched;</span>
+<span class="lineNum">     754 </span>            : }
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span>            : /*
+<span class="lineNum">     757 </span>            :  * A helper function to create the path of a relation file and segment.
+<span class="lineNum">     758 </span>            :  *
+<span class="lineNum">     759 </span>            :  * The returned path is palloc'd
+<a name="760"><span class="lineNum">     760 </span>            :  */</a>
+<span class="lineNum">     761 </span>            : static char *
+<span class="lineNum">     762 </span><span class="lineNoCov">          0 : datasegpath(RelFileNode rnode, ForkNumber forknum, BlockNumber segno)</span>
+<span class="lineNum">     763 </span>            : {
+<span class="lineNum">     764 </span>            :     char       *path;
+<span class="lineNum">     765 </span>            :     char       *segpath;
+<span class="lineNum">     766 </span>            : 
+<span class="lineNum">     767 </span><span class="lineNoCov">          0 :     path = relpathperm(rnode, forknum);</span>
+<span class="lineNum">     768 </span><span class="lineNoCov">          0 :     if (segno &gt; 0)</span>
+<span class="lineNum">     769 </span>            :     {
+<span class="lineNum">     770 </span><span class="lineNoCov">          0 :         segpath = psprintf(&quot;%s.%u&quot;, path, segno);</span>
+<span class="lineNum">     771 </span><span class="lineNoCov">          0 :         pfree(path);</span>
+<span class="lineNum">     772 </span><span class="lineNoCov">          0 :         return segpath;</span>
+<span class="lineNum">     773 </span>            :     }
+<span class="lineNum">     774 </span>            :     else
+<span class="lineNum">     775 </span><span class="lineNoCov">          0 :         return path;</span>
+<span class="lineNum">     776 </span>            : }
+<a name="777"><span class="lineNum">     777 </span>            : </a>
+<span class="lineNum">     778 </span>            : static int
+<span class="lineNum">     779 </span><span class="lineNoCov">          0 : path_cmp(const void *a, const void *b)</span>
+<span class="lineNum">     780 </span>            : {
+<span class="lineNum">     781 </span><span class="lineNoCov">          0 :     file_entry_t *fa = *((file_entry_t **) a);</span>
+<span class="lineNum">     782 </span><span class="lineNoCov">          0 :     file_entry_t *fb = *((file_entry_t **) b);</span>
+<span class="lineNum">     783 </span>            : 
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :     return strcmp(fa-&gt;path, fb-&gt;path);</span>
+<span class="lineNum">     785 </span>            : }
+<span class="lineNum">     786 </span>            : 
+<span class="lineNum">     787 </span>            : /*
+<span class="lineNum">     788 </span>            :  * In the final stage, the filemap is sorted so that removals come last.
+<span class="lineNum">     789 </span>            :  * From disk space usage point of view, it would be better to do removals
+<span class="lineNum">     790 </span>            :  * first, but for now, safety first. If a whole directory is deleted, all
+<span class="lineNum">     791 </span>            :  * files and subdirectories inside it need to removed first. On creation,
+<span class="lineNum">     792 </span>            :  * parent directory needs to be created before files and directories inside
+<span class="lineNum">     793 </span>            :  * it. To achieve that, the file_action_t enum is ordered so that we can
+<span class="lineNum">     794 </span>            :  * just sort on that first. Furthermore, sort REMOVE entries in reverse
+<span class="lineNum">     795 </span>            :  * path order, so that &quot;foo/bar&quot; subdirectory is removed before &quot;foo&quot;.
+<a name="796"><span class="lineNum">     796 </span>            :  */</a>
+<span class="lineNum">     797 </span>            : static int
+<span class="lineNum">     798 </span><span class="lineNoCov">          0 : final_filemap_cmp(const void *a, const void *b)</span>
+<span class="lineNum">     799 </span>            : {
+<span class="lineNum">     800 </span><span class="lineNoCov">          0 :     file_entry_t *fa = *((file_entry_t **) a);</span>
+<span class="lineNum">     801 </span><span class="lineNoCov">          0 :     file_entry_t *fb = *((file_entry_t **) b);</span>
+<span class="lineNum">     802 </span>            : 
+<span class="lineNum">     803 </span><span class="lineNoCov">          0 :     if (fa-&gt;action &gt; fb-&gt;action)</span>
+<span class="lineNum">     804 </span><span class="lineNoCov">          0 :         return 1;</span>
+<span class="lineNum">     805 </span><span class="lineNoCov">          0 :     if (fa-&gt;action &lt; fb-&gt;action)</span>
+<span class="lineNum">     806 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     807 </span>            : 
+<span class="lineNum">     808 </span><span class="lineNoCov">          0 :     if (fa-&gt;action == FILE_ACTION_REMOVE)</span>
+<span class="lineNum">     809 </span><span class="lineNoCov">          0 :         return strcmp(fb-&gt;path, fa-&gt;path);</span>
+<span class="lineNum">     810 </span>            :     else
+<span class="lineNum">     811 </span><span class="lineNoCov">          0 :         return strcmp(fa-&gt;path, fb-&gt;path);</span>
+<span class="lineNum">     812 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,485 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/levenshtein.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - levenshtein.c<span style="font-size: 80%;"> (source / <a href="levenshtein.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">76</td>
+            <td class="headerCovTableEntry">103</td>
+            <td class="headerCovTableEntryLo">73.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">1</td>
+            <td class="headerCovTableEntry">2</td>
+            <td class="headerCovTableEntryLo">50.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * levenshtein.c
+<span class="lineNum">       4 </span>            :  *    Levenshtein distance implementation.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Original author:  Joe Conway &lt;mail@joeconway.com&gt;
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  * This file is included by varlena.c twice, to provide matching code for (1)
+<span class="lineNum">       9 </span>            :  * Levenshtein distance with custom costings, and (2) Levenshtein distance with
+<span class="lineNum">      10 </span>            :  * custom costings and a &quot;max&quot; value above which exact distances are not
+<span class="lineNum">      11 </span>            :  * interesting.  Before the inclusion, we rely on the presence of the inline
+<span class="lineNum">      12 </span>            :  * function rest_of_char_same().
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * Written based on a description of the algorithm by Michael Gilleland found
+<span class="lineNum">      15 </span>            :  * at http://www.merriampark.com/ld.htm.  Also looked at levenshtein.c in the
+<span class="lineNum">      16 </span>            :  * PHP 4.0.6 distribution for inspiration.  Configurable penalty costs
+<span class="lineNum">      17 </span>            :  * extension is introduced by Volkan YAZICI &lt;volkan.yazici@gmail.com.
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  * Copyright (c) 2001-2019, PostgreSQL Global Development Group
+<span class="lineNum">      20 </span>            :  *
+<span class="lineNum">      21 </span>            :  * IDENTIFICATION
+<span class="lineNum">      22 </span>            :  *  src/backend/utils/adt/levenshtein.c
+<span class="lineNum">      23 </span>            :  *
+<span class="lineNum">      24 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      25 </span>            :  */
+<span class="lineNum">      26 </span>            : #define MAX_LEVENSHTEIN_STRLEN      255
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : /*
+<span class="lineNum">      29 </span>            :  * Calculates Levenshtein distance metric between supplied strings, which are
+<span class="lineNum">      30 </span>            :  * not necessarily null-terminated.
+<span class="lineNum">      31 </span>            :  *
+<span class="lineNum">      32 </span>            :  * source: source string, of length slen bytes.
+<span class="lineNum">      33 </span>            :  * target: target string, of length tlen bytes.
+<span class="lineNum">      34 </span>            :  * ins_c, del_c, sub_c: costs to charge for character insertion, deletion,
+<span class="lineNum">      35 </span>            :  *      and substitution respectively; (1, 1, 1) costs suffice for common
+<span class="lineNum">      36 </span>            :  *      cases, but your mileage may vary.
+<span class="lineNum">      37 </span>            :  * max_d: if provided and &gt;= 0, maximum distance we care about; see below.
+<span class="lineNum">      38 </span>            :  * trusted: caller is trusted and need not obey MAX_LEVENSHTEIN_STRLEN.
+<span class="lineNum">      39 </span>            :  *
+<span class="lineNum">      40 </span>            :  * One way to compute Levenshtein distance is to incrementally construct
+<span class="lineNum">      41 </span>            :  * an (m+1)x(n+1) matrix where cell (i, j) represents the minimum number
+<span class="lineNum">      42 </span>            :  * of operations required to transform the first i characters of s into
+<span class="lineNum">      43 </span>            :  * the first j characters of t.  The last column of the final row is the
+<span class="lineNum">      44 </span>            :  * answer.
+<span class="lineNum">      45 </span>            :  *
+<span class="lineNum">      46 </span>            :  * We use that algorithm here with some modification.  In lieu of holding
+<span class="lineNum">      47 </span>            :  * the entire array in memory at once, we'll just use two arrays of size
+<span class="lineNum">      48 </span>            :  * m+1 for storing accumulated values. At each step one array represents
+<span class="lineNum">      49 </span>            :  * the &quot;previous&quot; row and one is the &quot;current&quot; row of the notional large
+<span class="lineNum">      50 </span>            :  * array.
+<span class="lineNum">      51 </span>            :  *
+<span class="lineNum">      52 </span>            :  * If max_d &gt;= 0, we only need to provide an accurate answer when that answer
+<span class="lineNum">      53 </span>            :  * is less than or equal to max_d.  From any cell in the matrix, there is
+<span class="lineNum">      54 </span>            :  * theoretical &quot;minimum residual distance&quot; from that cell to the last column
+<span class="lineNum">      55 </span>            :  * of the final row.  This minimum residual distance is zero when the
+<span class="lineNum">      56 </span>            :  * untransformed portions of the strings are of equal length (because we might
+<span class="lineNum">      57 </span>            :  * get lucky and find all the remaining characters matching) and is otherwise
+<span class="lineNum">      58 </span>            :  * based on the minimum number of insertions or deletions needed to make them
+<span class="lineNum">      59 </span>            :  * equal length.  The residual distance grows as we move toward the upper
+<span class="lineNum">      60 </span>            :  * right or lower left corners of the matrix.  When the max_d bound is
+<span class="lineNum">      61 </span>            :  * usefully tight, we can use this property to avoid computing the entirety
+<span class="lineNum">      62 </span>            :  * of each row; instead, we maintain a start_column and stop_column that
+<span class="lineNum">      63 </span>            :  * identify the portion of the matrix close to the diagonal which can still
+<span class="lineNum">      64 </span>            :  * affect the final answer.
+<span class="lineNum">      65 </span>            :  */
+<a name="66"><span class="lineNum">      66 </span>            : int</a>
+<span class="lineNum">      67 </span>            : #ifdef LEVENSHTEIN_LESS_EQUAL
+<span class="lineNum">      68 </span><span class="lineCov">        610 : varstr_levenshtein_less_equal(const char *source, int slen,</span>
+<span class="lineNum">      69 </span>            :                               const char *target, int tlen,
+<span class="lineNum">      70 </span>            :                               int ins_c, int del_c, int sub_c,
+<a name="71"><span class="lineNum">      71 </span>            :                               int max_d, bool trusted)</a>
+<span class="lineNum">      72 </span>            : #else
+<span class="lineNum">      73 </span><span class="lineNoCov">          0 : varstr_levenshtein(const char *source, int slen,</span>
+<span class="lineNum">      74 </span>            :                    const char *target, int tlen,
+<span class="lineNum">      75 </span>            :                    int ins_c, int del_c, int sub_c,
+<span class="lineNum">      76 </span>            :                    bool trusted)
+<span class="lineNum">      77 </span>            : #endif
+<span class="lineNum">      78 </span>            : {
+<span class="lineNum">      79 </span>            :     int         m,
+<span class="lineNum">      80 </span>            :                 n;
+<span class="lineNum">      81 </span>            :     int        *prev;
+<span class="lineNum">      82 </span>            :     int        *curr;
+<span class="lineNum">      83 </span><span class="lineCov">        610 :     int        *s_char_len = NULL;</span>
+<span class="lineNum">      84 </span>            :     int         i,
+<span class="lineNum">      85 </span>            :                 j;
+<span class="lineNum">      86 </span>            :     const char *y;
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            :     /*
+<span class="lineNum">      89 </span>            :      * For varstr_levenshtein_less_equal, we have real variables called
+<span class="lineNum">      90 </span>            :      * start_column and stop_column; otherwise it's just short-hand for 0 and
+<span class="lineNum">      91 </span>            :      * m.
+<span class="lineNum">      92 </span>            :      */
+<span class="lineNum">      93 </span>            : #ifdef LEVENSHTEIN_LESS_EQUAL
+<span class="lineNum">      94 </span>            :     int         start_column,
+<span class="lineNum">      95 </span>            :                 stop_column;
+<span class="lineNum">      96 </span>            : 
+<span class="lineNum">      97 </span>            : #undef START_COLUMN
+<span class="lineNum">      98 </span>            : #undef STOP_COLUMN
+<span class="lineNum">      99 </span>            : #define START_COLUMN start_column
+<span class="lineNum">     100 </span>            : #define STOP_COLUMN stop_column
+<span class="lineNum">     101 </span>            : #else
+<span class="lineNum">     102 </span>            : #undef START_COLUMN
+<span class="lineNum">     103 </span>            : #undef STOP_COLUMN
+<span class="lineNum">     104 </span>            : #define START_COLUMN 0
+<span class="lineNum">     105 </span>            : #define STOP_COLUMN m
+<span class="lineNum">     106 </span>            : #endif
+<span class="lineNum">     107 </span>            : 
+<span class="lineNum">     108 </span>            :     /* Convert string lengths (in bytes) to lengths in characters */
+<span class="lineNum">     109 </span><span class="lineCov">        610 :     m = pg_mbstrlen_with_len(source, slen);</span>
+<span class="lineNum">     110 </span><span class="lineCov">        610 :     n = pg_mbstrlen_with_len(target, tlen);</span>
+<span class="lineNum">     111 </span>            : 
+<span class="lineNum">     112 </span>            :     /*
+<span class="lineNum">     113 </span>            :      * We can transform an empty s into t with n insertions, or a non-empty t
+<span class="lineNum">     114 </span>            :      * into an empty s with m deletions.
+<span class="lineNum">     115 </span>            :      */
+<span class="lineNum">     116 </span><span class="lineCov">        610 :     if (!m)</span>
+<span class="lineNum">     117 </span><span class="lineNoCov">          0 :         return n * ins_c;</span>
+<span class="lineNum">     118 </span><span class="lineCov">        610 :     if (!n)</span>
+<span class="lineNum">     119 </span><span class="lineNoCov">          0 :         return m * del_c;</span>
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span>            :     /*
+<span class="lineNum">     122 </span>            :      * For security concerns, restrict excessive CPU+RAM usage. (This
+<span class="lineNum">     123 </span>            :      * implementation uses O(m) memory and has O(mn) complexity.)  If
+<span class="lineNum">     124 </span>            :      * &quot;trusted&quot; is true, caller is responsible for not making excessive
+<span class="lineNum">     125 </span>            :      * requests, typically by using a small max_d along with strings that are
+<span class="lineNum">     126 </span>            :      * bounded, though not necessarily to MAX_LEVENSHTEIN_STRLEN exactly.
+<span class="lineNum">     127 </span>            :      */
+<span class="lineNum">     128 </span><span class="lineCov">        610 :     if (!trusted &amp;&amp;</span>
+<span class="lineNum">     129 </span><span class="lineNoCov">          0 :         (m &gt; MAX_LEVENSHTEIN_STRLEN ||</span>
+<span class="lineNum">     130 </span>            :          n &gt; MAX_LEVENSHTEIN_STRLEN))
+<span class="lineNum">     131 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     132 </span>            :                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+<span class="lineNum">     133 </span>            :                  errmsg(&quot;levenshtein argument exceeds maximum length of %d characters&quot;,
+<span class="lineNum">     134 </span>            :                         MAX_LEVENSHTEIN_STRLEN)));
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span>            : #ifdef LEVENSHTEIN_LESS_EQUAL
+<span class="lineNum">     137 </span>            :     /* Initialize start and stop columns. */
+<span class="lineNum">     138 </span><span class="lineCov">        610 :     start_column = 0;</span>
+<span class="lineNum">     139 </span><span class="lineCov">        610 :     stop_column = m + 1;</span>
+<span class="lineNum">     140 </span>            : 
+<span class="lineNum">     141 </span>            :     /*
+<span class="lineNum">     142 </span>            :      * If max_d &gt;= 0, determine whether the bound is impossibly tight.  If so,
+<span class="lineNum">     143 </span>            :      * return max_d + 1 immediately.  Otherwise, determine whether it's tight
+<span class="lineNum">     144 </span>            :      * enough to limit the computation we must perform.  If so, figure out
+<span class="lineNum">     145 </span>            :      * initial stop column.
+<span class="lineNum">     146 </span>            :      */
+<span class="lineNum">     147 </span><span class="lineCov">        610 :     if (max_d &gt;= 0)</span>
+<span class="lineNum">     148 </span>            :     {
+<span class="lineNum">     149 </span>            :         int         min_theo_d; /* Theoretical minimum distance. */
+<span class="lineNum">     150 </span>            :         int         max_theo_d; /* Theoretical maximum distance. */
+<span class="lineNum">     151 </span><span class="lineCov">        610 :         int         net_inserts = n - m;</span>
+<span class="lineNum">     152 </span>            : 
+<span class="lineNum">     153 </span><span class="lineCov">        610 :         min_theo_d = net_inserts &lt; 0 ?</span>
+<span class="lineNum">     154 </span><span class="lineCov">        610 :             -net_inserts * del_c : net_inserts * ins_c;</span>
+<span class="lineNum">     155 </span><span class="lineCov">        610 :         if (min_theo_d &gt; max_d)</span>
+<span class="lineNum">     156 </span><span class="lineCov">        212 :             return max_d + 1;</span>
+<span class="lineNum">     157 </span><span class="lineCov">        398 :         if (ins_c + del_c &lt; sub_c)</span>
+<span class="lineNum">     158 </span><span class="lineNoCov">          0 :             sub_c = ins_c + del_c;</span>
+<span class="lineNum">     159 </span><span class="lineCov">        398 :         max_theo_d = min_theo_d + sub_c * Min(m, n);</span>
+<span class="lineNum">     160 </span><span class="lineCov">        398 :         if (max_d &gt;= max_theo_d)</span>
+<span class="lineNum">     161 </span><span class="lineCov">        140 :             max_d = -1;</span>
+<span class="lineNum">     162 </span><span class="lineCov">        258 :         else if (ins_c + del_c &gt; 0)</span>
+<span class="lineNum">     163 </span>            :         {
+<span class="lineNum">     164 </span>            :             /*
+<span class="lineNum">     165 </span>            :              * Figure out how much of the first row of the notional matrix we
+<span class="lineNum">     166 </span>            :              * need to fill in.  If the string is growing, the theoretical
+<span class="lineNum">     167 </span>            :              * minimum distance already incorporates the cost of deleting the
+<span class="lineNum">     168 </span>            :              * number of characters necessary to make the two strings equal in
+<span class="lineNum">     169 </span>            :              * length.  Each additional deletion forces another insertion, so
+<span class="lineNum">     170 </span>            :              * the best-case total cost increases by ins_c + del_c. If the
+<span class="lineNum">     171 </span>            :              * string is shrinking, the minimum theoretical cost assumes no
+<span class="lineNum">     172 </span>            :              * excess deletions; that is, we're starting no further right than
+<span class="lineNum">     173 </span>            :              * column n - m.  If we do start further right, the best-case
+<span class="lineNum">     174 </span>            :              * total cost increases by ins_c + del_c for each move right.
+<span class="lineNum">     175 </span>            :              */
+<span class="lineNum">     176 </span><span class="lineCov">        258 :             int         slack_d = max_d - min_theo_d;</span>
+<span class="lineNum">     177 </span><span class="lineCov">        258 :             int         best_column = net_inserts &lt; 0 ? -net_inserts : 0;</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span><span class="lineCov">        258 :             stop_column = best_column + (slack_d / (ins_c + del_c)) + 1;</span>
+<span class="lineNum">     180 </span><span class="lineCov">        258 :             if (stop_column &gt; m)</span>
+<span class="lineNum">     181 </span><span class="lineNoCov">          0 :                 stop_column = m + 1;</span>
+<span class="lineNum">     182 </span>            :         }
+<span class="lineNum">     183 </span>            :     }
+<span class="lineNum">     184 </span>            : #endif
+<span class="lineNum">     185 </span>            : 
+<span class="lineNum">     186 </span>            :     /*
+<span class="lineNum">     187 </span>            :      * In order to avoid calling pg_mblen() repeatedly on each character in s,
+<span class="lineNum">     188 </span>            :      * we cache all the lengths before starting the main loop -- but if all
+<span class="lineNum">     189 </span>            :      * the characters in both strings are single byte, then we skip this and
+<span class="lineNum">     190 </span>            :      * use a fast-path in the main loop.  If only one string contains
+<span class="lineNum">     191 </span>            :      * multi-byte characters, we still build the array, so that the fast-path
+<span class="lineNum">     192 </span>            :      * needn't deal with the case where the array hasn't been initialized.
+<span class="lineNum">     193 </span>            :      */
+<span class="lineNum">     194 </span><span class="lineCov">        398 :     if (m != slen || n != tlen)</span>
+<span class="lineNum">     195 </span>            :     {
+<span class="lineNum">     196 </span>            :         int         i;
+<span class="lineNum">     197 </span><span class="lineNoCov">          0 :         const char *cp = source;</span>
+<span class="lineNum">     198 </span>            : 
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 :         s_char_len = (int *) palloc((m + 1) * sizeof(int));</span>
+<span class="lineNum">     200 </span><span class="lineNoCov">          0 :         for (i = 0; i &lt; m; ++i)</span>
+<span class="lineNum">     201 </span>            :         {
+<span class="lineNum">     202 </span><span class="lineNoCov">          0 :             s_char_len[i] = pg_mblen(cp);</span>
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :             cp += s_char_len[i];</span>
+<span class="lineNum">     204 </span>            :         }
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 :         s_char_len[i] = 0;</span>
+<span class="lineNum">     206 </span>            :     }
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span>            :     /* One more cell for initialization column and row. */
+<span class="lineNum">     209 </span><span class="lineCov">        398 :     ++m;</span>
+<span class="lineNum">     210 </span><span class="lineCov">        398 :     ++n;</span>
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span>            :     /* Previous and current rows of notional array. */
+<span class="lineNum">     213 </span><span class="lineCov">        398 :     prev = (int *) palloc(2 * m * sizeof(int));</span>
+<span class="lineNum">     214 </span><span class="lineCov">        398 :     curr = prev + m;</span>
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span>            :     /*
+<span class="lineNum">     217 </span>            :      * To transform the first i characters of s into the first 0 characters of
+<span class="lineNum">     218 </span>            :      * t, we must perform i deletions.
+<span class="lineNum">     219 </span>            :      */
+<span class="lineNum">     220 </span><span class="lineCov">       1458 :     for (i = START_COLUMN; i &lt; STOP_COLUMN; i++)</span>
+<span class="lineNum">     221 </span><span class="lineCov">       1060 :         prev[i] = i * del_c;</span>
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span>            :     /* Loop through rows of the notional array */
+<span class="lineNum">     224 </span><span class="lineCov">       1482 :     for (y = target, j = 1; j &lt; n; j++)</span>
+<span class="lineNum">     225 </span>            :     {
+<span class="lineNum">     226 </span>            :         int        *temp;
+<span class="lineNum">     227 </span><span class="lineCov">       1296 :         const char *x = source;</span>
+<span class="lineNum">     228 </span><span class="lineCov">       1296 :         int         y_char_len = n != tlen + 1 ? pg_mblen(y) : 1;</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span>            : #ifdef LEVENSHTEIN_LESS_EQUAL
+<span class="lineNum">     231 </span>            : 
+<span class="lineNum">     232 </span>            :         /*
+<span class="lineNum">     233 </span>            :          * In the best case, values percolate down the diagonal unchanged, so
+<span class="lineNum">     234 </span>            :          * we must increment stop_column unless it's already on the right end
+<span class="lineNum">     235 </span>            :          * of the array.  The inner loop will read prev[stop_column], so we
+<span class="lineNum">     236 </span>            :          * have to initialize it even though it shouldn't affect the result.
+<span class="lineNum">     237 </span>            :          */
+<span class="lineNum">     238 </span><span class="lineCov">       1296 :         if (stop_column &lt; m)</span>
+<span class="lineNum">     239 </span>            :         {
+<span class="lineNum">     240 </span><span class="lineCov">       1016 :             prev[stop_column] = max_d + 1;</span>
+<span class="lineNum">     241 </span><span class="lineCov">       1016 :             ++stop_column;</span>
+<span class="lineNum">     242 </span>            :         }
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            :         /*
+<span class="lineNum">     245 </span>            :          * The main loop fills in curr, but curr[0] needs a special case: to
+<span class="lineNum">     246 </span>            :          * transform the first 0 characters of s into the first j characters
+<span class="lineNum">     247 </span>            :          * of t, we must perform j insertions.  However, if start_column &gt; 0,
+<span class="lineNum">     248 </span>            :          * this special case does not apply.
+<span class="lineNum">     249 </span>            :          */
+<span class="lineNum">     250 </span><span class="lineCov">       1296 :         if (start_column == 0)</span>
+<span class="lineNum">     251 </span>            :         {
+<span class="lineNum">     252 </span><span class="lineCov">        800 :             curr[0] = j * ins_c;</span>
+<span class="lineNum">     253 </span><span class="lineCov">        800 :             i = 1;</span>
+<span class="lineNum">     254 </span>            :         }
+<span class="lineNum">     255 </span>            :         else
+<span class="lineNum">     256 </span><span class="lineCov">        496 :             i = start_column;</span>
+<span class="lineNum">     257 </span>            : #else
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :         curr[0] = j * ins_c;</span>
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :         i = 1;</span>
+<span class="lineNum">     260 </span>            : #endif
+<span class="lineNum">     261 </span>            : 
+<span class="lineNum">     262 </span>            :         /*
+<span class="lineNum">     263 </span>            :          * This inner loop is critical to performance, so we include a
+<span class="lineNum">     264 </span>            :          * fast-path to handle the (fairly common) case where no multibyte
+<span class="lineNum">     265 </span>            :          * characters are in the mix.  The fast-path is entitled to assume
+<span class="lineNum">     266 </span>            :          * that if s_char_len is not initialized then BOTH strings contain
+<span class="lineNum">     267 </span>            :          * only single-byte characters.
+<span class="lineNum">     268 </span>            :          */
+<span class="lineNum">     269 </span><span class="lineCov">       1296 :         if (s_char_len != NULL)</span>
+<span class="lineNum">     270 </span>            :         {
+<span class="lineNum">     271 </span><span class="lineNoCov">          0 :             for (; i &lt; STOP_COLUMN; i++)</span>
+<span class="lineNum">     272 </span>            :             {
+<span class="lineNum">     273 </span>            :                 int         ins;
+<span class="lineNum">     274 </span>            :                 int         del;
+<span class="lineNum">     275 </span>            :                 int         sub;
+<span class="lineNum">     276 </span><span class="lineNoCov">          0 :                 int         x_char_len = s_char_len[i - 1];</span>
+<span class="lineNum">     277 </span>            : 
+<span class="lineNum">     278 </span>            :                 /*
+<span class="lineNum">     279 </span>            :                  * Calculate costs for insertion, deletion, and substitution.
+<span class="lineNum">     280 </span>            :                  *
+<span class="lineNum">     281 </span>            :                  * When calculating cost for substitution, we compare the last
+<span class="lineNum">     282 </span>            :                  * character of each possibly-multibyte character first,
+<span class="lineNum">     283 </span>            :                  * because that's enough to rule out most mis-matches.  If we
+<span class="lineNum">     284 </span>            :                  * get past that test, then we compare the lengths and the
+<span class="lineNum">     285 </span>            :                  * remaining bytes.
+<span class="lineNum">     286 </span>            :                  */
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :                 ins = prev[i] + ins_c;</span>
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :                 del = curr[i - 1] + del_c;</span>
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :                 if (x[x_char_len - 1] == y[y_char_len - 1]</span>
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :                     &amp;&amp; x_char_len == y_char_len &amp;&amp;</span>
+<span class="lineNum">     291 </span><span class="lineNoCov">          0 :                     (x_char_len == 1 || rest_of_char_same(x, y, x_char_len)))</span>
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :                     sub = prev[i - 1];</span>
+<span class="lineNum">     293 </span>            :                 else
+<span class="lineNum">     294 </span><span class="lineNoCov">          0 :                     sub = prev[i - 1] + sub_c;</span>
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span>            :                 /* Take the one with minimum cost. */
+<span class="lineNum">     297 </span><span class="lineNoCov">          0 :                 curr[i] = Min(ins, del);</span>
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :                 curr[i] = Min(curr[i], sub);</span>
+<span class="lineNum">     299 </span>            : 
+<span class="lineNum">     300 </span>            :                 /* Point to next character. */
+<span class="lineNum">     301 </span><span class="lineNoCov">          0 :                 x += x_char_len;</span>
+<span class="lineNum">     302 </span>            :             }
+<span class="lineNum">     303 </span>            :         }
+<span class="lineNum">     304 </span>            :         else
+<span class="lineNum">     305 </span>            :         {
+<span class="lineNum">     306 </span><span class="lineCov">       5056 :             for (; i &lt; STOP_COLUMN; i++)</span>
+<span class="lineNum">     307 </span>            :             {
+<span class="lineNum">     308 </span>            :                 int         ins;
+<span class="lineNum">     309 </span>            :                 int         del;
+<span class="lineNum">     310 </span>            :                 int         sub;
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span>            :                 /* Calculate costs for insertion, deletion, and substitution. */
+<span class="lineNum">     313 </span><span class="lineCov">       3760 :                 ins = prev[i] + ins_c;</span>
+<span class="lineNum">     314 </span><span class="lineCov">       3760 :                 del = curr[i - 1] + del_c;</span>
+<span class="lineNum">     315 </span><span class="lineCov">       3760 :                 sub = prev[i - 1] + ((*x == *y) ? 0 : sub_c);</span>
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            :                 /* Take the one with minimum cost. */
+<span class="lineNum">     318 </span><span class="lineCov">       3760 :                 curr[i] = Min(ins, del);</span>
+<span class="lineNum">     319 </span><span class="lineCov">       3760 :                 curr[i] = Min(curr[i], sub);</span>
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span>            :                 /* Point to next character. */
+<span class="lineNum">     322 </span><span class="lineCov">       3760 :                 x++;</span>
+<span class="lineNum">     323 </span>            :             }
+<span class="lineNum">     324 </span>            :         }
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span>            :         /* Swap current row with previous row. */
+<span class="lineNum">     327 </span><span class="lineCov">       1296 :         temp = curr;</span>
+<span class="lineNum">     328 </span><span class="lineCov">       1296 :         curr = prev;</span>
+<span class="lineNum">     329 </span><span class="lineCov">       1296 :         prev = temp;</span>
+<span class="lineNum">     330 </span>            : 
+<span class="lineNum">     331 </span>            :         /* Point to next character. */
+<span class="lineNum">     332 </span><span class="lineCov">       1296 :         y += y_char_len;</span>
+<span class="lineNum">     333 </span>            : 
+<span class="lineNum">     334 </span>            : #ifdef LEVENSHTEIN_LESS_EQUAL
+<span class="lineNum">     335 </span>            : 
+<span class="lineNum">     336 </span>            :         /*
+<span class="lineNum">     337 </span>            :          * This chunk of code represents a significant performance hit if used
+<span class="lineNum">     338 </span>            :          * in the case where there is no max_d bound.  This is probably not
+<span class="lineNum">     339 </span>            :          * because the max_d &gt;= 0 test itself is expensive, but rather because
+<span class="lineNum">     340 </span>            :          * the possibility of needing to execute this code prevents tight
+<span class="lineNum">     341 </span>            :          * optimization of the loop as a whole.
+<span class="lineNum">     342 </span>            :          */
+<span class="lineNum">     343 </span><span class="lineCov">       1296 :         if (max_d &gt;= 0)</span>
+<span class="lineNum">     344 </span>            :         {
+<span class="lineNum">     345 </span>            :             /*
+<span class="lineNum">     346 </span>            :              * The &quot;zero point&quot; is the column of the current row where the
+<span class="lineNum">     347 </span>            :              * remaining portions of the strings are of equal length.  There
+<span class="lineNum">     348 </span>            :              * are (n - 1) characters in the target string, of which j have
+<span class="lineNum">     349 </span>            :              * been transformed.  There are (m - 1) characters in the source
+<span class="lineNum">     350 </span>            :              * string, so we want to find the value for zp where (n - 1) - j =
+<span class="lineNum">     351 </span>            :              * (m - 1) - zp.
+<span class="lineNum">     352 </span>            :              */
+<span class="lineNum">     353 </span><span class="lineCov">       1060 :             int         zp = j - (n - m);</span>
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span>            :             /* Check whether the stop column can slide left. */
+<span class="lineNum">     356 </span><span class="lineCov">       3488 :             while (stop_column &gt; 0)</span>
+<span class="lineNum">     357 </span>            :             {
+<span class="lineNum">     358 </span><span class="lineCov">       2216 :                 int         ii = stop_column - 1;</span>
+<span class="lineNum">     359 </span><span class="lineCov">       2216 :                 int         net_inserts = ii - zp;</span>
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span><span class="lineCov">       3752 :                 if (prev[ii] + (net_inserts &gt; 0 ? net_inserts * ins_c :</span>
+<span class="lineNum">     362 </span><span class="lineCov">       1536 :                                 -net_inserts * del_c) &lt;= max_d)</span>
+<span class="lineNum">     363 </span><span class="lineCov">        848 :                     break;</span>
+<span class="lineNum">     364 </span><span class="lineCov">       1368 :                 stop_column--;</span>
+<span class="lineNum">     365 </span>            :             }
+<span class="lineNum">     366 </span>            : 
+<span class="lineNum">     367 </span>            :             /* Check whether the start column can slide right. */
+<span class="lineNum">     368 </span><span class="lineCov">       2842 :             while (start_column &lt; stop_column)</span>
+<span class="lineNum">     369 </span>            :             {
+<span class="lineNum">     370 </span><span class="lineCov">       1570 :                 int         net_inserts = start_column - zp;</span>
+<span class="lineNum">     371 </span>            : 
+<span class="lineNum">     372 </span><span class="lineCov">       3140 :                 if (prev[start_column] +</span>
+<span class="lineNum">     373 </span><span class="lineCov">       3086 :                     (net_inserts &gt; 0 ? net_inserts * ins_c :</span>
+<span class="lineNum">     374 </span><span class="lineCov">       1516 :                      -net_inserts * del_c) &lt;= max_d)</span>
+<span class="lineNum">     375 </span><span class="lineCov">        848 :                     break;</span>
+<span class="lineNum">     376 </span>            : 
+<span class="lineNum">     377 </span>            :                 /*
+<span class="lineNum">     378 </span>            :                  * We'll never again update these values, so we must make sure
+<span class="lineNum">     379 </span>            :                  * there's nothing here that could confuse any future
+<span class="lineNum">     380 </span>            :                  * iteration of the outer loop.
+<span class="lineNum">     381 </span>            :                  */
+<span class="lineNum">     382 </span><span class="lineCov">        722 :                 prev[start_column] = max_d + 1;</span>
+<span class="lineNum">     383 </span><span class="lineCov">        722 :                 curr[start_column] = max_d + 1;</span>
+<span class="lineNum">     384 </span><span class="lineCov">        722 :                 if (start_column != 0)</span>
+<span class="lineNum">     385 </span><span class="lineCov">        502 :                     source += (s_char_len != NULL) ? s_char_len[start_column - 1] : 1;</span>
+<span class="lineNum">     386 </span><span class="lineCov">        722 :                 start_column++;</span>
+<span class="lineNum">     387 </span>            :             }
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span>            :             /* If they cross, we're going to exceed the bound. */
+<span class="lineNum">     390 </span><span class="lineCov">       1060 :             if (start_column &gt;= stop_column)</span>
+<span class="lineNum">     391 </span><span class="lineCov">        212 :                 return max_d + 1;</span>
+<span class="lineNum">     392 </span>            :         }
+<span class="lineNum">     393 </span>            : #endif
+<span class="lineNum">     394 </span>            :     }
+<span class="lineNum">     395 </span>            : 
+<span class="lineNum">     396 </span>            :     /*
+<span class="lineNum">     397 </span>            :      * Because the final value was swapped from the previous row to the
+<span class="lineNum">     398 </span>            :      * current row, that's where we'll find it.
+<span class="lineNum">     399 </span>            :      */
+<span class="lineNum">     400 </span><span class="lineCov">        186 :     return prev[m - 1];</span>
+<span class="lineNum">     401 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

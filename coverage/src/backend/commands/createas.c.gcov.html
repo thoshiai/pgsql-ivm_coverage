@@ -1,0 +1,1361 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/commands/createas.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/commands</a> - createas.c<span style="font-size: 80%;"> (source / <a href="createas.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">449</td>
+            <td class="headerCovTableEntry">464</td>
+            <td class="headerCovTableEntryHi">96.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntry">13</td>
+            <td class="headerCovTableEntryHi">92.3 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * createas.c
+<span class="lineNum">       4 </span>            :  *    Execution of CREATE TABLE ... AS, a/k/a SELECT INTO.
+<span class="lineNum">       5 </span>            :  *    Since CREATE MATERIALIZED VIEW shares syntax and most behaviors,
+<span class="lineNum">       6 </span>            :  *    we implement that here, too.
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  * We implement this by diverting the query's normal output to a
+<span class="lineNum">       9 </span>            :  * specialized DestReceiver type.
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * Formerly, CTAS was implemented as a variant of SELECT, which led
+<span class="lineNum">      12 </span>            :  * to assorted legacy behaviors that we still try to preserve, notably that
+<span class="lineNum">      13 </span>            :  * we must return a tuples-processed count in the completionTag.  (We no
+<span class="lineNum">      14 </span>            :  * longer do that for CTAS ... WITH NO DATA, however.)
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      17 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  *
+<span class="lineNum">      20 </span>            :  * IDENTIFICATION
+<span class="lineNum">      21 </span>            :  *    src/backend/commands/createas.c
+<span class="lineNum">      22 </span>            :  *
+<span class="lineNum">      23 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      24 </span>            :  */
+<span class="lineNum">      25 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : #include &quot;access/heapam.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;access/reloptions.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;access/sysattr.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;access/tableam.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;access/xact.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;access/xlog.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;catalog/namespace.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;catalog/toasting.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;commands/createas.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;commands/matview.h&quot;
+<span class="lineNum">      38 </span>            : #include &quot;commands/prepare.h&quot;
+<span class="lineNum">      39 </span>            : #include &quot;commands/tablecmds.h&quot;
+<span class="lineNum">      40 </span>            : #include &quot;commands/view.h&quot;
+<span class="lineNum">      41 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      42 </span>            : #include &quot;nodes/makefuncs.h&quot;
+<span class="lineNum">      43 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      44 </span>            : #include &quot;parser/parse_clause.h&quot;
+<span class="lineNum">      45 </span>            : #include &quot;rewrite/rewriteHandler.h&quot;
+<span class="lineNum">      46 </span>            : #include &quot;storage/smgr.h&quot;
+<span class="lineNum">      47 </span>            : #include &quot;tcop/tcopprot.h&quot;
+<span class="lineNum">      48 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      49 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      50 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      51 </span>            : #include &quot;utils/rls.h&quot;
+<span class="lineNum">      52 </span>            : #include &quot;utils/snapmgr.h&quot;
+<span class="lineNum">      53 </span>            : #include &quot;catalog/pg_trigger.h&quot;
+<span class="lineNum">      54 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      55 </span>            : #include &quot;commands/trigger.h&quot;
+<span class="lineNum">      56 </span>            : #include &quot;parser/parser.h&quot;
+<span class="lineNum">      57 </span>            : #include &quot;parser/parsetree.h&quot;
+<span class="lineNum">      58 </span>            : #include &quot;parser/parse_func.h&quot;
+<span class="lineNum">      59 </span>            : #include &quot;parser/parse_type.h&quot;
+<span class="lineNum">      60 </span>            : #include &quot;parser/parse_relation.h&quot;
+<span class="lineNum">      61 </span>            : #include &quot;nodes/print.h&quot;
+<span class="lineNum">      62 </span>            : #include &quot;nodes/primnodes.h&quot;
+<span class="lineNum">      63 </span>            : #include &quot;optimizer/optimizer.h&quot;
+<span class="lineNum">      64 </span>            : #include &quot;commands/defrem.h&quot;
+<span class="lineNum">      65 </span>            : #include &quot;utils/syscache.h&quot;
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : #include &quot;optimizer/clauses.h&quot;
+<span class="lineNum">      68 </span>            : 
+<span class="lineNum">      69 </span>            : typedef struct
+<span class="lineNum">      70 </span>            : {
+<span class="lineNum">      71 </span>            :     DestReceiver pub;           /* publicly-known function pointers */
+<span class="lineNum">      72 </span>            :     IntoClause *into;           /* target relation specification */
+<span class="lineNum">      73 </span>            :     /* These fields are filled by intorel_startup: */
+<span class="lineNum">      74 </span>            :     Relation    rel;            /* relation to write to */
+<span class="lineNum">      75 </span>            :     ObjectAddress reladdr;      /* address of rel, for ExecCreateTableAs */
+<span class="lineNum">      76 </span>            :     CommandId   output_cid;     /* cmin to insert in output tuples */
+<span class="lineNum">      77 </span>            :     int         ti_options;     /* table_tuple_insert performance options */
+<span class="lineNum">      78 </span>            :     BulkInsertState bistate;    /* bulk insert state */
+<span class="lineNum">      79 </span>            : } DR_intorel;
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span>            : typedef struct
+<span class="lineNum">      82 </span>            : {
+<span class="lineNum">      83 </span>            :     bool    has_outerjoin;
+<span class="lineNum">      84 </span>            :     bool    has_subquery;
+<span class="lineNum">      85 </span>            :     bool    has_agg;
+<span class="lineNum">      86 </span>            :     List    *join_quals;
+<span class="lineNum">      87 </span>            : } check_ivm_restriction_context;
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span>            : /* utility functions for CTAS definition creation */
+<span class="lineNum">      90 </span>            : static ObjectAddress create_ctas_internal(List *attrList, IntoClause *into);
+<span class="lineNum">      91 </span>            : static ObjectAddress create_ctas_nodata(List *tlist, IntoClause *into);
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            : /* DestReceiver routines for collecting data */
+<span class="lineNum">      94 </span>            : static void intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo);
+<span class="lineNum">      95 </span>            : static bool intorel_receive(TupleTableSlot *slot, DestReceiver *self);
+<span class="lineNum">      96 </span>            : static void intorel_shutdown(DestReceiver *self);
+<span class="lineNum">      97 </span>            : static void intorel_destroy(DestReceiver *self);
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            : static void CreateIvmTrigger(Oid relOid, Oid viewOid, char *matviewname, int16 type, int16 timing);
+<span class="lineNum">     100 </span>            : static void CreateIvmTriggersOnBaseTables(Query *qry, Node *jtnode, Oid matviewOid, char* matviewname, Relids *relids);
+<span class="lineNum">     101 </span>            : static void check_ivm_restriction_walker(Node *node, check_ivm_restriction_context *ctx, int depth);
+<span class="lineNum">     102 </span>            : static bool is_equijoin_condition(OpExpr *op);
+<span class="lineNum">     103 </span>            : 
+<span class="lineNum">     104 </span>            : /*
+<span class="lineNum">     105 </span>            :  * create_ctas_internal
+<span class="lineNum">     106 </span>            :  *
+<span class="lineNum">     107 </span>            :  * Internal utility used for the creation of the definition of a relation
+<span class="lineNum">     108 </span>            :  * created via CREATE TABLE AS or a materialized view.  Caller needs to
+<span class="lineNum">     109 </span>            :  * provide a list of attributes (ColumnDef nodes).
+<a name="110"><span class="lineNum">     110 </span>            :  */</a>
+<span class="lineNum">     111 </span>            : static ObjectAddress
+<span class="lineNum">     112 </span><span class="lineCov">        370 : create_ctas_internal(List *attrList, IntoClause *into)</span>
+<span class="lineNum">     113 </span>            : {
+<span class="lineNum">     114 </span><span class="lineCov">        370 :     CreateStmt *create = makeNode(CreateStmt);</span>
+<span class="lineNum">     115 </span>            :     bool        is_matview;
+<span class="lineNum">     116 </span>            :     char        relkind;
+<span class="lineNum">     117 </span>            :     Datum       toast_options;
+<span class="lineNum">     118 </span>            :     static char *validnsps[] = HEAP_RELOPT_NAMESPACES;
+<span class="lineNum">     119 </span>            :     ObjectAddress intoRelationAddr;
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span>            :     /* This code supports both CREATE TABLE AS and CREATE MATERIALIZED VIEW */
+<span class="lineNum">     122 </span><span class="lineCov">        370 :     is_matview = (into-&gt;viewQuery != NULL);</span>
+<span class="lineNum">     123 </span><span class="lineCov">        370 :     relkind = is_matview ? RELKIND_MATVIEW : RELKIND_RELATION;</span>
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            :     /*
+<span class="lineNum">     126 </span>            :      * Create the target relation by faking up a CREATE TABLE parsetree and
+<span class="lineNum">     127 </span>            :      * passing it to DefineRelation.
+<span class="lineNum">     128 </span>            :      */
+<span class="lineNum">     129 </span><span class="lineCov">        370 :     create-&gt;relation = into-&gt;rel;</span>
+<span class="lineNum">     130 </span><span class="lineCov">        370 :     create-&gt;tableElts = attrList;</span>
+<span class="lineNum">     131 </span><span class="lineCov">        370 :     create-&gt;inhRelations = NIL;</span>
+<span class="lineNum">     132 </span><span class="lineCov">        370 :     create-&gt;ofTypename = NULL;</span>
+<span class="lineNum">     133 </span><span class="lineCov">        370 :     create-&gt;constraints = NIL;</span>
+<span class="lineNum">     134 </span><span class="lineCov">        370 :     create-&gt;options = into-&gt;options;</span>
+<span class="lineNum">     135 </span><span class="lineCov">        370 :     create-&gt;oncommit = into-&gt;onCommit;</span>
+<span class="lineNum">     136 </span><span class="lineCov">        370 :     create-&gt;tablespacename = into-&gt;tableSpaceName;</span>
+<span class="lineNum">     137 </span><span class="lineCov">        370 :     create-&gt;if_not_exists = false;</span>
+<span class="lineNum">     138 </span>            :     /* Using Materialized view only */
+<span class="lineNum">     139 </span><span class="lineCov">        370 :     create-&gt;ivm = into-&gt;ivm;</span>
+<span class="lineNum">     140 </span><span class="lineCov">        370 :     create-&gt;accessMethod = into-&gt;accessMethod;</span>
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span>            :     /*
+<span class="lineNum">     143 </span>            :      * Create the relation.  (This will error out if there's an existing view,
+<span class="lineNum">     144 </span>            :      * so we don't need more code to complain if &quot;replace&quot; is false.)
+<span class="lineNum">     145 </span>            :      */
+<span class="lineNum">     146 </span><span class="lineCov">        370 :     intoRelationAddr = DefineRelation(create, relkind, InvalidOid, NULL, NULL);</span>
+<span class="lineNum">     147 </span>            : 
+<span class="lineNum">     148 </span>            :     /*
+<span class="lineNum">     149 </span>            :      * If necessary, create a TOAST table for the target table.  Note that
+<span class="lineNum">     150 </span>            :      * NewRelationCreateToastTable ends with CommandCounterIncrement(), so
+<span class="lineNum">     151 </span>            :      * that the TOAST table will be visible for insertion.
+<span class="lineNum">     152 </span>            :      */
+<span class="lineNum">     153 </span><span class="lineCov">        358 :     CommandCounterIncrement();</span>
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            :     /* parse and validate reloptions for the toast table */
+<span class="lineNum">     156 </span><span class="lineCov">        358 :     toast_options = transformRelOptions((Datum) 0,</span>
+<span class="lineNum">     157 </span>            :                                         create-&gt;options,
+<span class="lineNum">     158 </span>            :                                         &quot;toast&quot;,
+<span class="lineNum">     159 </span>            :                                         validnsps,
+<span class="lineNum">     160 </span>            :                                         true, false);
+<span class="lineNum">     161 </span>            : 
+<span class="lineNum">     162 </span><span class="lineCov">        358 :     (void) heap_reloptions(RELKIND_TOASTVALUE, toast_options, true);</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span><span class="lineCov">        358 :     NewRelationCreateToastTable(intoRelationAddr.objectId, toast_options);</span>
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span>            :     /* Create the &quot;view&quot; part of a materialized view. */
+<span class="lineNum">     167 </span><span class="lineCov">        358 :     if (is_matview)</span>
+<span class="lineNum">     168 </span>            :     {
+<span class="lineNum">     169 </span>            :         /* StoreViewQuery scribbles on tree, so make a copy */
+<span class="lineNum">     170 </span><span class="lineCov">        136 :         Query      *query = (Query *) copyObject(into-&gt;viewQuery);</span>
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span><span class="lineCov">        136 :         StoreViewQuery(intoRelationAddr.objectId, query, false);</span>
+<span class="lineNum">     173 </span><span class="lineCov">        136 :         CommandCounterIncrement();</span>
+<span class="lineNum">     174 </span>            :     }
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span><span class="lineCov">        358 :     return intoRelationAddr;</span>
+<span class="lineNum">     177 </span>            : }
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span>            : /*
+<span class="lineNum">     181 </span>            :  * create_ctas_nodata
+<span class="lineNum">     182 </span>            :  *
+<span class="lineNum">     183 </span>            :  * Create CTAS or materialized view when WITH NO DATA is used, starting from
+<span class="lineNum">     184 </span>            :  * the targetlist of the SELECT or view definition.
+<a name="185"><span class="lineNum">     185 </span>            :  */</a>
+<span class="lineNum">     186 </span>            : static ObjectAddress
+<span class="lineNum">     187 </span><span class="lineCov">         22 : create_ctas_nodata(List *tlist, IntoClause *into)</span>
+<span class="lineNum">     188 </span>            : {
+<span class="lineNum">     189 </span>            :     List       *attrList;
+<span class="lineNum">     190 </span>            :     ListCell   *t,
+<span class="lineNum">     191 </span>            :                *lc;
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            :     /*
+<span class="lineNum">     194 </span>            :      * Build list of ColumnDefs from non-junk elements of the tlist.  If a
+<span class="lineNum">     195 </span>            :      * column name list was specified in CREATE TABLE AS, override the column
+<span class="lineNum">     196 </span>            :      * names in the query.  (Too few column names are OK, too many are not.)
+<span class="lineNum">     197 </span>            :      */
+<span class="lineNum">     198 </span><span class="lineCov">         22 :     attrList = NIL;</span>
+<span class="lineNum">     199 </span><span class="lineCov">         22 :     lc = list_head(into-&gt;colNames);</span>
+<span class="lineNum">     200 </span><span class="lineCov">         58 :     foreach(t, tlist)</span>
+<span class="lineNum">     201 </span>            :     {
+<span class="lineNum">     202 </span><span class="lineCov">         36 :         TargetEntry *tle = (TargetEntry *) lfirst(t);</span>
+<span class="lineNum">     203 </span>            : 
+<span class="lineNum">     204 </span><span class="lineCov">         36 :         if (!tle-&gt;resjunk)</span>
+<span class="lineNum">     205 </span>            :         {
+<span class="lineNum">     206 </span>            :             ColumnDef  *col;
+<span class="lineNum">     207 </span>            :             char       *colname;
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineCov">         36 :             if (lc)</span>
+<span class="lineNum">     210 </span>            :             {
+<span class="lineNum">     211 </span><span class="lineCov">         20 :                 colname = strVal(lfirst(lc));</span>
+<span class="lineNum">     212 </span><span class="lineCov">         20 :                 lc = lnext(into-&gt;colNames, lc);</span>
+<span class="lineNum">     213 </span>            :             }
+<span class="lineNum">     214 </span>            :             else
+<span class="lineNum">     215 </span><span class="lineCov">         16 :                 colname = tle-&gt;resname;</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span><span class="lineCov">        108 :             col = makeColumnDef(colname,</span>
+<span class="lineNum">     218 </span><span class="lineCov">         36 :                                 exprType((Node *) tle-&gt;expr),</span>
+<span class="lineNum">     219 </span><span class="lineCov">         36 :                                 exprTypmod((Node *) tle-&gt;expr),</span>
+<span class="lineNum">     220 </span><span class="lineCov">         36 :                                 exprCollation((Node *) tle-&gt;expr));</span>
+<span class="lineNum">     221 </span>            : 
+<span class="lineNum">     222 </span>            :             /*
+<span class="lineNum">     223 </span>            :              * It's possible that the column is of a collatable type but the
+<span class="lineNum">     224 </span>            :              * collation could not be resolved, so double-check.  (We must
+<span class="lineNum">     225 </span>            :              * check this here because DefineRelation would adopt the type's
+<span class="lineNum">     226 </span>            :              * default collation rather than complaining.)
+<span class="lineNum">     227 </span>            :              */
+<span class="lineNum">     228 </span><span class="lineCov">         70 :             if (!OidIsValid(col-&gt;collOid) &amp;&amp;</span>
+<span class="lineNum">     229 </span><span class="lineCov">         34 :                 type_is_collatable(col-&gt;typeName-&gt;typeOid))</span>
+<span class="lineNum">     230 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     231 </span>            :                         (errcode(ERRCODE_INDETERMINATE_COLLATION),
+<span class="lineNum">     232 </span>            :                          errmsg(&quot;no collation was derived for column \&quot;%s\&quot; with collatable type %s&quot;,
+<span class="lineNum">     233 </span>            :                                 col-&gt;colname,
+<span class="lineNum">     234 </span>            :                                 format_type_be(col-&gt;typeName-&gt;typeOid)),
+<span class="lineNum">     235 </span>            :                          errhint(&quot;Use the COLLATE clause to set the collation explicitly.&quot;)));
+<span class="lineNum">     236 </span>            : 
+<span class="lineNum">     237 </span><span class="lineCov">         36 :             attrList = lappend(attrList, col);</span>
+<span class="lineNum">     238 </span>            :         }
+<span class="lineNum">     239 </span>            :     }
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span><span class="lineCov">         22 :     if (lc != NULL)</span>
+<span class="lineNum">     242 </span><span class="lineCov">          4 :         ereport(ERROR,</span>
+<span class="lineNum">     243 </span>            :                 (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     244 </span>            :                  errmsg(&quot;too many column names were specified&quot;)));
+<span class="lineNum">     245 </span>            : 
+<span class="lineNum">     246 </span>            :     /* Create the relation definition using the ColumnDef list */
+<span class="lineNum">     247 </span><span class="lineCov">         18 :     return create_ctas_internal(attrList, into);</span>
+<span class="lineNum">     248 </span>            : }
+<span class="lineNum">     249 </span>            : 
+<span class="lineNum">     250 </span>            : /*
+<span class="lineNum">     251 </span>            :  * ExecCreateTableAs -- execute a CREATE TABLE AS command
+<a name="252"><span class="lineNum">     252 </span>            :  */</a>
+<span class="lineNum">     253 </span>            : ObjectAddress
+<span class="lineNum">     254 </span><span class="lineCov">        432 : ExecCreateTableAs(CreateTableAsStmt *stmt, const char *queryString,</span>
+<span class="lineNum">     255 </span>            :                   ParamListInfo params, QueryEnvironment *queryEnv,
+<span class="lineNum">     256 </span>            :                   char *completionTag)
+<span class="lineNum">     257 </span>            : {
+<span class="lineNum">     258 </span><span class="lineCov">        432 :     Query      *query = castNode(Query, stmt-&gt;query);</span>
+<span class="lineNum">     259 </span><span class="lineCov">        432 :     IntoClause *into = stmt-&gt;into;</span>
+<span class="lineNum">     260 </span><span class="lineCov">        432 :     bool        is_matview = (into-&gt;viewQuery != NULL);</span>
+<span class="lineNum">     261 </span>            :     DestReceiver *dest;
+<span class="lineNum">     262 </span><span class="lineCov">        432 :     Oid         save_userid = InvalidOid;</span>
+<span class="lineNum">     263 </span><span class="lineCov">        432 :     int         save_sec_context = 0;</span>
+<span class="lineNum">     264 </span><span class="lineCov">        432 :     int         save_nestlevel = 0;</span>
+<span class="lineNum">     265 </span>            :     ObjectAddress address;
+<span class="lineNum">     266 </span>            :     List       *rewritten;
+<span class="lineNum">     267 </span>            :     PlannedStmt *plan;
+<span class="lineNum">     268 </span>            :     QueryDesc  *queryDesc;
+<span class="lineNum">     269 </span>            :     Query      *copied_query;
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span><span class="lineCov">        432 :     if (stmt-&gt;if_not_exists)</span>
+<span class="lineNum">     272 </span>            :     {
+<span class="lineNum">     273 </span>            :         Oid         nspid;
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span><span class="lineCov">          6 :         nspid = RangeVarGetCreationNamespace(stmt-&gt;into-&gt;rel);</span>
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span><span class="lineCov">          6 :         if (get_relname_relid(stmt-&gt;into-&gt;rel-&gt;relname, nspid))</span>
+<span class="lineNum">     278 </span>            :         {
+<span class="lineNum">     279 </span><span class="lineCov">          6 :             ereport(NOTICE,</span>
+<span class="lineNum">     280 </span>            :                     (errcode(ERRCODE_DUPLICATE_TABLE),
+<span class="lineNum">     281 </span>            :                      errmsg(&quot;relation \&quot;%s\&quot; already exists, skipping&quot;,
+<span class="lineNum">     282 </span>            :                             stmt-&gt;into-&gt;rel-&gt;relname)));
+<span class="lineNum">     283 </span><span class="lineCov">          6 :             return InvalidObjectAddress;</span>
+<span class="lineNum">     284 </span>            :         }
+<span class="lineNum">     285 </span>            :     }
+<span class="lineNum">     286 </span>            : 
+<span class="lineNum">     287 </span>            :     /*
+<span class="lineNum">     288 </span>            :      * Create the tuple receiver object and insert info it will need
+<span class="lineNum">     289 </span>            :      */
+<span class="lineNum">     290 </span><span class="lineCov">        426 :     dest = CreateIntoRelDestReceiver(into);</span>
+<span class="lineNum">     291 </span>            : 
+<span class="lineNum">     292 </span>            :     /*
+<span class="lineNum">     293 </span>            :      * The contained Query could be a SELECT, or an EXECUTE utility command.
+<span class="lineNum">     294 </span>            :      * If the latter, we just pass it off to ExecuteQuery.
+<span class="lineNum">     295 </span>            :      */
+<span class="lineNum">     296 </span><span class="lineCov">        438 :     if (query-&gt;commandType == CMD_UTILITY &amp;&amp;</span>
+<span class="lineNum">     297 </span><span class="lineCov">         12 :         IsA(query-&gt;utilityStmt, ExecuteStmt))</span>
+<span class="lineNum">     298 </span>            :     {
+<span class="lineNum">     299 </span><span class="lineCov">         12 :         ExecuteStmt *estmt = castNode(ExecuteStmt, query-&gt;utilityStmt);</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span><span class="lineCov">         12 :         Assert(!is_matview);    /* excluded by syntax */</span>
+<span class="lineNum">     302 </span><span class="lineCov">         12 :         ExecuteQuery(estmt, into, queryString, params, dest, completionTag);</span>
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span>            :         /* get object address that intorel_startup saved for us */
+<span class="lineNum">     305 </span><span class="lineCov">         10 :         address = ((DR_intorel *) dest)-&gt;reladdr;</span>
+<span class="lineNum">     306 </span>            : 
+<span class="lineNum">     307 </span><span class="lineCov">         10 :         return address;</span>
+<span class="lineNum">     308 </span>            :     }
+<span class="lineNum">     309 </span><span class="lineCov">        414 :     Assert(query-&gt;commandType == CMD_SELECT);</span>
+<span class="lineNum">     310 </span>            : 
+<span class="lineNum">     311 </span>            :     /*
+<span class="lineNum">     312 </span>            :      * For materialized views, lock down security-restricted operations and
+<span class="lineNum">     313 </span>            :      * arrange to make GUC variable changes local to this command.  This is
+<span class="lineNum">     314 </span>            :      * not necessary for security, but this keeps the behavior similar to
+<span class="lineNum">     315 </span>            :      * REFRESH MATERIALIZED VIEW.  Otherwise, one could create a materialized
+<span class="lineNum">     316 </span>            :      * view not possible to refresh.
+<span class="lineNum">     317 </span>            :      */
+<span class="lineNum">     318 </span><span class="lineCov">        414 :     if (is_matview)</span>
+<span class="lineNum">     319 </span>            :     {
+<span class="lineNum">     320 </span><span class="lineCov">        190 :         GetUserIdAndSecContext(&amp;save_userid, &amp;save_sec_context);</span>
+<span class="lineNum">     321 </span><span class="lineCov">        190 :         SetUserIdAndSecContext(save_userid,</span>
+<span class="lineNum">     322 </span>            :                                save_sec_context | SECURITY_RESTRICTED_OPERATION);
+<span class="lineNum">     323 </span><span class="lineCov">        190 :         save_nestlevel = NewGUCNestLevel();</span>
+<span class="lineNum">     324 </span>            :     }
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span><span class="lineCov">        414 :     if (into-&gt;skipData)</span>
+<span class="lineNum">     327 </span>            :     {
+<span class="lineNum">     328 </span>            :         /*
+<span class="lineNum">     329 </span>            :          * If WITH NO DATA was specified, do not go through the rewriter,
+<span class="lineNum">     330 </span>            :          * planner and executor.  Just define the relation using a code path
+<span class="lineNum">     331 </span>            :          * similar to CREATE VIEW.  This avoids dump/restore problems stemming
+<span class="lineNum">     332 </span>            :          * from running the planner before all dependencies are set up.
+<span class="lineNum">     333 </span>            :          */
+<span class="lineNum">     334 </span><span class="lineCov">         22 :         address = create_ctas_nodata(query-&gt;targetList, into);</span>
+<span class="lineNum">     335 </span>            :     }
+<span class="lineNum">     336 </span>            :     else
+<span class="lineNum">     337 </span>            :     {
+<span class="lineNum">     338 </span>            :         /*
+<span class="lineNum">     339 </span>            :          * Parse analysis was done already, but we still have to run the rule
+<span class="lineNum">     340 </span>            :          * rewriter.  We do not do AcquireRewriteLocks: we assume the query
+<span class="lineNum">     341 </span>            :          * either came straight from the parser, or suitable locks were
+<span class="lineNum">     342 </span>            :          * acquired by plancache.c.
+<span class="lineNum">     343 </span>            :          *
+<span class="lineNum">     344 </span>            :          * Because the rewriter and planner tend to scribble on the input, we
+<span class="lineNum">     345 </span>            :          * make a preliminary copy of the source querytree.  This prevents
+<span class="lineNum">     346 </span>            :          * problems in the case that CTAS is in a portal or plpgsql function
+<span class="lineNum">     347 </span>            :          * and is executed repeatedly.  (See also the same hack in EXPLAIN and
+<span class="lineNum">     348 </span>            :          * PREPARE.)
+<span class="lineNum">     349 </span>            :          */
+<span class="lineNum">     350 </span>            : 
+<span class="lineNum">     351 </span><span class="lineCov">        392 :         copied_query = copyObject(query);</span>
+<span class="lineNum">     352 </span><span class="lineCov">        392 :         if (is_matview &amp;&amp; into-&gt;ivm)</span>
+<span class="lineNum">     353 </span>            :         {
+<span class="lineNum">     354 </span>            :             TargetEntry *tle;
+<span class="lineNum">     355 </span>            :             Node *node;
+<span class="lineNum">     356 </span><span class="lineCov">        118 :             ParseState *pstate = make_parsestate(NULL);</span>
+<span class="lineNum">     357 </span>            :             FuncCall *fn;
+<span class="lineNum">     358 </span><span class="lineCov">        118 :             check_ivm_restriction_context ctx = {false, false, false, NIL};</span>
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span><span class="lineCov">        118 :             pstate-&gt;p_expr_kind = EXPR_KIND_SELECT_TARGET;</span>
+<span class="lineNum">     361 </span>            : 
+<span class="lineNum">     362 </span><span class="lineCov">        118 :             check_ivm_restriction_walker((Node *) copied_query, &amp;ctx, 0);</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span>            :             /*
+<span class="lineNum">     365 </span>            :              * If this query has EXISTS clause, rewrite query and
+<span class="lineNum">     366 </span>            :              * add __ivm_exists_count_X__ column.
+<span class="lineNum">     367 </span>            :              */
+<span class="lineNum">     368 </span><span class="lineCov">         74 :             if (copied_query-&gt;hasSubLinks)</span>
+<span class="lineNum">     369 </span>            :             {
+<span class="lineNum">     370 </span>            :                 ListCell *lc;
+<span class="lineNum">     371 </span>            :                 RangeTblEntry *rte;
+<span class="lineNum">     372 </span>            : 
+<span class="lineNum">     373 </span>            :                 /* rewrite EXISTS sublink to LATERAL subquery */
+<span class="lineNum">     374 </span><span class="lineCov">          8 :                 rewrite_query_for_exists_subquery(copied_query);</span>
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span>            :                 /* Add count(*) using EXISTS clause */
+<span class="lineNum">     377 </span><span class="lineCov">         20 :                 foreach(lc, copied_query-&gt;rtable)</span>
+<span class="lineNum">     378 </span>            :                 {
+<span class="lineNum">     379 </span>            :                     char *columnName;
+<span class="lineNum">     380 </span><span class="lineCov">         14 :                     Node *countCol = NULL;</span>
+<span class="lineNum">     381 </span>            : 
+<span class="lineNum">     382 </span><span class="lineCov">         14 :                     rte = (RangeTblEntry *) lfirst(lc);</span>
+<span class="lineNum">     383 </span><span class="lineCov">         14 :                     if (!rte-&gt;subquery || !rte-&gt;lateral)</span>
+<span class="lineNum">     384 </span><span class="lineCov">          6 :                         continue;</span>
+<span class="lineNum">     385 </span><span class="lineCov">          8 :                     pstate-&gt;p_rtable = copied_query-&gt;rtable;</span>
+<span class="lineNum">     386 </span>            : 
+<span class="lineNum">     387 </span><span class="lineCov">          8 :                     columnName = getColumnNameStartWith(rte, &quot;__ivm_exists&quot;);</span>
+<span class="lineNum">     388 </span><span class="lineCov">          8 :                     if (columnName == NULL)</span>
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :                         continue;</span>
+<span class="lineNum">     390 </span><span class="lineCov">          8 :                     countCol = scanRTEForColumn(pstate, rte, columnName,-1, 0, NULL);</span>
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span><span class="lineCov">          8 :                     if (countCol != NULL)</span>
+<span class="lineNum">     393 </span>            :                     {
+<span class="lineNum">     394 </span><span class="lineCov">         16 :                         tle = makeTargetEntry((Expr *) countCol,</span>
+<span class="lineNum">     395 </span><span class="lineCov">          8 :                                                     list_length(copied_query-&gt;targetList) + 1,</span>
+<span class="lineNum">     396 </span>            :                                                     pstrdup(columnName),
+<span class="lineNum">     397 </span>            :                                                     false);
+<span class="lineNum">     398 </span><span class="lineCov">          8 :                         copied_query-&gt;targetList = list_concat(copied_query-&gt;targetList, list_make1(tle));</span>
+<span class="lineNum">     399 </span>            :                     }
+<span class="lineNum">     400 </span>            :                 }
+<span class="lineNum">     401 </span>            :             }
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span>            :             /* group keys must be in targetlist */
+<span class="lineNum">     404 </span><span class="lineCov">         72 :             if (copied_query-&gt;groupClause)</span>
+<span class="lineNum">     405 </span>            :             {
+<span class="lineNum">     406 </span>            :                 ListCell *lc;
+<span class="lineNum">     407 </span><span class="lineCov">         16 :                 foreach(lc, copied_query-&gt;groupClause)</span>
+<span class="lineNum">     408 </span>            :                 {
+<span class="lineNum">     409 </span><span class="lineCov">          8 :                     SortGroupClause *scl = (SortGroupClause *) lfirst(lc);</span>
+<span class="lineNum">     410 </span><span class="lineCov">          8 :                     TargetEntry *tle = get_sortgroupclause_tle(scl, copied_query-&gt;targetList);</span>
+<span class="lineNum">     411 </span>            : 
+<span class="lineNum">     412 </span><span class="lineCov">          8 :                     if (tle-&gt;resjunk)</span>
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :                         elog(ERROR, &quot;GROUP BY expression must appear in select list for incremental materialized views&quot;);</span>
+<span class="lineNum">     414 </span>            :                 }
+<span class="lineNum">     415 </span>            :             }
+<span class="lineNum">     416 </span><span class="lineCov">         64 :             else if (!copied_query-&gt;hasAggs)</span>
+<span class="lineNum">     417 </span><span class="lineCov">         60 :                 copied_query-&gt;groupClause = transformDistinctClause(NULL, &amp;copied_query-&gt;targetList, copied_query-&gt;sortClause, false);</span>
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span><span class="lineCov">         72 :             if (copied_query-&gt;hasAggs)</span>
+<span class="lineNum">     420 </span>            :             {
+<span class="lineNum">     421 </span>            :                 ListCell *lc;
+<span class="lineNum">     422 </span><span class="lineCov">         12 :                 List *agg_counts = NIL;</span>
+<span class="lineNum">     423 </span><span class="lineCov">         12 :                 AttrNumber next_resno = list_length(copied_query-&gt;targetList) + 1;</span>
+<span class="lineNum">     424 </span><span class="lineCov">         12 :                 Const   *dmy_arg = makeConst(INT4OID,</span>
+<span class="lineNum">     425 </span>            :                                              -1,
+<span class="lineNum">     426 </span>            :                                              InvalidOid,
+<span class="lineNum">     427 </span>            :                                              sizeof(int32),
+<span class="lineNum">     428 </span>            :                                              Int32GetDatum(1),
+<span class="lineNum">     429 </span>            :                                              false,
+<span class="lineNum">     430 </span>            :                                              true); /* pass by value */
+<span class="lineNum">     431 </span>            : 
+<span class="lineNum">     432 </span><span class="lineCov">         46 :                 foreach(lc, copied_query-&gt;targetList)</span>
+<span class="lineNum">     433 </span>            :                 {
+<span class="lineNum">     434 </span><span class="lineCov">         34 :                     TargetEntry *tle = (TargetEntry *) lfirst(lc);</span>
+<span class="lineNum">     435 </span>            :                     TargetEntry *tle_count;
+<span class="lineNum">     436 </span><span class="lineCov">         34 :                     char *resname = (into-&gt;colNames == NIL ? tle-&gt;resname : strVal(list_nth(into-&gt;colNames, tle-&gt;resno-1)));</span>
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span>            : 
+<span class="lineNum">     439 </span><span class="lineCov">         34 :                     if (IsA(tle-&gt;expr, Aggref))</span>
+<span class="lineNum">     440 </span>            :                     {
+<span class="lineNum">     441 </span><span class="lineCov">         26 :                         Aggref *aggref = (Aggref *) tle-&gt;expr;</span>
+<span class="lineNum">     442 </span><span class="lineCov">         26 :                         const char *aggname = get_func_name(aggref-&gt;aggfnoid);</span>
+<span class="lineNum">     443 </span>            : 
+<span class="lineNum">     444 </span>            :                         /* XXX: need some generalization
+<span class="lineNum">     445 </span>            :                          *
+<span class="lineNum">     446 </span>            :                          * Specifically, Using func names is not robust.  We can use oids instead
+<span class="lineNum">     447 </span>            :                          * of names, but it would be nice to add some information to pg_aggregate.
+<span class="lineNum">     448 </span>            :                          */
+<span class="lineNum">     449 </span><span class="lineCov">         26 :                         if (strcmp(aggname, &quot;sum&quot;) !=0</span>
+<span class="lineNum">     450 </span><span class="lineCov">         18 :                             &amp;&amp; strcmp(aggname, &quot;count&quot;) != 0</span>
+<span class="lineNum">     451 </span><span class="lineCov">         12 :                             &amp;&amp; strcmp(aggname, &quot;avg&quot;) != 0</span>
+<span class="lineNum">     452 </span><span class="lineCov">          8 :                             &amp;&amp; strcmp(aggname, &quot;min&quot;) != 0</span>
+<span class="lineNum">     453 </span><span class="lineCov">          4 :                             &amp;&amp; strcmp(aggname, &quot;max&quot;) != 0</span>
+<span class="lineNum">     454 </span>            :                         )
+<span class="lineNum">     455 </span><span class="lineNoCov">          0 :                             elog(ERROR, &quot;aggregate function %s is not supported&quot;, aggname);</span>
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span>            :                         /*
+<span class="lineNum">     458 </span>            :                          * For aggregate functions except to count, add count func with the same arg parameters.
+<span class="lineNum">     459 </span>            :                          * Also, add sum func for agv.
+<span class="lineNum">     460 </span>            :                          *
+<span class="lineNum">     461 </span>            :                          * XXX: If there are same expressions explicitly in the target list, we can use this instead
+<span class="lineNum">     462 </span>            :                          * of adding new duplicated one.
+<span class="lineNum">     463 </span>            :                          */
+<span class="lineNum">     464 </span><span class="lineCov">         26 :                         if (strcmp(aggname, &quot;count&quot;) != 0)</span>
+<span class="lineNum">     465 </span>            :                         {
+<span class="lineNum">     466 </span><span class="lineCov">         20 :                             fn = makeFuncCall(list_make1(makeString(&quot;count&quot;)), NIL, -1);</span>
+<span class="lineNum">     467 </span>            : 
+<span class="lineNum">     468 </span>            :                             /* Make a Func with a dummy arg, and then override this by the original agg's args. */
+<span class="lineNum">     469 </span><span class="lineCov">         20 :                             node = ParseFuncOrColumn(pstate, fn-&gt;funcname, list_make1(dmy_arg), NULL, fn, false, -1);</span>
+<span class="lineNum">     470 </span><span class="lineCov">         20 :                             ((Aggref *)node)-&gt;args = aggref-&gt;args;</span>
+<span class="lineNum">     471 </span>            : 
+<span class="lineNum">     472 </span><span class="lineCov">         20 :                             tle_count = makeTargetEntry((Expr *) node,</span>
+<span class="lineNum">     473 </span>            :                                                         next_resno,
+<span class="lineNum">     474 </span><span class="lineCov">         20 :                                                         pstrdup(makeObjectName(&quot;__ivm_count&quot;,resname, &quot;_&quot;)),</span>
+<span class="lineNum">     475 </span>            :                                                         false);
+<span class="lineNum">     476 </span><span class="lineCov">         20 :                             agg_counts = lappend(agg_counts, tle_count);</span>
+<span class="lineNum">     477 </span><span class="lineCov">         20 :                             next_resno++;</span>
+<span class="lineNum">     478 </span>            :                         }
+<span class="lineNum">     479 </span><span class="lineCov">         26 :                         if (strcmp(aggname, &quot;avg&quot;) == 0)</span>
+<span class="lineNum">     480 </span>            :                         {
+<span class="lineNum">     481 </span><span class="lineCov">          4 :                             List *dmy_args = NIL;</span>
+<span class="lineNum">     482 </span>            :                             ListCell *lc;
+<span class="lineNum">     483 </span><span class="lineCov">          8 :                             foreach(lc, aggref-&gt;aggargtypes)</span>
+<span class="lineNum">     484 </span>            :                             {
+<span class="lineNum">     485 </span><span class="lineCov">          4 :                                 Oid     typeid = lfirst_oid(lc);</span>
+<span class="lineNum">     486 </span><span class="lineCov">          4 :                                 Type    type = typeidType(typeid);</span>
+<span class="lineNum">     487 </span>            : 
+<span class="lineNum">     488 </span><span class="lineCov">          8 :                                 Const *con = makeConst(typeid,</span>
+<span class="lineNum">     489 </span>            :                                                        -1,
+<span class="lineNum">     490 </span>            :                                                        typeTypeCollation(type),
+<span class="lineNum">     491 </span><span class="lineCov">          4 :                                                        typeLen(type),</span>
+<span class="lineNum">     492 </span>            :                                                        (Datum) 0,
+<span class="lineNum">     493 </span>            :                                                        true,
+<span class="lineNum">     494 </span><span class="lineCov">          4 :                                                        typeByVal(type));</span>
+<span class="lineNum">     495 </span><span class="lineCov">          4 :                                 dmy_args = lappend(dmy_args, con);</span>
+<span class="lineNum">     496 </span><span class="lineCov">          4 :                                 ReleaseSysCache(type);</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span>            :                             }
+<span class="lineNum">     499 </span><span class="lineCov">          4 :                             fn = makeFuncCall(list_make1(makeString(&quot;sum&quot;)), NIL, -1);</span>
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span>            :                             /* Make a Func with a dummy arg, and then override this by the original agg's args. */
+<span class="lineNum">     502 </span><span class="lineCov">          4 :                             node = ParseFuncOrColumn(pstate, fn-&gt;funcname, dmy_args, NULL, fn, false, -1);</span>
+<span class="lineNum">     503 </span><span class="lineCov">          4 :                             ((Aggref *)node)-&gt;args = aggref-&gt;args;</span>
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span><span class="lineCov">          4 :                             tle_count = makeTargetEntry((Expr *) node,</span>
+<span class="lineNum">     506 </span>            :                                                         next_resno,
+<span class="lineNum">     507 </span><span class="lineCov">          4 :                                                         pstrdup(makeObjectName(&quot;__ivm_sum&quot;,resname, &quot;_&quot;)),</span>
+<span class="lineNum">     508 </span>            :                                                         false);
+<span class="lineNum">     509 </span><span class="lineCov">          4 :                             agg_counts = lappend(agg_counts, tle_count);</span>
+<span class="lineNum">     510 </span><span class="lineCov">          4 :                             next_resno++;</span>
+<span class="lineNum">     511 </span>            :                         }
+<span class="lineNum">     512 </span>            : 
+<span class="lineNum">     513 </span>            :                     }
+<span class="lineNum">     514 </span>            :                 }
+<span class="lineNum">     515 </span><span class="lineCov">         12 :                 copied_query-&gt;targetList = list_concat(copied_query-&gt;targetList, agg_counts);</span>
+<span class="lineNum">     516 </span>            : 
+<span class="lineNum">     517 </span>            :             }
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span>            :             /* Add count(*) for counting algorithm */
+<span class="lineNum">     520 </span><span class="lineCov">         72 :             fn = makeFuncCall(list_make1(makeString(&quot;count&quot;)), NIL, -1);</span>
+<span class="lineNum">     521 </span><span class="lineCov">         72 :             fn-&gt;agg_star = true;</span>
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span><span class="lineCov">         72 :             node = ParseFuncOrColumn(pstate, fn-&gt;funcname, NIL, NULL, fn, false, -1);</span>
+<span class="lineNum">     524 </span>            : 
+<span class="lineNum">     525 </span><span class="lineCov">        144 :             tle = makeTargetEntry((Expr *) node,</span>
+<span class="lineNum">     526 </span><span class="lineCov">         72 :                                     list_length(copied_query-&gt;targetList) + 1,</span>
+<span class="lineNum">     527 </span>            :                                     pstrdup(&quot;__ivm_count__&quot;),
+<span class="lineNum">     528 </span>            :                                     false);
+<span class="lineNum">     529 </span><span class="lineCov">         72 :             copied_query-&gt;targetList = lappend(copied_query-&gt;targetList, tle);</span>
+<span class="lineNum">     530 </span><span class="lineCov">         72 :             copied_query-&gt;hasAggs = true;</span>
+<span class="lineNum">     531 </span>            : 
+<span class="lineNum">     532 </span>            :             /*
+<span class="lineNum">     533 </span>            :              * Add JSONB column for meta information related to outer joins.
+<span class="lineNum">     534 </span>            :              * Actually this is required only for delta tables, but we create
+<span class="lineNum">     535 </span>            :              * this here because delta tables are created using the schema
+<span class="lineNum">     536 </span>            :              * of the matview.
+<span class="lineNum">     537 </span>            :              */
+<span class="lineNum">     538 </span><span class="lineCov">         72 :             if (ctx.has_outerjoin)</span>
+<span class="lineNum">     539 </span>            :             {
+<span class="lineNum">     540 </span><span class="lineCov">         38 :                 Const   *dmy_jsonb = makeConst(JSONBOID,</span>
+<span class="lineNum">     541 </span>            :                                             -1,
+<span class="lineNum">     542 </span>            :                                             InvalidOid,
+<span class="lineNum">     543 </span>            :                                             -1,
+<span class="lineNum">     544 </span>            :                                             PointerGetDatum(NULL),
+<span class="lineNum">     545 </span>            :                                             true,
+<span class="lineNum">     546 </span>            :                                             false);
+<span class="lineNum">     547 </span><span class="lineCov">         76 :                 tle = makeTargetEntry((Expr *) dmy_jsonb,</span>
+<span class="lineNum">     548 </span><span class="lineCov">         38 :                                         list_length(copied_query-&gt;targetList) + 1,</span>
+<span class="lineNum">     549 </span>            :                                         pstrdup(&quot;__ivm_meta__&quot;),
+<span class="lineNum">     550 </span>            :                                         false);
+<span class="lineNum">     551 </span><span class="lineCov">         38 :                 copied_query-&gt;targetList = lappend(copied_query-&gt;targetList, tle);</span>
+<span class="lineNum">     552 </span>            :             }
+<span class="lineNum">     553 </span>            :         }
+<span class="lineNum">     554 </span>            : 
+<span class="lineNum">     555 </span><span class="lineCov">        346 :         rewritten = QueryRewrite(copied_query);</span>
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span>            :         /* SELECT should never rewrite to more or less than one SELECT query */
+<span class="lineNum">     558 </span><span class="lineCov">        346 :         if (list_length(rewritten) != 1)</span>
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unexpected rewrite result for %s&quot;,</span>
+<span class="lineNum">     560 </span>            :                  is_matview ? &quot;CREATE MATERIALIZED VIEW&quot; :
+<span class="lineNum">     561 </span>            :                  &quot;CREATE TABLE AS SELECT&quot;);
+<span class="lineNum">     562 </span><span class="lineCov">        346 :         query = linitial_node(Query, rewritten);</span>
+<span class="lineNum">     563 </span><span class="lineCov">        346 :         Assert(query-&gt;commandType == CMD_SELECT);</span>
+<span class="lineNum">     564 </span>            : 
+<span class="lineNum">     565 </span>            :         /* plan the query */
+<span class="lineNum">     566 </span><span class="lineCov">        346 :         plan = pg_plan_query(query, CURSOR_OPT_PARALLEL_OK, params);</span>
+<span class="lineNum">     567 </span>            : 
+<span class="lineNum">     568 </span>            :         /*
+<span class="lineNum">     569 </span>            :          * Use a snapshot with an updated command ID to ensure this query sees
+<span class="lineNum">     570 </span>            :          * results of any previously executed queries.  (This could only
+<span class="lineNum">     571 </span>            :          * matter if the planner executed an allegedly-stable function that
+<span class="lineNum">     572 </span>            :          * changed the database contents, but let's do it anyway to be
+<span class="lineNum">     573 </span>            :          * parallel to the EXPLAIN code path.)
+<span class="lineNum">     574 </span>            :          */
+<span class="lineNum">     575 </span><span class="lineCov">        344 :         PushCopiedSnapshot(GetActiveSnapshot());</span>
+<span class="lineNum">     576 </span><span class="lineCov">        344 :         UpdateActiveSnapshotCommandId();</span>
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span>            :         /* Create a QueryDesc, redirecting output to our tuple receiver */
+<span class="lineNum">     579 </span><span class="lineCov">        344 :         queryDesc = CreateQueryDesc(plan, queryString,</span>
+<span class="lineNum">     580 </span>            :                                     GetActiveSnapshot(), InvalidSnapshot,
+<span class="lineNum">     581 </span>            :                                     dest, params, queryEnv, 0);
+<span class="lineNum">     582 </span>            : 
+<span class="lineNum">     583 </span>            :         /* call ExecutorStart to prepare the plan for execution */
+<span class="lineNum">     584 </span><span class="lineCov">        344 :         ExecutorStart(queryDesc, GetIntoRelEFlags(into));</span>
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span>            :         /* run the plan to completion */
+<span class="lineNum">     587 </span><span class="lineCov">        344 :         ExecutorRun(queryDesc, ForwardScanDirection, 0L, true);</span>
+<span class="lineNum">     588 </span>            : 
+<span class="lineNum">     589 </span>            :         /* save the rowcount if we're given a completionTag to fill */
+<span class="lineNum">     590 </span><span class="lineCov">        320 :         if (completionTag)</span>
+<span class="lineNum">     591 </span><span class="lineCov">        318 :             snprintf(completionTag, COMPLETION_TAG_BUFSIZE,</span>
+<span class="lineNum">     592 </span>            :                      &quot;SELECT &quot; UINT64_FORMAT,
+<span class="lineNum">     593 </span><span class="lineCov">        318 :                      queryDesc-&gt;estate-&gt;es_processed);</span>
+<span class="lineNum">     594 </span>            : 
+<span class="lineNum">     595 </span>            :         /* get object address that intorel_startup saved for us */
+<span class="lineNum">     596 </span><span class="lineCov">        320 :         address = ((DR_intorel *) dest)-&gt;reladdr;</span>
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span>            :         /* and clean up */
+<span class="lineNum">     599 </span><span class="lineCov">        320 :         ExecutorFinish(queryDesc);</span>
+<span class="lineNum">     600 </span><span class="lineCov">        320 :         ExecutorEnd(queryDesc);</span>
+<span class="lineNum">     601 </span>            : 
+<span class="lineNum">     602 </span><span class="lineCov">        320 :         FreeQueryDesc(queryDesc);</span>
+<span class="lineNum">     603 </span>            : 
+<span class="lineNum">     604 </span><span class="lineCov">        320 :         PopActiveSnapshot();</span>
+<span class="lineNum">     605 </span>            :     }
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span><span class="lineCov">        338 :     if (is_matview)</span>
+<span class="lineNum">     608 </span>            :     {
+<span class="lineNum">     609 </span>            :         /* Roll back any GUC changes */
+<span class="lineNum">     610 </span><span class="lineCov">        136 :         AtEOXact_GUC(false, save_nestlevel);</span>
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span>            :         /* Restore userid and security context */
+<span class="lineNum">     613 </span><span class="lineCov">        136 :         SetUserIdAndSecContext(save_userid, save_sec_context);</span>
+<span class="lineNum">     614 </span>            : 
+<span class="lineNum">     615 </span>            : 
+<span class="lineNum">     616 </span><span class="lineCov">        136 :         if (into-&gt;ivm)</span>
+<span class="lineNum">     617 </span>            :         {
+<span class="lineNum">     618 </span>            : 
+<span class="lineNum">     619 </span><span class="lineCov">         72 :             Oid matviewOid = address.objectId;</span>
+<span class="lineNum">     620 </span><span class="lineCov">         72 :             Relation matviewRel = table_open(matviewOid, NoLock);</span>
+<span class="lineNum">     621 </span><span class="lineCov">         72 :             char    *matviewname = quote_qualified_identifier(get_namespace_name(RelationGetNamespace(matviewRel)),</span>
+<span class="lineNum">     622 </span><span class="lineCov">         72 :                                                      RelationGetRelationName(matviewRel));</span>
+<span class="lineNum">     623 </span><span class="lineCov">         72 :             Relids  relids = NULL;</span>
+<span class="lineNum">     624 </span>            : 
+<span class="lineNum">     625 </span><span class="lineCov">         72 :             copied_query = copyObject(query);</span>
+<span class="lineNum">     626 </span><span class="lineCov">         72 :             AcquireRewriteLocks(copied_query, true, false);</span>
+<span class="lineNum">     627 </span>            : 
+<span class="lineNum">     628 </span><span class="lineCov">         72 :             CreateIvmTriggersOnBaseTables(copied_query, (Node *)copied_query-&gt;jointree, matviewOid, matviewname, &amp;relids);</span>
+<span class="lineNum">     629 </span>            : 
+<span class="lineNum">     630 </span><span class="lineCov">         72 :             table_close(matviewRel, NoLock);</span>
+<span class="lineNum">     631 </span>            : 
+<span class="lineNum">     632 </span><span class="lineCov">         72 :             bms_free(relids);</span>
+<span class="lineNum">     633 </span>            :         }
+<span class="lineNum">     634 </span>            :     }
+<span class="lineNum">     635 </span>            : 
+<span class="lineNum">     636 </span><span class="lineCov">        338 :     return address;</span>
+<span class="lineNum">     637 </span>            : }
+<span class="lineNum">     638 </span>            : /*
+<a name="639"><span class="lineNum">     639 </span>            :  * CreateIvmTriggersOnBaseTables -- create IVM triggers on all base tables</a>
+<span class="lineNum">     640 </span>            :  */
+<span class="lineNum">     641 </span><span class="lineCov">        322 : static void CreateIvmTriggersOnBaseTables(Query *qry, Node *jtnode, Oid matviewOid, char* matviewname, Relids *relids)</span>
+<span class="lineNum">     642 </span>            : {
+<span class="lineNum">     643 </span><span class="lineCov">        322 :     if (jtnode == NULL)</span>
+<span class="lineNum">     644 </span><span class="lineCov">        322 :         return;</span>
+<span class="lineNum">     645 </span><span class="lineCov">        322 :     if (IsA(jtnode, RangeTblRef))</span>
+<span class="lineNum">     646 </span>            :     {
+<span class="lineNum">     647 </span><span class="lineCov">        166 :         int         rti = ((RangeTblRef *) jtnode)-&gt;rtindex;</span>
+<span class="lineNum">     648 </span><span class="lineCov">        166 :         RangeTblEntry *rte = rt_fetch(rti, qry-&gt;rtable);</span>
+<span class="lineNum">     649 </span>            : 
+<span class="lineNum">     650 </span><span class="lineCov">        166 :         if (rte-&gt;rtekind == RTE_RELATION)</span>
+<span class="lineNum">     651 </span>            :         {
+<span class="lineNum">     652 </span><span class="lineCov">        158 :             if (!bms_is_member(rte-&gt;relid, *relids))</span>
+<span class="lineNum">     653 </span>            :             {
+<span class="lineNum">     654 </span><span class="lineCov">        152 :                 CreateIvmTrigger(rte-&gt;relid, matviewOid, matviewname, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_BEFORE);</span>
+<span class="lineNum">     655 </span><span class="lineCov">        152 :                 CreateIvmTrigger(rte-&gt;relid, matviewOid, matviewname, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_BEFORE);</span>
+<span class="lineNum">     656 </span><span class="lineCov">        152 :                 CreateIvmTrigger(rte-&gt;relid, matviewOid, matviewname, TRIGGER_TYPE_UPDATE, TRIGGER_TYPE_BEFORE);</span>
+<span class="lineNum">     657 </span><span class="lineCov">        152 :                 CreateIvmTrigger(rte-&gt;relid, matviewOid, matviewname, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_AFTER);</span>
+<span class="lineNum">     658 </span><span class="lineCov">        152 :                 CreateIvmTrigger(rte-&gt;relid, matviewOid, matviewname, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_AFTER);</span>
+<span class="lineNum">     659 </span><span class="lineCov">        152 :                 CreateIvmTrigger(rte-&gt;relid, matviewOid, matviewname, TRIGGER_TYPE_UPDATE, TRIGGER_TYPE_AFTER);</span>
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span><span class="lineCov">        152 :                 *relids = bms_add_member(*relids, rte-&gt;relid);</span>
+<span class="lineNum">     662 </span>            :             }
+<span class="lineNum">     663 </span>            :         }
+<span class="lineNum">     664 </span><span class="lineCov">          8 :         else if (rte-&gt;rtekind == RTE_SUBQUERY)</span>
+<span class="lineNum">     665 </span>            :         {
+<span class="lineNum">     666 </span><span class="lineCov">          8 :             Query *subquery = rte-&gt;subquery;</span>
+<span class="lineNum">     667 </span><span class="lineCov">          8 :             Assert(rte-&gt;subquery != NULL);</span>
+<span class="lineNum">     668 </span>            : 
+<span class="lineNum">     669 </span><span class="lineCov">          8 :             CreateIvmTriggersOnBaseTables(subquery, (Node *)subquery-&gt;jointree, matviewOid, matviewname, relids);</span>
+<span class="lineNum">     670 </span>            :         }
+<span class="lineNum">     671 </span>            :         else
+<span class="lineNum">     672 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unsupported RTE kind: %d&quot;, (int) rte-&gt;rtekind);</span>
+<span class="lineNum">     673 </span>            :     }
+<span class="lineNum">     674 </span><span class="lineCov">        156 :     else if (IsA(jtnode, FromExpr))</span>
+<span class="lineNum">     675 </span>            :     {
+<span class="lineNum">     676 </span><span class="lineCov">         80 :         FromExpr   *f = (FromExpr *) jtnode;</span>
+<span class="lineNum">     677 </span>            :         ListCell   *l;
+<span class="lineNum">     678 </span>            : 
+<span class="lineNum">     679 </span><span class="lineCov">        170 :         foreach(l, f-&gt;fromlist)</span>
+<span class="lineNum">     680 </span><span class="lineCov">         90 :             CreateIvmTriggersOnBaseTables(qry, lfirst(l), matviewOid, matviewname, relids);</span>
+<span class="lineNum">     681 </span>            :     }
+<span class="lineNum">     682 </span><span class="lineCov">         76 :     else if (IsA(jtnode, JoinExpr))</span>
+<span class="lineNum">     683 </span>            :     {
+<span class="lineNum">     684 </span><span class="lineCov">         76 :         JoinExpr   *j = (JoinExpr *) jtnode;</span>
+<span class="lineNum">     685 </span>            : 
+<span class="lineNum">     686 </span><span class="lineCov">         76 :         CreateIvmTriggersOnBaseTables(qry, j-&gt;larg, matviewOid, matviewname, relids);</span>
+<span class="lineNum">     687 </span><span class="lineCov">         76 :         CreateIvmTriggersOnBaseTables(qry, j-&gt;rarg, matviewOid, matviewname, relids);</span>
+<span class="lineNum">     688 </span>            :     }
+<span class="lineNum">     689 </span>            :     else
+<span class="lineNum">     690 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;unrecognized node type: %d&quot;, (int) nodeTag(jtnode));</span>
+<span class="lineNum">     691 </span>            : }
+<span class="lineNum">     692 </span>            : 
+<span class="lineNum">     693 </span>            : /*
+<span class="lineNum">     694 </span>            :  * GetIntoRelEFlags --- compute executor flags needed for CREATE TABLE AS
+<span class="lineNum">     695 </span>            :  *
+<span class="lineNum">     696 </span>            :  * This is exported because EXPLAIN and PREPARE need it too.  (Note: those
+<span class="lineNum">     697 </span>            :  * callers still need to deal explicitly with the skipData flag; since they
+<span class="lineNum">     698 </span>            :  * use different methods for suppressing execution, it doesn't seem worth
+<span class="lineNum">     699 </span>            :  * trying to encapsulate that part.)
+<a name="700"><span class="lineNum">     700 </span>            :  */</a>
+<span class="lineNum">     701 </span>            : int
+<span class="lineNum">     702 </span><span class="lineCov">        374 : GetIntoRelEFlags(IntoClause *intoClause)</span>
+<span class="lineNum">     703 </span>            : {
+<span class="lineNum">     704 </span><span class="lineCov">        374 :     int         flags = 0;</span>
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span><span class="lineCov">        374 :     if (intoClause-&gt;skipData)</span>
+<span class="lineNum">     707 </span><span class="lineCov">          6 :         flags |= EXEC_FLAG_WITH_NO_DATA;</span>
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span><span class="lineCov">        374 :     return flags;</span>
+<span class="lineNum">     710 </span>            : }
+<span class="lineNum">     711 </span>            : 
+<span class="lineNum">     712 </span>            : /*
+<span class="lineNum">     713 </span>            :  * CreateIntoRelDestReceiver -- create a suitable DestReceiver object
+<span class="lineNum">     714 </span>            :  *
+<span class="lineNum">     715 </span>            :  * intoClause will be NULL if called from CreateDestReceiver(), in which
+<span class="lineNum">     716 </span>            :  * case it has to be provided later.  However, it is convenient to allow
+<span class="lineNum">     717 </span>            :  * self-&gt;into to be filled in immediately for other callers.
+<a name="718"><span class="lineNum">     718 </span>            :  */</a>
+<span class="lineNum">     719 </span>            : DestReceiver *
+<span class="lineNum">     720 </span><span class="lineCov">        444 : CreateIntoRelDestReceiver(IntoClause *intoClause)</span>
+<span class="lineNum">     721 </span>            : {
+<span class="lineNum">     722 </span><span class="lineCov">        444 :     DR_intorel *self = (DR_intorel *) palloc0(sizeof(DR_intorel));</span>
+<span class="lineNum">     723 </span>            : 
+<span class="lineNum">     724 </span><span class="lineCov">        444 :     self-&gt;pub.receiveSlot = intorel_receive;</span>
+<span class="lineNum">     725 </span><span class="lineCov">        444 :     self-&gt;pub.rStartup = intorel_startup;</span>
+<span class="lineNum">     726 </span><span class="lineCov">        444 :     self-&gt;pub.rShutdown = intorel_shutdown;</span>
+<span class="lineNum">     727 </span><span class="lineCov">        444 :     self-&gt;pub.rDestroy = intorel_destroy;</span>
+<span class="lineNum">     728 </span><span class="lineCov">        444 :     self-&gt;pub.mydest = DestIntoRel;</span>
+<span class="lineNum">     729 </span><span class="lineCov">        444 :     self-&gt;into = intoClause;</span>
+<span class="lineNum">     730 </span>            :     /* other private fields will be set during intorel_startup */
+<span class="lineNum">     731 </span>            : 
+<span class="lineNum">     732 </span><span class="lineCov">        444 :     return (DestReceiver *) self;</span>
+<span class="lineNum">     733 </span>            : }
+<span class="lineNum">     734 </span>            : 
+<span class="lineNum">     735 </span>            : /*
+<span class="lineNum">     736 </span>            :  * intorel_startup --- executor startup
+<a name="737"><span class="lineNum">     737 </span>            :  */</a>
+<span class="lineNum">     738 </span>            : static void
+<span class="lineNum">     739 </span><span class="lineCov">        360 : intorel_startup(DestReceiver *self, int operation, TupleDesc typeinfo)</span>
+<span class="lineNum">     740 </span>            : {
+<span class="lineNum">     741 </span><span class="lineCov">        360 :     DR_intorel *myState = (DR_intorel *) self;</span>
+<span class="lineNum">     742 </span><span class="lineCov">        360 :     IntoClause *into = myState-&gt;into;</span>
+<span class="lineNum">     743 </span>            :     bool        is_matview;
+<span class="lineNum">     744 </span>            :     char        relkind;
+<span class="lineNum">     745 </span>            :     List       *attrList;
+<span class="lineNum">     746 </span>            :     ObjectAddress intoRelationAddr;
+<span class="lineNum">     747 </span>            :     Relation    intoRelationDesc;
+<span class="lineNum">     748 </span>            :     RangeTblEntry *rte;
+<span class="lineNum">     749 </span>            :     ListCell   *lc;
+<span class="lineNum">     750 </span>            :     int         attnum;
+<span class="lineNum">     751 </span>            : 
+<span class="lineNum">     752 </span><span class="lineCov">        360 :     Assert(into != NULL);       /* else somebody forgot to set it */</span>
+<span class="lineNum">     753 </span>            : 
+<span class="lineNum">     754 </span>            :     /* This code supports both CREATE TABLE AS and CREATE MATERIALIZED VIEW */
+<span class="lineNum">     755 </span><span class="lineCov">        360 :     is_matview = (into-&gt;viewQuery != NULL);</span>
+<span class="lineNum">     756 </span><span class="lineCov">        360 :     relkind = is_matview ? RELKIND_MATVIEW : RELKIND_RELATION;</span>
+<span class="lineNum">     757 </span>            : 
+<span class="lineNum">     758 </span>            :     /*
+<span class="lineNum">     759 </span>            :      * Build column definitions using &quot;pre-cooked&quot; type and collation info. If
+<span class="lineNum">     760 </span>            :      * a column name list was specified in CREATE TABLE AS, override the
+<span class="lineNum">     761 </span>            :      * column names derived from the query.  (Too few column names are OK, too
+<span class="lineNum">     762 </span>            :      * many are not.)
+<span class="lineNum">     763 </span>            :      */
+<span class="lineNum">     764 </span><span class="lineCov">        360 :     attrList = NIL;</span>
+<span class="lineNum">     765 </span><span class="lineCov">        360 :     lc = list_head(into-&gt;colNames);</span>
+<span class="lineNum">     766 </span><span class="lineCov">       1734 :     for (attnum = 0; attnum &lt; typeinfo-&gt;natts; attnum++)</span>
+<span class="lineNum">     767 </span>            :     {
+<span class="lineNum">     768 </span><span class="lineCov">       1378 :         Form_pg_attribute attribute = TupleDescAttr(typeinfo, attnum);</span>
+<span class="lineNum">     769 </span>            :         ColumnDef  *col;
+<span class="lineNum">     770 </span>            :         char       *colname;
+<span class="lineNum">     771 </span>            : 
+<span class="lineNum">     772 </span><span class="lineCov">       1378 :         if (lc)</span>
+<span class="lineNum">     773 </span>            :         {
+<span class="lineNum">     774 </span><span class="lineCov">        218 :             colname = strVal(lfirst(lc));</span>
+<span class="lineNum">     775 </span><span class="lineCov">        218 :             lc = lnext(into-&gt;colNames, lc);</span>
+<span class="lineNum">     776 </span>            :         }
+<span class="lineNum">     777 </span>            :         else
+<span class="lineNum">     778 </span><span class="lineCov">       1160 :             colname = NameStr(attribute-&gt;attname);</span>
+<span class="lineNum">     779 </span>            : 
+<span class="lineNum">     780 </span><span class="lineCov">       1378 :         col = makeColumnDef(colname,</span>
+<span class="lineNum">     781 </span>            :                             attribute-&gt;atttypid,
+<span class="lineNum">     782 </span>            :                             attribute-&gt;atttypmod,
+<span class="lineNum">     783 </span>            :                             attribute-&gt;attcollation);
+<span class="lineNum">     784 </span>            : 
+<span class="lineNum">     785 </span>            :         /*
+<span class="lineNum">     786 </span>            :          * It's possible that the column is of a collatable type but the
+<span class="lineNum">     787 </span>            :          * collation could not be resolved, so double-check.  (We must check
+<span class="lineNum">     788 </span>            :          * this here because DefineRelation would adopt the type's default
+<span class="lineNum">     789 </span>            :          * collation rather than complaining.)
+<span class="lineNum">     790 </span>            :          */
+<span class="lineNum">     791 </span><span class="lineCov">       2612 :         if (!OidIsValid(col-&gt;collOid) &amp;&amp;</span>
+<span class="lineNum">     792 </span><span class="lineCov">       1234 :             type_is_collatable(col-&gt;typeName-&gt;typeOid))</span>
+<span class="lineNum">     793 </span><span class="lineCov">          4 :             ereport(ERROR,</span>
+<span class="lineNum">     794 </span>            :                     (errcode(ERRCODE_INDETERMINATE_COLLATION),
+<span class="lineNum">     795 </span>            :                      errmsg(&quot;no collation was derived for column \&quot;%s\&quot; with collatable type %s&quot;,
+<span class="lineNum">     796 </span>            :                             col-&gt;colname,
+<span class="lineNum">     797 </span>            :                             format_type_be(col-&gt;typeName-&gt;typeOid)),
+<span class="lineNum">     798 </span>            :                      errhint(&quot;Use the COLLATE clause to set the collation explicitly.&quot;)));
+<span class="lineNum">     799 </span>            : 
+<span class="lineNum">     800 </span><span class="lineCov">       1374 :         attrList = lappend(attrList, col);</span>
+<span class="lineNum">     801 </span>            :     }
+<span class="lineNum">     802 </span>            : 
+<span class="lineNum">     803 </span><span class="lineCov">        356 :     if (lc != NULL)</span>
+<span class="lineNum">     804 </span><span class="lineCov">          4 :         ereport(ERROR,</span>
+<span class="lineNum">     805 </span>            :                 (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     806 </span>            :                  errmsg(&quot;too many column names were specified&quot;)));
+<span class="lineNum">     807 </span>            : 
+<span class="lineNum">     808 </span>            :     /*
+<span class="lineNum">     809 </span>            :      * Actually create the target table
+<span class="lineNum">     810 </span>            :      */
+<span class="lineNum">     811 </span><span class="lineCov">        352 :     intoRelationAddr = create_ctas_internal(attrList, into);</span>
+<span class="lineNum">     812 </span>            : 
+<span class="lineNum">     813 </span>            :     /*
+<span class="lineNum">     814 </span>            :      * Finally we can open the target table
+<span class="lineNum">     815 </span>            :      */
+<span class="lineNum">     816 </span><span class="lineCov">        340 :     intoRelationDesc = table_open(intoRelationAddr.objectId, AccessExclusiveLock);</span>
+<span class="lineNum">     817 </span>            : 
+<span class="lineNum">     818 </span>            :     /*
+<span class="lineNum">     819 </span>            :      * Check INSERT permission on the constructed table.
+<span class="lineNum">     820 </span>            :      *
+<span class="lineNum">     821 </span>            :      * XXX: It would arguably make sense to skip this check if into-&gt;skipData
+<span class="lineNum">     822 </span>            :      * is true.
+<span class="lineNum">     823 </span>            :      */
+<span class="lineNum">     824 </span><span class="lineCov">        340 :     rte = makeNode(RangeTblEntry);</span>
+<span class="lineNum">     825 </span><span class="lineCov">        340 :     rte-&gt;rtekind = RTE_RELATION;</span>
+<span class="lineNum">     826 </span><span class="lineCov">        340 :     rte-&gt;relid = intoRelationAddr.objectId;</span>
+<span class="lineNum">     827 </span><span class="lineCov">        340 :     rte-&gt;relkind = relkind;</span>
+<span class="lineNum">     828 </span><span class="lineCov">        340 :     rte-&gt;rellockmode = RowExclusiveLock;</span>
+<span class="lineNum">     829 </span><span class="lineCov">        340 :     rte-&gt;requiredPerms = ACL_INSERT;</span>
+<span class="lineNum">     830 </span>            : 
+<span class="lineNum">     831 </span><span class="lineCov">       1622 :     for (attnum = 1; attnum &lt;= intoRelationDesc-&gt;rd_att-&gt;natts; attnum++)</span>
+<span class="lineNum">     832 </span><span class="lineCov">       1282 :         rte-&gt;insertedCols = bms_add_member(rte-&gt;insertedCols,</span>
+<span class="lineNum">     833 </span>            :                                            attnum - FirstLowInvalidHeapAttributeNumber);
+<span class="lineNum">     834 </span>            : 
+<span class="lineNum">     835 </span><span class="lineCov">        340 :     ExecCheckRTPerms(list_make1(rte), true);</span>
+<span class="lineNum">     836 </span>            : 
+<span class="lineNum">     837 </span>            :     /*
+<span class="lineNum">     838 </span>            :      * Make sure the constructed table does not have RLS enabled.
+<span class="lineNum">     839 </span>            :      *
+<span class="lineNum">     840 </span>            :      * check_enable_rls() will ereport(ERROR) itself if the user has requested
+<span class="lineNum">     841 </span>            :      * something invalid, and otherwise will return RLS_ENABLED if RLS should
+<span class="lineNum">     842 </span>            :      * be enabled here.  We don't actually support that currently, so throw
+<span class="lineNum">     843 </span>            :      * our own ereport(ERROR) if that happens.
+<span class="lineNum">     844 </span>            :      */
+<span class="lineNum">     845 </span><span class="lineCov">        334 :     if (check_enable_rls(intoRelationAddr.objectId, InvalidOid, false) == RLS_ENABLED)</span>
+<span class="lineNum">     846 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     847 </span>            :                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     848 </span>            :                  (errmsg(&quot;policies not yet implemented for this command&quot;))));
+<span class="lineNum">     849 </span>            : 
+<span class="lineNum">     850 </span>            :     /*
+<span class="lineNum">     851 </span>            :      * Tentatively mark the target as populated, if it's a matview and we're
+<span class="lineNum">     852 </span>            :      * going to fill it; otherwise, no change needed.
+<span class="lineNum">     853 </span>            :      */
+<span class="lineNum">     854 </span><span class="lineCov">        334 :     if (is_matview &amp;&amp; !into-&gt;skipData)</span>
+<span class="lineNum">     855 </span><span class="lineCov">        122 :         SetMatViewPopulatedState(intoRelationDesc, true);</span>
+<span class="lineNum">     856 </span>            : 
+<span class="lineNum">     857 </span>            :     /*
+<span class="lineNum">     858 </span>            :      * Mark relisivm field, if it's a matview and into-&gt;ivm is true.
+<span class="lineNum">     859 </span>            :      */
+<span class="lineNum">     860 </span><span class="lineCov">        334 :     if (is_matview &amp;&amp; into-&gt;ivm)</span>
+<span class="lineNum">     861 </span><span class="lineCov">         72 :         SetMatViewIVMState(intoRelationDesc, true);</span>
+<span class="lineNum">     862 </span>            :     /*
+<span class="lineNum">     863 </span>            :      * Fill private fields of myState for use by later routines
+<span class="lineNum">     864 </span>            :      */
+<span class="lineNum">     865 </span><span class="lineCov">        334 :     myState-&gt;rel = intoRelationDesc;</span>
+<span class="lineNum">     866 </span><span class="lineCov">        334 :     myState-&gt;reladdr = intoRelationAddr;</span>
+<span class="lineNum">     867 </span><span class="lineCov">        334 :     myState-&gt;output_cid = GetCurrentCommandId(true);</span>
+<span class="lineNum">     868 </span>            : 
+<span class="lineNum">     869 </span>            :     /*
+<span class="lineNum">     870 </span>            :      * We can skip WAL-logging the insertions, unless PITR or streaming
+<span class="lineNum">     871 </span>            :      * replication is in use. We can skip the FSM in any case.
+<span class="lineNum">     872 </span>            :      */
+<span class="lineNum">     873 </span><span class="lineCov">        334 :     myState-&gt;ti_options = TABLE_INSERT_SKIP_FSM |</span>
+<span class="lineNum">     874 </span><span class="lineCov">        334 :         (XLogIsNeeded() ? 0 : TABLE_INSERT_SKIP_WAL);</span>
+<span class="lineNum">     875 </span><span class="lineCov">        334 :     myState-&gt;bistate = GetBulkInsertState();</span>
+<span class="lineNum">     876 </span>            : 
+<span class="lineNum">     877 </span>            :     /* Not using WAL requires smgr_targblock be initially invalid */
+<span class="lineNum">     878 </span><span class="lineCov">        334 :     Assert(RelationGetTargetBlock(intoRelationDesc) == InvalidBlockNumber);</span>
+<span class="lineNum">     879 </span><span class="lineCov">        334 : }</span>
+<span class="lineNum">     880 </span>            : 
+<span class="lineNum">     881 </span>            : /*
+<span class="lineNum">     882 </span>            :  * intorel_receive --- receive one tuple
+<a name="883"><span class="lineNum">     883 </span>            :  */</a>
+<span class="lineNum">     884 </span>            : static bool
+<span class="lineNum">     885 </span><span class="lineCov">     439896 : intorel_receive(TupleTableSlot *slot, DestReceiver *self)</span>
+<span class="lineNum">     886 </span>            : {
+<span class="lineNum">     887 </span><span class="lineCov">     439896 :     DR_intorel *myState = (DR_intorel *) self;</span>
+<span class="lineNum">     888 </span>            : 
+<span class="lineNum">     889 </span>            :     /*
+<span class="lineNum">     890 </span>            :      * Note that the input slot might not be of the type of the target
+<span class="lineNum">     891 </span>            :      * relation. That's supported by table_tuple_insert(), but slightly less
+<span class="lineNum">     892 </span>            :      * efficient than inserting with the right slot - but the alternative
+<span class="lineNum">     893 </span>            :      * would be to copy into a slot of the right type, which would not be
+<span class="lineNum">     894 </span>            :      * cheap either. This also doesn't allow accessing per-AM data (say a
+<span class="lineNum">     895 </span>            :      * tuple's xmin), but since we don't do that here...
+<span class="lineNum">     896 </span>            :      */
+<span class="lineNum">     897 </span>            : 
+<span class="lineNum">     898 </span><span class="lineCov">     439896 :     table_tuple_insert(myState-&gt;rel,</span>
+<span class="lineNum">     899 </span>            :                        slot,
+<span class="lineNum">     900 </span>            :                        myState-&gt;output_cid,
+<span class="lineNum">     901 </span>            :                        myState-&gt;ti_options,
+<span class="lineNum">     902 </span>            :                        myState-&gt;bistate);
+<span class="lineNum">     903 </span>            : 
+<span class="lineNum">     904 </span>            :     /* We know this is a newly created relation, so there are no indexes */
+<span class="lineNum">     905 </span>            : 
+<span class="lineNum">     906 </span><span class="lineCov">     439896 :     return true;</span>
+<span class="lineNum">     907 </span>            : }
+<span class="lineNum">     908 </span>            : 
+<span class="lineNum">     909 </span>            : /*
+<span class="lineNum">     910 </span>            :  * intorel_shutdown --- executor end
+<a name="911"><span class="lineNum">     911 </span>            :  */</a>
+<span class="lineNum">     912 </span>            : static void
+<span class="lineNum">     913 </span><span class="lineCov">        334 : intorel_shutdown(DestReceiver *self)</span>
+<span class="lineNum">     914 </span>            : {
+<span class="lineNum">     915 </span><span class="lineCov">        334 :     DR_intorel *myState = (DR_intorel *) self;</span>
+<span class="lineNum">     916 </span>            : 
+<span class="lineNum">     917 </span><span class="lineCov">        334 :     FreeBulkInsertState(myState-&gt;bistate);</span>
+<span class="lineNum">     918 </span>            : 
+<span class="lineNum">     919 </span><span class="lineCov">        334 :     table_finish_bulk_insert(myState-&gt;rel, myState-&gt;ti_options);</span>
+<span class="lineNum">     920 </span>            : 
+<span class="lineNum">     921 </span>            :     /* close rel, but keep lock until commit */
+<span class="lineNum">     922 </span><span class="lineCov">        334 :     table_close(myState-&gt;rel, NoLock);</span>
+<span class="lineNum">     923 </span><span class="lineCov">        334 :     myState-&gt;rel = NULL;</span>
+<span class="lineNum">     924 </span><span class="lineCov">        334 : }</span>
+<span class="lineNum">     925 </span>            : 
+<span class="lineNum">     926 </span>            : /*
+<span class="lineNum">     927 </span>            :  * intorel_destroy --- release DestReceiver object
+<a name="928"><span class="lineNum">     928 </span>            :  */</a>
+<span class="lineNum">     929 </span>            : static void
+<span class="lineNum">     930 </span><span class="lineNoCov">          0 : intorel_destroy(DestReceiver *self)</span>
+<span class="lineNum">     931 </span>            : {
+<span class="lineNum">     932 </span><span class="lineNoCov">          0 :     pfree(self);</span>
+<span class="lineNum">     933 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     934 </span>            : 
+<span class="lineNum">     935 </span>            : /*
+<span class="lineNum">     936 </span>            :  * CreateIvmTrigger -- create IVM trigger on a base table
+<a name="937"><span class="lineNum">     937 </span>            :  */</a>
+<span class="lineNum">     938 </span>            : static void
+<span class="lineNum">     939 </span><span class="lineCov">        912 : CreateIvmTrigger(Oid relOid, Oid viewOid, char *matviewname, int16 type, int16 timing)</span>
+<span class="lineNum">     940 </span>            : {
+<span class="lineNum">     941 </span>            :     ObjectAddress   refaddr;
+<span class="lineNum">     942 </span>            :     ObjectAddress   address;
+<span class="lineNum">     943 </span>            :     CreateTrigStmt *ivm_trigger;
+<span class="lineNum">     944 </span><span class="lineCov">        912 :     List *transitionRels = NIL;</span>
+<span class="lineNum">     945 </span>            : 
+<span class="lineNum">     946 </span><span class="lineCov">        912 :     Assert(timing == TRIGGER_TYPE_BEFORE || timing == TRIGGER_TYPE_AFTER);</span>
+<span class="lineNum">     947 </span>            : 
+<span class="lineNum">     948 </span><span class="lineCov">        912 :     refaddr.classId = RelationRelationId;</span>
+<span class="lineNum">     949 </span><span class="lineCov">        912 :     refaddr.objectId = viewOid;</span>
+<span class="lineNum">     950 </span><span class="lineCov">        912 :     refaddr.objectSubId = 0;</span>
+<span class="lineNum">     951 </span>            : 
+<span class="lineNum">     952 </span><span class="lineCov">        912 :     ivm_trigger = makeNode(CreateTrigStmt);</span>
+<span class="lineNum">     953 </span><span class="lineCov">        912 :     ivm_trigger-&gt;relation = NULL;</span>
+<span class="lineNum">     954 </span><span class="lineCov">        912 :     ivm_trigger-&gt;row = false;</span>
+<span class="lineNum">     955 </span>            : 
+<span class="lineNum">     956 </span><span class="lineCov">        912 :     ivm_trigger-&gt;timing = timing;</span>
+<span class="lineNum">     957 </span><span class="lineCov">        912 :     ivm_trigger-&gt;events = type;</span>
+<span class="lineNum">     958 </span>            : 
+<span class="lineNum">     959 </span><span class="lineCov">        912 :     switch (type)</span>
+<span class="lineNum">     960 </span>            :     {
+<span class="lineNum">     961 </span>            :         case TRIGGER_TYPE_INSERT:
+<span class="lineNum">     962 </span><span class="lineCov">        304 :             ivm_trigger-&gt;trigname = (timing == TRIGGER_TYPE_BEFORE ? &quot;IVM_trigger_ins_before&quot; : &quot;IVM_trigger_ins_after&quot;);</span>
+<span class="lineNum">     963 </span><span class="lineCov">        304 :             break;</span>
+<span class="lineNum">     964 </span>            :         case TRIGGER_TYPE_DELETE:
+<span class="lineNum">     965 </span><span class="lineCov">        304 :             ivm_trigger-&gt;trigname = (timing == TRIGGER_TYPE_BEFORE ? &quot;IVM_trigger_del_before&quot; : &quot;IVM_trigger_del_after&quot;);</span>
+<span class="lineNum">     966 </span><span class="lineCov">        304 :             break;</span>
+<span class="lineNum">     967 </span>            :         case TRIGGER_TYPE_UPDATE:
+<span class="lineNum">     968 </span><span class="lineCov">        304 :             ivm_trigger-&gt;trigname = (timing == TRIGGER_TYPE_BEFORE ? &quot;IVM_trigger_upd_before&quot; : &quot;IVM_trigger_upd_after&quot;);</span>
+<span class="lineNum">     969 </span><span class="lineCov">        304 :             break;</span>
+<span class="lineNum">     970 </span>            :         default:
+<span class="lineNum">     971 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unsupported trigger type&quot;);</span>
+<span class="lineNum">     972 </span>            :     }
+<span class="lineNum">     973 </span>            : 
+<span class="lineNum">     974 </span><span class="lineCov">        912 :     if (timing == TRIGGER_TYPE_AFTER)</span>
+<span class="lineNum">     975 </span>            :     {
+<span class="lineNum">     976 </span><span class="lineCov">        456 :         if (type == TRIGGER_TYPE_INSERT || type == TRIGGER_TYPE_UPDATE)</span>
+<span class="lineNum">     977 </span>            :         {
+<span class="lineNum">     978 </span><span class="lineCov">        304 :             TriggerTransition *n = makeNode(TriggerTransition);</span>
+<span class="lineNum">     979 </span><span class="lineCov">        304 :             n-&gt;name = &quot;ivm_newtable&quot;;</span>
+<span class="lineNum">     980 </span><span class="lineCov">        304 :             n-&gt;isNew = true;</span>
+<span class="lineNum">     981 </span><span class="lineCov">        304 :             n-&gt;isTable = true;</span>
+<span class="lineNum">     982 </span>            : 
+<span class="lineNum">     983 </span><span class="lineCov">        304 :             transitionRels = lappend(transitionRels, n);</span>
+<span class="lineNum">     984 </span>            :         }
+<span class="lineNum">     985 </span><span class="lineCov">        456 :         if (type == TRIGGER_TYPE_DELETE || type == TRIGGER_TYPE_UPDATE)</span>
+<span class="lineNum">     986 </span>            :         {
+<span class="lineNum">     987 </span><span class="lineCov">        304 :             TriggerTransition *n = makeNode(TriggerTransition);</span>
+<span class="lineNum">     988 </span><span class="lineCov">        304 :             n-&gt;name = &quot;ivm_oldtable&quot;;</span>
+<span class="lineNum">     989 </span><span class="lineCov">        304 :             n-&gt;isNew = false;</span>
+<span class="lineNum">     990 </span><span class="lineCov">        304 :             n-&gt;isTable = true;</span>
+<span class="lineNum">     991 </span>            : 
+<span class="lineNum">     992 </span><span class="lineCov">        304 :             transitionRels = lappend(transitionRels, n);</span>
+<span class="lineNum">     993 </span>            :         }
+<span class="lineNum">     994 </span>            :     }
+<span class="lineNum">     995 </span>            : 
+<span class="lineNum">     996 </span><span class="lineCov">        912 :     ivm_trigger-&gt;funcname =</span>
+<span class="lineNum">     997 </span><span class="lineCov">        912 :         (timing == TRIGGER_TYPE_BEFORE ? SystemFuncName(&quot;IVM_immediate_before&quot;) : SystemFuncName(&quot;IVM_immediate_maintenance&quot;));</span>
+<span class="lineNum">     998 </span>            : 
+<span class="lineNum">     999 </span><span class="lineCov">        912 :     ivm_trigger-&gt;columns = NIL;</span>
+<span class="lineNum">    1000 </span><span class="lineCov">        912 :     ivm_trigger-&gt;transitionRels = transitionRels;</span>
+<span class="lineNum">    1001 </span><span class="lineCov">        912 :     ivm_trigger-&gt;whenClause = NULL;</span>
+<span class="lineNum">    1002 </span><span class="lineCov">        912 :     ivm_trigger-&gt;isconstraint = false;</span>
+<span class="lineNum">    1003 </span><span class="lineCov">        912 :     ivm_trigger-&gt;deferrable = false;</span>
+<span class="lineNum">    1004 </span><span class="lineCov">        912 :     ivm_trigger-&gt;initdeferred = false;</span>
+<span class="lineNum">    1005 </span><span class="lineCov">        912 :     ivm_trigger-&gt;constrrel = NULL;</span>
+<span class="lineNum">    1006 </span><span class="lineCov">        912 :     ivm_trigger-&gt;args = list_make1(makeString(matviewname));</span>
+<span class="lineNum">    1007 </span>            : 
+<span class="lineNum">    1008 </span><span class="lineCov">        912 :     address = CreateTrigger(ivm_trigger, NULL, relOid, InvalidOid, InvalidOid,</span>
+<span class="lineNum">    1009 </span>            :                          InvalidOid, InvalidOid, InvalidOid, NULL, true, false);
+<span class="lineNum">    1010 </span>            : 
+<span class="lineNum">    1011 </span><span class="lineCov">        912 :     recordDependencyOn(&amp;address, &amp;refaddr, DEPENDENCY_AUTO);</span>
+<span class="lineNum">    1012 </span>            : 
+<span class="lineNum">    1013 </span>            :     /* Make changes-so-far visible */
+<span class="lineNum">    1014 </span><span class="lineCov">        912 :     CommandCounterIncrement();</span>
+<span class="lineNum">    1015 </span><span class="lineCov">        912 : }</span>
+<span class="lineNum">    1016 </span>            : 
+<span class="lineNum">    1017 </span>            : 
+<span class="lineNum">    1018 </span>            : /*
+<span class="lineNum">    1019 </span>            :  * check_ivm_restriction_walker --- look for specify nodes in the query tree
+<a name="1020"><span class="lineNum">    1020 </span>            :  */</a>
+<span class="lineNum">    1021 </span>            : static void
+<span class="lineNum">    1022 </span><span class="lineCov">       1350 : check_ivm_restriction_walker(Node *node, check_ivm_restriction_context *ctx, int depth)</span>
+<span class="lineNum">    1023 </span>            : {
+<span class="lineNum">    1024 </span>            :     /* This can recurse, so check for excessive recursion */
+<span class="lineNum">    1025 </span><span class="lineCov">       1350 :     check_stack_depth();</span>
+<span class="lineNum">    1026 </span>            : 
+<span class="lineNum">    1027 </span><span class="lineCov">       1350 :     if (node == NULL)</span>
+<span class="lineNum">    1028 </span><span class="lineCov">         82 :         return;</span>
+<span class="lineNum">    1029 </span>            : 
+<span class="lineNum">    1030 </span><span class="lineCov">       1268 :     switch (nodeTag(node))</span>
+<span class="lineNum">    1031 </span>            :     {
+<span class="lineNum">    1032 </span>            :         case T_Query:
+<span class="lineNum">    1033 </span>            :             {
+<span class="lineNum">    1034 </span><span class="lineCov">        136 :                 Query *qry = (Query *)node;</span>
+<span class="lineNum">    1035 </span>            :                 ListCell   *lc;
+<span class="lineNum">    1036 </span>            :                 /* if contained CTE, return error */
+<span class="lineNum">    1037 </span><span class="lineCov">        136 :                 if (qry-&gt;cteList != NIL)</span>
+<span class="lineNum">    1038 </span><span class="lineCov">          2 :                     ereport(ERROR, (errmsg(&quot;CTE is not supported with IVM&quot;)));</span>
+<span class="lineNum">    1039 </span><span class="lineCov">        134 :                 if (qry-&gt;havingQual != NULL)</span>
+<span class="lineNum">    1040 </span><span class="lineCov">          2 :                     ereport(ERROR, (errmsg(&quot; HAVING clause is not supported with IVM&quot;)));</span>
+<span class="lineNum">    1041 </span>            :                 /* There is a possibility that we don't need to return an error */
+<span class="lineNum">    1042 </span><span class="lineCov">        132 :                 if (qry-&gt;sortClause != NIL)</span>
+<span class="lineNum">    1043 </span><span class="lineCov">          2 :                     ereport(ERROR, (errmsg(&quot;ORDER BY clause is not supported with IVM&quot;)));</span>
+<span class="lineNum">    1044 </span><span class="lineCov">        130 :                 if (depth &gt; 0 &amp;&amp; qry-&gt;hasAggs)</span>
+<span class="lineNum">    1045 </span><span class="lineCov">          2 :                     ereport(ERROR, (errmsg(&quot;aggregate functions in nested query are not supported with IVM&quot;)));</span>
+<span class="lineNum">    1046 </span>            : 
+<span class="lineNum">    1047 </span><span class="lineCov">        128 :                 ctx-&gt;has_agg = qry-&gt;hasAggs;</span>
+<span class="lineNum">    1048 </span>            : 
+<span class="lineNum">    1049 </span>            :                 /* if contained VIEW or subquery into RTE, return error */
+<span class="lineNum">    1050 </span><span class="lineCov">        454 :                 foreach(lc, qry-&gt;rtable)</span>
+<span class="lineNum">    1051 </span>            :                 {
+<span class="lineNum">    1052 </span><span class="lineCov">        332 :                     RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);</span>
+<span class="lineNum">    1053 </span><span class="lineCov">        662 :                     if (rte-&gt;relkind == RELKIND_VIEW ||</span>
+<span class="lineNum">    1054 </span><span class="lineCov">        330 :                             rte-&gt;relkind == RELKIND_MATVIEW)</span>
+<span class="lineNum">    1055 </span><span class="lineCov">          4 :                         ereport(ERROR, (errmsg(&quot;VIEW or MATERIALIZED VIEW is not supported with IVM&quot;)));</span>
+<span class="lineNum">    1056 </span><span class="lineCov">        328 :                     if (rte-&gt;rtekind ==  RTE_SUBQUERY)</span>
+<span class="lineNum">    1057 </span>            :                     {
+<span class="lineNum">    1058 </span><span class="lineCov">          6 :                         if (ctx-&gt;has_outerjoin)</span>
+<span class="lineNum">    1059 </span><span class="lineNoCov">          0 :                             ereport(ERROR, (errmsg(&quot;subquery is not supported with IVM together with outer join&quot;)));</span>
+<span class="lineNum">    1060 </span>            : 
+<span class="lineNum">    1061 </span><span class="lineCov">          6 :                         ctx-&gt;has_subquery = true;</span>
+<span class="lineNum">    1062 </span><span class="lineCov">          6 :                         check_ivm_restriction_walker((Node *) rte-&gt;subquery, ctx, depth + 1);</span>
+<span class="lineNum">    1063 </span>            :                     }
+<span class="lineNum">    1064 </span>            :                 }
+<span class="lineNum">    1065 </span>            : 
+<span class="lineNum">    1066 </span>            :                 /* search in jointree */
+<span class="lineNum">    1067 </span><span class="lineCov">        122 :                 check_ivm_restriction_walker((Node *) qry-&gt;jointree, ctx, depth);</span>
+<span class="lineNum">    1068 </span>            : 
+<span class="lineNum">    1069 </span>            :                 /* search in target lists */
+<span class="lineNum">    1070 </span><span class="lineCov">        388 :                 foreach(lc, qry-&gt;targetList)</span>
+<span class="lineNum">    1071 </span>            :                 {
+<span class="lineNum">    1072 </span><span class="lineCov">        284 :                     TargetEntry *tle = (TargetEntry *) lfirst(lc);</span>
+<span class="lineNum">    1073 </span><span class="lineCov">        284 :                     check_ivm_restriction_walker((Node *) tle-&gt;expr, ctx, depth);</span>
+<span class="lineNum">    1074 </span>            :                 }
+<span class="lineNum">    1075 </span>            : 
+<span class="lineNum">    1076 </span>            :                 /* additional restriction checks for outer join query */
+<span class="lineNum">    1077 </span><span class="lineCov">        104 :                 if (ctx-&gt;has_outerjoin &amp;&amp; depth == 0)</span>
+<span class="lineNum">    1078 </span>            :                 {
+<span class="lineNum">    1079 </span><span class="lineCov">         54 :                     List    *where_quals_vars = NIL;</span>
+<span class="lineNum">    1080 </span><span class="lineCov">         54 :                     List    *nonnullable_vars = find_nonnullable_vars((Node *) qry-&gt;jointree-&gt;quals);</span>
+<span class="lineNum">    1081 </span><span class="lineCov">         54 :                     List    *qual_vars = NIL;</span>
+<span class="lineNum">    1082 </span>            :                     ListCell *lc;
+<span class="lineNum">    1083 </span>            : 
+<span class="lineNum">    1084 </span><span class="lineCov">        122 :                     foreach (lc, ctx-&gt;join_quals)</span>
+<span class="lineNum">    1085 </span>            :                     {
+<span class="lineNum">    1086 </span><span class="lineCov">         72 :                         OpExpr  *op = (OpExpr *) lfirst(lc);</span>
+<span class="lineNum">    1087 </span>            : 
+<span class="lineNum">    1088 </span><span class="lineCov">         72 :                         if (!is_equijoin_condition(op))</span>
+<span class="lineNum">    1089 </span><span class="lineCov">          4 :                             ereport(ERROR, (errmsg(&quot;Only simple equijoin is supported for IVM with outer join&quot;)));</span>
+<span class="lineNum">    1090 </span>            : 
+<span class="lineNum">    1091 </span><span class="lineCov">         68 :                         op = (OpExpr *) flatten_join_alias_vars(qry, (Node *) op);</span>
+<span class="lineNum">    1092 </span><span class="lineCov">         68 :                         qual_vars = list_concat(qual_vars, pull_vars_of_level((Node *) op, 0));</span>
+<span class="lineNum">    1093 </span>            :                     }
+<span class="lineNum">    1094 </span>            : 
+<span class="lineNum">    1095 </span><span class="lineCov">        182 :                     foreach (lc, qual_vars)</span>
+<span class="lineNum">    1096 </span>            :                     {
+<span class="lineNum">    1097 </span><span class="lineCov">        136 :                         Var *var = lfirst(lc);</span>
+<span class="lineNum">    1098 </span>            :                         ListCell *lc2;
+<span class="lineNum">    1099 </span><span class="lineCov">        136 :                         bool found = false;</span>
+<span class="lineNum">    1100 </span>            : 
+<span class="lineNum">    1101 </span><span class="lineCov">        304 :                         foreach(lc2, qry-&gt;targetList)</span>
+<span class="lineNum">    1102 </span>            :                         {
+<span class="lineNum">    1103 </span><span class="lineCov">        300 :                             TargetEntry *tle = lfirst(lc2);</span>
+<span class="lineNum">    1104 </span>            : 
+<span class="lineNum">    1105 </span><span class="lineCov">        300 :                             if (IsA(tle-&gt;expr, Var))</span>
+<span class="lineNum">    1106 </span>            :                             {
+<span class="lineNum">    1107 </span><span class="lineCov">        300 :                                 Var *var2 = (Var *) flatten_join_alias_vars(qry, (Node *) tle-&gt;expr);</span>
+<span class="lineNum">    1108 </span><span class="lineCov">        300 :                                 if (var-&gt;varno == var2-&gt;varno &amp;&amp; var-&gt;varattno == var2-&gt;varattno)</span>
+<span class="lineNum">    1109 </span>            :                                 {
+<span class="lineNum">    1110 </span><span class="lineCov">        132 :                                     found = true;</span>
+<span class="lineNum">    1111 </span><span class="lineCov">        132 :                                     break;</span>
+<span class="lineNum">    1112 </span>            :                                 }
+<span class="lineNum">    1113 </span>            :                             }
+<span class="lineNum">    1114 </span>            :                         }
+<span class="lineNum">    1115 </span><span class="lineCov">        136 :                         if (!found)</span>
+<span class="lineNum">    1116 </span><span class="lineCov">          4 :                             ereport(ERROR, (errmsg(&quot;targetlist must contain vars in the join condition for IVM with outer join&quot;)));</span>
+<span class="lineNum">    1117 </span>            :                     }
+<span class="lineNum">    1118 </span>            : 
+<span class="lineNum">    1119 </span><span class="lineCov">         46 :                     where_quals_vars = pull_vars_of_level(flatten_join_alias_vars(qry, (Node *) qry-&gt;jointree-&gt;quals), 0);</span>
+<span class="lineNum">    1120 </span>            : 
+<span class="lineNum">    1121 </span><span class="lineCov">         46 :                     if (list_length(where_quals_vars) &gt; list_length(nonnullable_vars))</span>
+<span class="lineNum">    1122 </span><span class="lineCov">          4 :                         ereport(ERROR, (errmsg(&quot;WHERE cannot contain non null-rejecting predicates for IVM with outer join&quot;)));</span>
+<span class="lineNum">    1123 </span>            : 
+<span class="lineNum">    1124 </span><span class="lineCov">         42 :                     if (contain_nonstrict_functions((Node *) qry-&gt;targetList))</span>
+<span class="lineNum">    1125 </span><span class="lineCov">          4 :                         ereport(ERROR, (errmsg(&quot;targetlist cannot contain non strict functions for IVM with outer join&quot;)));</span>
+<span class="lineNum">    1126 </span>            :                 }
+<span class="lineNum">    1127 </span>            : 
+<span class="lineNum">    1128 </span><span class="lineCov">         88 :                 break;</span>
+<span class="lineNum">    1129 </span>            :             }
+<span class="lineNum">    1130 </span>            :         case T_JoinExpr:
+<span class="lineNum">    1131 </span>            :             {
+<span class="lineNum">    1132 </span><span class="lineCov">         98 :                 JoinExpr *joinexpr = (JoinExpr *)node;</span>
+<span class="lineNum">    1133 </span><span class="lineCov">         98 :                 if (IS_OUTER_JOIN(joinexpr-&gt;jointype))</span>
+<span class="lineNum">    1134 </span>            :                 {
+<span class="lineNum">    1135 </span><span class="lineCov">         78 :                     if (ctx-&gt;has_subquery)</span>
+<span class="lineNum">    1136 </span><span class="lineCov">          2 :                         ereport(ERROR, (errmsg(&quot;subquery is not supported with IVM together with outer join&quot;)));</span>
+<span class="lineNum">    1137 </span><span class="lineCov">         76 :                     if (ctx-&gt;has_agg)</span>
+<span class="lineNum">    1138 </span><span class="lineCov">          2 :                         ereport(ERROR, (errmsg(&quot;aggregate is not supported with IVM together with outer join&quot;)));</span>
+<span class="lineNum">    1139 </span>            : 
+<span class="lineNum">    1140 </span><span class="lineCov">         74 :                     ctx-&gt;has_outerjoin = true;</span>
+<span class="lineNum">    1141 </span><span class="lineCov">         74 :                     ctx-&gt;join_quals = lappend(ctx-&gt;join_quals, joinexpr-&gt;quals);</span>
+<span class="lineNum">    1142 </span>            :                 }
+<span class="lineNum">    1143 </span>            :                 /* left side */
+<span class="lineNum">    1144 </span><span class="lineCov">         94 :                 check_ivm_restriction_walker((Node *) joinexpr-&gt;larg, ctx, depth);</span>
+<span class="lineNum">    1145 </span>            :                 /* right side */
+<span class="lineNum">    1146 </span><span class="lineCov">         94 :                 check_ivm_restriction_walker((Node *) joinexpr-&gt;rarg, ctx, depth);</span>
+<span class="lineNum">    1147 </span><span class="lineCov">         94 :                 check_ivm_restriction_walker((Node *) joinexpr-&gt;quals, ctx, depth);</span>
+<span class="lineNum">    1148 </span>            :             }
+<span class="lineNum">    1149 </span><span class="lineCov">         94 :             break;</span>
+<span class="lineNum">    1150 </span>            :         case T_FromExpr:
+<span class="lineNum">    1151 </span>            :             {
+<span class="lineNum">    1152 </span>            :                 ListCell *lc;
+<span class="lineNum">    1153 </span><span class="lineCov">        122 :                 FromExpr *fromexpr = (FromExpr *)node;</span>
+<span class="lineNum">    1154 </span><span class="lineCov">        242 :                 foreach(lc, fromexpr-&gt;fromlist)</span>
+<span class="lineNum">    1155 </span>            :                 {
+<span class="lineNum">    1156 </span><span class="lineCov">        124 :                     check_ivm_restriction_walker((Node *) lfirst(lc), ctx, depth);</span>
+<span class="lineNum">    1157 </span>            :                 }
+<span class="lineNum">    1158 </span>            : 
+<span class="lineNum">    1159 </span><span class="lineCov">        118 :                 check_ivm_restriction_walker((Node *) fromexpr-&gt;quals, ctx, depth);</span>
+<span class="lineNum">    1160 </span>            :             }
+<span class="lineNum">    1161 </span><span class="lineCov">        108 :             break;</span>
+<span class="lineNum">    1162 </span>            :         case T_Var:
+<span class="lineNum">    1163 </span>            :             {
+<span class="lineNum">    1164 </span>            :                 /* if system column, return error */
+<span class="lineNum">    1165 </span><span class="lineCov">        476 :                 Var *variable = (Var *) node;</span>
+<span class="lineNum">    1166 </span><span class="lineCov">        476 :                 if (variable-&gt;varattno &lt; 0)</span>
+<span class="lineNum">    1167 </span><span class="lineCov">          4 :                     ereport(ERROR, (errmsg(&quot;system column is not supported with IVM&quot;)));</span>
+<span class="lineNum">    1168 </span>            :             }
+<span class="lineNum">    1169 </span><span class="lineCov">        472 :             break;</span>
+<span class="lineNum">    1170 </span>            :         case T_BoolExpr:
+<span class="lineNum">    1171 </span>            :             {
+<span class="lineNum">    1172 </span><span class="lineCov">         12 :                 BoolExpr   *boolexpr = (BoolExpr *) node;</span>
+<span class="lineNum">    1173 </span>            :                 ListCell   *lc;
+<span class="lineNum">    1174 </span>            : 
+<span class="lineNum">    1175 </span><span class="lineCov">         36 :                 foreach(lc, boolexpr-&gt;args)</span>
+<span class="lineNum">    1176 </span>            :                 {
+<span class="lineNum">    1177 </span><span class="lineCov">         24 :                     Node       *arg = (Node *) lfirst(lc);</span>
+<span class="lineNum">    1178 </span><span class="lineCov">         24 :                     check_ivm_restriction_walker(arg, ctx, depth);</span>
+<span class="lineNum">    1179 </span>            :                 }
+<span class="lineNum">    1180 </span><span class="lineCov">         12 :                 break;</span>
+<span class="lineNum">    1181 </span>            :             }
+<span class="lineNum">    1182 </span>            :         case T_NullIfExpr: /* same as OpExpr */
+<span class="lineNum">    1183 </span>            :         case T_DistinctExpr: /* same as OpExpr */
+<span class="lineNum">    1184 </span>            :         case T_OpExpr:
+<span class="lineNum">    1185 </span>            :             {
+<span class="lineNum">    1186 </span><span class="lineCov">        128 :                 OpExpr     *op = (OpExpr *) node;</span>
+<span class="lineNum">    1187 </span>            :                 ListCell   *lc;
+<span class="lineNum">    1188 </span><span class="lineCov">        380 :                 foreach(lc, op-&gt;args)</span>
+<span class="lineNum">    1189 </span>            :                 {
+<span class="lineNum">    1190 </span><span class="lineCov">        254 :                     Node       *arg = (Node *) lfirst(lc);</span>
+<span class="lineNum">    1191 </span><span class="lineCov">        254 :                     check_ivm_restriction_walker(arg, ctx, depth);</span>
+<span class="lineNum">    1192 </span>            :                 }
+<span class="lineNum">    1193 </span><span class="lineCov">        126 :                 break;</span>
+<span class="lineNum">    1194 </span>            :             }
+<span class="lineNum">    1195 </span>            :         case T_CaseExpr:
+<span class="lineNum">    1196 </span>            :             {
+<span class="lineNum">    1197 </span><span class="lineCov">          2 :                 CaseExpr *caseexpr = (CaseExpr *) node;</span>
+<span class="lineNum">    1198 </span>            :                 ListCell *lc;
+<span class="lineNum">    1199 </span>            :                 /* result for ELSE clause */
+<span class="lineNum">    1200 </span><span class="lineCov">          2 :                 check_ivm_restriction_walker((Node *) caseexpr-&gt;defresult, ctx, depth);</span>
+<span class="lineNum">    1201 </span>            :                 /* expr for WHEN clauses */
+<span class="lineNum">    1202 </span><span class="lineCov">          4 :                 foreach(lc, caseexpr-&gt;args)</span>
+<span class="lineNum">    1203 </span>            :                 {
+<span class="lineNum">    1204 </span><span class="lineCov">          2 :                     CaseWhen *when = (CaseWhen *) lfirst(lc);</span>
+<span class="lineNum">    1205 </span><span class="lineCov">          2 :                     Node *w_expr = (Node *) when-&gt;expr;</span>
+<span class="lineNum">    1206 </span>            :                     /* result for WHEN clause */
+<span class="lineNum">    1207 </span><span class="lineCov">          2 :                     check_ivm_restriction_walker((Node *) when-&gt;result, ctx, depth);</span>
+<span class="lineNum">    1208 </span>            :                     /* expr clause*/
+<span class="lineNum">    1209 </span><span class="lineCov">          2 :                     check_ivm_restriction_walker((Node *) w_expr, ctx, depth);</span>
+<span class="lineNum">    1210 </span>            :                 }
+<span class="lineNum">    1211 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">    1212 </span>            :             }
+<span class="lineNum">    1213 </span>            :         case T_SubLink:
+<span class="lineNum">    1214 </span>            :             {
+<span class="lineNum">    1215 </span>            :                 /* Now, EXISTS clause is supported only */
+<span class="lineNum">    1216 </span><span class="lineCov">         20 :                 SubLink *sublink = (SubLink *) node;</span>
+<span class="lineNum">    1217 </span><span class="lineCov">         20 :                 if (sublink-&gt;subLinkType != EXISTS_SUBLINK)</span>
+<span class="lineNum">    1218 </span><span class="lineCov">          4 :                     ereport(ERROR, (errmsg(&quot;subquery in WHERE is not supported by IVM, except for EXISTS clause&quot;)));</span>
+<span class="lineNum">    1219 </span><span class="lineCov">         16 :                 if (depth &gt; 0)</span>
+<span class="lineNum">    1220 </span><span class="lineCov">          2 :                     ereport(ERROR, (errmsg(&quot;nested subquery is not supported by IVM&quot;)));</span>
+<span class="lineNum">    1221 </span><span class="lineCov">         14 :                 if (ctx-&gt;has_outerjoin)</span>
+<span class="lineNum">    1222 </span><span class="lineCov">          2 :                     ereport(ERROR, (errmsg(&quot;subquery is not supported by IVM together with outer join&quot;)));</span>
+<span class="lineNum">    1223 </span><span class="lineCov">         12 :                 check_ivm_restriction_walker(sublink-&gt;subselect, ctx, depth + 1);</span>
+<span class="lineNum">    1224 </span><span class="lineCov">         10 :                 break;</span>
+<span class="lineNum">    1225 </span>            :             }
+<span class="lineNum">    1226 </span>            :         case T_SubPlan:
+<span class="lineNum">    1227 </span>            :         case T_Aggref:
+<span class="lineNum">    1228 </span>            :         case T_GroupingFunc:
+<span class="lineNum">    1229 </span>            :         case T_WindowFunc:
+<span class="lineNum">    1230 </span>            :         case T_FuncExpr:
+<span class="lineNum">    1231 </span>            :         case T_SQLValueFunction:
+<span class="lineNum">    1232 </span>            :         case T_Const:
+<span class="lineNum">    1233 </span>            :         case T_Param:
+<span class="lineNum">    1234 </span>            :         default:
+<span class="lineNum">    1235 </span>            :             /* do nothing */
+<span class="lineNum">    1236 </span><span class="lineCov">        274 :             break;</span>
+<span class="lineNum">    1237 </span>            :     }
+<span class="lineNum">    1238 </span>            : 
+<span class="lineNum">    1239 </span><span class="lineCov">       1186 :     return;</span>
+<span class="lineNum">    1240 </span>            : }
+<span class="lineNum">    1241 </span>            : 
+<span class="lineNum">    1242 </span>            : /*
+<span class="lineNum">    1243 </span>            :  * is_equijoin_condition - check if all operators must be btree equality or hash equality
+<a name="1244"><span class="lineNum">    1244 </span>            :  */</a>
+<span class="lineNum">    1245 </span>            : static bool
+<span class="lineNum">    1246 </span><span class="lineCov">         72 : is_equijoin_condition(OpExpr *op)</span>
+<span class="lineNum">    1247 </span>            : {
+<span class="lineNum">    1248 </span>            :     Oid         opno;
+<span class="lineNum">    1249 </span>            :     Node       *left_expr;
+<span class="lineNum">    1250 </span>            :     Node       *right_expr;
+<span class="lineNum">    1251 </span>            :     Relids      left_varnos;
+<span class="lineNum">    1252 </span>            :     Relids      right_varnos;
+<span class="lineNum">    1253 </span>            :     Oid         opinputtype;
+<span class="lineNum">    1254 </span>            : 
+<span class="lineNum">    1255 </span>            :     /* Is it a binary opclause? */
+<span class="lineNum">    1256 </span><span class="lineCov">         72 :     if (!IsA(op, OpExpr) || list_length(op-&gt;args) != 2)</span>
+<span class="lineNum">    1257 </span><span class="lineCov">          2 :         return false;</span>
+<span class="lineNum">    1258 </span>            : 
+<span class="lineNum">    1259 </span><span class="lineCov">         70 :     opno = op-&gt;opno;</span>
+<span class="lineNum">    1260 </span><span class="lineCov">         70 :     left_expr = linitial(op-&gt;args);</span>
+<span class="lineNum">    1261 </span><span class="lineCov">         70 :     right_expr = lsecond(op-&gt;args);</span>
+<span class="lineNum">    1262 </span><span class="lineCov">         70 :     left_varnos = pull_varnos(left_expr);</span>
+<span class="lineNum">    1263 </span><span class="lineCov">         70 :     right_varnos = pull_varnos(right_expr);</span>
+<span class="lineNum">    1264 </span><span class="lineCov">         70 :     opinputtype = exprType(left_expr);</span>
+<span class="lineNum">    1265 </span>            : 
+<span class="lineNum">    1266 </span><span class="lineCov">        140 :     if (bms_num_members(left_varnos) != 1 || bms_num_members(right_varnos) != 1 ||</span>
+<span class="lineNum">    1267 </span><span class="lineCov">         70 :         bms_equal(left_varnos, right_varnos) !=0)</span>
+<span class="lineNum">    1268 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1269 </span>            : 
+<span class="lineNum">    1270 </span><span class="lineCov">         70 :     if (op_mergejoinable(opno, opinputtype) &amp;&amp; get_mergejoin_opfamilies(opno) != NIL)</span>
+<span class="lineNum">    1271 </span><span class="lineCov">         68 :         return true;</span>
+<span class="lineNum">    1272 </span>            : 
+<span class="lineNum">    1273 </span><span class="lineCov">          2 :     if (op_hashjoinable(opno, opinputtype))</span>
+<span class="lineNum">    1274 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">    1275 </span>            : 
+<span class="lineNum">    1276 </span><span class="lineCov">          2 :     return false;</span>
+<span class="lineNum">    1277 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

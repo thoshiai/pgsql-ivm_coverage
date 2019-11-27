@@ -1,0 +1,869 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/nodeGatherMerge.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - nodeGatherMerge.c<span style="font-size: 80%;"> (source / <a href="nodeGatherMerge.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">219</td>
+            <td class="headerCovTableEntry">224</td>
+            <td class="headerCovTableEntryHi">97.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * nodeGatherMerge.c
+<span class="lineNum">       4 </span>            :  *      Scan a plan in multiple workers, and do order-preserving merge.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  * IDENTIFICATION
+<span class="lineNum">      10 </span>            :  *    src/backend/executor/nodeGatherMerge.c
+<span class="lineNum">      11 </span>            :  *
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/relscan.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;access/xact.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;executor/execdebug.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;executor/execParallel.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;executor/nodeGatherMerge.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;executor/nodeSubplan.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;executor/tqueue.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;lib/binaryheap.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;optimizer/optimizer.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      29 </span>            : 
+<span class="lineNum">      30 </span>            : /*
+<span class="lineNum">      31 </span>            :  * When we read tuples from workers, it's a good idea to read several at once
+<span class="lineNum">      32 </span>            :  * for efficiency when possible: this minimizes context-switching overhead.
+<span class="lineNum">      33 </span>            :  * But reading too many at a time wastes memory without improving performance.
+<span class="lineNum">      34 </span>            :  * We'll read up to MAX_TUPLE_STORE tuples (in addition to the first one).
+<span class="lineNum">      35 </span>            :  */
+<span class="lineNum">      36 </span>            : #define MAX_TUPLE_STORE 10
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : /*
+<span class="lineNum">      39 </span>            :  * Pending-tuple array for each worker.  This holds additional tuples that
+<span class="lineNum">      40 </span>            :  * we were able to fetch from the worker, but can't process yet.  In addition,
+<span class="lineNum">      41 </span>            :  * this struct holds the &quot;done&quot; flag indicating the worker is known to have
+<span class="lineNum">      42 </span>            :  * no more tuples.  (We do not use this struct for the leader; we don't keep
+<span class="lineNum">      43 </span>            :  * any pending tuples for the leader, and the need_to_scan_locally flag serves
+<span class="lineNum">      44 </span>            :  * as its &quot;done&quot; indicator.)
+<span class="lineNum">      45 </span>            :  */
+<span class="lineNum">      46 </span>            : typedef struct GMReaderTupleBuffer
+<span class="lineNum">      47 </span>            : {
+<span class="lineNum">      48 </span>            :     HeapTuple  *tuple;          /* array of length MAX_TUPLE_STORE */
+<span class="lineNum">      49 </span>            :     int         nTuples;        /* number of tuples currently stored */
+<span class="lineNum">      50 </span>            :     int         readCounter;    /* index of next tuple to extract */
+<span class="lineNum">      51 </span>            :     bool        done;           /* true if reader is known exhausted */
+<span class="lineNum">      52 </span>            : } GMReaderTupleBuffer;
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            : static TupleTableSlot *ExecGatherMerge(PlanState *pstate);
+<span class="lineNum">      55 </span>            : static int32 heap_compare_slots(Datum a, Datum b, void *arg);
+<span class="lineNum">      56 </span>            : static TupleTableSlot *gather_merge_getnext(GatherMergeState *gm_state);
+<span class="lineNum">      57 </span>            : static HeapTuple gm_readnext_tuple(GatherMergeState *gm_state, int nreader,
+<span class="lineNum">      58 </span>            :                                    bool nowait, bool *done);
+<span class="lineNum">      59 </span>            : static void ExecShutdownGatherMergeWorkers(GatherMergeState *node);
+<span class="lineNum">      60 </span>            : static void gather_merge_setup(GatherMergeState *gm_state);
+<span class="lineNum">      61 </span>            : static void gather_merge_init(GatherMergeState *gm_state);
+<span class="lineNum">      62 </span>            : static void gather_merge_clear_tuples(GatherMergeState *gm_state);
+<span class="lineNum">      63 </span>            : static bool gather_merge_readnext(GatherMergeState *gm_state, int reader,
+<span class="lineNum">      64 </span>            :                                   bool nowait);
+<span class="lineNum">      65 </span>            : static void load_tuple_array(GatherMergeState *gm_state, int reader);
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">      68 </span>            :  *      ExecInitGather
+<span class="lineNum">      69 </span>            :  * ----------------------------------------------------------------
+<a name="70"><span class="lineNum">      70 </span>            :  */</a>
+<span class="lineNum">      71 </span>            : GatherMergeState *
+<span class="lineNum">      72 </span><span class="lineCov">         68 : ExecInitGatherMerge(GatherMerge *node, EState *estate, int eflags)</span>
+<span class="lineNum">      73 </span>            : {
+<span class="lineNum">      74 </span>            :     GatherMergeState *gm_state;
+<span class="lineNum">      75 </span>            :     Plan       *outerNode;
+<span class="lineNum">      76 </span>            :     TupleDesc   tupDesc;
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            :     /* Gather merge node doesn't have innerPlan node. */
+<span class="lineNum">      79 </span><span class="lineCov">         68 :     Assert(innerPlan(node) == NULL);</span>
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span>            :     /*
+<span class="lineNum">      82 </span>            :      * create state structure
+<span class="lineNum">      83 </span>            :      */
+<span class="lineNum">      84 </span><span class="lineCov">         68 :     gm_state = makeNode(GatherMergeState);</span>
+<span class="lineNum">      85 </span><span class="lineCov">         68 :     gm_state-&gt;ps.plan = (Plan *) node;</span>
+<span class="lineNum">      86 </span><span class="lineCov">         68 :     gm_state-&gt;ps.state = estate;</span>
+<span class="lineNum">      87 </span><span class="lineCov">         68 :     gm_state-&gt;ps.ExecProcNode = ExecGatherMerge;</span>
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span><span class="lineCov">         68 :     gm_state-&gt;initialized = false;</span>
+<span class="lineNum">      90 </span><span class="lineCov">         68 :     gm_state-&gt;gm_initialized = false;</span>
+<span class="lineNum">      91 </span><span class="lineCov">         68 :     gm_state-&gt;tuples_needed = -1;</span>
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            :     /*
+<span class="lineNum">      94 </span>            :      * Miscellaneous initialization
+<span class="lineNum">      95 </span>            :      *
+<span class="lineNum">      96 </span>            :      * create expression context for node
+<span class="lineNum">      97 </span>            :      */
+<span class="lineNum">      98 </span><span class="lineCov">         68 :     ExecAssignExprContext(estate, &amp;gm_state-&gt;ps);</span>
+<span class="lineNum">      99 </span>            : 
+<span class="lineNum">     100 </span>            :     /*
+<span class="lineNum">     101 </span>            :      * GatherMerge doesn't support checking a qual (it's always more efficient
+<span class="lineNum">     102 </span>            :      * to do it in the child node).
+<span class="lineNum">     103 </span>            :      */
+<span class="lineNum">     104 </span><span class="lineCov">         68 :     Assert(!node-&gt;plan.qual);</span>
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span>            :     /*
+<span class="lineNum">     107 </span>            :      * now initialize outer plan
+<span class="lineNum">     108 </span>            :      */
+<span class="lineNum">     109 </span><span class="lineCov">         68 :     outerNode = outerPlan(node);</span>
+<span class="lineNum">     110 </span><span class="lineCov">         68 :     outerPlanState(gm_state) = ExecInitNode(outerNode, estate, eflags);</span>
+<span class="lineNum">     111 </span>            : 
+<span class="lineNum">     112 </span>            :     /*
+<span class="lineNum">     113 </span>            :      * Leader may access ExecProcNode result directly (if
+<span class="lineNum">     114 </span>            :      * need_to_scan_locally), or from workers via tuple queue.  So we can't
+<span class="lineNum">     115 </span>            :      * trivially rely on the slot type being fixed for expressions evaluated
+<span class="lineNum">     116 </span>            :      * within this node.
+<span class="lineNum">     117 </span>            :      */
+<span class="lineNum">     118 </span><span class="lineCov">         68 :     gm_state-&gt;ps.outeropsset = true;</span>
+<span class="lineNum">     119 </span><span class="lineCov">         68 :     gm_state-&gt;ps.outeropsfixed = false;</span>
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span>            :     /*
+<span class="lineNum">     122 </span>            :      * Store the tuple descriptor into gather merge state, so we can use it
+<span class="lineNum">     123 </span>            :      * while initializing the gather merge slots.
+<span class="lineNum">     124 </span>            :      */
+<span class="lineNum">     125 </span><span class="lineCov">         68 :     tupDesc = ExecGetResultType(outerPlanState(gm_state));</span>
+<span class="lineNum">     126 </span><span class="lineCov">         68 :     gm_state-&gt;tupDesc = tupDesc;</span>
+<span class="lineNum">     127 </span>            : 
+<span class="lineNum">     128 </span>            :     /*
+<span class="lineNum">     129 </span>            :      * Initialize result type and projection.
+<span class="lineNum">     130 </span>            :      */
+<span class="lineNum">     131 </span><span class="lineCov">         68 :     ExecInitResultTypeTL(&amp;gm_state-&gt;ps);</span>
+<span class="lineNum">     132 </span><span class="lineCov">         68 :     ExecConditionalAssignProjectionInfo(&amp;gm_state-&gt;ps, tupDesc, OUTER_VAR);</span>
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span>            :     /*
+<span class="lineNum">     135 </span>            :      * Without projections result slot type is not trivially known, see
+<span class="lineNum">     136 </span>            :      * comment above.
+<span class="lineNum">     137 </span>            :      */
+<span class="lineNum">     138 </span><span class="lineCov">         68 :     if (gm_state-&gt;ps.ps_ProjInfo == NULL)</span>
+<span class="lineNum">     139 </span>            :     {
+<span class="lineNum">     140 </span><span class="lineCov">         68 :         gm_state-&gt;ps.resultopsset = true;</span>
+<span class="lineNum">     141 </span><span class="lineCov">         68 :         gm_state-&gt;ps.resultopsfixed = false;</span>
+<span class="lineNum">     142 </span>            :     }
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span>            :     /*
+<span class="lineNum">     145 </span>            :      * initialize sort-key information
+<span class="lineNum">     146 </span>            :      */
+<span class="lineNum">     147 </span><span class="lineCov">         68 :     if (node-&gt;numCols)</span>
+<span class="lineNum">     148 </span>            :     {
+<span class="lineNum">     149 </span>            :         int         i;
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span><span class="lineCov">         68 :         gm_state-&gt;gm_nkeys = node-&gt;numCols;</span>
+<span class="lineNum">     152 </span><span class="lineCov">         68 :         gm_state-&gt;gm_sortkeys =</span>
+<span class="lineNum">     153 </span><span class="lineCov">         68 :             palloc0(sizeof(SortSupportData) * node-&gt;numCols);</span>
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span><span class="lineCov">        144 :         for (i = 0; i &lt; node-&gt;numCols; i++)</span>
+<span class="lineNum">     156 </span>            :         {
+<span class="lineNum">     157 </span><span class="lineCov">         76 :             SortSupport sortKey = gm_state-&gt;gm_sortkeys + i;</span>
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span><span class="lineCov">         76 :             sortKey-&gt;ssup_cxt = CurrentMemoryContext;</span>
+<span class="lineNum">     160 </span><span class="lineCov">         76 :             sortKey-&gt;ssup_collation = node-&gt;collations[i];</span>
+<span class="lineNum">     161 </span><span class="lineCov">         76 :             sortKey-&gt;ssup_nulls_first = node-&gt;nullsFirst[i];</span>
+<span class="lineNum">     162 </span><span class="lineCov">         76 :             sortKey-&gt;ssup_attno = node-&gt;sortColIdx[i];</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span>            :             /*
+<span class="lineNum">     165 </span>            :              * We don't perform abbreviated key conversion here, for the same
+<span class="lineNum">     166 </span>            :              * reasons that it isn't used in MergeAppend
+<span class="lineNum">     167 </span>            :              */
+<span class="lineNum">     168 </span><span class="lineCov">         76 :             sortKey-&gt;abbreviate = false;</span>
+<span class="lineNum">     169 </span>            : 
+<span class="lineNum">     170 </span><span class="lineCov">         76 :             PrepareSortSupportFromOrderingOp(node-&gt;sortOperators[i], sortKey);</span>
+<span class="lineNum">     171 </span>            :         }
+<span class="lineNum">     172 </span>            :     }
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span>            :     /* Now allocate the workspace for gather merge */
+<span class="lineNum">     175 </span><span class="lineCov">         68 :     gather_merge_setup(gm_state);</span>
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span><span class="lineCov">         68 :     return gm_state;</span>
+<span class="lineNum">     178 </span>            : }
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     181 </span>            :  *      ExecGatherMerge(node)
+<span class="lineNum">     182 </span>            :  *
+<span class="lineNum">     183 </span>            :  *      Scans the relation via multiple workers and returns
+<span class="lineNum">     184 </span>            :  *      the next qualifying tuple.
+<span class="lineNum">     185 </span>            :  * ----------------------------------------------------------------
+<a name="186"><span class="lineNum">     186 </span>            :  */</a>
+<span class="lineNum">     187 </span>            : static TupleTableSlot *
+<span class="lineNum">     188 </span><span class="lineCov">      61240 : ExecGatherMerge(PlanState *pstate)</span>
+<span class="lineNum">     189 </span>            : {
+<span class="lineNum">     190 </span><span class="lineCov">      61240 :     GatherMergeState *node = castNode(GatherMergeState, pstate);</span>
+<span class="lineNum">     191 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     192 </span>            :     ExprContext *econtext;
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span><span class="lineCov">      61240 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span>            :     /*
+<span class="lineNum">     197 </span>            :      * As with Gather, we don't launch workers until this node is actually
+<span class="lineNum">     198 </span>            :      * executed.
+<span class="lineNum">     199 </span>            :      */
+<span class="lineNum">     200 </span><span class="lineCov">      61240 :     if (!node-&gt;initialized)</span>
+<span class="lineNum">     201 </span>            :     {
+<span class="lineNum">     202 </span><span class="lineCov">         42 :         EState     *estate = node-&gt;ps.state;</span>
+<span class="lineNum">     203 </span><span class="lineCov">         42 :         GatherMerge *gm = castNode(GatherMerge, node-&gt;ps.plan);</span>
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span>            :         /*
+<span class="lineNum">     206 </span>            :          * Sometimes we might have to run without parallelism; but if parallel
+<span class="lineNum">     207 </span>            :          * mode is active then we can try to fire up some workers.
+<span class="lineNum">     208 </span>            :          */
+<span class="lineNum">     209 </span><span class="lineCov">         42 :         if (gm-&gt;num_workers &gt; 0 &amp;&amp; estate-&gt;es_use_parallel_mode)</span>
+<span class="lineNum">     210 </span>            :         {
+<span class="lineNum">     211 </span>            :             ParallelContext *pcxt;
+<span class="lineNum">     212 </span>            : 
+<span class="lineNum">     213 </span>            :             /* Initialize, or re-initialize, shared state needed by workers. */
+<span class="lineNum">     214 </span><span class="lineCov">         42 :             if (!node-&gt;pei)</span>
+<span class="lineNum">     215 </span><span class="lineCov">         34 :                 node-&gt;pei = ExecInitParallelPlan(node-&gt;ps.lefttree,</span>
+<span class="lineNum">     216 </span>            :                                                  estate,
+<span class="lineNum">     217 </span>            :                                                  gm-&gt;initParam,
+<span class="lineNum">     218 </span>            :                                                  gm-&gt;num_workers,
+<span class="lineNum">     219 </span>            :                                                  node-&gt;tuples_needed);
+<span class="lineNum">     220 </span>            :             else
+<span class="lineNum">     221 </span><span class="lineCov">         16 :                 ExecParallelReinitialize(node-&gt;ps.lefttree,</span>
+<span class="lineNum">     222 </span><span class="lineCov">          8 :                                          node-&gt;pei,</span>
+<span class="lineNum">     223 </span>            :                                          gm-&gt;initParam);
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span>            :             /* Try to launch workers. */
+<span class="lineNum">     226 </span><span class="lineCov">         42 :             pcxt = node-&gt;pei-&gt;pcxt;</span>
+<span class="lineNum">     227 </span><span class="lineCov">         42 :             LaunchParallelWorkers(pcxt);</span>
+<span class="lineNum">     228 </span>            :             /* We save # workers launched for the benefit of EXPLAIN */
+<span class="lineNum">     229 </span><span class="lineCov">         42 :             node-&gt;nworkers_launched = pcxt-&gt;nworkers_launched;</span>
+<span class="lineNum">     230 </span>            : 
+<span class="lineNum">     231 </span>            :             /* Set up tuple queue readers to read the results. */
+<span class="lineNum">     232 </span><span class="lineCov">         42 :             if (pcxt-&gt;nworkers_launched &gt; 0)</span>
+<span class="lineNum">     233 </span>            :             {
+<span class="lineNum">     234 </span><span class="lineCov">         38 :                 ExecParallelCreateReaders(node-&gt;pei);</span>
+<span class="lineNum">     235 </span>            :                 /* Make a working array showing the active readers */
+<span class="lineNum">     236 </span><span class="lineCov">         38 :                 node-&gt;nreaders = pcxt-&gt;nworkers_launched;</span>
+<span class="lineNum">     237 </span><span class="lineCov">         38 :                 node-&gt;reader = (TupleQueueReader **)</span>
+<span class="lineNum">     238 </span><span class="lineCov">         38 :                     palloc(node-&gt;nreaders * sizeof(TupleQueueReader *));</span>
+<span class="lineNum">     239 </span><span class="lineCov">         38 :                 memcpy(node-&gt;reader, node-&gt;pei-&gt;reader,</span>
+<span class="lineNum">     240 </span><span class="lineCov">         38 :                        node-&gt;nreaders * sizeof(TupleQueueReader *));</span>
+<span class="lineNum">     241 </span>            :             }
+<span class="lineNum">     242 </span>            :             else
+<span class="lineNum">     243 </span>            :             {
+<span class="lineNum">     244 </span>            :                 /* No workers?  Then never mind. */
+<span class="lineNum">     245 </span><span class="lineCov">          4 :                 node-&gt;nreaders = 0;</span>
+<span class="lineNum">     246 </span><span class="lineCov">          4 :                 node-&gt;reader = NULL;</span>
+<span class="lineNum">     247 </span>            :             }
+<span class="lineNum">     248 </span>            :         }
+<span class="lineNum">     249 </span>            : 
+<span class="lineNum">     250 </span>            :         /* allow leader to participate if enabled or no choice */
+<span class="lineNum">     251 </span><span class="lineCov">         42 :         if (parallel_leader_participation || node-&gt;nreaders == 0)</span>
+<span class="lineNum">     252 </span><span class="lineCov">         40 :             node-&gt;need_to_scan_locally = true;</span>
+<span class="lineNum">     253 </span><span class="lineCov">         42 :         node-&gt;initialized = true;</span>
+<span class="lineNum">     254 </span>            :     }
+<span class="lineNum">     255 </span>            : 
+<span class="lineNum">     256 </span>            :     /*
+<span class="lineNum">     257 </span>            :      * Reset per-tuple memory context to free any expression evaluation
+<span class="lineNum">     258 </span>            :      * storage allocated in the previous tuple cycle.
+<span class="lineNum">     259 </span>            :      */
+<span class="lineNum">     260 </span><span class="lineCov">      61240 :     econtext = node-&gt;ps.ps_ExprContext;</span>
+<span class="lineNum">     261 </span><span class="lineCov">      61240 :     ResetExprContext(econtext);</span>
+<span class="lineNum">     262 </span>            : 
+<span class="lineNum">     263 </span>            :     /*
+<span class="lineNum">     264 </span>            :      * Get next tuple, either from one of our workers, or by running the plan
+<span class="lineNum">     265 </span>            :      * ourselves.
+<span class="lineNum">     266 </span>            :      */
+<span class="lineNum">     267 </span><span class="lineCov">      61240 :     slot = gather_merge_getnext(node);</span>
+<span class="lineNum">     268 </span><span class="lineCov">      61240 :     if (TupIsNull(slot))</span>
+<span class="lineNum">     269 </span><span class="lineCov">         36 :         return NULL;</span>
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span>            :     /* If no projection is required, we're done. */
+<span class="lineNum">     272 </span><span class="lineCov">      61204 :     if (node-&gt;ps.ps_ProjInfo == NULL)</span>
+<span class="lineNum">     273 </span><span class="lineCov">      61204 :         return slot;</span>
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span>            :     /*
+<span class="lineNum">     276 </span>            :      * Form the result tuple using ExecProject(), and return it.
+<span class="lineNum">     277 </span>            :      */
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :     econtext-&gt;ecxt_outertuple = slot;</span>
+<span class="lineNum">     279 </span><span class="lineNoCov">          0 :     return ExecProject(node-&gt;ps.ps_ProjInfo);</span>
+<span class="lineNum">     280 </span>            : }
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     283 </span>            :  *      ExecEndGatherMerge
+<span class="lineNum">     284 </span>            :  *
+<span class="lineNum">     285 </span>            :  *      frees any storage allocated through C routines.
+<span class="lineNum">     286 </span>            :  * ----------------------------------------------------------------
+<a name="287"><span class="lineNum">     287 </span>            :  */</a>
+<span class="lineNum">     288 </span>            : void
+<span class="lineNum">     289 </span><span class="lineCov">         68 : ExecEndGatherMerge(GatherMergeState *node)</span>
+<span class="lineNum">     290 </span>            : {
+<span class="lineNum">     291 </span><span class="lineCov">         68 :     ExecEndNode(outerPlanState(node));  /* let children clean up first */</span>
+<span class="lineNum">     292 </span><span class="lineCov">         68 :     ExecShutdownGatherMerge(node);</span>
+<span class="lineNum">     293 </span><span class="lineCov">         68 :     ExecFreeExprContext(&amp;node-&gt;ps);</span>
+<span class="lineNum">     294 </span><span class="lineCov">         68 :     if (node-&gt;ps.ps_ResultTupleSlot)</span>
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :         ExecClearTuple(node-&gt;ps.ps_ResultTupleSlot);</span>
+<span class="lineNum">     296 </span><span class="lineCov">         68 : }</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     299 </span>            :  *      ExecShutdownGatherMerge
+<span class="lineNum">     300 </span>            :  *
+<span class="lineNum">     301 </span>            :  *      Destroy the setup for parallel workers including parallel context.
+<span class="lineNum">     302 </span>            :  * ----------------------------------------------------------------
+<a name="303"><span class="lineNum">     303 </span>            :  */</a>
+<span class="lineNum">     304 </span>            : void
+<span class="lineNum">     305 </span><span class="lineCov">        108 : ExecShutdownGatherMerge(GatherMergeState *node)</span>
+<span class="lineNum">     306 </span>            : {
+<span class="lineNum">     307 </span><span class="lineCov">        108 :     ExecShutdownGatherMergeWorkers(node);</span>
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span>            :     /* Now destroy the parallel context. */
+<span class="lineNum">     310 </span><span class="lineCov">        108 :     if (node-&gt;pei != NULL)</span>
+<span class="lineNum">     311 </span>            :     {
+<span class="lineNum">     312 </span><span class="lineCov">         34 :         ExecParallelCleanup(node-&gt;pei);</span>
+<span class="lineNum">     313 </span><span class="lineCov">         34 :         node-&gt;pei = NULL;</span>
+<span class="lineNum">     314 </span>            :     }
+<span class="lineNum">     315 </span><span class="lineCov">        108 : }</span>
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     318 </span>            :  *      ExecShutdownGatherMergeWorkers
+<span class="lineNum">     319 </span>            :  *
+<span class="lineNum">     320 </span>            :  *      Stop all the parallel workers.
+<span class="lineNum">     321 </span>            :  * ----------------------------------------------------------------
+<a name="322"><span class="lineNum">     322 </span>            :  */</a>
+<span class="lineNum">     323 </span>            : static void
+<span class="lineNum">     324 </span><span class="lineCov">        120 : ExecShutdownGatherMergeWorkers(GatherMergeState *node)</span>
+<span class="lineNum">     325 </span>            : {
+<span class="lineNum">     326 </span><span class="lineCov">        120 :     if (node-&gt;pei != NULL)</span>
+<span class="lineNum">     327 </span><span class="lineCov">         42 :         ExecParallelFinish(node-&gt;pei);</span>
+<span class="lineNum">     328 </span>            : 
+<span class="lineNum">     329 </span>            :     /* Flush local copy of reader array */
+<span class="lineNum">     330 </span><span class="lineCov">        120 :     if (node-&gt;reader)</span>
+<span class="lineNum">     331 </span><span class="lineCov">         38 :         pfree(node-&gt;reader);</span>
+<span class="lineNum">     332 </span><span class="lineCov">        120 :     node-&gt;reader = NULL;</span>
+<span class="lineNum">     333 </span><span class="lineCov">        120 : }</span>
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     336 </span>            :  *      ExecReScanGatherMerge
+<span class="lineNum">     337 </span>            :  *
+<span class="lineNum">     338 </span>            :  *      Prepare to re-scan the result of a GatherMerge.
+<span class="lineNum">     339 </span>            :  * ----------------------------------------------------------------
+<a name="340"><span class="lineNum">     340 </span>            :  */</a>
+<span class="lineNum">     341 </span>            : void
+<span class="lineNum">     342 </span><span class="lineCov">         12 : ExecReScanGatherMerge(GatherMergeState *node)</span>
+<span class="lineNum">     343 </span>            : {
+<span class="lineNum">     344 </span><span class="lineCov">         12 :     GatherMerge *gm = (GatherMerge *) node-&gt;ps.plan;</span>
+<span class="lineNum">     345 </span><span class="lineCov">         12 :     PlanState  *outerPlan = outerPlanState(node);</span>
+<span class="lineNum">     346 </span>            : 
+<span class="lineNum">     347 </span>            :     /* Make sure any existing workers are gracefully shut down */
+<span class="lineNum">     348 </span><span class="lineCov">         12 :     ExecShutdownGatherMergeWorkers(node);</span>
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span>            :     /* Free any unused tuples, so we don't leak memory across rescans */
+<span class="lineNum">     351 </span><span class="lineCov">         12 :     gather_merge_clear_tuples(node);</span>
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span>            :     /* Mark node so that shared state will be rebuilt at next call */
+<span class="lineNum">     354 </span><span class="lineCov">         12 :     node-&gt;initialized = false;</span>
+<span class="lineNum">     355 </span><span class="lineCov">         12 :     node-&gt;gm_initialized = false;</span>
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span>            :     /*
+<span class="lineNum">     358 </span>            :      * Set child node's chgParam to tell it that the next scan might deliver a
+<span class="lineNum">     359 </span>            :      * different set of rows within the leader process.  (The overall rowset
+<span class="lineNum">     360 </span>            :      * shouldn't change, but the leader process's subset might; hence nodes
+<span class="lineNum">     361 </span>            :      * between here and the parallel table scan node mustn't optimize on the
+<span class="lineNum">     362 </span>            :      * assumption of an unchanging rowset.)
+<span class="lineNum">     363 </span>            :      */
+<span class="lineNum">     364 </span><span class="lineCov">         12 :     if (gm-&gt;rescan_param &gt;= 0)</span>
+<span class="lineNum">     365 </span><span class="lineCov">         12 :         outerPlan-&gt;chgParam = bms_add_member(outerPlan-&gt;chgParam,</span>
+<span class="lineNum">     366 </span>            :                                              gm-&gt;rescan_param);
+<span class="lineNum">     367 </span>            : 
+<span class="lineNum">     368 </span>            :     /*
+<span class="lineNum">     369 </span>            :      * If chgParam of subnode is not null then plan will be re-scanned by
+<span class="lineNum">     370 </span>            :      * first ExecProcNode.  Note: because this does nothing if we have a
+<span class="lineNum">     371 </span>            :      * rescan_param, it's currently guaranteed that parallel-aware child nodes
+<span class="lineNum">     372 </span>            :      * will not see a ReScan call until after they get a ReInitializeDSM call.
+<span class="lineNum">     373 </span>            :      * That ordering might not be something to rely on, though.  A good rule
+<span class="lineNum">     374 </span>            :      * of thumb is that ReInitializeDSM should reset only shared state, ReScan
+<span class="lineNum">     375 </span>            :      * should reset only local state, and anything that depends on both of
+<span class="lineNum">     376 </span>            :      * those steps being finished must wait until the first ExecProcNode call.
+<span class="lineNum">     377 </span>            :      */
+<span class="lineNum">     378 </span><span class="lineCov">         12 :     if (outerPlan-&gt;chgParam == NULL)</span>
+<span class="lineNum">     379 </span><span class="lineNoCov">          0 :         ExecReScan(outerPlan);</span>
+<span class="lineNum">     380 </span><span class="lineCov">         12 : }</span>
+<span class="lineNum">     381 </span>            : 
+<span class="lineNum">     382 </span>            : /*
+<span class="lineNum">     383 </span>            :  * Set up the data structures that we'll need for Gather Merge.
+<span class="lineNum">     384 </span>            :  *
+<span class="lineNum">     385 </span>            :  * We allocate these once on the basis of gm-&gt;num_workers, which is an
+<span class="lineNum">     386 </span>            :  * upper bound for the number of workers we'll actually have.  During
+<span class="lineNum">     387 </span>            :  * a rescan, we reset the structures to empty.  This approach simplifies
+<span class="lineNum">     388 </span>            :  * not leaking memory across rescans.
+<span class="lineNum">     389 </span>            :  *
+<span class="lineNum">     390 </span>            :  * In the gm_slots[] array, index 0 is for the leader, and indexes 1 to n
+<span class="lineNum">     391 </span>            :  * are for workers.  The values placed into gm_heap correspond to indexes
+<span class="lineNum">     392 </span>            :  * in gm_slots[].  The gm_tuple_buffers[] array, however, is indexed from
+<span class="lineNum">     393 </span>            :  * 0 to n-1; it has no entry for the leader.
+<a name="394"><span class="lineNum">     394 </span>            :  */</a>
+<span class="lineNum">     395 </span>            : static void
+<span class="lineNum">     396 </span><span class="lineCov">         68 : gather_merge_setup(GatherMergeState *gm_state)</span>
+<span class="lineNum">     397 </span>            : {
+<span class="lineNum">     398 </span><span class="lineCov">         68 :     GatherMerge *gm = castNode(GatherMerge, gm_state-&gt;ps.plan);</span>
+<span class="lineNum">     399 </span><span class="lineCov">         68 :     int         nreaders = gm-&gt;num_workers;</span>
+<span class="lineNum">     400 </span>            :     int         i;
+<span class="lineNum">     401 </span>            : 
+<span class="lineNum">     402 </span>            :     /*
+<span class="lineNum">     403 </span>            :      * Allocate gm_slots for the number of workers + one more slot for leader.
+<span class="lineNum">     404 </span>            :      * Slot 0 is always for the leader.  Leader always calls ExecProcNode() to
+<span class="lineNum">     405 </span>            :      * read the tuple, and then stores it directly into its gm_slots entry.
+<span class="lineNum">     406 </span>            :      * For other slots, code below will call ExecInitExtraTupleSlot() to
+<span class="lineNum">     407 </span>            :      * create a slot for the worker's results.  Note that during any single
+<span class="lineNum">     408 </span>            :      * scan, we might have fewer than num_workers available workers, in which
+<span class="lineNum">     409 </span>            :      * case the extra array entries go unused.
+<span class="lineNum">     410 </span>            :      */
+<span class="lineNum">     411 </span><span class="lineCov">         68 :     gm_state-&gt;gm_slots = (TupleTableSlot **)</span>
+<span class="lineNum">     412 </span><span class="lineCov">         68 :         palloc0((nreaders + 1) * sizeof(TupleTableSlot *));</span>
+<span class="lineNum">     413 </span>            : 
+<span class="lineNum">     414 </span>            :     /* Allocate the tuple slot and tuple array for each worker */
+<span class="lineNum">     415 </span><span class="lineCov">         68 :     gm_state-&gt;gm_tuple_buffers = (GMReaderTupleBuffer *)</span>
+<span class="lineNum">     416 </span><span class="lineCov">         68 :         palloc0(nreaders * sizeof(GMReaderTupleBuffer));</span>
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span><span class="lineCov">        268 :     for (i = 0; i &lt; nreaders; i++)</span>
+<span class="lineNum">     419 </span>            :     {
+<span class="lineNum">     420 </span>            :         /* Allocate the tuple array with length MAX_TUPLE_STORE */
+<span class="lineNum">     421 </span><span class="lineCov">        400 :         gm_state-&gt;gm_tuple_buffers[i].tuple =</span>
+<span class="lineNum">     422 </span><span class="lineCov">        200 :             (HeapTuple *) palloc0(sizeof(HeapTuple) * MAX_TUPLE_STORE);</span>
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span>            :         /* Initialize tuple slot for worker */
+<span class="lineNum">     425 </span><span class="lineCov">        400 :         gm_state-&gt;gm_slots[i + 1] =</span>
+<span class="lineNum">     426 </span><span class="lineCov">        200 :             ExecInitExtraTupleSlot(gm_state-&gt;ps.state, gm_state-&gt;tupDesc,</span>
+<span class="lineNum">     427 </span>            :                                    &amp;TTSOpsHeapTuple);
+<span class="lineNum">     428 </span>            :     }
+<span class="lineNum">     429 </span>            : 
+<span class="lineNum">     430 </span>            :     /* Allocate the resources for the merge */
+<span class="lineNum">     431 </span><span class="lineCov">         68 :     gm_state-&gt;gm_heap = binaryheap_allocate(nreaders + 1,</span>
+<span class="lineNum">     432 </span>            :                                             heap_compare_slots,
+<span class="lineNum">     433 </span>            :                                             gm_state);
+<span class="lineNum">     434 </span><span class="lineCov">         68 : }</span>
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span>            : /*
+<span class="lineNum">     437 </span>            :  * Initialize the Gather Merge.
+<span class="lineNum">     438 </span>            :  *
+<span class="lineNum">     439 </span>            :  * Reset data structures to ensure they're empty.  Then pull at least one
+<span class="lineNum">     440 </span>            :  * tuple from leader + each worker (or set its &quot;done&quot; indicator), and set up
+<span class="lineNum">     441 </span>            :  * the heap.
+<a name="442"><span class="lineNum">     442 </span>            :  */</a>
+<span class="lineNum">     443 </span>            : static void
+<span class="lineNum">     444 </span><span class="lineCov">         42 : gather_merge_init(GatherMergeState *gm_state)</span>
+<span class="lineNum">     445 </span>            : {
+<span class="lineNum">     446 </span><span class="lineCov">         42 :     int         nreaders = gm_state-&gt;nreaders;</span>
+<span class="lineNum">     447 </span><span class="lineCov">         42 :     bool        nowait = true;</span>
+<span class="lineNum">     448 </span>            :     int         i;
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span>            :     /* Assert that gather_merge_setup made enough space */
+<span class="lineNum">     451 </span><span class="lineCov">         42 :     Assert(nreaders &lt;= castNode(GatherMerge, gm_state-&gt;ps.plan)-&gt;num_workers);</span>
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span>            :     /* Reset leader's tuple slot to empty */
+<span class="lineNum">     454 </span><span class="lineCov">         42 :     gm_state-&gt;gm_slots[0] = NULL;</span>
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span>            :     /* Reset the tuple slot and tuple array for each worker */
+<span class="lineNum">     457 </span><span class="lineCov">        158 :     for (i = 0; i &lt; nreaders; i++)</span>
+<span class="lineNum">     458 </span>            :     {
+<span class="lineNum">     459 </span>            :         /* Reset tuple array to empty */
+<span class="lineNum">     460 </span><span class="lineCov">        116 :         gm_state-&gt;gm_tuple_buffers[i].nTuples = 0;</span>
+<span class="lineNum">     461 </span><span class="lineCov">        116 :         gm_state-&gt;gm_tuple_buffers[i].readCounter = 0;</span>
+<span class="lineNum">     462 </span>            :         /* Reset done flag to not-done */
+<span class="lineNum">     463 </span><span class="lineCov">        116 :         gm_state-&gt;gm_tuple_buffers[i].done = false;</span>
+<span class="lineNum">     464 </span>            :         /* Ensure output slot is empty */
+<span class="lineNum">     465 </span><span class="lineCov">        116 :         ExecClearTuple(gm_state-&gt;gm_slots[i + 1]);</span>
+<span class="lineNum">     466 </span>            :     }
+<span class="lineNum">     467 </span>            : 
+<span class="lineNum">     468 </span>            :     /* Reset binary heap to empty */
+<span class="lineNum">     469 </span><span class="lineCov">         42 :     binaryheap_reset(gm_state-&gt;gm_heap);</span>
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span>            :     /*
+<span class="lineNum">     472 </span>            :      * First, try to read a tuple from each worker (including leader) in
+<span class="lineNum">     473 </span>            :      * nowait mode.  After this, if not all workers were able to produce a
+<span class="lineNum">     474 </span>            :      * tuple (or a &quot;done&quot; indication), then re-read from remaining workers,
+<span class="lineNum">     475 </span>            :      * this time using wait mode.  Add all live readers (those producing at
+<span class="lineNum">     476 </span>            :      * least one tuple) to the heap.
+<span class="lineNum">     477 </span>            :      */
+<span class="lineNum">     478 </span>            : reread:
+<span class="lineNum">     479 </span><span class="lineCov">        352 :     for (i = 0; i &lt;= nreaders; i++)</span>
+<span class="lineNum">     480 </span>            :     {
+<span class="lineNum">     481 </span><span class="lineCov">        280 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     482 </span>            : 
+<span class="lineNum">     483 </span>            :         /* skip this source if already known done */
+<span class="lineNum">     484 </span><span class="lineCov">        488 :         if ((i == 0) ? gm_state-&gt;need_to_scan_locally :</span>
+<span class="lineNum">     485 </span><span class="lineCov">        208 :             !gm_state-&gt;gm_tuple_buffers[i - 1].done)</span>
+<span class="lineNum">     486 </span>            :         {
+<span class="lineNum">     487 </span><span class="lineCov">        254 :             if (TupIsNull(gm_state-&gt;gm_slots[i]))</span>
+<span class="lineNum">     488 </span>            :             {
+<span class="lineNum">     489 </span>            :                 /* Don't have a tuple yet, try to get one */
+<span class="lineNum">     490 </span><span class="lineCov">        428 :                 if (gather_merge_readnext(gm_state, i, nowait))</span>
+<span class="lineNum">     491 </span><span class="lineCov">        112 :                     binaryheap_add_unordered(gm_state-&gt;gm_heap,</span>
+<span class="lineNum">     492 </span>            :                                              Int32GetDatum(i));
+<span class="lineNum">     493 </span>            :             }
+<span class="lineNum">     494 </span>            :             else
+<span class="lineNum">     495 </span>            :             {
+<span class="lineNum">     496 </span>            :                 /*
+<span class="lineNum">     497 </span>            :                  * We already got at least one tuple from this worker, but
+<span class="lineNum">     498 </span>            :                  * might as well see if it has any more ready by now.
+<span class="lineNum">     499 </span>            :                  */
+<span class="lineNum">     500 </span><span class="lineCov">         40 :                 load_tuple_array(gm_state, i);</span>
+<span class="lineNum">     501 </span>            :             }
+<span class="lineNum">     502 </span>            :         }
+<span class="lineNum">     503 </span>            :     }
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span>            :     /* need not recheck leader, since nowait doesn't matter for it */
+<span class="lineNum">     506 </span><span class="lineCov">        192 :     for (i = 1; i &lt;= nreaders; i++)</span>
+<span class="lineNum">     507 </span>            :     {
+<span class="lineNum">     508 </span><span class="lineCov">        216 :         if (!gm_state-&gt;gm_tuple_buffers[i - 1].done &amp;&amp;</span>
+<span class="lineNum">     509 </span><span class="lineCov">        132 :             TupIsNull(gm_state-&gt;gm_slots[i]))</span>
+<span class="lineNum">     510 </span>            :         {
+<span class="lineNum">     511 </span><span class="lineCov">         30 :             nowait = false;</span>
+<span class="lineNum">     512 </span><span class="lineCov">         30 :             goto reread;</span>
+<span class="lineNum">     513 </span>            :         }
+<span class="lineNum">     514 </span>            :     }
+<span class="lineNum">     515 </span>            : 
+<span class="lineNum">     516 </span>            :     /* Now heapify the heap. */
+<span class="lineNum">     517 </span><span class="lineCov">         42 :     binaryheap_build(gm_state-&gt;gm_heap);</span>
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span><span class="lineCov">         42 :     gm_state-&gt;gm_initialized = true;</span>
+<span class="lineNum">     520 </span><span class="lineCov">         42 : }</span>
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            : /*
+<span class="lineNum">     523 </span>            :  * Clear out the tuple table slot, and any unused pending tuples,
+<span class="lineNum">     524 </span>            :  * for each gather merge input.
+<a name="525"><span class="lineNum">     525 </span>            :  */</a>
+<span class="lineNum">     526 </span>            : static void
+<span class="lineNum">     527 </span><span class="lineCov">         48 : gather_merge_clear_tuples(GatherMergeState *gm_state)</span>
+<span class="lineNum">     528 </span>            : {
+<span class="lineNum">     529 </span>            :     int         i;
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span><span class="lineCov">        188 :     for (i = 0; i &lt; gm_state-&gt;nreaders; i++)</span>
+<span class="lineNum">     532 </span>            :     {
+<span class="lineNum">     533 </span><span class="lineCov">        140 :         GMReaderTupleBuffer *tuple_buffer = &amp;gm_state-&gt;gm_tuple_buffers[i];</span>
+<span class="lineNum">     534 </span>            : 
+<span class="lineNum">     535 </span><span class="lineCov">        280 :         while (tuple_buffer-&gt;readCounter &lt; tuple_buffer-&gt;nTuples)</span>
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 :             heap_freetuple(tuple_buffer-&gt;tuple[tuple_buffer-&gt;readCounter++]);</span>
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span><span class="lineCov">        140 :         ExecClearTuple(gm_state-&gt;gm_slots[i + 1]);</span>
+<span class="lineNum">     539 </span>            :     }
+<span class="lineNum">     540 </span><span class="lineCov">         48 : }</span>
+<span class="lineNum">     541 </span>            : 
+<span class="lineNum">     542 </span>            : /*
+<span class="lineNum">     543 </span>            :  * Read the next tuple for gather merge.
+<span class="lineNum">     544 </span>            :  *
+<span class="lineNum">     545 </span>            :  * Fetch the sorted tuple out of the heap.
+<a name="546"><span class="lineNum">     546 </span>            :  */</a>
+<span class="lineNum">     547 </span>            : static TupleTableSlot *
+<span class="lineNum">     548 </span><span class="lineCov">      61240 : gather_merge_getnext(GatherMergeState *gm_state)</span>
+<span class="lineNum">     549 </span>            : {
+<span class="lineNum">     550 </span>            :     int         i;
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span><span class="lineCov">      61240 :     if (!gm_state-&gt;gm_initialized)</span>
+<span class="lineNum">     553 </span>            :     {
+<span class="lineNum">     554 </span>            :         /*
+<span class="lineNum">     555 </span>            :          * First time through: pull the first tuple from each participant, and
+<span class="lineNum">     556 </span>            :          * set up the heap.
+<span class="lineNum">     557 </span>            :          */
+<span class="lineNum">     558 </span><span class="lineCov">         42 :         gather_merge_init(gm_state);</span>
+<span class="lineNum">     559 </span>            :     }
+<span class="lineNum">     560 </span>            :     else
+<span class="lineNum">     561 </span>            :     {
+<span class="lineNum">     562 </span>            :         /*
+<span class="lineNum">     563 </span>            :          * Otherwise, pull the next tuple from whichever participant we
+<span class="lineNum">     564 </span>            :          * returned from last time, and reinsert that participant's index into
+<span class="lineNum">     565 </span>            :          * the heap, because it might now compare differently against the
+<span class="lineNum">     566 </span>            :          * other elements of the heap.
+<span class="lineNum">     567 </span>            :          */
+<span class="lineNum">     568 </span><span class="lineCov">      61198 :         i = DatumGetInt32(binaryheap_first(gm_state-&gt;gm_heap));</span>
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span><span class="lineCov">      61198 :         if (gather_merge_readnext(gm_state, i, false))</span>
+<span class="lineNum">     571 </span><span class="lineCov">      61096 :             binaryheap_replace_first(gm_state-&gt;gm_heap, Int32GetDatum(i));</span>
+<span class="lineNum">     572 </span>            :         else
+<span class="lineNum">     573 </span>            :         {
+<span class="lineNum">     574 </span>            :             /* reader exhausted, remove it from heap */
+<span class="lineNum">     575 </span><span class="lineCov">        102 :             (void) binaryheap_remove_first(gm_state-&gt;gm_heap);</span>
+<span class="lineNum">     576 </span>            :         }
+<span class="lineNum">     577 </span>            :     }
+<span class="lineNum">     578 </span>            : 
+<span class="lineNum">     579 </span><span class="lineCov">      61240 :     if (binaryheap_empty(gm_state-&gt;gm_heap))</span>
+<span class="lineNum">     580 </span>            :     {
+<span class="lineNum">     581 </span>            :         /* All the queues are exhausted, and so is the heap */
+<span class="lineNum">     582 </span><span class="lineCov">         36 :         gather_merge_clear_tuples(gm_state);</span>
+<span class="lineNum">     583 </span><span class="lineCov">         36 :         return NULL;</span>
+<span class="lineNum">     584 </span>            :     }
+<span class="lineNum">     585 </span>            :     else
+<span class="lineNum">     586 </span>            :     {
+<span class="lineNum">     587 </span>            :         /* Return next tuple from whichever participant has the leading one */
+<span class="lineNum">     588 </span><span class="lineCov">      61204 :         i = DatumGetInt32(binaryheap_first(gm_state-&gt;gm_heap));</span>
+<span class="lineNum">     589 </span><span class="lineCov">      61204 :         return gm_state-&gt;gm_slots[i];</span>
+<span class="lineNum">     590 </span>            :     }
+<span class="lineNum">     591 </span>            : }
+<span class="lineNum">     592 </span>            : 
+<span class="lineNum">     593 </span>            : /*
+<span class="lineNum">     594 </span>            :  * Read tuple(s) for given reader in nowait mode, and load into its tuple
+<span class="lineNum">     595 </span>            :  * array, until we have MAX_TUPLE_STORE of them or would have to block.
+<a name="596"><span class="lineNum">     596 </span>            :  */</a>
+<span class="lineNum">     597 </span>            : static void
+<span class="lineNum">     598 </span><span class="lineCov">       1764 : load_tuple_array(GatherMergeState *gm_state, int reader)</span>
+<span class="lineNum">     599 </span>            : {
+<span class="lineNum">     600 </span>            :     GMReaderTupleBuffer *tuple_buffer;
+<span class="lineNum">     601 </span>            :     int         i;
+<span class="lineNum">     602 </span>            : 
+<span class="lineNum">     603 </span>            :     /* Don't do anything if this is the leader. */
+<span class="lineNum">     604 </span><span class="lineCov">       1764 :     if (reader == 0)</span>
+<span class="lineNum">     605 </span><span class="lineCov">       1792 :         return;</span>
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span><span class="lineCov">       1736 :     tuple_buffer = &amp;gm_state-&gt;gm_tuple_buffers[reader - 1];</span>
+<span class="lineNum">     608 </span>            : 
+<span class="lineNum">     609 </span>            :     /* If there's nothing in the array, reset the counters to zero. */
+<span class="lineNum">     610 </span><span class="lineCov">       1736 :     if (tuple_buffer-&gt;nTuples == tuple_buffer-&gt;readCounter)</span>
+<span class="lineNum">     611 </span><span class="lineCov">       1724 :         tuple_buffer-&gt;nTuples = tuple_buffer-&gt;readCounter = 0;</span>
+<span class="lineNum">     612 </span>            : 
+<span class="lineNum">     613 </span>            :     /* Try to fill additional slots in the array. */
+<span class="lineNum">     614 </span><span class="lineCov">      18590 :     for (i = tuple_buffer-&gt;nTuples; i &lt; MAX_TUPLE_STORE; i++)</span>
+<span class="lineNum">     615 </span>            :     {
+<span class="lineNum">     616 </span>            :         HeapTuple   tuple;
+<span class="lineNum">     617 </span>            : 
+<span class="lineNum">     618 </span><span class="lineCov">      16936 :         tuple = gm_readnext_tuple(gm_state,</span>
+<span class="lineNum">     619 </span>            :                                   reader,
+<span class="lineNum">     620 </span>            :                                   true,
+<span class="lineNum">     621 </span>            :                                   &amp;tuple_buffer-&gt;done);
+<span class="lineNum">     622 </span><span class="lineCov">      16936 :         if (!HeapTupleIsValid(tuple))</span>
+<span class="lineNum">     623 </span><span class="lineCov">         82 :             break;</span>
+<span class="lineNum">     624 </span><span class="lineCov">      16854 :         tuple_buffer-&gt;tuple[i] = tuple;</span>
+<span class="lineNum">     625 </span><span class="lineCov">      16854 :         tuple_buffer-&gt;nTuples++;</span>
+<span class="lineNum">     626 </span>            :     }
+<span class="lineNum">     627 </span>            : }
+<span class="lineNum">     628 </span>            : 
+<span class="lineNum">     629 </span>            : /*
+<span class="lineNum">     630 </span>            :  * Store the next tuple for a given reader into the appropriate slot.
+<span class="lineNum">     631 </span>            :  *
+<span class="lineNum">     632 </span>            :  * Returns true if successful, false if not (either reader is exhausted,
+<span class="lineNum">     633 </span>            :  * or we didn't want to wait for a tuple).  Sets done flag if reader
+<span class="lineNum">     634 </span>            :  * is found to be exhausted.
+<a name="635"><span class="lineNum">     635 </span>            :  */</a>
+<span class="lineNum">     636 </span>            : static bool
+<span class="lineNum">     637 </span><span class="lineCov">      61412 : gather_merge_readnext(GatherMergeState *gm_state, int reader, bool nowait)</span>
+<span class="lineNum">     638 </span>            : {
+<span class="lineNum">     639 </span>            :     GMReaderTupleBuffer *tuple_buffer;
+<span class="lineNum">     640 </span>            :     HeapTuple   tup;
+<span class="lineNum">     641 </span>            : 
+<span class="lineNum">     642 </span>            :     /*
+<span class="lineNum">     643 </span>            :      * If we're being asked to generate a tuple from the leader, then we just
+<span class="lineNum">     644 </span>            :      * call ExecProcNode as normal to produce one.
+<span class="lineNum">     645 </span>            :      */
+<span class="lineNum">     646 </span><span class="lineCov">      61412 :     if (reader == 0)</span>
+<span class="lineNum">     647 </span>            :     {
+<span class="lineNum">     648 </span><span class="lineCov">      42676 :         if (gm_state-&gt;need_to_scan_locally)</span>
+<span class="lineNum">     649 </span>            :         {
+<span class="lineNum">     650 </span><span class="lineCov">      42676 :             PlanState  *outerPlan = outerPlanState(gm_state);</span>
+<span class="lineNum">     651 </span>            :             TupleTableSlot *outerTupleSlot;
+<span class="lineNum">     652 </span><span class="lineCov">      42676 :             EState     *estate = gm_state-&gt;ps.state;</span>
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span>            :             /* Install our DSA area while executing the plan. */
+<span class="lineNum">     655 </span><span class="lineCov">      42676 :             estate-&gt;es_query_dsa = gm_state-&gt;pei ? gm_state-&gt;pei-&gt;area : NULL;</span>
+<span class="lineNum">     656 </span><span class="lineCov">      42676 :             outerTupleSlot = ExecProcNode(outerPlan);</span>
+<span class="lineNum">     657 </span><span class="lineCov">      42676 :             estate-&gt;es_query_dsa = NULL;</span>
+<span class="lineNum">     658 </span>            : 
+<span class="lineNum">     659 </span><span class="lineCov">      42676 :             if (!TupIsNull(outerTupleSlot))</span>
+<span class="lineNum">     660 </span>            :             {
+<span class="lineNum">     661 </span><span class="lineCov">      42642 :                 gm_state-&gt;gm_slots[0] = outerTupleSlot;</span>
+<span class="lineNum">     662 </span><span class="lineCov">      42642 :                 return true;</span>
+<span class="lineNum">     663 </span>            :             }
+<span class="lineNum">     664 </span>            :             /* need_to_scan_locally serves as &quot;done&quot; flag for leader */
+<span class="lineNum">     665 </span><span class="lineCov">         34 :             gm_state-&gt;need_to_scan_locally = false;</span>
+<span class="lineNum">     666 </span>            :         }
+<span class="lineNum">     667 </span><span class="lineCov">         34 :         return false;</span>
+<span class="lineNum">     668 </span>            :     }
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span>            :     /* Otherwise, check the state of the relevant tuple buffer. */
+<span class="lineNum">     671 </span><span class="lineCov">      18736 :     tuple_buffer = &amp;gm_state-&gt;gm_tuple_buffers[reader - 1];</span>
+<span class="lineNum">     672 </span>            : 
+<span class="lineNum">     673 </span><span class="lineCov">      18736 :     if (tuple_buffer-&gt;nTuples &gt; tuple_buffer-&gt;readCounter)</span>
+<span class="lineNum">     674 </span>            :     {
+<span class="lineNum">     675 </span>            :         /* Return any tuple previously read that is still buffered. */
+<span class="lineNum">     676 </span><span class="lineCov">      16842 :         tup = tuple_buffer-&gt;tuple[tuple_buffer-&gt;readCounter++];</span>
+<span class="lineNum">     677 </span>            :     }
+<span class="lineNum">     678 </span><span class="lineCov">       1894 :     else if (tuple_buffer-&gt;done)</span>
+<span class="lineNum">     679 </span>            :     {
+<span class="lineNum">     680 </span>            :         /* Reader is known to be exhausted. */
+<span class="lineNum">     681 </span><span class="lineCov">         68 :         return false;</span>
+<span class="lineNum">     682 </span>            :     }
+<span class="lineNum">     683 </span>            :     else
+<span class="lineNum">     684 </span>            :     {
+<span class="lineNum">     685 </span>            :         /* Read and buffer next tuple. */
+<span class="lineNum">     686 </span><span class="lineCov">       1826 :         tup = gm_readnext_tuple(gm_state,</span>
+<span class="lineNum">     687 </span>            :                                 reader,
+<span class="lineNum">     688 </span>            :                                 nowait,
+<span class="lineNum">     689 </span>            :                                 &amp;tuple_buffer-&gt;done);
+<span class="lineNum">     690 </span><span class="lineCov">       1826 :         if (!HeapTupleIsValid(tup))</span>
+<span class="lineNum">     691 </span><span class="lineCov">        102 :             return false;</span>
+<span class="lineNum">     692 </span>            : 
+<span class="lineNum">     693 </span>            :         /*
+<span class="lineNum">     694 </span>            :          * Attempt to read more tuples in nowait mode and store them in the
+<span class="lineNum">     695 </span>            :          * pending-tuple array for the reader.
+<span class="lineNum">     696 </span>            :          */
+<span class="lineNum">     697 </span><span class="lineCov">       1724 :         load_tuple_array(gm_state, reader);</span>
+<span class="lineNum">     698 </span>            :     }
+<span class="lineNum">     699 </span>            : 
+<span class="lineNum">     700 </span><span class="lineCov">      18566 :     Assert(HeapTupleIsValid(tup));</span>
+<span class="lineNum">     701 </span>            : 
+<span class="lineNum">     702 </span>            :     /* Build the TupleTableSlot for the given tuple */
+<span class="lineNum">     703 </span><span class="lineCov">      18566 :     ExecStoreHeapTuple(tup,     /* tuple to store */</span>
+<span class="lineNum">     704 </span><span class="lineCov">      18566 :                        gm_state-&gt;gm_slots[reader],   /* slot in which to store</span>
+<span class="lineNum">     705 </span>            :                                                      * the tuple */
+<span class="lineNum">     706 </span>            :                        true);   /* pfree tuple when done with it */
+<span class="lineNum">     707 </span>            : 
+<span class="lineNum">     708 </span><span class="lineCov">      18566 :     return true;</span>
+<span class="lineNum">     709 </span>            : }
+<span class="lineNum">     710 </span>            : 
+<span class="lineNum">     711 </span>            : /*
+<span class="lineNum">     712 </span>            :  * Attempt to read a tuple from given worker.
+<a name="713"><span class="lineNum">     713 </span>            :  */</a>
+<span class="lineNum">     714 </span>            : static HeapTuple
+<span class="lineNum">     715 </span><span class="lineCov">      18762 : gm_readnext_tuple(GatherMergeState *gm_state, int nreader, bool nowait,</span>
+<span class="lineNum">     716 </span>            :                   bool *done)
+<span class="lineNum">     717 </span>            : {
+<span class="lineNum">     718 </span>            :     TupleQueueReader *reader;
+<span class="lineNum">     719 </span>            :     HeapTuple   tup;
+<span class="lineNum">     720 </span>            : 
+<span class="lineNum">     721 </span>            :     /* Check for async events, particularly messages from workers. */
+<span class="lineNum">     722 </span><span class="lineCov">      18762 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     723 </span>            : 
+<span class="lineNum">     724 </span>            :     /*
+<span class="lineNum">     725 </span>            :      * Attempt to read a tuple.
+<span class="lineNum">     726 </span>            :      *
+<span class="lineNum">     727 </span>            :      * Note that TupleQueueReaderNext will just return NULL for a worker which
+<span class="lineNum">     728 </span>            :      * fails to initialize.  We'll treat that worker as having produced no
+<span class="lineNum">     729 </span>            :      * tuples; WaitForParallelWorkersToFinish will error out when we get
+<span class="lineNum">     730 </span>            :      * there.
+<span class="lineNum">     731 </span>            :      */
+<span class="lineNum">     732 </span><span class="lineCov">      18762 :     reader = gm_state-&gt;reader[nreader - 1];</span>
+<span class="lineNum">     733 </span><span class="lineCov">      18762 :     tup = TupleQueueReaderNext(reader, nowait, done);</span>
+<span class="lineNum">     734 </span>            : 
+<span class="lineNum">     735 </span><span class="lineCov">      18762 :     return tup;</span>
+<span class="lineNum">     736 </span>            : }
+<span class="lineNum">     737 </span>            : 
+<span class="lineNum">     738 </span>            : /*
+<span class="lineNum">     739 </span>            :  * We have one slot for each item in the heap array.  We use SlotNumber
+<span class="lineNum">     740 </span>            :  * to store slot indexes.  This doesn't actually provide any formal
+<span class="lineNum">     741 </span>            :  * type-safety, but it makes the code more self-documenting.
+<span class="lineNum">     742 </span>            :  */
+<span class="lineNum">     743 </span>            : typedef int32 SlotNumber;
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span>            : /*
+<span class="lineNum">     746 </span>            :  * Compare the tuples in the two given slots.
+<a name="747"><span class="lineNum">     747 </span>            :  */</a>
+<span class="lineNum">     748 </span>            : static int32
+<span class="lineNum">     749 </span><span class="lineCov">     121228 : heap_compare_slots(Datum a, Datum b, void *arg)</span>
+<span class="lineNum">     750 </span>            : {
+<span class="lineNum">     751 </span><span class="lineCov">     121228 :     GatherMergeState *node = (GatherMergeState *) arg;</span>
+<span class="lineNum">     752 </span><span class="lineCov">     121228 :     SlotNumber  slot1 = DatumGetInt32(a);</span>
+<span class="lineNum">     753 </span><span class="lineCov">     121228 :     SlotNumber  slot2 = DatumGetInt32(b);</span>
+<span class="lineNum">     754 </span>            : 
+<span class="lineNum">     755 </span><span class="lineCov">     121228 :     TupleTableSlot *s1 = node-&gt;gm_slots[slot1];</span>
+<span class="lineNum">     756 </span><span class="lineCov">     121228 :     TupleTableSlot *s2 = node-&gt;gm_slots[slot2];</span>
+<span class="lineNum">     757 </span>            :     int         nkey;
+<span class="lineNum">     758 </span>            : 
+<span class="lineNum">     759 </span><span class="lineCov">     121228 :     Assert(!TupIsNull(s1));</span>
+<span class="lineNum">     760 </span><span class="lineCov">     121228 :     Assert(!TupIsNull(s2));</span>
+<span class="lineNum">     761 </span>            : 
+<span class="lineNum">     762 </span><span class="lineCov">     188212 :     for (nkey = 0; nkey &lt; node-&gt;gm_nkeys; nkey++)</span>
+<span class="lineNum">     763 </span>            :     {
+<span class="lineNum">     764 </span><span class="lineCov">     121240 :         SortSupport sortKey = node-&gt;gm_sortkeys + nkey;</span>
+<span class="lineNum">     765 </span><span class="lineCov">     121240 :         AttrNumber  attno = sortKey-&gt;ssup_attno;</span>
+<span class="lineNum">     766 </span>            :         Datum       datum1,
+<span class="lineNum">     767 </span>            :                     datum2;
+<span class="lineNum">     768 </span>            :         bool        isNull1,
+<span class="lineNum">     769 </span>            :                     isNull2;
+<span class="lineNum">     770 </span>            :         int         compare;
+<span class="lineNum">     771 </span>            : 
+<span class="lineNum">     772 </span><span class="lineCov">     121240 :         datum1 = slot_getattr(s1, attno, &amp;isNull1);</span>
+<span class="lineNum">     773 </span><span class="lineCov">     121240 :         datum2 = slot_getattr(s2, attno, &amp;isNull2);</span>
+<span class="lineNum">     774 </span>            : 
+<span class="lineNum">     775 </span><span class="lineCov">     121240 :         compare = ApplySortComparator(datum1, isNull1,</span>
+<span class="lineNum">     776 </span>            :                                       datum2, isNull2,
+<span class="lineNum">     777 </span>            :                                       sortKey);
+<span class="lineNum">     778 </span><span class="lineCov">     121240 :         if (compare != 0)</span>
+<span class="lineNum">     779 </span>            :         {
+<span class="lineNum">     780 </span><span class="lineCov">      54256 :             INVERT_COMPARE_RESULT(compare);</span>
+<span class="lineNum">     781 </span><span class="lineCov">      54256 :             return compare;</span>
+<span class="lineNum">     782 </span>            :         }
+<span class="lineNum">     783 </span>            :     }
+<span class="lineNum">     784 </span><span class="lineCov">      66972 :     return 0;</span>
+<span class="lineNum">     785 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

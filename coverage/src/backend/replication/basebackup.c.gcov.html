@@ -1,0 +1,1828 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/replication/basebackup.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/replication</a> - basebackup.c<span style="font-size: 80%;"> (source / <a href="basebackup.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">527</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">16</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * basebackup.c
+<span class="lineNum">       4 </span>            :  *    code for taking a base backup and streaming it to a standby
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 2010-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  * IDENTIFICATION
+<span class="lineNum">       9 </span>            :  *    src/backend/replication/basebackup.c
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      12 </span>            :  */
+<span class="lineNum">      13 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      16 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      17 </span>            : #include &lt;time.h&gt;
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : #include &quot;access/xlog_internal.h&quot; /* for pg_start/stop_backup */
+<span class="lineNum">      20 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;common/file_perm.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;lib/stringinfo.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;libpq/libpq.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;libpq/pqformat.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;nodes/pg_list.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;pgtar.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;port.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;postmaster/syslogger.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;replication/basebackup.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;replication/walsender.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;replication/walsender_private.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;storage/bufpage.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;storage/checksum.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;storage/dsm_impl.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;storage/fd.h&quot;
+<span class="lineNum">      38 </span>            : #include &quot;storage/ipc.h&quot;
+<span class="lineNum">      39 </span>            : #include &quot;storage/reinit.h&quot;
+<span class="lineNum">      40 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      41 </span>            : #include &quot;utils/ps_status.h&quot;
+<span class="lineNum">      42 </span>            : #include &quot;utils/relcache.h&quot;
+<span class="lineNum">      43 </span>            : #include &quot;utils/timestamp.h&quot;
+<span class="lineNum">      44 </span>            : 
+<span class="lineNum">      45 </span>            : typedef struct
+<span class="lineNum">      46 </span>            : {
+<span class="lineNum">      47 </span>            :     const char *label;
+<span class="lineNum">      48 </span>            :     bool        progress;
+<span class="lineNum">      49 </span>            :     bool        fastcheckpoint;
+<span class="lineNum">      50 </span>            :     bool        nowait;
+<span class="lineNum">      51 </span>            :     bool        includewal;
+<span class="lineNum">      52 </span>            :     uint32      maxrate;
+<span class="lineNum">      53 </span>            :     bool        sendtblspcmapfile;
+<span class="lineNum">      54 </span>            : } basebackup_options;
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : 
+<span class="lineNum">      57 </span>            : static int64 sendDir(const char *path, int basepathlen, bool sizeonly,
+<span class="lineNum">      58 </span>            :                      List *tablespaces, bool sendtblspclinks);
+<span class="lineNum">      59 </span>            : static bool sendFile(const char *readfilename, const char *tarfilename,
+<span class="lineNum">      60 </span>            :                      struct stat *statbuf, bool missing_ok, Oid dboid);
+<span class="lineNum">      61 </span>            : static void sendFileWithContent(const char *filename, const char *content);
+<span class="lineNum">      62 </span>            : static int64 _tarWriteHeader(const char *filename, const char *linktarget,
+<span class="lineNum">      63 </span>            :                              struct stat *statbuf, bool sizeonly);
+<span class="lineNum">      64 </span>            : static int64 _tarWriteDir(const char *pathbuf, int basepathlen, struct stat *statbuf,
+<span class="lineNum">      65 </span>            :                           bool sizeonly);
+<span class="lineNum">      66 </span>            : static void send_int8_string(StringInfoData *buf, int64 intval);
+<span class="lineNum">      67 </span>            : static void SendBackupHeader(List *tablespaces);
+<span class="lineNum">      68 </span>            : static void base_backup_cleanup(int code, Datum arg);
+<span class="lineNum">      69 </span>            : static void perform_base_backup(basebackup_options *opt);
+<span class="lineNum">      70 </span>            : static void parse_basebackup_options(List *options, basebackup_options *opt);
+<span class="lineNum">      71 </span>            : static void SendXlogRecPtrResult(XLogRecPtr ptr, TimeLineID tli);
+<span class="lineNum">      72 </span>            : static int  compareWalFileNames(const ListCell *a, const ListCell *b);
+<span class="lineNum">      73 </span>            : static void throttle(size_t increment);
+<span class="lineNum">      74 </span>            : static bool is_checksummed_file(const char *fullpath, const char *filename);
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            : /* Was the backup currently in-progress initiated in recovery mode? */
+<span class="lineNum">      77 </span>            : static bool backup_started_in_recovery = false;
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            : /* Relative path of temporary statistics directory */
+<span class="lineNum">      80 </span>            : static char *statrelpath = NULL;
+<span class="lineNum">      81 </span>            : 
+<span class="lineNum">      82 </span>            : /*
+<span class="lineNum">      83 </span>            :  * Size of each block sent into the tar stream for larger files.
+<span class="lineNum">      84 </span>            :  */
+<span class="lineNum">      85 </span>            : #define TAR_SEND_SIZE 32768
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            : /*
+<span class="lineNum">      88 </span>            :  * How frequently to throttle, as a fraction of the specified rate-second.
+<span class="lineNum">      89 </span>            :  */
+<span class="lineNum">      90 </span>            : #define THROTTLING_FREQUENCY    8
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span>            : /*
+<span class="lineNum">      93 </span>            :  * Checks whether we encountered any error in fread().  fread() doesn't give
+<span class="lineNum">      94 </span>            :  * any clue what has happened, so we check with ferror().  Also, neither
+<span class="lineNum">      95 </span>            :  * fread() nor ferror() set errno, so we just throw a generic error.
+<span class="lineNum">      96 </span>            :  */
+<span class="lineNum">      97 </span>            : #define CHECK_FREAD_ERROR(fp, filename) \
+<span class="lineNum">      98 </span>            : do { \
+<span class="lineNum">      99 </span>            :     if (ferror(fp)) \
+<span class="lineNum">     100 </span>            :         ereport(ERROR, \
+<span class="lineNum">     101 </span>            :                 (errmsg(&quot;could not read from file \&quot;%s\&quot;&quot;, filename))); \
+<span class="lineNum">     102 </span>            : } while (0)
+<span class="lineNum">     103 </span>            : 
+<span class="lineNum">     104 </span>            : /* The actual number of bytes, transfer of which may cause sleep. */
+<span class="lineNum">     105 </span>            : static uint64 throttling_sample;
+<span class="lineNum">     106 </span>            : 
+<span class="lineNum">     107 </span>            : /* Amount of data already transferred but not yet throttled.  */
+<span class="lineNum">     108 </span>            : static int64 throttling_counter;
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span>            : /* The minimum time required to transfer throttling_sample bytes. */
+<span class="lineNum">     111 </span>            : static TimeOffset elapsed_min_unit;
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span>            : /* The last check of the transfer rate. */
+<span class="lineNum">     114 </span>            : static TimestampTz throttled_last;
+<span class="lineNum">     115 </span>            : 
+<span class="lineNum">     116 </span>            : /* The starting XLOG position of the base backup. */
+<span class="lineNum">     117 </span>            : static XLogRecPtr startptr;
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span>            : /* Total number of checksum failures during base backup. */
+<span class="lineNum">     120 </span>            : static long long int total_checksum_failures;
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span>            : /* Do not verify checksums. */
+<span class="lineNum">     123 </span>            : static bool noverify_checksums = false;
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            : /*
+<span class="lineNum">     126 </span>            :  * The contents of these directories are removed or recreated during server
+<span class="lineNum">     127 </span>            :  * start so they are not included in backups.  The directories themselves are
+<span class="lineNum">     128 </span>            :  * kept and included as empty to preserve access permissions.
+<span class="lineNum">     129 </span>            :  *
+<span class="lineNum">     130 </span>            :  * Note: this list should be kept in sync with the filter lists in pg_rewind's
+<span class="lineNum">     131 </span>            :  * filemap.c.
+<span class="lineNum">     132 </span>            :  */
+<span class="lineNum">     133 </span>            : static const char *const excludeDirContents[] =
+<span class="lineNum">     134 </span>            : {
+<span class="lineNum">     135 </span>            :     /*
+<span class="lineNum">     136 </span>            :      * Skip temporary statistics files. PG_STAT_TMP_DIR must be skipped even
+<span class="lineNum">     137 </span>            :      * when stats_temp_directory is set because PGSS_TEXT_FILE is always
+<span class="lineNum">     138 </span>            :      * created there.
+<span class="lineNum">     139 </span>            :      */
+<span class="lineNum">     140 </span>            :     PG_STAT_TMP_DIR,
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span>            :     /*
+<span class="lineNum">     143 </span>            :      * It is generally not useful to backup the contents of this directory
+<span class="lineNum">     144 </span>            :      * even if the intention is to restore to another master. See backup.sgml
+<span class="lineNum">     145 </span>            :      * for a more detailed description.
+<span class="lineNum">     146 </span>            :      */
+<span class="lineNum">     147 </span>            :     &quot;pg_replslot&quot;,
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :     /* Contents removed on startup, see dsm_cleanup_for_mmap(). */
+<span class="lineNum">     150 </span>            :     PG_DYNSHMEM_DIR,
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span>            :     /* Contents removed on startup, see AsyncShmemInit(). */
+<span class="lineNum">     153 </span>            :     &quot;pg_notify&quot;,
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            :     /*
+<span class="lineNum">     156 </span>            :      * Old contents are loaded for possible debugging but are not required for
+<span class="lineNum">     157 </span>            :      * normal operation, see OldSerXidInit().
+<span class="lineNum">     158 </span>            :      */
+<span class="lineNum">     159 </span>            :     &quot;pg_serial&quot;,
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span>            :     /* Contents removed on startup, see DeleteAllExportedSnapshotFiles(). */
+<span class="lineNum">     162 </span>            :     &quot;pg_snapshots&quot;,
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span>            :     /* Contents zeroed on startup, see StartupSUBTRANS(). */
+<span class="lineNum">     165 </span>            :     &quot;pg_subtrans&quot;,
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span>            :     /* end of list */
+<span class="lineNum">     168 </span>            :     NULL
+<span class="lineNum">     169 </span>            : };
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span>            : /*
+<span class="lineNum">     172 </span>            :  * List of files excluded from backups.
+<span class="lineNum">     173 </span>            :  */
+<span class="lineNum">     174 </span>            : static const char *const excludeFiles[] =
+<span class="lineNum">     175 </span>            : {
+<span class="lineNum">     176 </span>            :     /* Skip auto conf temporary file. */
+<span class="lineNum">     177 </span>            :     PG_AUTOCONF_FILENAME &quot;.tmp&quot;,
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span>            :     /* Skip current log file temporary file */
+<span class="lineNum">     180 </span>            :     LOG_METAINFO_DATAFILE_TMP,
+<span class="lineNum">     181 </span>            : 
+<span class="lineNum">     182 </span>            :     /* Skip relation cache because it is rebuilt on startup */
+<span class="lineNum">     183 </span>            :     RELCACHE_INIT_FILENAME,
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span>            :     /*
+<span class="lineNum">     186 </span>            :      * If there's a backup_label or tablespace_map file, it belongs to a
+<span class="lineNum">     187 </span>            :      * backup started by the user with pg_start_backup().  It is *not* correct
+<span class="lineNum">     188 </span>            :      * for this backup.  Our backup_label/tablespace_map is injected into the
+<span class="lineNum">     189 </span>            :      * tar separately.
+<span class="lineNum">     190 </span>            :      */
+<span class="lineNum">     191 </span>            :     BACKUP_LABEL_FILE,
+<span class="lineNum">     192 </span>            :     TABLESPACE_MAP,
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span>            :     &quot;postmaster.pid&quot;,
+<span class="lineNum">     195 </span>            :     &quot;postmaster.opts&quot;,
+<span class="lineNum">     196 </span>            : 
+<span class="lineNum">     197 </span>            :     /* end of list */
+<span class="lineNum">     198 </span>            :     NULL
+<span class="lineNum">     199 </span>            : };
+<span class="lineNum">     200 </span>            : 
+<span class="lineNum">     201 </span>            : /*
+<span class="lineNum">     202 </span>            :  * List of files excluded from checksum validation.
+<span class="lineNum">     203 </span>            :  *
+<span class="lineNum">     204 </span>            :  * Note: this list should be kept in sync with what pg_checksums.c
+<span class="lineNum">     205 </span>            :  * includes.
+<span class="lineNum">     206 </span>            :  */
+<span class="lineNum">     207 </span>            : static const char *const noChecksumFiles[] = {
+<span class="lineNum">     208 </span>            :     &quot;pg_control&quot;,
+<span class="lineNum">     209 </span>            :     &quot;pg_filenode.map&quot;,
+<span class="lineNum">     210 </span>            :     &quot;pg_internal.init&quot;,
+<span class="lineNum">     211 </span>            :     &quot;PG_VERSION&quot;,
+<span class="lineNum">     212 </span>            : #ifdef EXEC_BACKEND
+<span class="lineNum">     213 </span>            :     &quot;config_exec_params&quot;,
+<span class="lineNum">     214 </span>            :     &quot;config_exec_params.new&quot;,
+<span class="lineNum">     215 </span>            : #endif
+<span class="lineNum">     216 </span>            :     NULL,
+<span class="lineNum">     217 </span>            : };
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span>            : /*
+<span class="lineNum">     221 </span>            :  * Called when ERROR or FATAL happens in perform_base_backup() after
+<span class="lineNum">     222 </span>            :  * we have started the backup - make sure we end it!
+<a name="223"><span class="lineNum">     223 </span>            :  */</a>
+<span class="lineNum">     224 </span>            : static void
+<span class="lineNum">     225 </span><span class="lineNoCov">          0 : base_backup_cleanup(int code, Datum arg)</span>
+<span class="lineNum">     226 </span>            : {
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :     do_pg_abort_backup();</span>
+<span class="lineNum">     228 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span>            : /*
+<span class="lineNum">     231 </span>            :  * Actually do a base backup for the specified tablespaces.
+<span class="lineNum">     232 </span>            :  *
+<span class="lineNum">     233 </span>            :  * This is split out mainly to avoid complaints about &quot;variable might be
+<span class="lineNum">     234 </span>            :  * clobbered by longjmp&quot; from stupider versions of gcc.
+<a name="235"><span class="lineNum">     235 </span>            :  */</a>
+<span class="lineNum">     236 </span>            : static void
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 : perform_base_backup(basebackup_options *opt)</span>
+<span class="lineNum">     238 </span>            : {
+<span class="lineNum">     239 </span>            :     TimeLineID  starttli;
+<span class="lineNum">     240 </span>            :     XLogRecPtr  endptr;
+<span class="lineNum">     241 </span>            :     TimeLineID  endtli;
+<span class="lineNum">     242 </span>            :     StringInfo  labelfile;
+<span class="lineNum">     243 </span><span class="lineNoCov">          0 :     StringInfo  tblspc_map_file = NULL;</span>
+<span class="lineNum">     244 </span>            :     int         datadirpathlen;
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :     List       *tablespaces = NIL;</span>
+<span class="lineNum">     246 </span>            : 
+<span class="lineNum">     247 </span><span class="lineNoCov">          0 :     datadirpathlen = strlen(DataDir);</span>
+<span class="lineNum">     248 </span>            : 
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :     backup_started_in_recovery = RecoveryInProgress();</span>
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :     labelfile = makeStringInfo();</span>
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :     tblspc_map_file = makeStringInfo();</span>
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span><span class="lineNoCov">          0 :     total_checksum_failures = 0;</span>
+<span class="lineNum">     255 </span>            : 
+<span class="lineNum">     256 </span><span class="lineNoCov">          0 :     startptr = do_pg_start_backup(opt-&gt;label, opt-&gt;fastcheckpoint, &amp;starttli,</span>
+<span class="lineNum">     257 </span>            :                                   labelfile, &amp;tablespaces,
+<span class="lineNum">     258 </span>            :                                   tblspc_map_file,
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :                                   opt-&gt;progress, opt-&gt;sendtblspcmapfile);</span>
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span>            :     /*
+<span class="lineNum">     262 </span>            :      * Once do_pg_start_backup has been called, ensure that any failure causes
+<span class="lineNum">     263 </span>            :      * us to abort the backup so we don't &quot;leak&quot; a backup counter. For this
+<span class="lineNum">     264 </span>            :      * reason, *all* functionality between do_pg_start_backup() and the end of
+<span class="lineNum">     265 </span>            :      * do_pg_stop_backup() should be inside the error cleanup block!
+<span class="lineNum">     266 </span>            :      */
+<span class="lineNum">     267 </span>            : 
+<span class="lineNum">     268 </span><span class="lineNoCov">          0 :     PG_ENSURE_ERROR_CLEANUP(base_backup_cleanup, (Datum) 0);</span>
+<span class="lineNum">     269 </span>            :     {
+<span class="lineNum">     270 </span>            :         ListCell   *lc;
+<span class="lineNum">     271 </span>            :         tablespaceinfo *ti;
+<span class="lineNum">     272 </span>            : 
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 :         SendXlogRecPtrResult(startptr, starttli);</span>
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span>            :         /*
+<span class="lineNum">     276 </span>            :          * Calculate the relative path of temporary statistics directory in
+<span class="lineNum">     277 </span>            :          * order to skip the files which are located in that directory later.
+<span class="lineNum">     278 </span>            :          */
+<span class="lineNum">     279 </span><span class="lineNoCov">          0 :         if (is_absolute_path(pgstat_stat_directory) &amp;&amp;</span>
+<span class="lineNum">     280 </span><span class="lineNoCov">          0 :             strncmp(pgstat_stat_directory, DataDir, datadirpathlen) == 0)</span>
+<span class="lineNum">     281 </span><span class="lineNoCov">          0 :             statrelpath = psprintf(&quot;./%s&quot;, pgstat_stat_directory + datadirpathlen + 1);</span>
+<span class="lineNum">     282 </span><span class="lineNoCov">          0 :         else if (strncmp(pgstat_stat_directory, &quot;./&quot;, 2) != 0)</span>
+<span class="lineNum">     283 </span><span class="lineNoCov">          0 :             statrelpath = psprintf(&quot;./%s&quot;, pgstat_stat_directory);</span>
+<span class="lineNum">     284 </span>            :         else
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :             statrelpath = pgstat_stat_directory;</span>
+<span class="lineNum">     286 </span>            : 
+<span class="lineNum">     287 </span>            :         /* Add a node for the base directory at the end */
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :         ti = palloc0(sizeof(tablespaceinfo));</span>
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :         ti-&gt;size = opt-&gt;progress ? sendDir(&quot;.&quot;, 1, true, tablespaces, true) : -1;</span>
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :         tablespaces = lappend(tablespaces, ti);</span>
+<span class="lineNum">     291 </span>            : 
+<span class="lineNum">     292 </span>            :         /* Send tablespace header */
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :         SendBackupHeader(tablespaces);</span>
+<span class="lineNum">     294 </span>            : 
+<span class="lineNum">     295 </span>            :         /* Setup and activate network throttling, if client requested it */
+<span class="lineNum">     296 </span><span class="lineNoCov">          0 :         if (opt-&gt;maxrate &gt; 0)</span>
+<span class="lineNum">     297 </span>            :         {
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :             throttling_sample =</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :                 (int64) opt-&gt;maxrate * (int64) 1024 / THROTTLING_FREQUENCY;</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            :             /*
+<span class="lineNum">     302 </span>            :              * The minimum amount of time for throttling_sample bytes to be
+<span class="lineNum">     303 </span>            :              * transferred.
+<span class="lineNum">     304 </span>            :              */
+<span class="lineNum">     305 </span><span class="lineNoCov">          0 :             elapsed_min_unit = USECS_PER_SEC / THROTTLING_FREQUENCY;</span>
+<span class="lineNum">     306 </span>            : 
+<span class="lineNum">     307 </span>            :             /* Enable throttling. */
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :             throttling_counter = 0;</span>
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span>            :             /* The 'real data' starts now (header was ignored). */
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :             throttled_last = GetCurrentTimestamp();</span>
+<span class="lineNum">     312 </span>            :         }
+<span class="lineNum">     313 </span>            :         else
+<span class="lineNum">     314 </span>            :         {
+<span class="lineNum">     315 </span>            :             /* Disable throttling. */
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :             throttling_counter = -1;</span>
+<span class="lineNum">     317 </span>            :         }
+<span class="lineNum">     318 </span>            : 
+<span class="lineNum">     319 </span>            :         /* Send off our tablespaces one by one */
+<span class="lineNum">     320 </span><span class="lineNoCov">          0 :         foreach(lc, tablespaces)</span>
+<span class="lineNum">     321 </span>            :         {
+<span class="lineNum">     322 </span><span class="lineNoCov">          0 :             tablespaceinfo *ti = (tablespaceinfo *) lfirst(lc);</span>
+<span class="lineNum">     323 </span>            :             StringInfoData buf;
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span>            :             /* Send CopyOutResponse message */
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :             pq_beginmessage(&amp;buf, 'H');</span>
+<span class="lineNum">     327 </span><span class="lineNoCov">          0 :             pq_sendbyte(&amp;buf, 0);   /* overall format */</span>
+<span class="lineNum">     328 </span><span class="lineNoCov">          0 :             pq_sendint16(&amp;buf, 0);  /* natts */</span>
+<span class="lineNum">     329 </span><span class="lineNoCov">          0 :             pq_endmessage(&amp;buf);</span>
+<span class="lineNum">     330 </span>            : 
+<span class="lineNum">     331 </span><span class="lineNoCov">          0 :             if (ti-&gt;path == NULL)</span>
+<span class="lineNum">     332 </span>            :             {
+<span class="lineNum">     333 </span>            :                 struct stat statbuf;
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span>            :                 /* In the main tar, include the backup_label first... */
+<span class="lineNum">     336 </span><span class="lineNoCov">          0 :                 sendFileWithContent(BACKUP_LABEL_FILE, labelfile-&gt;data);</span>
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span>            :                 /*
+<span class="lineNum">     339 </span>            :                  * Send tablespace_map file if required and then the bulk of
+<span class="lineNum">     340 </span>            :                  * the files.
+<span class="lineNum">     341 </span>            :                  */
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :                 if (tblspc_map_file &amp;&amp; opt-&gt;sendtblspcmapfile)</span>
+<span class="lineNum">     343 </span>            :                 {
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :                     sendFileWithContent(TABLESPACE_MAP, tblspc_map_file-&gt;data);</span>
+<span class="lineNum">     345 </span><span class="lineNoCov">          0 :                     sendDir(&quot;.&quot;, 1, false, tablespaces, false);</span>
+<span class="lineNum">     346 </span>            :                 }
+<span class="lineNum">     347 </span>            :                 else
+<span class="lineNum">     348 </span><span class="lineNoCov">          0 :                     sendDir(&quot;.&quot;, 1, false, tablespaces, true);</span>
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span>            :                 /* ... and pg_control after everything else. */
+<span class="lineNum">     351 </span><span class="lineNoCov">          0 :                 if (lstat(XLOG_CONTROL_FILE, &amp;statbuf) != 0)</span>
+<span class="lineNum">     352 </span><span class="lineNoCov">          0 :                     ereport(ERROR,</span>
+<span class="lineNum">     353 </span>            :                             (errcode_for_file_access(),
+<span class="lineNum">     354 </span>            :                              errmsg(&quot;could not stat file \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">     355 </span>            :                                     XLOG_CONTROL_FILE)));
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :                 sendFile(XLOG_CONTROL_FILE, XLOG_CONTROL_FILE, &amp;statbuf, false, InvalidOid);</span>
+<span class="lineNum">     357 </span>            :             }
+<span class="lineNum">     358 </span>            :             else
+<span class="lineNum">     359 </span><span class="lineNoCov">          0 :                 sendTablespace(ti-&gt;path, false);</span>
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span>            :             /*
+<span class="lineNum">     362 </span>            :              * If we're including WAL, and this is the main data directory we
+<span class="lineNum">     363 </span>            :              * don't terminate the tar stream here. Instead, we will append
+<span class="lineNum">     364 </span>            :              * the xlog files below and terminate it then. This is safe since
+<span class="lineNum">     365 </span>            :              * the main data directory is always sent *last*.
+<span class="lineNum">     366 </span>            :              */
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :             if (opt-&gt;includewal &amp;&amp; ti-&gt;path == NULL)</span>
+<span class="lineNum">     368 </span>            :             {
+<span class="lineNum">     369 </span><span class="lineNoCov">          0 :                 Assert(lnext(tablespaces, lc) == NULL);</span>
+<span class="lineNum">     370 </span>            :             }
+<span class="lineNum">     371 </span>            :             else
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :                 pq_putemptymessage('c');    /* CopyDone */</span>
+<span class="lineNum">     373 </span>            :         }
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :         endptr = do_pg_stop_backup(labelfile-&gt;data, !opt-&gt;nowait, &amp;endtli);</span>
+<span class="lineNum">     376 </span>            :     }
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :     PG_END_ENSURE_ERROR_CLEANUP(base_backup_cleanup, (Datum) 0);</span>
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span><span class="lineNoCov">          0 :     if (opt-&gt;includewal)</span>
+<span class="lineNum">     381 </span>            :     {
+<span class="lineNum">     382 </span>            :         /*
+<span class="lineNum">     383 </span>            :          * We've left the last tar file &quot;open&quot;, so we can now append the
+<span class="lineNum">     384 </span>            :          * required WAL files to it.
+<span class="lineNum">     385 </span>            :          */
+<span class="lineNum">     386 </span>            :         char        pathbuf[MAXPGPATH];
+<span class="lineNum">     387 </span>            :         XLogSegNo   segno;
+<span class="lineNum">     388 </span>            :         XLogSegNo   startsegno;
+<span class="lineNum">     389 </span>            :         XLogSegNo   endsegno;
+<span class="lineNum">     390 </span>            :         struct stat statbuf;
+<span class="lineNum">     391 </span><span class="lineNoCov">          0 :         List       *historyFileList = NIL;</span>
+<span class="lineNum">     392 </span><span class="lineNoCov">          0 :         List       *walFileList = NIL;</span>
+<span class="lineNum">     393 </span>            :         char        firstoff[MAXFNAMELEN];
+<span class="lineNum">     394 </span>            :         char        lastoff[MAXFNAMELEN];
+<span class="lineNum">     395 </span>            :         DIR        *dir;
+<span class="lineNum">     396 </span>            :         struct dirent *de;
+<span class="lineNum">     397 </span>            :         ListCell   *lc;
+<span class="lineNum">     398 </span>            :         TimeLineID  tli;
+<span class="lineNum">     399 </span>            : 
+<span class="lineNum">     400 </span>            :         /*
+<span class="lineNum">     401 </span>            :          * I'd rather not worry about timelines here, so scan pg_wal and
+<span class="lineNum">     402 </span>            :          * include all WAL files in the range between 'startptr' and 'endptr',
+<span class="lineNum">     403 </span>            :          * regardless of the timeline the file is stamped with. If there are
+<span class="lineNum">     404 </span>            :          * some spurious WAL files belonging to timelines that don't belong in
+<span class="lineNum">     405 </span>            :          * this server's history, they will be included too. Normally there
+<span class="lineNum">     406 </span>            :          * shouldn't be such files, but if there are, there's little harm in
+<span class="lineNum">     407 </span>            :          * including them.
+<span class="lineNum">     408 </span>            :          */
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :         XLByteToSeg(startptr, startsegno, wal_segment_size);</span>
+<span class="lineNum">     410 </span><span class="lineNoCov">          0 :         XLogFileName(firstoff, ThisTimeLineID, startsegno, wal_segment_size);</span>
+<span class="lineNum">     411 </span><span class="lineNoCov">          0 :         XLByteToPrevSeg(endptr, endsegno, wal_segment_size);</span>
+<span class="lineNum">     412 </span><span class="lineNoCov">          0 :         XLogFileName(lastoff, ThisTimeLineID, endsegno, wal_segment_size);</span>
+<span class="lineNum">     413 </span>            : 
+<span class="lineNum">     414 </span><span class="lineNoCov">          0 :         dir = AllocateDir(&quot;pg_wal&quot;);</span>
+<span class="lineNum">     415 </span><span class="lineNoCov">          0 :         while ((de = ReadDir(dir, &quot;pg_wal&quot;)) != NULL)</span>
+<span class="lineNum">     416 </span>            :         {
+<span class="lineNum">     417 </span>            :             /* Does it look like a WAL segment, and is it in the range? */
+<span class="lineNum">     418 </span><span class="lineNoCov">          0 :             if (IsXLogFileName(de-&gt;d_name) &amp;&amp;</span>
+<span class="lineNum">     419 </span><span class="lineNoCov">          0 :                 strcmp(de-&gt;d_name + 8, firstoff + 8) &gt;= 0 &amp;&amp;</span>
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :                 strcmp(de-&gt;d_name + 8, lastoff + 8) &lt;= 0)</span>
+<span class="lineNum">     421 </span>            :             {
+<span class="lineNum">     422 </span><span class="lineNoCov">          0 :                 walFileList = lappend(walFileList, pstrdup(de-&gt;d_name));</span>
+<span class="lineNum">     423 </span>            :             }
+<span class="lineNum">     424 </span>            :             /* Does it look like a timeline history file? */
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :             else if (IsTLHistoryFileName(de-&gt;d_name))</span>
+<span class="lineNum">     426 </span>            :             {
+<span class="lineNum">     427 </span><span class="lineNoCov">          0 :                 historyFileList = lappend(historyFileList, pstrdup(de-&gt;d_name));</span>
+<span class="lineNum">     428 </span>            :             }
+<span class="lineNum">     429 </span>            :         }
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :         FreeDir(dir);</span>
+<span class="lineNum">     431 </span>            : 
+<span class="lineNum">     432 </span>            :         /*
+<span class="lineNum">     433 </span>            :          * Before we go any further, check that none of the WAL segments we
+<span class="lineNum">     434 </span>            :          * need were removed.
+<span class="lineNum">     435 </span>            :          */
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :         CheckXLogRemoved(startsegno, ThisTimeLineID);</span>
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span>            :         /*
+<span class="lineNum">     439 </span>            :          * Sort the WAL filenames.  We want to send the files in order from
+<span class="lineNum">     440 </span>            :          * oldest to newest, to reduce the chance that a file is recycled
+<span class="lineNum">     441 </span>            :          * before we get a chance to send it over.
+<span class="lineNum">     442 </span>            :          */
+<span class="lineNum">     443 </span><span class="lineNoCov">          0 :         list_sort(walFileList, compareWalFileNames);</span>
+<span class="lineNum">     444 </span>            : 
+<span class="lineNum">     445 </span>            :         /*
+<span class="lineNum">     446 </span>            :          * There must be at least one xlog file in the pg_wal directory, since
+<span class="lineNum">     447 </span>            :          * we are doing backup-including-xlog.
+<span class="lineNum">     448 </span>            :          */
+<span class="lineNum">     449 </span><span class="lineNoCov">          0 :         if (walFileList == NIL)</span>
+<span class="lineNum">     450 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     451 </span>            :                     (errmsg(&quot;could not find any WAL files&quot;)));
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span>            :         /*
+<span class="lineNum">     454 </span>            :          * Sanity check: the first and last segment should cover startptr and
+<span class="lineNum">     455 </span>            :          * endptr, with no gaps in between.
+<span class="lineNum">     456 </span>            :          */
+<span class="lineNum">     457 </span><span class="lineNoCov">          0 :         XLogFromFileName((char *) linitial(walFileList),</span>
+<span class="lineNum">     458 </span>            :                          &amp;tli, &amp;segno, wal_segment_size);
+<span class="lineNum">     459 </span><span class="lineNoCov">          0 :         if (segno != startsegno)</span>
+<span class="lineNum">     460 </span>            :         {
+<span class="lineNum">     461 </span>            :             char        startfname[MAXFNAMELEN];
+<span class="lineNum">     462 </span>            : 
+<span class="lineNum">     463 </span><span class="lineNoCov">          0 :             XLogFileName(startfname, ThisTimeLineID, startsegno,</span>
+<span class="lineNum">     464 </span>            :                          wal_segment_size);
+<span class="lineNum">     465 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     466 </span>            :                     (errmsg(&quot;could not find WAL file \&quot;%s\&quot;&quot;, startfname)));
+<span class="lineNum">     467 </span>            :         }
+<span class="lineNum">     468 </span><span class="lineNoCov">          0 :         foreach(lc, walFileList)</span>
+<span class="lineNum">     469 </span>            :         {
+<span class="lineNum">     470 </span><span class="lineNoCov">          0 :             char       *walFileName = (char *) lfirst(lc);</span>
+<span class="lineNum">     471 </span><span class="lineNoCov">          0 :             XLogSegNo   currsegno = segno;</span>
+<span class="lineNum">     472 </span><span class="lineNoCov">          0 :             XLogSegNo   nextsegno = segno + 1;</span>
+<span class="lineNum">     473 </span>            : 
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :             XLogFromFileName(walFileName, &amp;tli, &amp;segno, wal_segment_size);</span>
+<span class="lineNum">     475 </span><span class="lineNoCov">          0 :             if (!(nextsegno == segno || currsegno == segno))</span>
+<span class="lineNum">     476 </span>            :             {
+<span class="lineNum">     477 </span>            :                 char        nextfname[MAXFNAMELEN];
+<span class="lineNum">     478 </span>            : 
+<span class="lineNum">     479 </span><span class="lineNoCov">          0 :                 XLogFileName(nextfname, ThisTimeLineID, nextsegno,</span>
+<span class="lineNum">     480 </span>            :                              wal_segment_size);
+<span class="lineNum">     481 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     482 </span>            :                         (errmsg(&quot;could not find WAL file \&quot;%s\&quot;&quot;, nextfname)));
+<span class="lineNum">     483 </span>            :             }
+<span class="lineNum">     484 </span>            :         }
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :         if (segno != endsegno)</span>
+<span class="lineNum">     486 </span>            :         {
+<span class="lineNum">     487 </span>            :             char        endfname[MAXFNAMELEN];
+<span class="lineNum">     488 </span>            : 
+<span class="lineNum">     489 </span><span class="lineNoCov">          0 :             XLogFileName(endfname, ThisTimeLineID, endsegno, wal_segment_size);</span>
+<span class="lineNum">     490 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     491 </span>            :                     (errmsg(&quot;could not find WAL file \&quot;%s\&quot;&quot;, endfname)));
+<span class="lineNum">     492 </span>            :         }
+<span class="lineNum">     493 </span>            : 
+<span class="lineNum">     494 </span>            :         /* Ok, we have everything we need. Send the WAL files. */
+<span class="lineNum">     495 </span><span class="lineNoCov">          0 :         foreach(lc, walFileList)</span>
+<span class="lineNum">     496 </span>            :         {
+<span class="lineNum">     497 </span><span class="lineNoCov">          0 :             char       *walFileName = (char *) lfirst(lc);</span>
+<span class="lineNum">     498 </span>            :             FILE       *fp;
+<span class="lineNum">     499 </span>            :             char        buf[TAR_SEND_SIZE];
+<span class="lineNum">     500 </span>            :             size_t      cnt;
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :             pgoff_t     len = 0;</span>
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span><span class="lineNoCov">          0 :             snprintf(pathbuf, MAXPGPATH, XLOGDIR &quot;/%s&quot;, walFileName);</span>
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :             XLogFromFileName(walFileName, &amp;tli, &amp;segno, wal_segment_size);</span>
+<span class="lineNum">     505 </span>            : 
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :             fp = AllocateFile(pathbuf, &quot;rb&quot;);</span>
+<span class="lineNum">     507 </span><span class="lineNoCov">          0 :             if (fp == NULL)</span>
+<span class="lineNum">     508 </span>            :             {
+<span class="lineNum">     509 </span><span class="lineNoCov">          0 :                 int         save_errno = errno;</span>
+<span class="lineNum">     510 </span>            : 
+<span class="lineNum">     511 </span>            :                 /*
+<span class="lineNum">     512 </span>            :                  * Most likely reason for this is that the file was already
+<span class="lineNum">     513 </span>            :                  * removed by a checkpoint, so check for that to get a better
+<span class="lineNum">     514 </span>            :                  * error message.
+<span class="lineNum">     515 </span>            :                  */
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :                 CheckXLogRemoved(segno, tli);</span>
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span><span class="lineNoCov">          0 :                 errno = save_errno;</span>
+<span class="lineNum">     519 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     520 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     521 </span>            :                          errmsg(&quot;could not open file \&quot;%s\&quot;: %m&quot;, pathbuf)));
+<span class="lineNum">     522 </span>            :             }
+<span class="lineNum">     523 </span>            : 
+<span class="lineNum">     524 </span><span class="lineNoCov">          0 :             if (fstat(fileno(fp), &amp;statbuf) != 0)</span>
+<span class="lineNum">     525 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     526 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     527 </span>            :                          errmsg(&quot;could not stat file \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">     528 </span>            :                                 pathbuf)));
+<span class="lineNum">     529 </span><span class="lineNoCov">          0 :             if (statbuf.st_size != wal_segment_size)</span>
+<span class="lineNum">     530 </span>            :             {
+<span class="lineNum">     531 </span><span class="lineNoCov">          0 :                 CheckXLogRemoved(segno, tli);</span>
+<span class="lineNum">     532 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     533 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     534 </span>            :                          errmsg(&quot;unexpected WAL file size \&quot;%s\&quot;&quot;, walFileName)));
+<span class="lineNum">     535 </span>            :             }
+<span class="lineNum">     536 </span>            : 
+<span class="lineNum">     537 </span>            :             /* send the WAL file itself */
+<span class="lineNum">     538 </span><span class="lineNoCov">          0 :             _tarWriteHeader(pathbuf, NULL, &amp;statbuf, false);</span>
+<span class="lineNum">     539 </span>            : 
+<span class="lineNum">     540 </span><span class="lineNoCov">          0 :             while ((cnt = fread(buf, 1,</span>
+<span class="lineNum">     541 </span><span class="lineNoCov">          0 :                                 Min(sizeof(buf), wal_segment_size - len),</span>
+<span class="lineNum">     542 </span>            :                                 fp)) &gt; 0)
+<span class="lineNum">     543 </span>            :             {
+<span class="lineNum">     544 </span><span class="lineNoCov">          0 :                 CheckXLogRemoved(segno, tli);</span>
+<span class="lineNum">     545 </span>            :                 /* Send the chunk as a CopyData message */
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 :                 if (pq_putmessage('d', buf, cnt))</span>
+<span class="lineNum">     547 </span><span class="lineNoCov">          0 :                     ereport(ERROR,</span>
+<span class="lineNum">     548 </span>            :                             (errmsg(&quot;base backup could not send data, aborting backup&quot;)));
+<span class="lineNum">     549 </span>            : 
+<span class="lineNum">     550 </span><span class="lineNoCov">          0 :                 len += cnt;</span>
+<span class="lineNum">     551 </span><span class="lineNoCov">          0 :                 throttle(cnt);</span>
+<span class="lineNum">     552 </span>            : 
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :                 if (len == wal_segment_size)</span>
+<span class="lineNum">     554 </span><span class="lineNoCov">          0 :                     break;</span>
+<span class="lineNum">     555 </span>            :             }
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 :             CHECK_FREAD_ERROR(fp, pathbuf);</span>
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :             if (len != wal_segment_size)</span>
+<span class="lineNum">     560 </span>            :             {
+<span class="lineNum">     561 </span><span class="lineNoCov">          0 :                 CheckXLogRemoved(segno, tli);</span>
+<span class="lineNum">     562 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     563 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     564 </span>            :                          errmsg(&quot;unexpected WAL file size \&quot;%s\&quot;&quot;, walFileName)));
+<span class="lineNum">     565 </span>            :             }
+<span class="lineNum">     566 </span>            : 
+<span class="lineNum">     567 </span>            :             /* wal_segment_size is a multiple of 512, so no need for padding */
+<span class="lineNum">     568 </span>            : 
+<span class="lineNum">     569 </span><span class="lineNoCov">          0 :             FreeFile(fp);</span>
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span>            :             /*
+<span class="lineNum">     572 </span>            :              * Mark file as archived, otherwise files can get archived again
+<span class="lineNum">     573 </span>            :              * after promotion of a new node. This is in line with
+<span class="lineNum">     574 </span>            :              * walreceiver.c always doing an XLogArchiveForceDone() after a
+<span class="lineNum">     575 </span>            :              * complete segment.
+<span class="lineNum">     576 </span>            :              */
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 :             StatusFilePath(pathbuf, walFileName, &quot;.done&quot;);</span>
+<span class="lineNum">     578 </span><span class="lineNoCov">          0 :             sendFileWithContent(pathbuf, &quot;&quot;);</span>
+<span class="lineNum">     579 </span>            :         }
+<span class="lineNum">     580 </span>            : 
+<span class="lineNum">     581 </span>            :         /*
+<span class="lineNum">     582 </span>            :          * Send timeline history files too. Only the latest timeline history
+<span class="lineNum">     583 </span>            :          * file is required for recovery, and even that only if there happens
+<span class="lineNum">     584 </span>            :          * to be a timeline switch in the first WAL segment that contains the
+<span class="lineNum">     585 </span>            :          * checkpoint record, or if we're taking a base backup from a standby
+<span class="lineNum">     586 </span>            :          * server and the target timeline changes while the backup is taken.
+<span class="lineNum">     587 </span>            :          * But they are small and highly useful for debugging purposes, so
+<span class="lineNum">     588 </span>            :          * better include them all, always.
+<span class="lineNum">     589 </span>            :          */
+<span class="lineNum">     590 </span><span class="lineNoCov">          0 :         foreach(lc, historyFileList)</span>
+<span class="lineNum">     591 </span>            :         {
+<span class="lineNum">     592 </span><span class="lineNoCov">          0 :             char       *fname = lfirst(lc);</span>
+<span class="lineNum">     593 </span>            : 
+<span class="lineNum">     594 </span><span class="lineNoCov">          0 :             snprintf(pathbuf, MAXPGPATH, XLOGDIR &quot;/%s&quot;, fname);</span>
+<span class="lineNum">     595 </span>            : 
+<span class="lineNum">     596 </span><span class="lineNoCov">          0 :             if (lstat(pathbuf, &amp;statbuf) != 0)</span>
+<span class="lineNum">     597 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     598 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     599 </span>            :                          errmsg(&quot;could not stat file \&quot;%s\&quot;: %m&quot;, pathbuf)));
+<span class="lineNum">     600 </span>            : 
+<span class="lineNum">     601 </span><span class="lineNoCov">          0 :             sendFile(pathbuf, pathbuf, &amp;statbuf, false, InvalidOid);</span>
+<span class="lineNum">     602 </span>            : 
+<span class="lineNum">     603 </span>            :             /* unconditionally mark file as archived */
+<span class="lineNum">     604 </span><span class="lineNoCov">          0 :             StatusFilePath(pathbuf, fname, &quot;.done&quot;);</span>
+<span class="lineNum">     605 </span><span class="lineNoCov">          0 :             sendFileWithContent(pathbuf, &quot;&quot;);</span>
+<span class="lineNum">     606 </span>            :         }
+<span class="lineNum">     607 </span>            : 
+<span class="lineNum">     608 </span>            :         /* Send CopyDone message for the last tar file */
+<span class="lineNum">     609 </span><span class="lineNoCov">          0 :         pq_putemptymessage('c');</span>
+<span class="lineNum">     610 </span>            :     }
+<span class="lineNum">     611 </span><span class="lineNoCov">          0 :     SendXlogRecPtrResult(endptr, endtli);</span>
+<span class="lineNum">     612 </span>            : 
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :     if (total_checksum_failures)</span>
+<span class="lineNum">     614 </span>            :     {
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :         if (total_checksum_failures &gt; 1)</span>
+<span class="lineNum">     616 </span><span class="lineNoCov">          0 :             ereport(WARNING,</span>
+<span class="lineNum">     617 </span>            :                     (errmsg(&quot;%lld total checksum verification failures&quot;, total_checksum_failures)));
+<span class="lineNum">     618 </span>            : 
+<span class="lineNum">     619 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     620 </span>            :                 (errcode(ERRCODE_DATA_CORRUPTED),
+<span class="lineNum">     621 </span>            :                  errmsg(&quot;checksum verification failure during base backup&quot;)));
+<span class="lineNum">     622 </span>            :     }
+<span class="lineNum">     623 </span>            : 
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span>            : /*
+<span class="lineNum">     627 </span>            :  * list_sort comparison function, to compare log/seg portion of WAL segment
+<span class="lineNum">     628 </span>            :  * filenames, ignoring the timeline portion.
+<a name="629"><span class="lineNum">     629 </span>            :  */</a>
+<span class="lineNum">     630 </span>            : static int
+<span class="lineNum">     631 </span><span class="lineNoCov">          0 : compareWalFileNames(const ListCell *a, const ListCell *b)</span>
+<span class="lineNum">     632 </span>            : {
+<span class="lineNum">     633 </span><span class="lineNoCov">          0 :     char       *fna = (char *) lfirst(a);</span>
+<span class="lineNum">     634 </span><span class="lineNoCov">          0 :     char       *fnb = (char *) lfirst(b);</span>
+<span class="lineNum">     635 </span>            : 
+<span class="lineNum">     636 </span><span class="lineNoCov">          0 :     return strcmp(fna + 8, fnb + 8);</span>
+<span class="lineNum">     637 </span>            : }
+<span class="lineNum">     638 </span>            : 
+<span class="lineNum">     639 </span>            : /*
+<span class="lineNum">     640 </span>            :  * Parse the base backup options passed down by the parser
+<a name="641"><span class="lineNum">     641 </span>            :  */</a>
+<span class="lineNum">     642 </span>            : static void
+<span class="lineNum">     643 </span><span class="lineNoCov">          0 : parse_basebackup_options(List *options, basebackup_options *opt)</span>
+<span class="lineNum">     644 </span>            : {
+<span class="lineNum">     645 </span>            :     ListCell   *lopt;
+<span class="lineNum">     646 </span><span class="lineNoCov">          0 :     bool        o_label = false;</span>
+<span class="lineNum">     647 </span><span class="lineNoCov">          0 :     bool        o_progress = false;</span>
+<span class="lineNum">     648 </span><span class="lineNoCov">          0 :     bool        o_fast = false;</span>
+<span class="lineNum">     649 </span><span class="lineNoCov">          0 :     bool        o_nowait = false;</span>
+<span class="lineNum">     650 </span><span class="lineNoCov">          0 :     bool        o_wal = false;</span>
+<span class="lineNum">     651 </span><span class="lineNoCov">          0 :     bool        o_maxrate = false;</span>
+<span class="lineNum">     652 </span><span class="lineNoCov">          0 :     bool        o_tablespace_map = false;</span>
+<span class="lineNum">     653 </span><span class="lineNoCov">          0 :     bool        o_noverify_checksums = false;</span>
+<span class="lineNum">     654 </span>            : 
+<span class="lineNum">     655 </span><span class="lineNoCov">          0 :     MemSet(opt, 0, sizeof(*opt));</span>
+<span class="lineNum">     656 </span><span class="lineNoCov">          0 :     foreach(lopt, options)</span>
+<span class="lineNum">     657 </span>            :     {
+<span class="lineNum">     658 </span><span class="lineNoCov">          0 :         DefElem    *defel = (DefElem *) lfirst(lopt);</span>
+<span class="lineNum">     659 </span>            : 
+<span class="lineNum">     660 </span><span class="lineNoCov">          0 :         if (strcmp(defel-&gt;defname, &quot;label&quot;) == 0)</span>
+<span class="lineNum">     661 </span>            :         {
+<span class="lineNum">     662 </span><span class="lineNoCov">          0 :             if (o_label)</span>
+<span class="lineNum">     663 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     664 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     665 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     666 </span><span class="lineNoCov">          0 :             opt-&gt;label = strVal(defel-&gt;arg);</span>
+<span class="lineNum">     667 </span><span class="lineNoCov">          0 :             o_label = true;</span>
+<span class="lineNum">     668 </span>            :         }
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :         else if (strcmp(defel-&gt;defname, &quot;progress&quot;) == 0)</span>
+<span class="lineNum">     670 </span>            :         {
+<span class="lineNum">     671 </span><span class="lineNoCov">          0 :             if (o_progress)</span>
+<span class="lineNum">     672 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     673 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     674 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     675 </span><span class="lineNoCov">          0 :             opt-&gt;progress = true;</span>
+<span class="lineNum">     676 </span><span class="lineNoCov">          0 :             o_progress = true;</span>
+<span class="lineNum">     677 </span>            :         }
+<span class="lineNum">     678 </span><span class="lineNoCov">          0 :         else if (strcmp(defel-&gt;defname, &quot;fast&quot;) == 0)</span>
+<span class="lineNum">     679 </span>            :         {
+<span class="lineNum">     680 </span><span class="lineNoCov">          0 :             if (o_fast)</span>
+<span class="lineNum">     681 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     682 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     683 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     684 </span><span class="lineNoCov">          0 :             opt-&gt;fastcheckpoint = true;</span>
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 :             o_fast = true;</span>
+<span class="lineNum">     686 </span>            :         }
+<span class="lineNum">     687 </span><span class="lineNoCov">          0 :         else if (strcmp(defel-&gt;defname, &quot;nowait&quot;) == 0)</span>
+<span class="lineNum">     688 </span>            :         {
+<span class="lineNum">     689 </span><span class="lineNoCov">          0 :             if (o_nowait)</span>
+<span class="lineNum">     690 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     691 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     692 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     693 </span><span class="lineNoCov">          0 :             opt-&gt;nowait = true;</span>
+<span class="lineNum">     694 </span><span class="lineNoCov">          0 :             o_nowait = true;</span>
+<span class="lineNum">     695 </span>            :         }
+<span class="lineNum">     696 </span><span class="lineNoCov">          0 :         else if (strcmp(defel-&gt;defname, &quot;wal&quot;) == 0)</span>
+<span class="lineNum">     697 </span>            :         {
+<span class="lineNum">     698 </span><span class="lineNoCov">          0 :             if (o_wal)</span>
+<span class="lineNum">     699 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     700 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     701 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     702 </span><span class="lineNoCov">          0 :             opt-&gt;includewal = true;</span>
+<span class="lineNum">     703 </span><span class="lineNoCov">          0 :             o_wal = true;</span>
+<span class="lineNum">     704 </span>            :         }
+<span class="lineNum">     705 </span><span class="lineNoCov">          0 :         else if (strcmp(defel-&gt;defname, &quot;max_rate&quot;) == 0)</span>
+<span class="lineNum">     706 </span>            :         {
+<span class="lineNum">     707 </span>            :             long        maxrate;
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span><span class="lineNoCov">          0 :             if (o_maxrate)</span>
+<span class="lineNum">     710 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     711 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     712 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     713 </span>            : 
+<span class="lineNum">     714 </span><span class="lineNoCov">          0 :             maxrate = intVal(defel-&gt;arg);</span>
+<span class="lineNum">     715 </span><span class="lineNoCov">          0 :             if (maxrate &lt; MAX_RATE_LOWER || maxrate &gt; MAX_RATE_UPPER)</span>
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     717 </span>            :                         (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+<span class="lineNum">     718 </span>            :                          errmsg(&quot;%d is outside the valid range for parameter \&quot;%s\&quot; (%d .. %d)&quot;,
+<span class="lineNum">     719 </span>            :                                 (int) maxrate, &quot;MAX_RATE&quot;, MAX_RATE_LOWER, MAX_RATE_UPPER)));
+<span class="lineNum">     720 </span>            : 
+<span class="lineNum">     721 </span><span class="lineNoCov">          0 :             opt-&gt;maxrate = (uint32) maxrate;</span>
+<span class="lineNum">     722 </span><span class="lineNoCov">          0 :             o_maxrate = true;</span>
+<span class="lineNum">     723 </span>            :         }
+<span class="lineNum">     724 </span><span class="lineNoCov">          0 :         else if (strcmp(defel-&gt;defname, &quot;tablespace_map&quot;) == 0)</span>
+<span class="lineNum">     725 </span>            :         {
+<span class="lineNum">     726 </span><span class="lineNoCov">          0 :             if (o_tablespace_map)</span>
+<span class="lineNum">     727 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     728 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     729 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     730 </span><span class="lineNoCov">          0 :             opt-&gt;sendtblspcmapfile = true;</span>
+<span class="lineNum">     731 </span><span class="lineNoCov">          0 :             o_tablespace_map = true;</span>
+<span class="lineNum">     732 </span>            :         }
+<span class="lineNum">     733 </span><span class="lineNoCov">          0 :         else if (strcmp(defel-&gt;defname, &quot;noverify_checksums&quot;) == 0)</span>
+<span class="lineNum">     734 </span>            :         {
+<span class="lineNum">     735 </span><span class="lineNoCov">          0 :             if (o_noverify_checksums)</span>
+<span class="lineNum">     736 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     737 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     738 </span>            :                          errmsg(&quot;duplicate option \&quot;%s\&quot;&quot;, defel-&gt;defname)));
+<span class="lineNum">     739 </span><span class="lineNoCov">          0 :             noverify_checksums = true;</span>
+<span class="lineNum">     740 </span><span class="lineNoCov">          0 :             o_noverify_checksums = true;</span>
+<span class="lineNum">     741 </span>            :         }
+<span class="lineNum">     742 </span>            :         else
+<span class="lineNum">     743 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;option \&quot;%s\&quot; not recognized&quot;,</span>
+<span class="lineNum">     744 </span>            :                  defel-&gt;defname);
+<span class="lineNum">     745 </span>            :     }
+<span class="lineNum">     746 </span><span class="lineNoCov">          0 :     if (opt-&gt;label == NULL)</span>
+<span class="lineNum">     747 </span><span class="lineNoCov">          0 :         opt-&gt;label = &quot;base backup&quot;;</span>
+<span class="lineNum">     748 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     749 </span>            : 
+<span class="lineNum">     750 </span>            : 
+<span class="lineNum">     751 </span>            : /*
+<span class="lineNum">     752 </span>            :  * SendBaseBackup() - send a complete base backup.
+<span class="lineNum">     753 </span>            :  *
+<span class="lineNum">     754 </span>            :  * The function will put the system into backup mode like pg_start_backup()
+<span class="lineNum">     755 </span>            :  * does, so that the backup is consistent even though we read directly from
+<span class="lineNum">     756 </span>            :  * the filesystem, bypassing the buffer cache.
+<a name="757"><span class="lineNum">     757 </span>            :  */</a>
+<span class="lineNum">     758 </span>            : void
+<span class="lineNum">     759 </span><span class="lineNoCov">          0 : SendBaseBackup(BaseBackupCmd *cmd)</span>
+<span class="lineNum">     760 </span>            : {
+<span class="lineNum">     761 </span>            :     basebackup_options opt;
+<span class="lineNum">     762 </span>            : 
+<span class="lineNum">     763 </span><span class="lineNoCov">          0 :     parse_basebackup_options(cmd-&gt;options, &amp;opt);</span>
+<span class="lineNum">     764 </span>            : 
+<span class="lineNum">     765 </span><span class="lineNoCov">          0 :     WalSndSetState(WALSNDSTATE_BACKUP);</span>
+<span class="lineNum">     766 </span>            : 
+<span class="lineNum">     767 </span><span class="lineNoCov">          0 :     if (update_process_title)</span>
+<span class="lineNum">     768 </span>            :     {
+<span class="lineNum">     769 </span>            :         char        activitymsg[50];
+<span class="lineNum">     770 </span>            : 
+<span class="lineNum">     771 </span><span class="lineNoCov">          0 :         snprintf(activitymsg, sizeof(activitymsg), &quot;sending backup \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">     772 </span>            :                  opt.label);
+<span class="lineNum">     773 </span><span class="lineNoCov">          0 :         set_ps_display(activitymsg, false);</span>
+<span class="lineNum">     774 </span>            :     }
+<span class="lineNum">     775 </span>            : 
+<span class="lineNum">     776 </span><span class="lineNoCov">          0 :     perform_base_backup(&amp;opt);</span>
+<span class="lineNum">     777 </span><span class="lineNoCov">          0 : }</span>
+<a name="778"><span class="lineNum">     778 </span>            : </a>
+<span class="lineNum">     779 </span>            : static void
+<span class="lineNum">     780 </span><span class="lineNoCov">          0 : send_int8_string(StringInfoData *buf, int64 intval)</span>
+<span class="lineNum">     781 </span>            : {
+<span class="lineNum">     782 </span>            :     char        is[32];
+<span class="lineNum">     783 </span>            : 
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :     sprintf(is, INT64_FORMAT, intval);</span>
+<span class="lineNum">     785 </span><span class="lineNoCov">          0 :     pq_sendint32(buf, strlen(is));</span>
+<span class="lineNum">     786 </span><span class="lineNoCov">          0 :     pq_sendbytes(buf, is, strlen(is));</span>
+<span class="lineNum">     787 </span><span class="lineNoCov">          0 : }</span>
+<a name="788"><span class="lineNum">     788 </span>            : </a>
+<span class="lineNum">     789 </span>            : static void
+<span class="lineNum">     790 </span><span class="lineNoCov">          0 : SendBackupHeader(List *tablespaces)</span>
+<span class="lineNum">     791 </span>            : {
+<span class="lineNum">     792 </span>            :     StringInfoData buf;
+<span class="lineNum">     793 </span>            :     ListCell   *lc;
+<span class="lineNum">     794 </span>            : 
+<span class="lineNum">     795 </span>            :     /* Construct and send the directory information */
+<span class="lineNum">     796 </span><span class="lineNoCov">          0 :     pq_beginmessage(&amp;buf, 'T'); /* RowDescription */</span>
+<span class="lineNum">     797 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 3);      /* 3 fields */</span>
+<span class="lineNum">     798 </span>            : 
+<span class="lineNum">     799 </span>            :     /* First field - spcoid */
+<span class="lineNum">     800 </span><span class="lineNoCov">          0 :     pq_sendstring(&amp;buf, &quot;spcoid&quot;);</span>
+<span class="lineNum">     801 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);      /* table oid */</span>
+<span class="lineNum">     802 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);      /* attnum */</span>
+<span class="lineNum">     803 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, OIDOID); /* type oid */</span>
+<span class="lineNum">     804 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 4);      /* typlen */</span>
+<span class="lineNum">     805 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);      /* typmod */</span>
+<span class="lineNum">     806 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);      /* format code */</span>
+<span class="lineNum">     807 </span>            : 
+<span class="lineNum">     808 </span>            :     /* Second field - spclocation */
+<span class="lineNum">     809 </span><span class="lineNoCov">          0 :     pq_sendstring(&amp;buf, &quot;spclocation&quot;);</span>
+<span class="lineNum">     810 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);</span>
+<span class="lineNum">     811 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);</span>
+<span class="lineNum">     812 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, TEXTOID);</span>
+<span class="lineNum">     813 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, -1);</span>
+<span class="lineNum">     814 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);</span>
+<span class="lineNum">     815 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);</span>
+<span class="lineNum">     816 </span>            : 
+<span class="lineNum">     817 </span>            :     /* Third field - size */
+<span class="lineNum">     818 </span><span class="lineNoCov">          0 :     pq_sendstring(&amp;buf, &quot;size&quot;);</span>
+<span class="lineNum">     819 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);</span>
+<span class="lineNum">     820 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);</span>
+<span class="lineNum">     821 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, INT8OID);</span>
+<span class="lineNum">     822 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 8);</span>
+<span class="lineNum">     823 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);</span>
+<span class="lineNum">     824 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);</span>
+<span class="lineNum">     825 </span><span class="lineNoCov">          0 :     pq_endmessage(&amp;buf);</span>
+<span class="lineNum">     826 </span>            : 
+<span class="lineNum">     827 </span><span class="lineNoCov">          0 :     foreach(lc, tablespaces)</span>
+<span class="lineNum">     828 </span>            :     {
+<span class="lineNum">     829 </span><span class="lineNoCov">          0 :         tablespaceinfo *ti = lfirst(lc);</span>
+<span class="lineNum">     830 </span>            : 
+<span class="lineNum">     831 </span>            :         /* Send one datarow message */
+<span class="lineNum">     832 </span><span class="lineNoCov">          0 :         pq_beginmessage(&amp;buf, 'D');</span>
+<span class="lineNum">     833 </span><span class="lineNoCov">          0 :         pq_sendint16(&amp;buf, 3);  /* number of columns */</span>
+<span class="lineNum">     834 </span><span class="lineNoCov">          0 :         if (ti-&gt;path == NULL)</span>
+<span class="lineNum">     835 </span>            :         {
+<span class="lineNum">     836 </span><span class="lineNoCov">          0 :             pq_sendint32(&amp;buf, -1); /* Length = -1 ==&gt; NULL */</span>
+<span class="lineNum">     837 </span><span class="lineNoCov">          0 :             pq_sendint32(&amp;buf, -1);</span>
+<span class="lineNum">     838 </span>            :         }
+<span class="lineNum">     839 </span>            :         else
+<span class="lineNum">     840 </span>            :         {
+<span class="lineNum">     841 </span>            :             Size        len;
+<span class="lineNum">     842 </span>            : 
+<span class="lineNum">     843 </span><span class="lineNoCov">          0 :             len = strlen(ti-&gt;oid);</span>
+<span class="lineNum">     844 </span><span class="lineNoCov">          0 :             pq_sendint32(&amp;buf, len);</span>
+<span class="lineNum">     845 </span><span class="lineNoCov">          0 :             pq_sendbytes(&amp;buf, ti-&gt;oid, len);</span>
+<span class="lineNum">     846 </span>            : 
+<span class="lineNum">     847 </span><span class="lineNoCov">          0 :             len = strlen(ti-&gt;path);</span>
+<span class="lineNum">     848 </span><span class="lineNoCov">          0 :             pq_sendint32(&amp;buf, len);</span>
+<span class="lineNum">     849 </span><span class="lineNoCov">          0 :             pq_sendbytes(&amp;buf, ti-&gt;path, len);</span>
+<span class="lineNum">     850 </span>            :         }
+<span class="lineNum">     851 </span><span class="lineNoCov">          0 :         if (ti-&gt;size &gt;= 0)</span>
+<span class="lineNum">     852 </span><span class="lineNoCov">          0 :             send_int8_string(&amp;buf, ti-&gt;size / 1024);</span>
+<span class="lineNum">     853 </span>            :         else
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :             pq_sendint32(&amp;buf, -1); /* NULL */</span>
+<span class="lineNum">     855 </span>            : 
+<span class="lineNum">     856 </span><span class="lineNoCov">          0 :         pq_endmessage(&amp;buf);</span>
+<span class="lineNum">     857 </span>            :     }
+<span class="lineNum">     858 </span>            : 
+<span class="lineNum">     859 </span>            :     /* Send a CommandComplete message */
+<span class="lineNum">     860 </span><span class="lineNoCov">          0 :     pq_puttextmessage('C', &quot;SELECT&quot;);</span>
+<span class="lineNum">     861 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     862 </span>            : 
+<span class="lineNum">     863 </span>            : /*
+<span class="lineNum">     864 </span>            :  * Send a single resultset containing just a single
+<span class="lineNum">     865 </span>            :  * XLogRecPtr record (in text format)
+<a name="866"><span class="lineNum">     866 </span>            :  */</a>
+<span class="lineNum">     867 </span>            : static void
+<span class="lineNum">     868 </span><span class="lineNoCov">          0 : SendXlogRecPtrResult(XLogRecPtr ptr, TimeLineID tli)</span>
+<span class="lineNum">     869 </span>            : {
+<span class="lineNum">     870 </span>            :     StringInfoData buf;
+<span class="lineNum">     871 </span>            :     char        str[MAXFNAMELEN];
+<span class="lineNum">     872 </span>            :     Size        len;
+<span class="lineNum">     873 </span>            : 
+<span class="lineNum">     874 </span><span class="lineNoCov">          0 :     pq_beginmessage(&amp;buf, 'T'); /* RowDescription */</span>
+<span class="lineNum">     875 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 2);      /* 2 fields */</span>
+<span class="lineNum">     876 </span>            : 
+<span class="lineNum">     877 </span>            :     /* Field headers */
+<span class="lineNum">     878 </span><span class="lineNoCov">          0 :     pq_sendstring(&amp;buf, &quot;recptr&quot;);</span>
+<span class="lineNum">     879 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);      /* table oid */</span>
+<span class="lineNum">     880 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);      /* attnum */</span>
+<span class="lineNum">     881 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, TEXTOID);    /* type oid */</span>
+<span class="lineNum">     882 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, -1);</span>
+<span class="lineNum">     883 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);</span>
+<span class="lineNum">     884 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);</span>
+<span class="lineNum">     885 </span>            : 
+<span class="lineNum">     886 </span><span class="lineNoCov">          0 :     pq_sendstring(&amp;buf, &quot;tli&quot;);</span>
+<span class="lineNum">     887 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);      /* table oid */</span>
+<span class="lineNum">     888 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);      /* attnum */</span>
+<span class="lineNum">     889 </span>            : 
+<span class="lineNum">     890 </span>            :     /*
+<span class="lineNum">     891 </span>            :      * int8 may seem like a surprising data type for this, but in theory int4
+<span class="lineNum">     892 </span>            :      * would not be wide enough for this, as TimeLineID is unsigned.
+<span class="lineNum">     893 </span>            :      */
+<span class="lineNum">     894 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, INT8OID);    /* type oid */</span>
+<span class="lineNum">     895 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, -1);</span>
+<span class="lineNum">     896 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, 0);</span>
+<span class="lineNum">     897 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 0);</span>
+<span class="lineNum">     898 </span><span class="lineNoCov">          0 :     pq_endmessage(&amp;buf);</span>
+<span class="lineNum">     899 </span>            : 
+<span class="lineNum">     900 </span>            :     /* Data row */
+<span class="lineNum">     901 </span><span class="lineNoCov">          0 :     pq_beginmessage(&amp;buf, 'D');</span>
+<span class="lineNum">     902 </span><span class="lineNoCov">          0 :     pq_sendint16(&amp;buf, 2);      /* number of columns */</span>
+<span class="lineNum">     903 </span>            : 
+<span class="lineNum">     904 </span><span class="lineNoCov">          0 :     len = snprintf(str, sizeof(str),</span>
+<span class="lineNum">     905 </span><span class="lineNoCov">          0 :                    &quot;%X/%X&quot;, (uint32) (ptr &gt;&gt; 32), (uint32) ptr);</span>
+<span class="lineNum">     906 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, len);</span>
+<span class="lineNum">     907 </span><span class="lineNoCov">          0 :     pq_sendbytes(&amp;buf, str, len);</span>
+<span class="lineNum">     908 </span>            : 
+<span class="lineNum">     909 </span><span class="lineNoCov">          0 :     len = snprintf(str, sizeof(str), &quot;%u&quot;, tli);</span>
+<span class="lineNum">     910 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;buf, len);</span>
+<span class="lineNum">     911 </span><span class="lineNoCov">          0 :     pq_sendbytes(&amp;buf, str, len);</span>
+<span class="lineNum">     912 </span>            : 
+<span class="lineNum">     913 </span><span class="lineNoCov">          0 :     pq_endmessage(&amp;buf);</span>
+<span class="lineNum">     914 </span>            : 
+<span class="lineNum">     915 </span>            :     /* Send a CommandComplete message */
+<span class="lineNum">     916 </span><span class="lineNoCov">          0 :     pq_puttextmessage('C', &quot;SELECT&quot;);</span>
+<span class="lineNum">     917 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     918 </span>            : 
+<span class="lineNum">     919 </span>            : /*
+<span class="lineNum">     920 </span>            :  * Inject a file with given name and content in the output tar stream.
+<a name="921"><span class="lineNum">     921 </span>            :  */</a>
+<span class="lineNum">     922 </span>            : static void
+<span class="lineNum">     923 </span><span class="lineNoCov">          0 : sendFileWithContent(const char *filename, const char *content)</span>
+<span class="lineNum">     924 </span>            : {
+<span class="lineNum">     925 </span>            :     struct stat statbuf;
+<span class="lineNum">     926 </span>            :     int         pad,
+<span class="lineNum">     927 </span>            :                 len;
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineNoCov">          0 :     len = strlen(content);</span>
+<span class="lineNum">     930 </span>            : 
+<span class="lineNum">     931 </span>            :     /*
+<span class="lineNum">     932 </span>            :      * Construct a stat struct for the backup_label file we're injecting in
+<span class="lineNum">     933 </span>            :      * the tar.
+<span class="lineNum">     934 </span>            :      */
+<span class="lineNum">     935 </span>            :     /* Windows doesn't have the concept of uid and gid */
+<span class="lineNum">     936 </span>            : #ifdef WIN32
+<span class="lineNum">     937 </span>            :     statbuf.st_uid = 0;
+<span class="lineNum">     938 </span>            :     statbuf.st_gid = 0;
+<span class="lineNum">     939 </span>            : #else
+<span class="lineNum">     940 </span><span class="lineNoCov">          0 :     statbuf.st_uid = geteuid();</span>
+<span class="lineNum">     941 </span><span class="lineNoCov">          0 :     statbuf.st_gid = getegid();</span>
+<span class="lineNum">     942 </span>            : #endif
+<span class="lineNum">     943 </span><span class="lineNoCov">          0 :     statbuf.st_mtime = time(NULL);</span>
+<span class="lineNum">     944 </span><span class="lineNoCov">          0 :     statbuf.st_mode = pg_file_create_mode;</span>
+<span class="lineNum">     945 </span><span class="lineNoCov">          0 :     statbuf.st_size = len;</span>
+<span class="lineNum">     946 </span>            : 
+<span class="lineNum">     947 </span><span class="lineNoCov">          0 :     _tarWriteHeader(filename, NULL, &amp;statbuf, false);</span>
+<span class="lineNum">     948 </span>            :     /* Send the contents as a CopyData message */
+<span class="lineNum">     949 </span><span class="lineNoCov">          0 :     pq_putmessage('d', content, len);</span>
+<span class="lineNum">     950 </span>            : 
+<span class="lineNum">     951 </span>            :     /* Pad to 512 byte boundary, per tar format requirements */
+<span class="lineNum">     952 </span><span class="lineNoCov">          0 :     pad = ((len + 511) &amp; ~511) - len;</span>
+<span class="lineNum">     953 </span><span class="lineNoCov">          0 :     if (pad &gt; 0)</span>
+<span class="lineNum">     954 </span>            :     {
+<span class="lineNum">     955 </span>            :         char        buf[512];
+<span class="lineNum">     956 </span>            : 
+<span class="lineNum">     957 </span><span class="lineNoCov">          0 :         MemSet(buf, 0, pad);</span>
+<span class="lineNum">     958 </span><span class="lineNoCov">          0 :         pq_putmessage('d', buf, pad);</span>
+<span class="lineNum">     959 </span>            :     }
+<span class="lineNum">     960 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     961 </span>            : 
+<span class="lineNum">     962 </span>            : /*
+<span class="lineNum">     963 </span>            :  * Include the tablespace directory pointed to by 'path' in the output tar
+<span class="lineNum">     964 </span>            :  * stream.  If 'sizeonly' is true, we just calculate a total length and return
+<span class="lineNum">     965 </span>            :  * it, without actually sending anything.
+<span class="lineNum">     966 </span>            :  *
+<span class="lineNum">     967 </span>            :  * Only used to send auxiliary tablespaces, not PGDATA.
+<a name="968"><span class="lineNum">     968 </span>            :  */</a>
+<span class="lineNum">     969 </span>            : int64
+<span class="lineNum">     970 </span><span class="lineNoCov">          0 : sendTablespace(char *path, bool sizeonly)</span>
+<span class="lineNum">     971 </span>            : {
+<span class="lineNum">     972 </span>            :     int64       size;
+<span class="lineNum">     973 </span>            :     char        pathbuf[MAXPGPATH];
+<span class="lineNum">     974 </span>            :     struct stat statbuf;
+<span class="lineNum">     975 </span>            : 
+<span class="lineNum">     976 </span>            :     /*
+<span class="lineNum">     977 </span>            :      * 'path' points to the tablespace location, but we only want to include
+<span class="lineNum">     978 </span>            :      * the version directory in it that belongs to us.
+<span class="lineNum">     979 </span>            :      */
+<span class="lineNum">     980 </span><span class="lineNoCov">          0 :     snprintf(pathbuf, sizeof(pathbuf), &quot;%s/%s&quot;, path,</span>
+<span class="lineNum">     981 </span>            :              TABLESPACE_VERSION_DIRECTORY);
+<span class="lineNum">     982 </span>            : 
+<span class="lineNum">     983 </span>            :     /*
+<span class="lineNum">     984 </span>            :      * Store a directory entry in the tar file so we get the permissions
+<span class="lineNum">     985 </span>            :      * right.
+<span class="lineNum">     986 </span>            :      */
+<span class="lineNum">     987 </span><span class="lineNoCov">          0 :     if (lstat(pathbuf, &amp;statbuf) != 0)</span>
+<span class="lineNum">     988 </span>            :     {
+<span class="lineNum">     989 </span><span class="lineNoCov">          0 :         if (errno != ENOENT)</span>
+<span class="lineNum">     990 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     991 </span>            :                     (errcode_for_file_access(),
+<span class="lineNum">     992 </span>            :                      errmsg(&quot;could not stat file or directory \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">     993 </span>            :                             pathbuf)));
+<span class="lineNum">     994 </span>            : 
+<span class="lineNum">     995 </span>            :         /* If the tablespace went away while scanning, it's no error. */
+<span class="lineNum">     996 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     997 </span>            :     }
+<span class="lineNum">     998 </span>            : 
+<span class="lineNum">     999 </span><span class="lineNoCov">          0 :     size = _tarWriteHeader(TABLESPACE_VERSION_DIRECTORY, NULL, &amp;statbuf,</span>
+<span class="lineNum">    1000 </span>            :                            sizeonly);
+<span class="lineNum">    1001 </span>            : 
+<span class="lineNum">    1002 </span>            :     /* Send all the files in the tablespace version directory */
+<span class="lineNum">    1003 </span><span class="lineNoCov">          0 :     size += sendDir(pathbuf, strlen(path), sizeonly, NIL, true);</span>
+<span class="lineNum">    1004 </span>            : 
+<span class="lineNum">    1005 </span><span class="lineNoCov">          0 :     return size;</span>
+<span class="lineNum">    1006 </span>            : }
+<span class="lineNum">    1007 </span>            : 
+<span class="lineNum">    1008 </span>            : /*
+<span class="lineNum">    1009 </span>            :  * Include all files from the given directory in the output tar stream. If
+<span class="lineNum">    1010 </span>            :  * 'sizeonly' is true, we just calculate a total length and return it, without
+<span class="lineNum">    1011 </span>            :  * actually sending anything.
+<span class="lineNum">    1012 </span>            :  *
+<span class="lineNum">    1013 </span>            :  * Omit any directory in the tablespaces list, to avoid backing up
+<span class="lineNum">    1014 </span>            :  * tablespaces twice when they were created inside PGDATA.
+<span class="lineNum">    1015 </span>            :  *
+<span class="lineNum">    1016 </span>            :  * If sendtblspclinks is true, we need to include symlink
+<span class="lineNum">    1017 </span>            :  * information in the tar file. If not, we can skip that
+<span class="lineNum">    1018 </span>            :  * as it will be sent separately in the tablespace_map file.
+<a name="1019"><span class="lineNum">    1019 </span>            :  */</a>
+<span class="lineNum">    1020 </span>            : static int64
+<span class="lineNum">    1021 </span><span class="lineNoCov">          0 : sendDir(const char *path, int basepathlen, bool sizeonly, List *tablespaces,</span>
+<span class="lineNum">    1022 </span>            :         bool sendtblspclinks)
+<span class="lineNum">    1023 </span>            : {
+<span class="lineNum">    1024 </span>            :     DIR        *dir;
+<span class="lineNum">    1025 </span>            :     struct dirent *de;
+<span class="lineNum">    1026 </span>            :     char        pathbuf[MAXPGPATH * 2];
+<span class="lineNum">    1027 </span>            :     struct stat statbuf;
+<span class="lineNum">    1028 </span><span class="lineNoCov">          0 :     int64       size = 0;</span>
+<span class="lineNum">    1029 </span>            :     const char *lastDir;        /* Split last dir from parent path. */
+<span class="lineNum">    1030 </span><span class="lineNoCov">          0 :     bool        isDbDir = false;    /* Does this directory contain relations? */</span>
+<span class="lineNum">    1031 </span>            : 
+<span class="lineNum">    1032 </span>            :     /*
+<span class="lineNum">    1033 </span>            :      * Determine if the current path is a database directory that can contain
+<span class="lineNum">    1034 </span>            :      * relations.
+<span class="lineNum">    1035 </span>            :      *
+<span class="lineNum">    1036 </span>            :      * Start by finding the location of the delimiter between the parent path
+<span class="lineNum">    1037 </span>            :      * and the current path.
+<span class="lineNum">    1038 </span>            :      */
+<span class="lineNum">    1039 </span><span class="lineNoCov">          0 :     lastDir = last_dir_separator(path);</span>
+<span class="lineNum">    1040 </span>            : 
+<span class="lineNum">    1041 </span>            :     /* Does this path look like a database path (i.e. all digits)? */
+<span class="lineNum">    1042 </span><span class="lineNoCov">          0 :     if (lastDir != NULL &amp;&amp;</span>
+<span class="lineNum">    1043 </span><span class="lineNoCov">          0 :         strspn(lastDir + 1, &quot;0123456789&quot;) == strlen(lastDir + 1))</span>
+<span class="lineNum">    1044 </span>            :     {
+<span class="lineNum">    1045 </span>            :         /* Part of path that contains the parent directory. */
+<span class="lineNum">    1046 </span><span class="lineNoCov">          0 :         int         parentPathLen = lastDir - path;</span>
+<span class="lineNum">    1047 </span>            : 
+<span class="lineNum">    1048 </span>            :         /*
+<span class="lineNum">    1049 </span>            :          * Mark path as a database directory if the parent path is either
+<span class="lineNum">    1050 </span>            :          * $PGDATA/base or a tablespace version path.
+<span class="lineNum">    1051 </span>            :          */
+<span class="lineNum">    1052 </span><span class="lineNoCov">          0 :         if (strncmp(path, &quot;./base&quot;, parentPathLen) == 0 ||</span>
+<span class="lineNum">    1053 </span><span class="lineNoCov">          0 :             (parentPathLen &gt;= (sizeof(TABLESPACE_VERSION_DIRECTORY) - 1) &amp;&amp;</span>
+<span class="lineNum">    1054 </span><span class="lineNoCov">          0 :              strncmp(lastDir - (sizeof(TABLESPACE_VERSION_DIRECTORY) - 1),</span>
+<span class="lineNum">    1055 </span>            :                      TABLESPACE_VERSION_DIRECTORY,
+<span class="lineNum">    1056 </span>            :                      sizeof(TABLESPACE_VERSION_DIRECTORY) - 1) == 0))
+<span class="lineNum">    1057 </span><span class="lineNoCov">          0 :             isDbDir = true;</span>
+<span class="lineNum">    1058 </span>            :     }
+<span class="lineNum">    1059 </span>            : 
+<span class="lineNum">    1060 </span><span class="lineNoCov">          0 :     dir = AllocateDir(path);</span>
+<span class="lineNum">    1061 </span><span class="lineNoCov">          0 :     while ((de = ReadDir(dir, path)) != NULL)</span>
+<span class="lineNum">    1062 </span>            :     {
+<span class="lineNum">    1063 </span>            :         int         excludeIdx;
+<span class="lineNum">    1064 </span>            :         bool        excludeFound;
+<span class="lineNum">    1065 </span>            :         ForkNumber  relForkNum; /* Type of fork if file is a relation */
+<span class="lineNum">    1066 </span>            :         int         relOidChars;    /* Chars in filename that are the rel oid */
+<span class="lineNum">    1067 </span>            : 
+<span class="lineNum">    1068 </span>            :         /* Skip special stuff */
+<span class="lineNum">    1069 </span><span class="lineNoCov">          0 :         if (strcmp(de-&gt;d_name, &quot;.&quot;) == 0 || strcmp(de-&gt;d_name, &quot;..&quot;) == 0)</span>
+<span class="lineNum">    1070 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1071 </span>            : 
+<span class="lineNum">    1072 </span>            :         /* Skip temporary files */
+<span class="lineNum">    1073 </span><span class="lineNoCov">          0 :         if (strncmp(de-&gt;d_name,</span>
+<span class="lineNum">    1074 </span>            :                     PG_TEMP_FILE_PREFIX,
+<span class="lineNum">    1075 </span>            :                     strlen(PG_TEMP_FILE_PREFIX)) == 0)
+<span class="lineNum">    1076 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1077 </span>            : 
+<span class="lineNum">    1078 </span>            :         /*
+<span class="lineNum">    1079 </span>            :          * Check if the postmaster has signaled us to exit, and abort with an
+<span class="lineNum">    1080 </span>            :          * error in that case. The error handler further up will call
+<span class="lineNum">    1081 </span>            :          * do_pg_abort_backup() for us. Also check that if the backup was
+<span class="lineNum">    1082 </span>            :          * started while still in recovery, the server wasn't promoted.
+<span class="lineNum">    1083 </span>            :          * do_pg_stop_backup() will check that too, but it's better to stop
+<span class="lineNum">    1084 </span>            :          * the backup early than continue to the end and fail there.
+<span class="lineNum">    1085 </span>            :          */
+<span class="lineNum">    1086 </span><span class="lineNoCov">          0 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1087 </span><span class="lineNoCov">          0 :         if (RecoveryInProgress() != backup_started_in_recovery)</span>
+<span class="lineNum">    1088 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">    1089 </span>            :                     (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">    1090 </span>            :                      errmsg(&quot;the standby was promoted during online backup&quot;),
+<span class="lineNum">    1091 </span>            :                      errhint(&quot;This means that the backup being taken is corrupt &quot;
+<span class="lineNum">    1092 </span>            :                              &quot;and should not be used. &quot;
+<span class="lineNum">    1093 </span>            :                              &quot;Try taking another online backup.&quot;)));
+<span class="lineNum">    1094 </span>            : 
+<span class="lineNum">    1095 </span>            :         /* Scan for files that should be excluded */
+<span class="lineNum">    1096 </span><span class="lineNoCov">          0 :         excludeFound = false;</span>
+<span class="lineNum">    1097 </span><span class="lineNoCov">          0 :         for (excludeIdx = 0; excludeFiles[excludeIdx] != NULL; excludeIdx++)</span>
+<span class="lineNum">    1098 </span>            :         {
+<span class="lineNum">    1099 </span><span class="lineNoCov">          0 :             if (strcmp(de-&gt;d_name, excludeFiles[excludeIdx]) == 0)</span>
+<span class="lineNum">    1100 </span>            :             {
+<span class="lineNum">    1101 </span><span class="lineNoCov">          0 :                 elog(DEBUG1, &quot;file \&quot;%s\&quot; excluded from backup&quot;, de-&gt;d_name);</span>
+<span class="lineNum">    1102 </span><span class="lineNoCov">          0 :                 excludeFound = true;</span>
+<span class="lineNum">    1103 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1104 </span>            :             }
+<span class="lineNum">    1105 </span>            :         }
+<span class="lineNum">    1106 </span>            : 
+<span class="lineNum">    1107 </span><span class="lineNoCov">          0 :         if (excludeFound)</span>
+<span class="lineNum">    1108 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1109 </span>            : 
+<span class="lineNum">    1110 </span>            :         /* Exclude all forks for unlogged tables except the init fork */
+<span class="lineNum">    1111 </span><span class="lineNoCov">          0 :         if (isDbDir &amp;&amp;</span>
+<span class="lineNum">    1112 </span><span class="lineNoCov">          0 :             parse_filename_for_nontemp_relation(de-&gt;d_name, &amp;relOidChars,</span>
+<span class="lineNum">    1113 </span>            :                                                 &amp;relForkNum))
+<span class="lineNum">    1114 </span>            :         {
+<span class="lineNum">    1115 </span>            :             /* Never exclude init forks */
+<span class="lineNum">    1116 </span><span class="lineNoCov">          0 :             if (relForkNum != INIT_FORKNUM)</span>
+<span class="lineNum">    1117 </span>            :             {
+<span class="lineNum">    1118 </span>            :                 char        initForkFile[MAXPGPATH];
+<span class="lineNum">    1119 </span>            :                 char        relOid[OIDCHARS + 1];
+<span class="lineNum">    1120 </span>            : 
+<span class="lineNum">    1121 </span>            :                 /*
+<span class="lineNum">    1122 </span>            :                  * If any other type of fork, check if there is an init fork
+<span class="lineNum">    1123 </span>            :                  * with the same OID. If so, the file can be excluded.
+<span class="lineNum">    1124 </span>            :                  */
+<span class="lineNum">    1125 </span><span class="lineNoCov">          0 :                 memcpy(relOid, de-&gt;d_name, relOidChars);</span>
+<span class="lineNum">    1126 </span><span class="lineNoCov">          0 :                 relOid[relOidChars] = '\0';</span>
+<span class="lineNum">    1127 </span><span class="lineNoCov">          0 :                 snprintf(initForkFile, sizeof(initForkFile), &quot;%s/%s_init&quot;,</span>
+<span class="lineNum">    1128 </span>            :                          path, relOid);
+<span class="lineNum">    1129 </span>            : 
+<span class="lineNum">    1130 </span><span class="lineNoCov">          0 :                 if (lstat(initForkFile, &amp;statbuf) == 0)</span>
+<span class="lineNum">    1131 </span>            :                 {
+<span class="lineNum">    1132 </span><span class="lineNoCov">          0 :                     elog(DEBUG2,</span>
+<span class="lineNum">    1133 </span>            :                          &quot;unlogged relation file \&quot;%s\&quot; excluded from backup&quot;,
+<span class="lineNum">    1134 </span>            :                          de-&gt;d_name);
+<span class="lineNum">    1135 </span>            : 
+<span class="lineNum">    1136 </span><span class="lineNoCov">          0 :                     continue;</span>
+<span class="lineNum">    1137 </span>            :                 }
+<span class="lineNum">    1138 </span>            :             }
+<span class="lineNum">    1139 </span>            :         }
+<span class="lineNum">    1140 </span>            : 
+<span class="lineNum">    1141 </span>            :         /* Exclude temporary relations */
+<span class="lineNum">    1142 </span><span class="lineNoCov">          0 :         if (isDbDir &amp;&amp; looks_like_temp_rel_name(de-&gt;d_name))</span>
+<span class="lineNum">    1143 </span>            :         {
+<span class="lineNum">    1144 </span><span class="lineNoCov">          0 :             elog(DEBUG2,</span>
+<span class="lineNum">    1145 </span>            :                  &quot;temporary relation file \&quot;%s\&quot; excluded from backup&quot;,
+<span class="lineNum">    1146 </span>            :                  de-&gt;d_name);
+<span class="lineNum">    1147 </span>            : 
+<span class="lineNum">    1148 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1149 </span>            :         }
+<span class="lineNum">    1150 </span>            : 
+<span class="lineNum">    1151 </span><span class="lineNoCov">          0 :         snprintf(pathbuf, sizeof(pathbuf), &quot;%s/%s&quot;, path, de-&gt;d_name);</span>
+<span class="lineNum">    1152 </span>            : 
+<span class="lineNum">    1153 </span>            :         /* Skip pg_control here to back up it last */
+<span class="lineNum">    1154 </span><span class="lineNoCov">          0 :         if (strcmp(pathbuf, &quot;./global/pg_control&quot;) == 0)</span>
+<span class="lineNum">    1155 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1156 </span>            : 
+<span class="lineNum">    1157 </span><span class="lineNoCov">          0 :         if (lstat(pathbuf, &amp;statbuf) != 0)</span>
+<span class="lineNum">    1158 </span>            :         {
+<span class="lineNum">    1159 </span><span class="lineNoCov">          0 :             if (errno != ENOENT)</span>
+<span class="lineNum">    1160 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">    1161 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">    1162 </span>            :                          errmsg(&quot;could not stat file or directory \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">    1163 </span>            :                                 pathbuf)));
+<span class="lineNum">    1164 </span>            : 
+<span class="lineNum">    1165 </span>            :             /* If the file went away while scanning, it's not an error. */
+<span class="lineNum">    1166 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1167 </span>            :         }
+<span class="lineNum">    1168 </span>            : 
+<span class="lineNum">    1169 </span>            :         /* Scan for directories whose contents should be excluded */
+<span class="lineNum">    1170 </span><span class="lineNoCov">          0 :         excludeFound = false;</span>
+<span class="lineNum">    1171 </span><span class="lineNoCov">          0 :         for (excludeIdx = 0; excludeDirContents[excludeIdx] != NULL; excludeIdx++)</span>
+<span class="lineNum">    1172 </span>            :         {
+<span class="lineNum">    1173 </span><span class="lineNoCov">          0 :             if (strcmp(de-&gt;d_name, excludeDirContents[excludeIdx]) == 0)</span>
+<span class="lineNum">    1174 </span>            :             {
+<span class="lineNum">    1175 </span><span class="lineNoCov">          0 :                 elog(DEBUG1, &quot;contents of directory \&quot;%s\&quot; excluded from backup&quot;, de-&gt;d_name);</span>
+<span class="lineNum">    1176 </span><span class="lineNoCov">          0 :                 size += _tarWriteDir(pathbuf, basepathlen, &amp;statbuf, sizeonly);</span>
+<span class="lineNum">    1177 </span><span class="lineNoCov">          0 :                 excludeFound = true;</span>
+<span class="lineNum">    1178 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1179 </span>            :             }
+<span class="lineNum">    1180 </span>            :         }
+<span class="lineNum">    1181 </span>            : 
+<span class="lineNum">    1182 </span><span class="lineNoCov">          0 :         if (excludeFound)</span>
+<span class="lineNum">    1183 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1184 </span>            : 
+<span class="lineNum">    1185 </span>            :         /*
+<span class="lineNum">    1186 </span>            :          * Exclude contents of directory specified by statrelpath if not set
+<span class="lineNum">    1187 </span>            :          * to the default (pg_stat_tmp) which is caught in the loop above.
+<span class="lineNum">    1188 </span>            :          */
+<span class="lineNum">    1189 </span><span class="lineNoCov">          0 :         if (statrelpath != NULL &amp;&amp; strcmp(pathbuf, statrelpath) == 0)</span>
+<span class="lineNum">    1190 </span>            :         {
+<span class="lineNum">    1191 </span><span class="lineNoCov">          0 :             elog(DEBUG1, &quot;contents of directory \&quot;%s\&quot; excluded from backup&quot;, statrelpath);</span>
+<span class="lineNum">    1192 </span><span class="lineNoCov">          0 :             size += _tarWriteDir(pathbuf, basepathlen, &amp;statbuf, sizeonly);</span>
+<span class="lineNum">    1193 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1194 </span>            :         }
+<span class="lineNum">    1195 </span>            : 
+<span class="lineNum">    1196 </span>            :         /*
+<span class="lineNum">    1197 </span>            :          * We can skip pg_wal, the WAL segments need to be fetched from the
+<span class="lineNum">    1198 </span>            :          * WAL archive anyway. But include it as an empty directory anyway, so
+<span class="lineNum">    1199 </span>            :          * we get permissions right.
+<span class="lineNum">    1200 </span>            :          */
+<span class="lineNum">    1201 </span><span class="lineNoCov">          0 :         if (strcmp(pathbuf, &quot;./pg_wal&quot;) == 0)</span>
+<span class="lineNum">    1202 </span>            :         {
+<span class="lineNum">    1203 </span>            :             /* If pg_wal is a symlink, write it as a directory anyway */
+<span class="lineNum">    1204 </span><span class="lineNoCov">          0 :             size += _tarWriteDir(pathbuf, basepathlen, &amp;statbuf, sizeonly);</span>
+<span class="lineNum">    1205 </span>            : 
+<span class="lineNum">    1206 </span>            :             /*
+<span class="lineNum">    1207 </span>            :              * Also send archive_status directory (by hackishly reusing
+<span class="lineNum">    1208 </span>            :              * statbuf from above ...).
+<span class="lineNum">    1209 </span>            :              */
+<span class="lineNum">    1210 </span><span class="lineNoCov">          0 :             size += _tarWriteHeader(&quot;./pg_wal/archive_status&quot;, NULL, &amp;statbuf,</span>
+<span class="lineNum">    1211 </span>            :                                     sizeonly);
+<span class="lineNum">    1212 </span>            : 
+<span class="lineNum">    1213 </span><span class="lineNoCov">          0 :             continue;           /* don't recurse into pg_wal */</span>
+<span class="lineNum">    1214 </span>            :         }
+<span class="lineNum">    1215 </span>            : 
+<span class="lineNum">    1216 </span>            :         /* Allow symbolic links in pg_tblspc only */
+<span class="lineNum">    1217 </span><span class="lineNoCov">          0 :         if (strcmp(path, &quot;./pg_tblspc&quot;) == 0 &amp;&amp;</span>
+<span class="lineNum">    1218 </span>            : #ifndef WIN32
+<span class="lineNum">    1219 </span><span class="lineNoCov">          0 :             S_ISLNK(statbuf.st_mode)</span>
+<span class="lineNum">    1220 </span>            : #else
+<span class="lineNum">    1221 </span>            :             pgwin32_is_junction(pathbuf)
+<span class="lineNum">    1222 </span>            : #endif
+<span class="lineNum">    1223 </span>            :             )
+<span class="lineNum">    1224 </span><span class="lineNoCov">          0 :         {</span>
+<span class="lineNum">    1225 </span>            : #if defined(HAVE_READLINK) || defined(WIN32)
+<span class="lineNum">    1226 </span>            :             char        linkpath[MAXPGPATH];
+<span class="lineNum">    1227 </span>            :             int         rllen;
+<span class="lineNum">    1228 </span>            : 
+<span class="lineNum">    1229 </span><span class="lineNoCov">          0 :             rllen = readlink(pathbuf, linkpath, sizeof(linkpath));</span>
+<span class="lineNum">    1230 </span><span class="lineNoCov">          0 :             if (rllen &lt; 0)</span>
+<span class="lineNum">    1231 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">    1232 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">    1233 </span>            :                          errmsg(&quot;could not read symbolic link \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">    1234 </span>            :                                 pathbuf)));
+<span class="lineNum">    1235 </span><span class="lineNoCov">          0 :             if (rllen &gt;= sizeof(linkpath))</span>
+<span class="lineNum">    1236 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">    1237 </span>            :                         (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+<span class="lineNum">    1238 </span>            :                          errmsg(&quot;symbolic link \&quot;%s\&quot; target is too long&quot;,
+<span class="lineNum">    1239 </span>            :                                 pathbuf)));
+<span class="lineNum">    1240 </span><span class="lineNoCov">          0 :             linkpath[rllen] = '\0';</span>
+<span class="lineNum">    1241 </span>            : 
+<span class="lineNum">    1242 </span><span class="lineNoCov">          0 :             size += _tarWriteHeader(pathbuf + basepathlen + 1, linkpath,</span>
+<span class="lineNum">    1243 </span>            :                                     &amp;statbuf, sizeonly);
+<span class="lineNum">    1244 </span>            : #else
+<span class="lineNum">    1245 </span>            : 
+<span class="lineNum">    1246 </span>            :             /*
+<span class="lineNum">    1247 </span>            :              * If the platform does not have symbolic links, it should not be
+<span class="lineNum">    1248 </span>            :              * possible to have tablespaces - clearly somebody else created
+<span class="lineNum">    1249 </span>            :              * them. Warn about it and ignore.
+<span class="lineNum">    1250 </span>            :              */
+<span class="lineNum">    1251 </span>            :             ereport(WARNING,
+<span class="lineNum">    1252 </span>            :                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">    1253 </span>            :                      errmsg(&quot;tablespaces are not supported on this platform&quot;)));
+<span class="lineNum">    1254 </span>            :             continue;
+<span class="lineNum">    1255 </span>            : #endif                          /* HAVE_READLINK */
+<span class="lineNum">    1256 </span>            :         }
+<span class="lineNum">    1257 </span><span class="lineNoCov">          0 :         else if (S_ISDIR(statbuf.st_mode))</span>
+<span class="lineNum">    1258 </span>            :         {
+<span class="lineNum">    1259 </span><span class="lineNoCov">          0 :             bool        skip_this_dir = false;</span>
+<span class="lineNum">    1260 </span>            :             ListCell   *lc;
+<span class="lineNum">    1261 </span>            : 
+<span class="lineNum">    1262 </span>            :             /*
+<span class="lineNum">    1263 </span>            :              * Store a directory entry in the tar file so we can get the
+<span class="lineNum">    1264 </span>            :              * permissions right.
+<span class="lineNum">    1265 </span>            :              */
+<span class="lineNum">    1266 </span><span class="lineNoCov">          0 :             size += _tarWriteHeader(pathbuf + basepathlen + 1, NULL, &amp;statbuf,</span>
+<span class="lineNum">    1267 </span>            :                                     sizeonly);
+<span class="lineNum">    1268 </span>            : 
+<span class="lineNum">    1269 </span>            :             /*
+<span class="lineNum">    1270 </span>            :              * Call ourselves recursively for a directory, unless it happens
+<span class="lineNum">    1271 </span>            :              * to be a separate tablespace located within PGDATA.
+<span class="lineNum">    1272 </span>            :              */
+<span class="lineNum">    1273 </span><span class="lineNoCov">          0 :             foreach(lc, tablespaces)</span>
+<span class="lineNum">    1274 </span>            :             {
+<span class="lineNum">    1275 </span><span class="lineNoCov">          0 :                 tablespaceinfo *ti = (tablespaceinfo *) lfirst(lc);</span>
+<span class="lineNum">    1276 </span>            : 
+<span class="lineNum">    1277 </span>            :                 /*
+<span class="lineNum">    1278 </span>            :                  * ti-&gt;rpath is the tablespace relative path within PGDATA, or
+<span class="lineNum">    1279 </span>            :                  * NULL if the tablespace has been properly located somewhere
+<span class="lineNum">    1280 </span>            :                  * else.
+<span class="lineNum">    1281 </span>            :                  *
+<span class="lineNum">    1282 </span>            :                  * Skip past the leading &quot;./&quot; in pathbuf when comparing.
+<span class="lineNum">    1283 </span>            :                  */
+<span class="lineNum">    1284 </span><span class="lineNoCov">          0 :                 if (ti-&gt;rpath &amp;&amp; strcmp(ti-&gt;rpath, pathbuf + 2) == 0)</span>
+<span class="lineNum">    1285 </span>            :                 {
+<span class="lineNum">    1286 </span><span class="lineNoCov">          0 :                     skip_this_dir = true;</span>
+<span class="lineNum">    1287 </span><span class="lineNoCov">          0 :                     break;</span>
+<span class="lineNum">    1288 </span>            :                 }
+<span class="lineNum">    1289 </span>            :             }
+<span class="lineNum">    1290 </span>            : 
+<span class="lineNum">    1291 </span>            :             /*
+<span class="lineNum">    1292 </span>            :              * skip sending directories inside pg_tblspc, if not required.
+<span class="lineNum">    1293 </span>            :              */
+<span class="lineNum">    1294 </span><span class="lineNoCov">          0 :             if (strcmp(pathbuf, &quot;./pg_tblspc&quot;) == 0 &amp;&amp; !sendtblspclinks)</span>
+<span class="lineNum">    1295 </span><span class="lineNoCov">          0 :                 skip_this_dir = true;</span>
+<span class="lineNum">    1296 </span>            : 
+<span class="lineNum">    1297 </span><span class="lineNoCov">          0 :             if (!skip_this_dir)</span>
+<span class="lineNum">    1298 </span><span class="lineNoCov">          0 :                 size += sendDir(pathbuf, basepathlen, sizeonly, tablespaces, sendtblspclinks);</span>
+<span class="lineNum">    1299 </span>            :         }
+<span class="lineNum">    1300 </span><span class="lineNoCov">          0 :         else if (S_ISREG(statbuf.st_mode))</span>
+<span class="lineNum">    1301 </span>            :         {
+<span class="lineNum">    1302 </span><span class="lineNoCov">          0 :             bool        sent = false;</span>
+<span class="lineNum">    1303 </span>            : 
+<span class="lineNum">    1304 </span><span class="lineNoCov">          0 :             if (!sizeonly)</span>
+<span class="lineNum">    1305 </span><span class="lineNoCov">          0 :                 sent = sendFile(pathbuf, pathbuf + basepathlen + 1, &amp;statbuf,</span>
+<span class="lineNum">    1306 </span><span class="lineNoCov">          0 :                                 true, isDbDir ? pg_atoi(lastDir + 1, sizeof(Oid), 0) : InvalidOid);</span>
+<span class="lineNum">    1307 </span>            : 
+<span class="lineNum">    1308 </span><span class="lineNoCov">          0 :             if (sent || sizeonly)</span>
+<span class="lineNum">    1309 </span>            :             {
+<span class="lineNum">    1310 </span>            :                 /* Add size, rounded up to 512byte block */
+<span class="lineNum">    1311 </span><span class="lineNoCov">          0 :                 size += ((statbuf.st_size + 511) &amp; ~511);</span>
+<span class="lineNum">    1312 </span><span class="lineNoCov">          0 :                 size += 512;    /* Size of the header of the file */</span>
+<span class="lineNum">    1313 </span>            :             }
+<span class="lineNum">    1314 </span>            :         }
+<span class="lineNum">    1315 </span>            :         else
+<span class="lineNum">    1316 </span><span class="lineNoCov">          0 :             ereport(WARNING,</span>
+<span class="lineNum">    1317 </span>            :                     (errmsg(&quot;skipping special file \&quot;%s\&quot;&quot;, pathbuf)));
+<span class="lineNum">    1318 </span>            :     }
+<span class="lineNum">    1319 </span><span class="lineNoCov">          0 :     FreeDir(dir);</span>
+<span class="lineNum">    1320 </span><span class="lineNoCov">          0 :     return size;</span>
+<span class="lineNum">    1321 </span>            : }
+<span class="lineNum">    1322 </span>            : 
+<span class="lineNum">    1323 </span>            : /*
+<span class="lineNum">    1324 </span>            :  * Check if a file should have its checksum validated.
+<span class="lineNum">    1325 </span>            :  * We validate checksums on files in regular tablespaces
+<span class="lineNum">    1326 </span>            :  * (including global and default) only, and in those there
+<span class="lineNum">    1327 </span>            :  * are some files that are explicitly excluded.
+<a name="1328"><span class="lineNum">    1328 </span>            :  */</a>
+<span class="lineNum">    1329 </span>            : static bool
+<span class="lineNum">    1330 </span><span class="lineNoCov">          0 : is_checksummed_file(const char *fullpath, const char *filename)</span>
+<span class="lineNum">    1331 </span>            : {
+<span class="lineNum">    1332 </span>            :     const char *const *f;
+<span class="lineNum">    1333 </span>            : 
+<span class="lineNum">    1334 </span>            :     /* Check that the file is in a tablespace */
+<span class="lineNum">    1335 </span><span class="lineNoCov">          0 :     if (strncmp(fullpath, &quot;./global/&quot;, 9) == 0 ||</span>
+<span class="lineNum">    1336 </span><span class="lineNoCov">          0 :         strncmp(fullpath, &quot;./base/&quot;, 7) == 0 ||</span>
+<span class="lineNum">    1337 </span><span class="lineNoCov">          0 :         strncmp(fullpath, &quot;/&quot;, 1) == 0)</span>
+<span class="lineNum">    1338 </span>            :     {
+<span class="lineNum">    1339 </span>            :         /* Compare file against noChecksumFiles skiplist */
+<span class="lineNum">    1340 </span><span class="lineNoCov">          0 :         for (f = noChecksumFiles; *f; f++)</span>
+<span class="lineNum">    1341 </span><span class="lineNoCov">          0 :             if (strcmp(*f, filename) == 0)</span>
+<span class="lineNum">    1342 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">    1343 </span>            : 
+<span class="lineNum">    1344 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">    1345 </span>            :     }
+<span class="lineNum">    1346 </span>            :     else
+<span class="lineNum">    1347 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1348 </span>            : }
+<span class="lineNum">    1349 </span>            : 
+<span class="lineNum">    1350 </span>            : /*****
+<span class="lineNum">    1351 </span>            :  * Functions for handling tar file format
+<span class="lineNum">    1352 </span>            :  *
+<span class="lineNum">    1353 </span>            :  * Copied from pg_dump, but modified to work with libpq for sending
+<span class="lineNum">    1354 </span>            :  */
+<span class="lineNum">    1355 </span>            : 
+<span class="lineNum">    1356 </span>            : 
+<span class="lineNum">    1357 </span>            : /*
+<span class="lineNum">    1358 </span>            :  * Given the member, write the TAR header &amp; send the file.
+<span class="lineNum">    1359 </span>            :  *
+<span class="lineNum">    1360 </span>            :  * If 'missing_ok' is true, will not throw an error if the file is not found.
+<span class="lineNum">    1361 </span>            :  *
+<span class="lineNum">    1362 </span>            :  * If dboid is anything other than InvalidOid then any checksum failures detected
+<span class="lineNum">    1363 </span>            :  * will get reported to the stats collector.
+<span class="lineNum">    1364 </span>            :  *
+<span class="lineNum">    1365 </span>            :  * Returns true if the file was successfully sent, false if 'missing_ok',
+<span class="lineNum">    1366 </span>            :  * and the file did not exist.
+<a name="1367"><span class="lineNum">    1367 </span>            :  */</a>
+<span class="lineNum">    1368 </span>            : static bool
+<span class="lineNum">    1369 </span><span class="lineNoCov">          0 : sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf,</span>
+<span class="lineNum">    1370 </span>            :          bool missing_ok, Oid dboid)
+<span class="lineNum">    1371 </span>            : {
+<span class="lineNum">    1372 </span>            :     FILE       *fp;
+<span class="lineNum">    1373 </span><span class="lineNoCov">          0 :     BlockNumber blkno = 0;</span>
+<span class="lineNum">    1374 </span><span class="lineNoCov">          0 :     bool        block_retry = false;</span>
+<span class="lineNum">    1375 </span>            :     char        buf[TAR_SEND_SIZE];
+<span class="lineNum">    1376 </span>            :     uint16      checksum;
+<span class="lineNum">    1377 </span><span class="lineNoCov">          0 :     int         checksum_failures = 0;</span>
+<span class="lineNum">    1378 </span>            :     off_t       cnt;
+<span class="lineNum">    1379 </span>            :     int         i;
+<span class="lineNum">    1380 </span><span class="lineNoCov">          0 :     pgoff_t     len = 0;</span>
+<span class="lineNum">    1381 </span>            :     char       *page;
+<span class="lineNum">    1382 </span>            :     size_t      pad;
+<span class="lineNum">    1383 </span>            :     PageHeader  phdr;
+<span class="lineNum">    1384 </span><span class="lineNoCov">          0 :     int         segmentno = 0;</span>
+<span class="lineNum">    1385 </span>            :     char       *segmentpath;
+<span class="lineNum">    1386 </span><span class="lineNoCov">          0 :     bool        verify_checksum = false;</span>
+<span class="lineNum">    1387 </span>            : 
+<span class="lineNum">    1388 </span><span class="lineNoCov">          0 :     fp = AllocateFile(readfilename, &quot;rb&quot;);</span>
+<span class="lineNum">    1389 </span><span class="lineNoCov">          0 :     if (fp == NULL)</span>
+<span class="lineNum">    1390 </span>            :     {
+<span class="lineNum">    1391 </span><span class="lineNoCov">          0 :         if (errno == ENOENT &amp;&amp; missing_ok)</span>
+<span class="lineNum">    1392 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">    1393 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">    1394 </span>            :                 (errcode_for_file_access(),
+<span class="lineNum">    1395 </span>            :                  errmsg(&quot;could not open file \&quot;%s\&quot;: %m&quot;, readfilename)));
+<span class="lineNum">    1396 </span>            :     }
+<span class="lineNum">    1397 </span>            : 
+<span class="lineNum">    1398 </span><span class="lineNoCov">          0 :     _tarWriteHeader(tarfilename, NULL, statbuf, false);</span>
+<span class="lineNum">    1399 </span>            : 
+<span class="lineNum">    1400 </span><span class="lineNoCov">          0 :     if (!noverify_checksums &amp;&amp; DataChecksumsEnabled())</span>
+<span class="lineNum">    1401 </span>            :     {
+<span class="lineNum">    1402 </span>            :         char       *filename;
+<span class="lineNum">    1403 </span>            : 
+<span class="lineNum">    1404 </span>            :         /*
+<span class="lineNum">    1405 </span>            :          * Get the filename (excluding path).  As last_dir_separator()
+<span class="lineNum">    1406 </span>            :          * includes the last directory separator, we chop that off by
+<span class="lineNum">    1407 </span>            :          * incrementing the pointer.
+<span class="lineNum">    1408 </span>            :          */
+<span class="lineNum">    1409 </span><span class="lineNoCov">          0 :         filename = last_dir_separator(readfilename) + 1;</span>
+<span class="lineNum">    1410 </span>            : 
+<span class="lineNum">    1411 </span><span class="lineNoCov">          0 :         if (is_checksummed_file(readfilename, filename))</span>
+<span class="lineNum">    1412 </span>            :         {
+<span class="lineNum">    1413 </span><span class="lineNoCov">          0 :             verify_checksum = true;</span>
+<span class="lineNum">    1414 </span>            : 
+<span class="lineNum">    1415 </span>            :             /*
+<span class="lineNum">    1416 </span>            :              * Cut off at the segment boundary (&quot;.&quot;) to get the segment number
+<span class="lineNum">    1417 </span>            :              * in order to mix it into the checksum.
+<span class="lineNum">    1418 </span>            :              */
+<span class="lineNum">    1419 </span><span class="lineNoCov">          0 :             segmentpath = strstr(filename, &quot;.&quot;);</span>
+<span class="lineNum">    1420 </span><span class="lineNoCov">          0 :             if (segmentpath != NULL)</span>
+<span class="lineNum">    1421 </span>            :             {
+<span class="lineNum">    1422 </span><span class="lineNoCov">          0 :                 segmentno = atoi(segmentpath + 1);</span>
+<span class="lineNum">    1423 </span><span class="lineNoCov">          0 :                 if (segmentno == 0)</span>
+<span class="lineNum">    1424 </span><span class="lineNoCov">          0 :                     ereport(ERROR,</span>
+<span class="lineNum">    1425 </span>            :                             (errmsg(&quot;invalid segment number %d in file \&quot;%s\&quot;&quot;,
+<span class="lineNum">    1426 </span>            :                                     segmentno, filename)));
+<span class="lineNum">    1427 </span>            :             }
+<span class="lineNum">    1428 </span>            :         }
+<span class="lineNum">    1429 </span>            :     }
+<span class="lineNum">    1430 </span>            : 
+<span class="lineNum">    1431 </span><span class="lineNoCov">          0 :     while ((cnt = fread(buf, 1, Min(sizeof(buf), statbuf-&gt;st_size - len), fp)) &gt; 0)</span>
+<span class="lineNum">    1432 </span>            :     {
+<span class="lineNum">    1433 </span>            :         /*
+<span class="lineNum">    1434 </span>            :          * The checksums are verified at block level, so we iterate over the
+<span class="lineNum">    1435 </span>            :          * buffer in chunks of BLCKSZ, after making sure that
+<span class="lineNum">    1436 </span>            :          * TAR_SEND_SIZE/buf is divisible by BLCKSZ and we read a multiple of
+<span class="lineNum">    1437 </span>            :          * BLCKSZ bytes.
+<span class="lineNum">    1438 </span>            :          */
+<span class="lineNum">    1439 </span>            :         Assert(TAR_SEND_SIZE % BLCKSZ == 0);
+<span class="lineNum">    1440 </span>            : 
+<span class="lineNum">    1441 </span><span class="lineNoCov">          0 :         if (verify_checksum &amp;&amp; (cnt % BLCKSZ != 0))</span>
+<span class="lineNum">    1442 </span>            :         {
+<span class="lineNum">    1443 </span><span class="lineNoCov">          0 :             ereport(WARNING,</span>
+<span class="lineNum">    1444 </span>            :                     (errmsg(&quot;could not verify checksum in file \&quot;%s\&quot;, block &quot;
+<span class="lineNum">    1445 </span>            :                             &quot;%d: read buffer size %d and page size %d &quot;
+<span class="lineNum">    1446 </span>            :                             &quot;differ&quot;,
+<span class="lineNum">    1447 </span>            :                             readfilename, blkno, (int) cnt, BLCKSZ)));
+<span class="lineNum">    1448 </span><span class="lineNoCov">          0 :             verify_checksum = false;</span>
+<span class="lineNum">    1449 </span>            :         }
+<span class="lineNum">    1450 </span>            : 
+<span class="lineNum">    1451 </span><span class="lineNoCov">          0 :         if (verify_checksum)</span>
+<span class="lineNum">    1452 </span>            :         {
+<span class="lineNum">    1453 </span><span class="lineNoCov">          0 :             for (i = 0; i &lt; cnt / BLCKSZ; i++)</span>
+<span class="lineNum">    1454 </span>            :             {
+<span class="lineNum">    1455 </span><span class="lineNoCov">          0 :                 page = buf + BLCKSZ * i;</span>
+<span class="lineNum">    1456 </span>            : 
+<span class="lineNum">    1457 </span>            :                 /*
+<span class="lineNum">    1458 </span>            :                  * Only check pages which have not been modified since the
+<span class="lineNum">    1459 </span>            :                  * start of the base backup. Otherwise, they might have been
+<span class="lineNum">    1460 </span>            :                  * written only halfway and the checksum would not be valid.
+<span class="lineNum">    1461 </span>            :                  * However, replaying WAL would reinstate the correct page in
+<span class="lineNum">    1462 </span>            :                  * this case. We also skip completely new pages, since they
+<span class="lineNum">    1463 </span>            :                  * don't have a checksum yet.
+<span class="lineNum">    1464 </span>            :                  */
+<span class="lineNum">    1465 </span><span class="lineNoCov">          0 :                 if (!PageIsNew(page) &amp;&amp; PageGetLSN(page) &lt; startptr)</span>
+<span class="lineNum">    1466 </span>            :                 {
+<span class="lineNum">    1467 </span><span class="lineNoCov">          0 :                     checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE);</span>
+<span class="lineNum">    1468 </span><span class="lineNoCov">          0 :                     phdr = (PageHeader) page;</span>
+<span class="lineNum">    1469 </span><span class="lineNoCov">          0 :                     if (phdr-&gt;pd_checksum != checksum)</span>
+<span class="lineNum">    1470 </span>            :                     {
+<span class="lineNum">    1471 </span>            :                         /*
+<span class="lineNum">    1472 </span>            :                          * Retry the block on the first failure.  It's
+<span class="lineNum">    1473 </span>            :                          * possible that we read the first 4K page of the
+<span class="lineNum">    1474 </span>            :                          * block just before postgres updated the entire block
+<span class="lineNum">    1475 </span>            :                          * so it ends up looking torn to us.  We only need to
+<span class="lineNum">    1476 </span>            :                          * retry once because the LSN should be updated to
+<span class="lineNum">    1477 </span>            :                          * something we can ignore on the next pass.  If the
+<span class="lineNum">    1478 </span>            :                          * error happens again then it is a true validation
+<span class="lineNum">    1479 </span>            :                          * failure.
+<span class="lineNum">    1480 </span>            :                          */
+<span class="lineNum">    1481 </span><span class="lineNoCov">          0 :                         if (block_retry == false)</span>
+<span class="lineNum">    1482 </span>            :                         {
+<span class="lineNum">    1483 </span>            :                             /* Reread the failed block */
+<span class="lineNum">    1484 </span><span class="lineNoCov">          0 :                             if (fseek(fp, -(cnt - BLCKSZ * i), SEEK_CUR) == -1)</span>
+<span class="lineNum">    1485 </span>            :                             {
+<span class="lineNum">    1486 </span><span class="lineNoCov">          0 :                                 ereport(ERROR,</span>
+<span class="lineNum">    1487 </span>            :                                         (errcode_for_file_access(),
+<span class="lineNum">    1488 </span>            :                                          errmsg(&quot;could not fseek in file \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">    1489 </span>            :                                                 readfilename)));
+<span class="lineNum">    1490 </span>            :                             }
+<span class="lineNum">    1491 </span>            : 
+<span class="lineNum">    1492 </span><span class="lineNoCov">          0 :                             if (fread(buf + BLCKSZ * i, 1, BLCKSZ, fp) != BLCKSZ)</span>
+<span class="lineNum">    1493 </span>            :                             {
+<span class="lineNum">    1494 </span>            :                                 /*
+<span class="lineNum">    1495 </span>            :                                  * If we hit end-of-file, a concurrent
+<span class="lineNum">    1496 </span>            :                                  * truncation must have occurred, so break out
+<span class="lineNum">    1497 </span>            :                                  * of this loop just as if the initial fread()
+<span class="lineNum">    1498 </span>            :                                  * returned 0. We'll drop through to the same
+<span class="lineNum">    1499 </span>            :                                  * code that handles that case. (We must fix
+<span class="lineNum">    1500 </span>            :                                  * up cnt first, though.)
+<span class="lineNum">    1501 </span>            :                                  */
+<span class="lineNum">    1502 </span><span class="lineNoCov">          0 :                                 if (feof(fp))</span>
+<span class="lineNum">    1503 </span>            :                                 {
+<span class="lineNum">    1504 </span><span class="lineNoCov">          0 :                                     cnt = BLCKSZ * i;</span>
+<span class="lineNum">    1505 </span><span class="lineNoCov">          0 :                                     break;</span>
+<span class="lineNum">    1506 </span>            :                                 }
+<span class="lineNum">    1507 </span>            : 
+<span class="lineNum">    1508 </span><span class="lineNoCov">          0 :                                 ereport(ERROR,</span>
+<span class="lineNum">    1509 </span>            :                                         (errcode_for_file_access(),
+<span class="lineNum">    1510 </span>            :                                          errmsg(&quot;could not reread block %d of file \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">    1511 </span>            :                                                 blkno, readfilename)));
+<span class="lineNum">    1512 </span>            :                             }
+<span class="lineNum">    1513 </span>            : 
+<span class="lineNum">    1514 </span><span class="lineNoCov">          0 :                             if (fseek(fp, cnt - BLCKSZ * i - BLCKSZ, SEEK_CUR) == -1)</span>
+<span class="lineNum">    1515 </span>            :                             {
+<span class="lineNum">    1516 </span><span class="lineNoCov">          0 :                                 ereport(ERROR,</span>
+<span class="lineNum">    1517 </span>            :                                         (errcode_for_file_access(),
+<span class="lineNum">    1518 </span>            :                                          errmsg(&quot;could not fseek in file \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">    1519 </span>            :                                                 readfilename)));
+<span class="lineNum">    1520 </span>            :                             }
+<span class="lineNum">    1521 </span>            : 
+<span class="lineNum">    1522 </span>            :                             /* Set flag so we know a retry was attempted */
+<span class="lineNum">    1523 </span><span class="lineNoCov">          0 :                             block_retry = true;</span>
+<span class="lineNum">    1524 </span>            : 
+<span class="lineNum">    1525 </span>            :                             /* Reset loop to validate the block again */
+<span class="lineNum">    1526 </span><span class="lineNoCov">          0 :                             i--;</span>
+<span class="lineNum">    1527 </span><span class="lineNoCov">          0 :                             continue;</span>
+<span class="lineNum">    1528 </span>            :                         }
+<span class="lineNum">    1529 </span>            : 
+<span class="lineNum">    1530 </span><span class="lineNoCov">          0 :                         checksum_failures++;</span>
+<span class="lineNum">    1531 </span>            : 
+<span class="lineNum">    1532 </span><span class="lineNoCov">          0 :                         if (checksum_failures &lt;= 5)</span>
+<span class="lineNum">    1533 </span><span class="lineNoCov">          0 :                             ereport(WARNING,</span>
+<span class="lineNum">    1534 </span>            :                                     (errmsg(&quot;checksum verification failed in &quot;
+<span class="lineNum">    1535 </span>            :                                             &quot;file \&quot;%s\&quot;, block %d: calculated &quot;
+<span class="lineNum">    1536 </span>            :                                             &quot;%X but expected %X&quot;,
+<span class="lineNum">    1537 </span>            :                                             readfilename, blkno, checksum,
+<span class="lineNum">    1538 </span>            :                                             phdr-&gt;pd_checksum)));
+<span class="lineNum">    1539 </span><span class="lineNoCov">          0 :                         if (checksum_failures == 5)</span>
+<span class="lineNum">    1540 </span><span class="lineNoCov">          0 :                             ereport(WARNING,</span>
+<span class="lineNum">    1541 </span>            :                                     (errmsg(&quot;further checksum verification &quot;
+<span class="lineNum">    1542 </span>            :                                             &quot;failures in file \&quot;%s\&quot; will not &quot;
+<span class="lineNum">    1543 </span>            :                                             &quot;be reported&quot;, readfilename)));
+<span class="lineNum">    1544 </span>            :                     }
+<span class="lineNum">    1545 </span>            :                 }
+<span class="lineNum">    1546 </span><span class="lineNoCov">          0 :                 block_retry = false;</span>
+<span class="lineNum">    1547 </span><span class="lineNoCov">          0 :                 blkno++;</span>
+<span class="lineNum">    1548 </span>            :             }
+<span class="lineNum">    1549 </span>            :         }
+<span class="lineNum">    1550 </span>            : 
+<span class="lineNum">    1551 </span>            :         /* Send the chunk as a CopyData message */
+<span class="lineNum">    1552 </span><span class="lineNoCov">          0 :         if (pq_putmessage('d', buf, cnt))</span>
+<span class="lineNum">    1553 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">    1554 </span>            :                     (errmsg(&quot;base backup could not send data, aborting backup&quot;)));
+<span class="lineNum">    1555 </span>            : 
+<span class="lineNum">    1556 </span><span class="lineNoCov">          0 :         len += cnt;</span>
+<span class="lineNum">    1557 </span><span class="lineNoCov">          0 :         throttle(cnt);</span>
+<span class="lineNum">    1558 </span>            : 
+<span class="lineNum">    1559 </span><span class="lineNoCov">          0 :         if (feof(fp) || len &gt;= statbuf-&gt;st_size)</span>
+<span class="lineNum">    1560 </span>            :         {
+<span class="lineNum">    1561 </span>            :             /*
+<span class="lineNum">    1562 </span>            :              * Reached end of file. The file could be longer, if it was
+<span class="lineNum">    1563 </span>            :              * extended while we were sending it, but for a base backup we can
+<span class="lineNum">    1564 </span>            :              * ignore such extended data. It will be restored from WAL.
+<span class="lineNum">    1565 </span>            :              */
+<span class="lineNum">    1566 </span>            :             break;
+<span class="lineNum">    1567 </span>            :         }
+<span class="lineNum">    1568 </span>            :     }
+<span class="lineNum">    1569 </span>            : 
+<span class="lineNum">    1570 </span><span class="lineNoCov">          0 :     CHECK_FREAD_ERROR(fp, readfilename);</span>
+<span class="lineNum">    1571 </span>            : 
+<span class="lineNum">    1572 </span>            :     /* If the file was truncated while we were sending it, pad it with zeros */
+<span class="lineNum">    1573 </span><span class="lineNoCov">          0 :     if (len &lt; statbuf-&gt;st_size)</span>
+<span class="lineNum">    1574 </span>            :     {
+<span class="lineNum">    1575 </span><span class="lineNoCov">          0 :         MemSet(buf, 0, sizeof(buf));</span>
+<span class="lineNum">    1576 </span><span class="lineNoCov">          0 :         while (len &lt; statbuf-&gt;st_size)</span>
+<span class="lineNum">    1577 </span>            :         {
+<span class="lineNum">    1578 </span><span class="lineNoCov">          0 :             cnt = Min(sizeof(buf), statbuf-&gt;st_size - len);</span>
+<span class="lineNum">    1579 </span><span class="lineNoCov">          0 :             pq_putmessage('d', buf, cnt);</span>
+<span class="lineNum">    1580 </span><span class="lineNoCov">          0 :             len += cnt;</span>
+<span class="lineNum">    1581 </span><span class="lineNoCov">          0 :             throttle(cnt);</span>
+<span class="lineNum">    1582 </span>            :         }
+<span class="lineNum">    1583 </span>            :     }
+<span class="lineNum">    1584 </span>            : 
+<span class="lineNum">    1585 </span>            :     /*
+<span class="lineNum">    1586 </span>            :      * Pad to 512 byte boundary, per tar format requirements. (This small
+<span class="lineNum">    1587 </span>            :      * piece of data is probably not worth throttling.)
+<span class="lineNum">    1588 </span>            :      */
+<span class="lineNum">    1589 </span><span class="lineNoCov">          0 :     pad = ((len + 511) &amp; ~511) - len;</span>
+<span class="lineNum">    1590 </span><span class="lineNoCov">          0 :     if (pad &gt; 0)</span>
+<span class="lineNum">    1591 </span>            :     {
+<span class="lineNum">    1592 </span><span class="lineNoCov">          0 :         MemSet(buf, 0, pad);</span>
+<span class="lineNum">    1593 </span><span class="lineNoCov">          0 :         pq_putmessage('d', buf, pad);</span>
+<span class="lineNum">    1594 </span>            :     }
+<span class="lineNum">    1595 </span>            : 
+<span class="lineNum">    1596 </span><span class="lineNoCov">          0 :     FreeFile(fp);</span>
+<span class="lineNum">    1597 </span>            : 
+<span class="lineNum">    1598 </span><span class="lineNoCov">          0 :     if (checksum_failures &gt; 1)</span>
+<span class="lineNum">    1599 </span>            :     {
+<span class="lineNum">    1600 </span><span class="lineNoCov">          0 :         ereport(WARNING,</span>
+<span class="lineNum">    1601 </span>            :                 (errmsg_plural(&quot;file \&quot;%s\&quot; has a total of %d checksum verification failure&quot;,
+<span class="lineNum">    1602 </span>            :                                &quot;file \&quot;%s\&quot; has a total of %d checksum verification failures&quot;,
+<span class="lineNum">    1603 </span>            :                                checksum_failures,
+<span class="lineNum">    1604 </span>            :                                readfilename, checksum_failures)));
+<span class="lineNum">    1605 </span>            : 
+<span class="lineNum">    1606 </span><span class="lineNoCov">          0 :         pgstat_report_checksum_failures_in_db(dboid, checksum_failures);</span>
+<span class="lineNum">    1607 </span>            :     }
+<span class="lineNum">    1608 </span>            : 
+<span class="lineNum">    1609 </span><span class="lineNoCov">          0 :     total_checksum_failures += checksum_failures;</span>
+<span class="lineNum">    1610 </span>            : 
+<span class="lineNum">    1611 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">    1612 </span>            : }
+<span class="lineNum">    1613 </span>            : 
+<a name="1614"><span class="lineNum">    1614 </span>            : </a>
+<span class="lineNum">    1615 </span>            : static int64
+<span class="lineNum">    1616 </span><span class="lineNoCov">          0 : _tarWriteHeader(const char *filename, const char *linktarget,</span>
+<span class="lineNum">    1617 </span>            :                 struct stat *statbuf, bool sizeonly)
+<span class="lineNum">    1618 </span>            : {
+<span class="lineNum">    1619 </span>            :     char        h[512];
+<span class="lineNum">    1620 </span>            :     enum tarError rc;
+<span class="lineNum">    1621 </span>            : 
+<span class="lineNum">    1622 </span><span class="lineNoCov">          0 :     if (!sizeonly)</span>
+<span class="lineNum">    1623 </span>            :     {
+<span class="lineNum">    1624 </span><span class="lineNoCov">          0 :         rc = tarCreateHeader(h, filename, linktarget, statbuf-&gt;st_size,</span>
+<span class="lineNum">    1625 </span>            :                              statbuf-&gt;st_mode, statbuf-&gt;st_uid, statbuf-&gt;st_gid,
+<span class="lineNum">    1626 </span>            :                              statbuf-&gt;st_mtime);
+<span class="lineNum">    1627 </span>            : 
+<span class="lineNum">    1628 </span><span class="lineNoCov">          0 :         switch (rc)</span>
+<span class="lineNum">    1629 </span>            :         {
+<span class="lineNum">    1630 </span>            :             case TAR_OK:
+<span class="lineNum">    1631 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1632 </span>            :             case TAR_NAME_TOO_LONG:
+<span class="lineNum">    1633 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">    1634 </span>            :                         (errmsg(&quot;file name too long for tar format: \&quot;%s\&quot;&quot;,
+<span class="lineNum">    1635 </span>            :                                 filename)));
+<span class="lineNum">    1636 </span>            :                 break;
+<span class="lineNum">    1637 </span>            :             case TAR_SYMLINK_TOO_LONG:
+<span class="lineNum">    1638 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">    1639 </span>            :                         (errmsg(&quot;symbolic link target too long for tar format: &quot;
+<span class="lineNum">    1640 </span>            :                                 &quot;file name \&quot;%s\&quot;, target \&quot;%s\&quot;&quot;,
+<span class="lineNum">    1641 </span>            :                                 filename, linktarget)));
+<span class="lineNum">    1642 </span>            :                 break;
+<span class="lineNum">    1643 </span>            :             default:
+<span class="lineNum">    1644 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;unrecognized tar error: %d&quot;, rc);</span>
+<span class="lineNum">    1645 </span>            :         }
+<span class="lineNum">    1646 </span>            : 
+<span class="lineNum">    1647 </span><span class="lineNoCov">          0 :         pq_putmessage('d', h, sizeof(h));</span>
+<span class="lineNum">    1648 </span>            :     }
+<span class="lineNum">    1649 </span>            : 
+<span class="lineNum">    1650 </span><span class="lineNoCov">          0 :     return sizeof(h);</span>
+<span class="lineNum">    1651 </span>            : }
+<span class="lineNum">    1652 </span>            : 
+<span class="lineNum">    1653 </span>            : /*
+<span class="lineNum">    1654 </span>            :  * Write tar header for a directory.  If the entry in statbuf is a link then
+<span class="lineNum">    1655 </span>            :  * write it as a directory anyway.
+<a name="1656"><span class="lineNum">    1656 </span>            :  */</a>
+<span class="lineNum">    1657 </span>            : static int64
+<span class="lineNum">    1658 </span><span class="lineNoCov">          0 : _tarWriteDir(const char *pathbuf, int basepathlen, struct stat *statbuf,</span>
+<span class="lineNum">    1659 </span>            :              bool sizeonly)
+<span class="lineNum">    1660 </span>            : {
+<span class="lineNum">    1661 </span>            :     /* If symlink, write it as a directory anyway */
+<span class="lineNum">    1662 </span>            : #ifndef WIN32
+<span class="lineNum">    1663 </span><span class="lineNoCov">          0 :     if (S_ISLNK(statbuf-&gt;st_mode))</span>
+<span class="lineNum">    1664 </span>            : #else
+<span class="lineNum">    1665 </span>            :     if (pgwin32_is_junction(pathbuf))
+<span class="lineNum">    1666 </span>            : #endif
+<span class="lineNum">    1667 </span><span class="lineNoCov">          0 :         statbuf-&gt;st_mode = S_IFDIR | pg_dir_create_mode;</span>
+<span class="lineNum">    1668 </span>            : 
+<span class="lineNum">    1669 </span><span class="lineNoCov">          0 :     return _tarWriteHeader(pathbuf + basepathlen + 1, NULL, statbuf, sizeonly);</span>
+<span class="lineNum">    1670 </span>            : }
+<span class="lineNum">    1671 </span>            : 
+<span class="lineNum">    1672 </span>            : /*
+<span class="lineNum">    1673 </span>            :  * Increment the network transfer counter by the given number of bytes,
+<span class="lineNum">    1674 </span>            :  * and sleep if necessary to comply with the requested network transfer
+<span class="lineNum">    1675 </span>            :  * rate.
+<a name="1676"><span class="lineNum">    1676 </span>            :  */</a>
+<span class="lineNum">    1677 </span>            : static void
+<span class="lineNum">    1678 </span><span class="lineNoCov">          0 : throttle(size_t increment)</span>
+<span class="lineNum">    1679 </span>            : {
+<span class="lineNum">    1680 </span>            :     TimeOffset  elapsed_min;
+<span class="lineNum">    1681 </span>            : 
+<span class="lineNum">    1682 </span><span class="lineNoCov">          0 :     if (throttling_counter &lt; 0)</span>
+<span class="lineNum">    1683 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1684 </span>            : 
+<span class="lineNum">    1685 </span><span class="lineNoCov">          0 :     throttling_counter += increment;</span>
+<span class="lineNum">    1686 </span><span class="lineNoCov">          0 :     if (throttling_counter &lt; throttling_sample)</span>
+<span class="lineNum">    1687 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1688 </span>            : 
+<span class="lineNum">    1689 </span>            :     /* How much time should have elapsed at minimum? */
+<span class="lineNum">    1690 </span><span class="lineNoCov">          0 :     elapsed_min = elapsed_min_unit *</span>
+<span class="lineNum">    1691 </span><span class="lineNoCov">          0 :         (throttling_counter / throttling_sample);</span>
+<span class="lineNum">    1692 </span>            : 
+<span class="lineNum">    1693 </span>            :     /*
+<span class="lineNum">    1694 </span>            :      * Since the latch could be set repeatedly because of concurrently WAL
+<span class="lineNum">    1695 </span>            :      * activity, sleep in a loop to ensure enough time has passed.
+<span class="lineNum">    1696 </span>            :      */
+<span class="lineNum">    1697 </span>            :     for (;;)
+<span class="lineNum">    1698 </span>            :     {
+<span class="lineNum">    1699 </span>            :         TimeOffset  elapsed,
+<span class="lineNum">    1700 </span>            :                     sleep;
+<span class="lineNum">    1701 </span>            :         int         wait_result;
+<span class="lineNum">    1702 </span>            : 
+<span class="lineNum">    1703 </span>            :         /* Time elapsed since the last measurement (and possible wake up). */
+<span class="lineNum">    1704 </span><span class="lineNoCov">          0 :         elapsed = GetCurrentTimestamp() - throttled_last;</span>
+<span class="lineNum">    1705 </span>            : 
+<span class="lineNum">    1706 </span>            :         /* sleep if the transfer is faster than it should be */
+<span class="lineNum">    1707 </span><span class="lineNoCov">          0 :         sleep = elapsed_min - elapsed;</span>
+<span class="lineNum">    1708 </span><span class="lineNoCov">          0 :         if (sleep &lt;= 0)</span>
+<span class="lineNum">    1709 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">    1710 </span>            : 
+<span class="lineNum">    1711 </span><span class="lineNoCov">          0 :         ResetLatch(MyLatch);</span>
+<span class="lineNum">    1712 </span>            : 
+<span class="lineNum">    1713 </span>            :         /* We're eating a potentially set latch, so check for interrupts */
+<span class="lineNum">    1714 </span><span class="lineNoCov">          0 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1715 </span>            : 
+<span class="lineNum">    1716 </span>            :         /*
+<span class="lineNum">    1717 </span>            :          * (TAR_SEND_SIZE / throttling_sample * elapsed_min_unit) should be
+<span class="lineNum">    1718 </span>            :          * the maximum time to sleep. Thus the cast to long is safe.
+<span class="lineNum">    1719 </span>            :          */
+<span class="lineNum">    1720 </span><span class="lineNoCov">          0 :         wait_result = WaitLatch(MyLatch,</span>
+<span class="lineNum">    1721 </span>            :                                 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+<span class="lineNum">    1722 </span>            :                                 (long) (sleep / 1000),
+<span class="lineNum">    1723 </span>            :                                 WAIT_EVENT_BASE_BACKUP_THROTTLE);
+<span class="lineNum">    1724 </span>            : 
+<span class="lineNum">    1725 </span><span class="lineNoCov">          0 :         if (wait_result &amp; WL_LATCH_SET)</span>
+<span class="lineNum">    1726 </span><span class="lineNoCov">          0 :             CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1727 </span>            : 
+<span class="lineNum">    1728 </span>            :         /* Done waiting? */
+<span class="lineNum">    1729 </span><span class="lineNoCov">          0 :         if (wait_result &amp; WL_TIMEOUT)</span>
+<span class="lineNum">    1730 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">    1731 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1732 </span>            : 
+<span class="lineNum">    1733 </span>            :     /*
+<span class="lineNum">    1734 </span>            :      * As we work with integers, only whole multiple of throttling_sample was
+<span class="lineNum">    1735 </span>            :      * processed. The rest will be done during the next call of this function.
+<span class="lineNum">    1736 </span>            :      */
+<span class="lineNum">    1737 </span><span class="lineNoCov">          0 :     throttling_counter %= throttling_sample;</span>
+<span class="lineNum">    1738 </span>            : 
+<span class="lineNum">    1739 </span>            :     /*
+<span class="lineNum">    1740 </span>            :      * Time interval for the remaining amount and possible next increments
+<span class="lineNum">    1741 </span>            :      * starts now.
+<span class="lineNum">    1742 </span>            :      */
+<span class="lineNum">    1743 </span><span class="lineNoCov">          0 :     throttled_last = GetCurrentTimestamp();</span>
+<span class="lineNum">    1744 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,619 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/tsearch/ts_typanalyze.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/tsearch</a> - ts_typanalyze.c<span style="font-size: 80%;"> (source / <a href="ts_typanalyze.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">112</td>
+            <td class="headerCovTableEntry">132</td>
+            <td class="headerCovTableEntryMed">84.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntry">8</td>
+            <td class="headerCovTableEntryMed">87.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * ts_typanalyze.c
+<span class="lineNum">       4 </span>            :  *    functions for gathering statistics from tsvector columns
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  * IDENTIFICATION
+<span class="lineNum">      10 </span>            :  *    src/backend/tsearch/ts_typanalyze.c
+<span class="lineNum">      11 </span>            :  *
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : #include &quot;catalog/pg_collation.h&quot;
+<span class="lineNum">      17 </span>            : #include &quot;catalog/pg_operator.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;commands/vacuum.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;tsearch/ts_type.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;utils/hashutils.h&quot;
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : /* A hash key for lexemes */
+<span class="lineNum">      25 </span>            : typedef struct
+<span class="lineNum">      26 </span>            : {
+<span class="lineNum">      27 </span>            :     char       *lexeme;         /* lexeme (not NULL terminated!) */
+<span class="lineNum">      28 </span>            :     int         length;         /* its length in bytes */
+<span class="lineNum">      29 </span>            : } LexemeHashKey;
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : /* A hash table entry for the Lossy Counting algorithm */
+<span class="lineNum">      32 </span>            : typedef struct
+<span class="lineNum">      33 </span>            : {
+<span class="lineNum">      34 </span>            :     LexemeHashKey key;          /* This is 'e' from the LC algorithm. */
+<span class="lineNum">      35 </span>            :     int         frequency;      /* This is 'f'. */
+<span class="lineNum">      36 </span>            :     int         delta;          /* And this is 'delta'. */
+<span class="lineNum">      37 </span>            : } TrackItem;
+<span class="lineNum">      38 </span>            : 
+<span class="lineNum">      39 </span>            : static void compute_tsvector_stats(VacAttrStats *stats,
+<span class="lineNum">      40 </span>            :                                    AnalyzeAttrFetchFunc fetchfunc,
+<span class="lineNum">      41 </span>            :                                    int samplerows,
+<span class="lineNum">      42 </span>            :                                    double totalrows);
+<span class="lineNum">      43 </span>            : static void prune_lexemes_hashtable(HTAB *lexemes_tab, int b_current);
+<span class="lineNum">      44 </span>            : static uint32 lexeme_hash(const void *key, Size keysize);
+<span class="lineNum">      45 </span>            : static int  lexeme_match(const void *key1, const void *key2, Size keysize);
+<span class="lineNum">      46 </span>            : static int  lexeme_compare(const void *key1, const void *key2);
+<span class="lineNum">      47 </span>            : static int  trackitem_compare_frequencies_desc(const void *e1, const void *e2);
+<span class="lineNum">      48 </span>            : static int  trackitem_compare_lexemes(const void *e1, const void *e2);
+<span class="lineNum">      49 </span>            : 
+<span class="lineNum">      50 </span>            : 
+<span class="lineNum">      51 </span>            : /*
+<span class="lineNum">      52 </span>            :  *  ts_typanalyze -- a custom typanalyze function for tsvector columns
+<a name="53"><span class="lineNum">      53 </span>            :  */</a>
+<span class="lineNum">      54 </span>            : Datum
+<span class="lineNum">      55 </span><span class="lineCov">          2 : ts_typanalyze(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      56 </span>            : {
+<span class="lineNum">      57 </span><span class="lineCov">          2 :     VacAttrStats *stats = (VacAttrStats *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">      58 </span><span class="lineCov">          2 :     Form_pg_attribute attr = stats-&gt;attr;</span>
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            :     /* If the attstattarget column is negative, use the default value */
+<span class="lineNum">      61 </span>            :     /* NB: it is okay to scribble on stats-&gt;attr since it's a copy */
+<span class="lineNum">      62 </span><span class="lineCov">          2 :     if (attr-&gt;attstattarget &lt; 0)</span>
+<span class="lineNum">      63 </span><span class="lineCov">          2 :         attr-&gt;attstattarget = default_statistics_target;</span>
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span><span class="lineCov">          2 :     stats-&gt;compute_stats = compute_tsvector_stats;</span>
+<span class="lineNum">      66 </span>            :     /* see comment about the choice of minrows in commands/analyze.c */
+<span class="lineNum">      67 </span><span class="lineCov">          2 :     stats-&gt;minrows = 300 * attr-&gt;attstattarget;</span>
+<span class="lineNum">      68 </span>            : 
+<span class="lineNum">      69 </span><span class="lineCov">          2 :     PG_RETURN_BOOL(true);</span>
+<span class="lineNum">      70 </span>            : }
+<span class="lineNum">      71 </span>            : 
+<span class="lineNum">      72 </span>            : /*
+<span class="lineNum">      73 </span>            :  *  compute_tsvector_stats() -- compute statistics for a tsvector column
+<span class="lineNum">      74 </span>            :  *
+<span class="lineNum">      75 </span>            :  *  This functions computes statistics that are useful for determining @@
+<span class="lineNum">      76 </span>            :  *  operations' selectivity, along with the fraction of non-null rows and
+<span class="lineNum">      77 </span>            :  *  average width.
+<span class="lineNum">      78 </span>            :  *
+<span class="lineNum">      79 </span>            :  *  Instead of finding the most common values, as we do for most datatypes,
+<span class="lineNum">      80 </span>            :  *  we're looking for the most common lexemes. This is more useful, because
+<span class="lineNum">      81 </span>            :  *  there most probably won't be any two rows with the same tsvector and thus
+<span class="lineNum">      82 </span>            :  *  the notion of a MCV is a bit bogus with this datatype. With a list of the
+<span class="lineNum">      83 </span>            :  *  most common lexemes we can do a better job at figuring out @@ selectivity.
+<span class="lineNum">      84 </span>            :  *
+<span class="lineNum">      85 </span>            :  *  For the same reasons we assume that tsvector columns are unique when
+<span class="lineNum">      86 </span>            :  *  determining the number of distinct values.
+<span class="lineNum">      87 </span>            :  *
+<span class="lineNum">      88 </span>            :  *  The algorithm used is Lossy Counting, as proposed in the paper &quot;Approximate
+<span class="lineNum">      89 </span>            :  *  frequency counts over data streams&quot; by G. S. Manku and R. Motwani, in
+<span class="lineNum">      90 </span>            :  *  Proceedings of the 28th International Conference on Very Large Data Bases,
+<span class="lineNum">      91 </span>            :  *  Hong Kong, China, August 2002, section 4.2. The paper is available at
+<span class="lineNum">      92 </span>            :  *  http://www.vldb.org/conf/2002/S10P03.pdf
+<span class="lineNum">      93 </span>            :  *
+<span class="lineNum">      94 </span>            :  *  The Lossy Counting (aka LC) algorithm goes like this:
+<span class="lineNum">      95 </span>            :  *  Let s be the threshold frequency for an item (the minimum frequency we
+<span class="lineNum">      96 </span>            :  *  are interested in) and epsilon the error margin for the frequency. Let D
+<span class="lineNum">      97 </span>            :  *  be a set of triples (e, f, delta), where e is an element value, f is that
+<span class="lineNum">      98 </span>            :  *  element's frequency (actually, its current occurrence count) and delta is
+<span class="lineNum">      99 </span>            :  *  the maximum error in f. We start with D empty and process the elements in
+<span class="lineNum">     100 </span>            :  *  batches of size w. (The batch size is also known as &quot;bucket size&quot; and is
+<span class="lineNum">     101 </span>            :  *  equal to 1/epsilon.) Let the current batch number be b_current, starting
+<span class="lineNum">     102 </span>            :  *  with 1. For each element e we either increment its f count, if it's
+<span class="lineNum">     103 </span>            :  *  already in D, or insert a new triple into D with values (e, 1, b_current
+<span class="lineNum">     104 </span>            :  *  - 1). After processing each batch we prune D, by removing from it all
+<span class="lineNum">     105 </span>            :  *  elements with f + delta &lt;= b_current.  After the algorithm finishes we
+<span class="lineNum">     106 </span>            :  *  suppress all elements from D that do not satisfy f &gt;= (s - epsilon) * N,
+<span class="lineNum">     107 </span>            :  *  where N is the total number of elements in the input.  We emit the
+<span class="lineNum">     108 </span>            :  *  remaining elements with estimated frequency f/N.  The LC paper proves
+<span class="lineNum">     109 </span>            :  *  that this algorithm finds all elements with true frequency at least s,
+<span class="lineNum">     110 </span>            :  *  and that no frequency is overestimated or is underestimated by more than
+<span class="lineNum">     111 </span>            :  *  epsilon.  Furthermore, given reasonable assumptions about the input
+<span class="lineNum">     112 </span>            :  *  distribution, the required table size is no more than about 7 times w.
+<span class="lineNum">     113 </span>            :  *
+<span class="lineNum">     114 </span>            :  *  We set s to be the estimated frequency of the K'th word in a natural
+<span class="lineNum">     115 </span>            :  *  language's frequency table, where K is the target number of entries in
+<span class="lineNum">     116 </span>            :  *  the MCELEM array plus an arbitrary constant, meant to reflect the fact
+<span class="lineNum">     117 </span>            :  *  that the most common words in any language would usually be stopwords
+<span class="lineNum">     118 </span>            :  *  so we will not actually see them in the input.  We assume that the
+<span class="lineNum">     119 </span>            :  *  distribution of word frequencies (including the stopwords) follows Zipf's
+<span class="lineNum">     120 </span>            :  *  law with an exponent of 1.
+<span class="lineNum">     121 </span>            :  *
+<span class="lineNum">     122 </span>            :  *  Assuming Zipfian distribution, the frequency of the K'th word is equal
+<span class="lineNum">     123 </span>            :  *  to 1/(K * H(W)) where H(n) is 1/2 + 1/3 + ... + 1/n and W is the number of
+<span class="lineNum">     124 </span>            :  *  words in the language.  Putting W as one million, we get roughly 0.07/K.
+<span class="lineNum">     125 </span>            :  *  Assuming top 10 words are stopwords gives s = 0.07/(K + 10).  We set
+<span class="lineNum">     126 </span>            :  *  epsilon = s/10, which gives bucket width w = (K + 10)/0.007 and
+<span class="lineNum">     127 </span>            :  *  maximum expected hashtable size of about 1000 * (K + 10).
+<span class="lineNum">     128 </span>            :  *
+<span class="lineNum">     129 </span>            :  *  Note: in the above discussion, s, epsilon, and f/N are in terms of a
+<span class="lineNum">     130 </span>            :  *  lexeme's frequency as a fraction of all lexemes seen in the input.
+<span class="lineNum">     131 </span>            :  *  However, what we actually want to store in the finished pg_statistic
+<span class="lineNum">     132 </span>            :  *  entry is each lexeme's frequency as a fraction of all rows that it occurs
+<span class="lineNum">     133 </span>            :  *  in.  Assuming that the input tsvectors are correctly constructed, no
+<span class="lineNum">     134 </span>            :  *  lexeme occurs more than once per tsvector, so the final count f is a
+<span class="lineNum">     135 </span>            :  *  correct estimate of the number of input tsvectors it occurs in, and we
+<span class="lineNum">     136 </span>            :  *  need only change the divisor from N to nonnull_cnt to get the number we
+<span class="lineNum">     137 </span>            :  *  want.
+<a name="138"><span class="lineNum">     138 </span>            :  */</a>
+<span class="lineNum">     139 </span>            : static void
+<span class="lineNum">     140 </span><span class="lineCov">          2 : compute_tsvector_stats(VacAttrStats *stats,</span>
+<span class="lineNum">     141 </span>            :                        AnalyzeAttrFetchFunc fetchfunc,
+<span class="lineNum">     142 </span>            :                        int samplerows,
+<span class="lineNum">     143 </span>            :                        double totalrows)
+<span class="lineNum">     144 </span>            : {
+<span class="lineNum">     145 </span>            :     int         num_mcelem;
+<span class="lineNum">     146 </span><span class="lineCov">          2 :     int         null_cnt = 0;</span>
+<span class="lineNum">     147 </span><span class="lineCov">          2 :     double      total_width = 0;</span>
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :     /* This is D from the LC algorithm. */
+<span class="lineNum">     150 </span>            :     HTAB       *lexemes_tab;
+<span class="lineNum">     151 </span>            :     HASHCTL     hash_ctl;
+<span class="lineNum">     152 </span>            :     HASH_SEQ_STATUS scan_status;
+<span class="lineNum">     153 </span>            : 
+<span class="lineNum">     154 </span>            :     /* This is the current bucket number from the LC algorithm */
+<span class="lineNum">     155 </span>            :     int         b_current;
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span>            :     /* This is 'w' from the LC algorithm */
+<span class="lineNum">     158 </span>            :     int         bucket_width;
+<span class="lineNum">     159 </span>            :     int         vector_no,
+<span class="lineNum">     160 </span>            :                 lexeme_no;
+<span class="lineNum">     161 </span>            :     LexemeHashKey hash_key;
+<span class="lineNum">     162 </span>            :     TrackItem  *item;
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span>            :     /*
+<span class="lineNum">     165 </span>            :      * We want statistics_target * 10 lexemes in the MCELEM array.  This
+<span class="lineNum">     166 </span>            :      * multiplier is pretty arbitrary, but is meant to reflect the fact that
+<span class="lineNum">     167 </span>            :      * the number of individual lexeme values tracked in pg_statistic ought to
+<span class="lineNum">     168 </span>            :      * be more than the number of values for a simple scalar column.
+<span class="lineNum">     169 </span>            :      */
+<span class="lineNum">     170 </span><span class="lineCov">          2 :     num_mcelem = stats-&gt;attr-&gt;attstattarget * 10;</span>
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span>            :     /*
+<span class="lineNum">     173 </span>            :      * We set bucket width equal to (num_mcelem + 10) / 0.007 as per the
+<span class="lineNum">     174 </span>            :      * comment above.
+<span class="lineNum">     175 </span>            :      */
+<span class="lineNum">     176 </span><span class="lineCov">          2 :     bucket_width = (num_mcelem + 10) * 1000 / 7;</span>
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span>            :     /*
+<span class="lineNum">     179 </span>            :      * Create the hashtable. It will be in local memory, so we don't need to
+<span class="lineNum">     180 </span>            :      * worry about overflowing the initial size. Also we don't need to pay any
+<span class="lineNum">     181 </span>            :      * attention to locking and memory management.
+<span class="lineNum">     182 </span>            :      */
+<span class="lineNum">     183 </span><span class="lineCov">          2 :     MemSet(&amp;hash_ctl, 0, sizeof(hash_ctl));</span>
+<span class="lineNum">     184 </span><span class="lineCov">          2 :     hash_ctl.keysize = sizeof(LexemeHashKey);</span>
+<span class="lineNum">     185 </span><span class="lineCov">          2 :     hash_ctl.entrysize = sizeof(TrackItem);</span>
+<span class="lineNum">     186 </span><span class="lineCov">          2 :     hash_ctl.hash = lexeme_hash;</span>
+<span class="lineNum">     187 </span><span class="lineCov">          2 :     hash_ctl.match = lexeme_match;</span>
+<span class="lineNum">     188 </span><span class="lineCov">          2 :     hash_ctl.hcxt = CurrentMemoryContext;</span>
+<span class="lineNum">     189 </span><span class="lineCov">          2 :     lexemes_tab = hash_create(&quot;Analyzed lexemes table&quot;,</span>
+<span class="lineNum">     190 </span>            :                               num_mcelem,
+<span class="lineNum">     191 </span>            :                               &amp;hash_ctl,
+<span class="lineNum">     192 </span>            :                               HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span>            :     /* Initialize counters. */
+<span class="lineNum">     195 </span><span class="lineCov">          2 :     b_current = 1;</span>
+<span class="lineNum">     196 </span><span class="lineCov">          2 :     lexeme_no = 0;</span>
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span>            :     /* Loop over the tsvectors. */
+<span class="lineNum">     199 </span><span class="lineCov">       1018 :     for (vector_no = 0; vector_no &lt; samplerows; vector_no++)</span>
+<span class="lineNum">     200 </span>            :     {
+<span class="lineNum">     201 </span>            :         Datum       value;
+<span class="lineNum">     202 </span>            :         bool        isnull;
+<span class="lineNum">     203 </span>            :         TSVector    vector;
+<span class="lineNum">     204 </span>            :         WordEntry  *curentryptr;
+<span class="lineNum">     205 </span>            :         char       *lexemesptr;
+<span class="lineNum">     206 </span>            :         int         j;
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span><span class="lineCov">       1016 :         vacuum_delay_point();</span>
+<span class="lineNum">     209 </span>            : 
+<span class="lineNum">     210 </span><span class="lineCov">       1016 :         value = fetchfunc(stats, vector_no, &amp;isnull);</span>
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span>            :         /*
+<span class="lineNum">     213 </span>            :          * Check for null/nonnull.
+<span class="lineNum">     214 </span>            :          */
+<span class="lineNum">     215 </span><span class="lineCov">       1016 :         if (isnull)</span>
+<span class="lineNum">     216 </span>            :         {
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 :             null_cnt++;</span>
+<span class="lineNum">     218 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     219 </span>            :         }
+<span class="lineNum">     220 </span>            : 
+<span class="lineNum">     221 </span>            :         /*
+<span class="lineNum">     222 </span>            :          * Add up widths for average-width calculation.  Since it's a
+<span class="lineNum">     223 </span>            :          * tsvector, we know it's varlena.  As in the regular
+<span class="lineNum">     224 </span>            :          * compute_minimal_stats function, we use the toasted width for this
+<span class="lineNum">     225 </span>            :          * calculation.
+<span class="lineNum">     226 </span>            :          */
+<span class="lineNum">     227 </span><span class="lineCov">       1016 :         total_width += VARSIZE_ANY(DatumGetPointer(value));</span>
+<span class="lineNum">     228 </span>            : 
+<span class="lineNum">     229 </span>            :         /*
+<span class="lineNum">     230 </span>            :          * Now detoast the tsvector if needed.
+<span class="lineNum">     231 </span>            :          */
+<span class="lineNum">     232 </span><span class="lineCov">       1016 :         vector = DatumGetTSVector(value);</span>
+<span class="lineNum">     233 </span>            : 
+<span class="lineNum">     234 </span>            :         /*
+<span class="lineNum">     235 </span>            :          * We loop through the lexemes in the tsvector and add them to our
+<span class="lineNum">     236 </span>            :          * tracking hashtable.
+<span class="lineNum">     237 </span>            :          */
+<span class="lineNum">     238 </span><span class="lineCov">       1016 :         lexemesptr = STRPTR(vector);</span>
+<span class="lineNum">     239 </span><span class="lineCov">       1016 :         curentryptr = ARRPTR(vector);</span>
+<span class="lineNum">     240 </span><span class="lineCov">      58650 :         for (j = 0; j &lt; vector-&gt;size; j++)</span>
+<span class="lineNum">     241 </span>            :         {
+<span class="lineNum">     242 </span>            :             bool        found;
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            :             /*
+<span class="lineNum">     245 </span>            :              * Construct a hash key.  The key points into the (detoasted)
+<span class="lineNum">     246 </span>            :              * tsvector value at this point, but if a new entry is created, we
+<span class="lineNum">     247 </span>            :              * make a copy of it.  This way we can free the tsvector value
+<span class="lineNum">     248 </span>            :              * once we've processed all its lexemes.
+<span class="lineNum">     249 </span>            :              */
+<span class="lineNum">     250 </span><span class="lineCov">      57634 :             hash_key.lexeme = lexemesptr + curentryptr-&gt;pos;</span>
+<span class="lineNum">     251 </span><span class="lineCov">      57634 :             hash_key.length = curentryptr-&gt;len;</span>
+<span class="lineNum">     252 </span>            : 
+<span class="lineNum">     253 </span>            :             /* Lookup current lexeme in hashtable, adding it if new */
+<span class="lineNum">     254 </span><span class="lineCov">      57634 :             item = (TrackItem *) hash_search(lexemes_tab,</span>
+<span class="lineNum">     255 </span>            :                                              (const void *) &amp;hash_key,
+<span class="lineNum">     256 </span>            :                                              HASH_ENTER, &amp;found);
+<span class="lineNum">     257 </span>            : 
+<span class="lineNum">     258 </span><span class="lineCov">      57634 :             if (found)</span>
+<span class="lineNum">     259 </span>            :             {
+<span class="lineNum">     260 </span>            :                 /* The lexeme is already on the tracking list */
+<span class="lineNum">     261 </span><span class="lineCov">      55352 :                 item-&gt;frequency++;</span>
+<span class="lineNum">     262 </span>            :             }
+<span class="lineNum">     263 </span>            :             else
+<span class="lineNum">     264 </span>            :             {
+<span class="lineNum">     265 </span>            :                 /* Initialize new tracking list element */
+<span class="lineNum">     266 </span><span class="lineCov">       2282 :                 item-&gt;frequency = 1;</span>
+<span class="lineNum">     267 </span><span class="lineCov">       2282 :                 item-&gt;delta = b_current - 1;</span>
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span><span class="lineCov">       2282 :                 item-&gt;key.lexeme = palloc(hash_key.length);</span>
+<span class="lineNum">     270 </span><span class="lineCov">       2282 :                 memcpy(item-&gt;key.lexeme, hash_key.lexeme, hash_key.length);</span>
+<span class="lineNum">     271 </span>            :             }
+<span class="lineNum">     272 </span>            : 
+<span class="lineNum">     273 </span>            :             /* lexeme_no is the number of elements processed (ie N) */
+<span class="lineNum">     274 </span><span class="lineCov">      57634 :             lexeme_no++;</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span>            :             /* We prune the D structure after processing each bucket */
+<span class="lineNum">     277 </span><span class="lineCov">      57634 :             if (lexeme_no % bucket_width == 0)</span>
+<span class="lineNum">     278 </span>            :             {
+<span class="lineNum">     279 </span><span class="lineNoCov">          0 :                 prune_lexemes_hashtable(lexemes_tab, b_current);</span>
+<span class="lineNum">     280 </span><span class="lineNoCov">          0 :                 b_current++;</span>
+<span class="lineNum">     281 </span>            :             }
+<span class="lineNum">     282 </span>            : 
+<span class="lineNum">     283 </span>            :             /* Advance to the next WordEntry in the tsvector */
+<span class="lineNum">     284 </span><span class="lineCov">      57634 :             curentryptr++;</span>
+<span class="lineNum">     285 </span>            :         }
+<span class="lineNum">     286 </span>            : 
+<span class="lineNum">     287 </span>            :         /* If the vector was toasted, free the detoasted copy. */
+<span class="lineNum">     288 </span><span class="lineCov">       1016 :         if (TSVectorGetDatum(vector) != value)</span>
+<span class="lineNum">     289 </span><span class="lineCov">        130 :             pfree(vector);</span>
+<span class="lineNum">     290 </span>            :     }
+<span class="lineNum">     291 </span>            : 
+<span class="lineNum">     292 </span>            :     /* We can only compute real stats if we found some non-null values. */
+<span class="lineNum">     293 </span><span class="lineCov">          2 :     if (null_cnt &lt; samplerows)</span>
+<span class="lineNum">     294 </span>            :     {
+<span class="lineNum">     295 </span><span class="lineCov">          2 :         int         nonnull_cnt = samplerows - null_cnt;</span>
+<span class="lineNum">     296 </span>            :         int         i;
+<span class="lineNum">     297 </span>            :         TrackItem **sort_table;
+<span class="lineNum">     298 </span>            :         int         track_len;
+<span class="lineNum">     299 </span>            :         int         cutoff_freq;
+<span class="lineNum">     300 </span>            :         int         minfreq,
+<span class="lineNum">     301 </span>            :                     maxfreq;
+<span class="lineNum">     302 </span>            : 
+<span class="lineNum">     303 </span><span class="lineCov">          2 :         stats-&gt;stats_valid = true;</span>
+<span class="lineNum">     304 </span>            :         /* Do the simple null-frac and average width stats */
+<span class="lineNum">     305 </span><span class="lineCov">          2 :         stats-&gt;stanullfrac = (double) null_cnt / (double) samplerows;</span>
+<span class="lineNum">     306 </span><span class="lineCov">          2 :         stats-&gt;stawidth = total_width / (double) nonnull_cnt;</span>
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span>            :         /* Assume it's a unique column (see notes above) */
+<span class="lineNum">     309 </span><span class="lineCov">          2 :         stats-&gt;stadistinct = -1.0 * (1.0 - stats-&gt;stanullfrac);</span>
+<span class="lineNum">     310 </span>            : 
+<span class="lineNum">     311 </span>            :         /*
+<span class="lineNum">     312 </span>            :          * Construct an array of the interesting hashtable items, that is,
+<span class="lineNum">     313 </span>            :          * those meeting the cutoff frequency (s - epsilon)*N.  Also identify
+<span class="lineNum">     314 </span>            :          * the minimum and maximum frequencies among these items.
+<span class="lineNum">     315 </span>            :          *
+<span class="lineNum">     316 </span>            :          * Since epsilon = s/10 and bucket_width = 1/epsilon, the cutoff
+<span class="lineNum">     317 </span>            :          * frequency is 9*N / bucket_width.
+<span class="lineNum">     318 </span>            :          */
+<span class="lineNum">     319 </span><span class="lineCov">          2 :         cutoff_freq = 9 * lexeme_no / bucket_width;</span>
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span><span class="lineCov">          2 :         i = hash_get_num_entries(lexemes_tab);  /* surely enough space */</span>
+<span class="lineNum">     322 </span><span class="lineCov">          2 :         sort_table = (TrackItem **) palloc(sizeof(TrackItem *) * i);</span>
+<span class="lineNum">     323 </span>            : 
+<span class="lineNum">     324 </span><span class="lineCov">          2 :         hash_seq_init(&amp;scan_status, lexemes_tab);</span>
+<span class="lineNum">     325 </span><span class="lineCov">          2 :         track_len = 0;</span>
+<span class="lineNum">     326 </span><span class="lineCov">          2 :         minfreq = lexeme_no;</span>
+<span class="lineNum">     327 </span><span class="lineCov">          2 :         maxfreq = 0;</span>
+<span class="lineNum">     328 </span><span class="lineCov">       2286 :         while ((item = (TrackItem *) hash_seq_search(&amp;scan_status)) != NULL)</span>
+<span class="lineNum">     329 </span>            :         {
+<span class="lineNum">     330 </span><span class="lineCov">       2282 :             if (item-&gt;frequency &gt; cutoff_freq)</span>
+<span class="lineNum">     331 </span>            :             {
+<span class="lineNum">     332 </span><span class="lineCov">       2106 :                 sort_table[track_len++] = item;</span>
+<span class="lineNum">     333 </span><span class="lineCov">       2106 :                 minfreq = Min(minfreq, item-&gt;frequency);</span>
+<span class="lineNum">     334 </span><span class="lineCov">       2106 :                 maxfreq = Max(maxfreq, item-&gt;frequency);</span>
+<span class="lineNum">     335 </span>            :             }
+<span class="lineNum">     336 </span>            :         }
+<span class="lineNum">     337 </span><span class="lineCov">          2 :         Assert(track_len &lt;= i);</span>
+<span class="lineNum">     338 </span>            : 
+<span class="lineNum">     339 </span>            :         /* emit some statistics for debug purposes */
+<span class="lineNum">     340 </span><span class="lineCov">          2 :         elog(DEBUG3, &quot;tsvector_stats: target # mces = %d, bucket width = %d, &quot;</span>
+<span class="lineNum">     341 </span>            :              &quot;# lexemes = %d, hashtable size = %d, usable entries = %d&quot;,
+<span class="lineNum">     342 </span>            :              num_mcelem, bucket_width, lexeme_no, i, track_len);
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span>            :         /*
+<span class="lineNum">     345 </span>            :          * If we obtained more lexemes than we really want, get rid of those
+<span class="lineNum">     346 </span>            :          * with least frequencies.  The easiest way is to qsort the array into
+<span class="lineNum">     347 </span>            :          * descending frequency order and truncate the array.
+<span class="lineNum">     348 </span>            :          */
+<span class="lineNum">     349 </span><span class="lineCov">          2 :         if (num_mcelem &lt; track_len)</span>
+<span class="lineNum">     350 </span>            :         {
+<span class="lineNum">     351 </span><span class="lineCov">          2 :             qsort(sort_table, track_len, sizeof(TrackItem *),</span>
+<span class="lineNum">     352 </span>            :                   trackitem_compare_frequencies_desc);
+<span class="lineNum">     353 </span>            :             /* reset minfreq to the smallest frequency we're keeping */
+<span class="lineNum">     354 </span><span class="lineCov">          2 :             minfreq = sort_table[num_mcelem - 1]-&gt;frequency;</span>
+<span class="lineNum">     355 </span>            :         }
+<span class="lineNum">     356 </span>            :         else
+<span class="lineNum">     357 </span><span class="lineNoCov">          0 :             num_mcelem = track_len;</span>
+<span class="lineNum">     358 </span>            : 
+<span class="lineNum">     359 </span>            :         /* Generate MCELEM slot entry */
+<span class="lineNum">     360 </span><span class="lineCov">          2 :         if (num_mcelem &gt; 0)</span>
+<span class="lineNum">     361 </span>            :         {
+<span class="lineNum">     362 </span>            :             MemoryContext old_context;
+<span class="lineNum">     363 </span>            :             Datum      *mcelem_values;
+<span class="lineNum">     364 </span>            :             float4     *mcelem_freqs;
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span>            :             /*
+<span class="lineNum">     367 </span>            :              * We want to store statistics sorted on the lexeme value using
+<span class="lineNum">     368 </span>            :              * first length, then byte-for-byte comparison. The reason for
+<span class="lineNum">     369 </span>            :              * doing length comparison first is that we don't care about the
+<span class="lineNum">     370 </span>            :              * ordering so long as it's consistent, and comparing lengths
+<span class="lineNum">     371 </span>            :              * first gives us a chance to avoid a strncmp() call.
+<span class="lineNum">     372 </span>            :              *
+<span class="lineNum">     373 </span>            :              * This is different from what we do with scalar statistics --
+<span class="lineNum">     374 </span>            :              * they get sorted on frequencies. The rationale is that we
+<span class="lineNum">     375 </span>            :              * usually search through most common elements looking for a
+<span class="lineNum">     376 </span>            :              * specific value, so we can grab its frequency.  When values are
+<span class="lineNum">     377 </span>            :              * presorted we can employ binary search for that.  See
+<span class="lineNum">     378 </span>            :              * ts_selfuncs.c for a real usage scenario.
+<span class="lineNum">     379 </span>            :              */
+<span class="lineNum">     380 </span><span class="lineCov">          2 :             qsort(sort_table, num_mcelem, sizeof(TrackItem *),</span>
+<span class="lineNum">     381 </span>            :                   trackitem_compare_lexemes);
+<span class="lineNum">     382 </span>            : 
+<span class="lineNum">     383 </span>            :             /* Must copy the target values into anl_context */
+<span class="lineNum">     384 </span><span class="lineCov">          2 :             old_context = MemoryContextSwitchTo(stats-&gt;anl_context);</span>
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span>            :             /*
+<span class="lineNum">     387 </span>            :              * We sorted statistics on the lexeme value, but we want to be
+<span class="lineNum">     388 </span>            :              * able to find out the minimal and maximal frequency without
+<span class="lineNum">     389 </span>            :              * going through all the values.  We keep those two extra
+<span class="lineNum">     390 </span>            :              * frequencies in two extra cells in mcelem_freqs.
+<span class="lineNum">     391 </span>            :              *
+<span class="lineNum">     392 </span>            :              * (Note: the MCELEM statistics slot definition allows for a third
+<span class="lineNum">     393 </span>            :              * extra number containing the frequency of nulls, but we don't
+<span class="lineNum">     394 </span>            :              * create that for a tsvector column, since null elements aren't
+<span class="lineNum">     395 </span>            :              * possible.)
+<span class="lineNum">     396 </span>            :              */
+<span class="lineNum">     397 </span><span class="lineCov">          2 :             mcelem_values = (Datum *) palloc(num_mcelem * sizeof(Datum));</span>
+<span class="lineNum">     398 </span><span class="lineCov">          2 :             mcelem_freqs = (float4 *) palloc((num_mcelem + 2) * sizeof(float4));</span>
+<span class="lineNum">     399 </span>            : 
+<span class="lineNum">     400 </span>            :             /*
+<span class="lineNum">     401 </span>            :              * See comments above about use of nonnull_cnt as the divisor for
+<span class="lineNum">     402 </span>            :              * the final frequency estimates.
+<span class="lineNum">     403 </span>            :              */
+<span class="lineNum">     404 </span><span class="lineCov">       2002 :             for (i = 0; i &lt; num_mcelem; i++)</span>
+<span class="lineNum">     405 </span>            :             {
+<span class="lineNum">     406 </span><span class="lineCov">       2000 :                 TrackItem  *item = sort_table[i];</span>
+<span class="lineNum">     407 </span>            : 
+<span class="lineNum">     408 </span><span class="lineCov">       4000 :                 mcelem_values[i] =</span>
+<span class="lineNum">     409 </span><span class="lineCov">       2000 :                     PointerGetDatum(cstring_to_text_with_len(item-&gt;key.lexeme,</span>
+<span class="lineNum">     410 </span>            :                                                              item-&gt;key.length));
+<span class="lineNum">     411 </span><span class="lineCov">       2000 :                 mcelem_freqs[i] = (double) item-&gt;frequency / (double) nonnull_cnt;</span>
+<span class="lineNum">     412 </span>            :             }
+<span class="lineNum">     413 </span><span class="lineCov">          2 :             mcelem_freqs[i++] = (double) minfreq / (double) nonnull_cnt;</span>
+<span class="lineNum">     414 </span><span class="lineCov">          2 :             mcelem_freqs[i] = (double) maxfreq / (double) nonnull_cnt;</span>
+<span class="lineNum">     415 </span><span class="lineCov">          2 :             MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">     416 </span>            : 
+<span class="lineNum">     417 </span><span class="lineCov">          2 :             stats-&gt;stakind[0] = STATISTIC_KIND_MCELEM;</span>
+<span class="lineNum">     418 </span><span class="lineCov">          2 :             stats-&gt;staop[0] = TextEqualOperator;</span>
+<span class="lineNum">     419 </span><span class="lineCov">          2 :             stats-&gt;stacoll[0] = DEFAULT_COLLATION_OID;</span>
+<span class="lineNum">     420 </span><span class="lineCov">          2 :             stats-&gt;stanumbers[0] = mcelem_freqs;</span>
+<span class="lineNum">     421 </span>            :             /* See above comment about two extra frequency fields */
+<span class="lineNum">     422 </span><span class="lineCov">          2 :             stats-&gt;numnumbers[0] = num_mcelem + 2;</span>
+<span class="lineNum">     423 </span><span class="lineCov">          2 :             stats-&gt;stavalues[0] = mcelem_values;</span>
+<span class="lineNum">     424 </span><span class="lineCov">          2 :             stats-&gt;numvalues[0] = num_mcelem;</span>
+<span class="lineNum">     425 </span>            :             /* We are storing text values */
+<span class="lineNum">     426 </span><span class="lineCov">          2 :             stats-&gt;statypid[0] = TEXTOID;</span>
+<span class="lineNum">     427 </span><span class="lineCov">          2 :             stats-&gt;statyplen[0] = -1;    /* typlen, -1 for varlena */</span>
+<span class="lineNum">     428 </span><span class="lineCov">          2 :             stats-&gt;statypbyval[0] = false;</span>
+<span class="lineNum">     429 </span><span class="lineCov">          2 :             stats-&gt;statypalign[0] = 'i';</span>
+<span class="lineNum">     430 </span>            :         }
+<span class="lineNum">     431 </span>            :     }
+<span class="lineNum">     432 </span>            :     else
+<span class="lineNum">     433 </span>            :     {
+<span class="lineNum">     434 </span>            :         /* We found only nulls; assume the column is entirely null */
+<span class="lineNum">     435 </span><span class="lineNoCov">          0 :         stats-&gt;stats_valid = true;</span>
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :         stats-&gt;stanullfrac = 1.0;</span>
+<span class="lineNum">     437 </span><span class="lineNoCov">          0 :         stats-&gt;stawidth = 0; /* &quot;unknown&quot; */</span>
+<span class="lineNum">     438 </span><span class="lineNoCov">          0 :         stats-&gt;stadistinct = 0.0;    /* &quot;unknown&quot; */</span>
+<span class="lineNum">     439 </span>            :     }
+<span class="lineNum">     440 </span>            : 
+<span class="lineNum">     441 </span>            :     /*
+<span class="lineNum">     442 </span>            :      * We don't need to bother cleaning up any of our temporary palloc's. The
+<span class="lineNum">     443 </span>            :      * hashtable should also go away, as it used a child memory context.
+<span class="lineNum">     444 </span>            :      */
+<span class="lineNum">     445 </span><span class="lineCov">          2 : }</span>
+<span class="lineNum">     446 </span>            : 
+<span class="lineNum">     447 </span>            : /*
+<span class="lineNum">     448 </span>            :  *  A function to prune the D structure from the Lossy Counting algorithm.
+<span class="lineNum">     449 </span>            :  *  Consult compute_tsvector_stats() for wider explanation.
+<a name="450"><span class="lineNum">     450 </span>            :  */</a>
+<span class="lineNum">     451 </span>            : static void
+<span class="lineNum">     452 </span><span class="lineNoCov">          0 : prune_lexemes_hashtable(HTAB *lexemes_tab, int b_current)</span>
+<span class="lineNum">     453 </span>            : {
+<span class="lineNum">     454 </span>            :     HASH_SEQ_STATUS scan_status;
+<span class="lineNum">     455 </span>            :     TrackItem  *item;
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span><span class="lineNoCov">          0 :     hash_seq_init(&amp;scan_status, lexemes_tab);</span>
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 :     while ((item = (TrackItem *) hash_seq_search(&amp;scan_status)) != NULL)</span>
+<span class="lineNum">     459 </span>            :     {
+<span class="lineNum">     460 </span><span class="lineNoCov">          0 :         if (item-&gt;frequency + item-&gt;delta &lt;= b_current)</span>
+<span class="lineNum">     461 </span>            :         {
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :             char       *lexeme = item-&gt;key.lexeme;</span>
+<span class="lineNum">     463 </span>            : 
+<span class="lineNum">     464 </span><span class="lineNoCov">          0 :             if (hash_search(lexemes_tab, (const void *) &amp;item-&gt;key,</span>
+<span class="lineNum">     465 </span>            :                             HASH_REMOVE, NULL) == NULL)
+<span class="lineNum">     466 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;hash table corrupted&quot;);</span>
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 :             pfree(lexeme);</span>
+<span class="lineNum">     468 </span>            :         }
+<span class="lineNum">     469 </span>            :     }
+<span class="lineNum">     470 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     471 </span>            : 
+<span class="lineNum">     472 </span>            : /*
+<span class="lineNum">     473 </span>            :  * Hash functions for lexemes. They are strings, but not NULL terminated,
+<span class="lineNum">     474 </span>            :  * so we need a special hash function.
+<a name="475"><span class="lineNum">     475 </span>            :  */</a>
+<span class="lineNum">     476 </span>            : static uint32
+<span class="lineNum">     477 </span><span class="lineCov">      57634 : lexeme_hash(const void *key, Size keysize)</span>
+<span class="lineNum">     478 </span>            : {
+<span class="lineNum">     479 </span><span class="lineCov">      57634 :     const LexemeHashKey *l = (const LexemeHashKey *) key;</span>
+<span class="lineNum">     480 </span>            : 
+<span class="lineNum">     481 </span><span class="lineCov">      57634 :     return DatumGetUInt32(hash_any((const unsigned char *) l-&gt;lexeme,</span>
+<span class="lineNum">     482 </span>            :                                    l-&gt;length));
+<span class="lineNum">     483 </span>            : }
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span>            : /*
+<span class="lineNum">     486 </span>            :  *  Matching function for lexemes, to be used in hashtable lookups.
+<a name="487"><span class="lineNum">     487 </span>            :  */</a>
+<span class="lineNum">     488 </span>            : static int
+<span class="lineNum">     489 </span><span class="lineCov">      55352 : lexeme_match(const void *key1, const void *key2, Size keysize)</span>
+<span class="lineNum">     490 </span>            : {
+<span class="lineNum">     491 </span>            :     /* The keysize parameter is superfluous, the keys store their lengths */
+<span class="lineNum">     492 </span><span class="lineCov">      55352 :     return lexeme_compare(key1, key2);</span>
+<span class="lineNum">     493 </span>            : }
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span>            : /*
+<span class="lineNum">     496 </span>            :  *  Comparison function for lexemes.
+<a name="497"><span class="lineNum">     497 </span>            :  */</a>
+<span class="lineNum">     498 </span>            : static int
+<span class="lineNum">     499 </span><span class="lineCov">      75822 : lexeme_compare(const void *key1, const void *key2)</span>
+<span class="lineNum">     500 </span>            : {
+<span class="lineNum">     501 </span><span class="lineCov">      75822 :     const LexemeHashKey *d1 = (const LexemeHashKey *) key1;</span>
+<span class="lineNum">     502 </span><span class="lineCov">      75822 :     const LexemeHashKey *d2 = (const LexemeHashKey *) key2;</span>
+<span class="lineNum">     503 </span>            : 
+<span class="lineNum">     504 </span>            :     /* First, compare by length */
+<span class="lineNum">     505 </span><span class="lineCov">      75822 :     if (d1-&gt;length &gt; d2-&gt;length)</span>
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :         return 1;</span>
+<span class="lineNum">     507 </span><span class="lineCov">      75822 :     else if (d1-&gt;length &lt; d2-&gt;length)</span>
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     509 </span>            :     /* Lengths are equal, do a byte-by-byte comparison */
+<span class="lineNum">     510 </span><span class="lineCov">      75822 :     return strncmp(d1-&gt;lexeme, d2-&gt;lexeme, d1-&gt;length);</span>
+<span class="lineNum">     511 </span>            : }
+<span class="lineNum">     512 </span>            : 
+<span class="lineNum">     513 </span>            : /*
+<span class="lineNum">     514 </span>            :  *  qsort() comparator for sorting TrackItems on frequencies (descending sort)
+<a name="515"><span class="lineNum">     515 </span>            :  */</a>
+<span class="lineNum">     516 </span>            : static int
+<span class="lineNum">     517 </span><span class="lineCov">      12180 : trackitem_compare_frequencies_desc(const void *e1, const void *e2)</span>
+<span class="lineNum">     518 </span>            : {
+<span class="lineNum">     519 </span><span class="lineCov">      12180 :     const TrackItem *const *t1 = (const TrackItem *const *) e1;</span>
+<span class="lineNum">     520 </span><span class="lineCov">      12180 :     const TrackItem *const *t2 = (const TrackItem *const *) e2;</span>
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span><span class="lineCov">      12180 :     return (*t2)-&gt;frequency - (*t1)-&gt;frequency;</span>
+<span class="lineNum">     523 </span>            : }
+<span class="lineNum">     524 </span>            : 
+<span class="lineNum">     525 </span>            : /*
+<span class="lineNum">     526 </span>            :  *  qsort() comparator for sorting TrackItems on lexemes
+<a name="527"><span class="lineNum">     527 </span>            :  */</a>
+<span class="lineNum">     528 </span>            : static int
+<span class="lineNum">     529 </span><span class="lineCov">      20470 : trackitem_compare_lexemes(const void *e1, const void *e2)</span>
+<span class="lineNum">     530 </span>            : {
+<span class="lineNum">     531 </span><span class="lineCov">      20470 :     const TrackItem *const *t1 = (const TrackItem *const *) e1;</span>
+<span class="lineNum">     532 </span><span class="lineCov">      20470 :     const TrackItem *const *t2 = (const TrackItem *const *) e2;</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span><span class="lineCov">      20470 :     return lexeme_compare(&amp;(*t1)-&gt;key, &amp;(*t2)-&gt;key);</span>
+<span class="lineNum">     535 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

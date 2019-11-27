@@ -1,0 +1,1610 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/nodeHashjoin.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - nodeHashjoin.c<span style="font-size: 80%;"> (source / <a href="nodeHashjoin.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">411</td>
+            <td class="headerCovTableEntry">445</td>
+            <td class="headerCovTableEntryHi">92.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">18</td>
+            <td class="headerCovTableEntry">18</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * nodeHashjoin.c
+<span class="lineNum">       4 </span>            :  *    Routines to handle hash join nodes
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/executor/nodeHashjoin.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  * PARALLELISM
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  * Hash joins can participate in parallel query execution in several ways.  A
+<span class="lineNum">      16 </span>            :  * parallel-oblivious hash join is one where the node is unaware that it is
+<span class="lineNum">      17 </span>            :  * part of a parallel plan.  In this case, a copy of the inner plan is used to
+<span class="lineNum">      18 </span>            :  * build a copy of the hash table in every backend, and the outer plan could
+<span class="lineNum">      19 </span>            :  * either be built from a partial or complete path, so that the results of the
+<span class="lineNum">      20 </span>            :  * hash join are correspondingly either partial or complete.  A parallel-aware
+<span class="lineNum">      21 </span>            :  * hash join is one that behaves differently, coordinating work between
+<span class="lineNum">      22 </span>            :  * backends, and appears as Parallel Hash Join in EXPLAIN output.  A Parallel
+<span class="lineNum">      23 </span>            :  * Hash Join always appears with a Parallel Hash node.
+<span class="lineNum">      24 </span>            :  *
+<span class="lineNum">      25 </span>            :  * Parallel-aware hash joins use the same per-backend state machine to track
+<span class="lineNum">      26 </span>            :  * progress through the hash join algorithm as parallel-oblivious hash joins.
+<span class="lineNum">      27 </span>            :  * In a parallel-aware hash join, there is also a shared state machine that
+<span class="lineNum">      28 </span>            :  * co-operating backends use to synchronize their local state machines and
+<span class="lineNum">      29 </span>            :  * program counters.  The shared state machine is managed with a Barrier IPC
+<span class="lineNum">      30 </span>            :  * primitive.  When all attached participants arrive at a barrier, the phase
+<span class="lineNum">      31 </span>            :  * advances and all waiting participants are released.
+<span class="lineNum">      32 </span>            :  *
+<span class="lineNum">      33 </span>            :  * When a participant begins working on a parallel hash join, it must first
+<span class="lineNum">      34 </span>            :  * figure out how much progress has already been made, because participants
+<span class="lineNum">      35 </span>            :  * don't wait for each other to begin.  For this reason there are switch
+<span class="lineNum">      36 </span>            :  * statements at key points in the code where we have to synchronize our local
+<span class="lineNum">      37 </span>            :  * state machine with the phase, and then jump to the correct part of the
+<span class="lineNum">      38 </span>            :  * algorithm so that we can get started.
+<span class="lineNum">      39 </span>            :  *
+<span class="lineNum">      40 </span>            :  * One barrier called build_barrier is used to coordinate the hashing phases.
+<span class="lineNum">      41 </span>            :  * The phase is represented by an integer which begins at zero and increments
+<span class="lineNum">      42 </span>            :  * one by one, but in the code it is referred to by symbolic names as follows:
+<span class="lineNum">      43 </span>            :  *
+<span class="lineNum">      44 </span>            :  *   PHJ_BUILD_ELECTING              -- initial state
+<span class="lineNum">      45 </span>            :  *   PHJ_BUILD_ALLOCATING            -- one sets up the batches and table 0
+<span class="lineNum">      46 </span>            :  *   PHJ_BUILD_HASHING_INNER         -- all hash the inner rel
+<span class="lineNum">      47 </span>            :  *   PHJ_BUILD_HASHING_OUTER         -- (multi-batch only) all hash the outer
+<span class="lineNum">      48 </span>            :  *   PHJ_BUILD_DONE                  -- building done, probing can begin
+<span class="lineNum">      49 </span>            :  *
+<span class="lineNum">      50 </span>            :  * While in the phase PHJ_BUILD_HASHING_INNER a separate pair of barriers may
+<span class="lineNum">      51 </span>            :  * be used repeatedly as required to coordinate expansions in the number of
+<span class="lineNum">      52 </span>            :  * batches or buckets.  Their phases are as follows:
+<span class="lineNum">      53 </span>            :  *
+<span class="lineNum">      54 </span>            :  *   PHJ_GROW_BATCHES_ELECTING       -- initial state
+<span class="lineNum">      55 </span>            :  *   PHJ_GROW_BATCHES_ALLOCATING     -- one allocates new batches
+<span class="lineNum">      56 </span>            :  *   PHJ_GROW_BATCHES_REPARTITIONING -- all repartition
+<span class="lineNum">      57 </span>            :  *   PHJ_GROW_BATCHES_FINISHING      -- one cleans up, detects skew
+<span class="lineNum">      58 </span>            :  *
+<span class="lineNum">      59 </span>            :  *   PHJ_GROW_BUCKETS_ELECTING       -- initial state
+<span class="lineNum">      60 </span>            :  *   PHJ_GROW_BUCKETS_ALLOCATING     -- one allocates new buckets
+<span class="lineNum">      61 </span>            :  *   PHJ_GROW_BUCKETS_REINSERTING    -- all insert tuples
+<span class="lineNum">      62 </span>            :  *
+<span class="lineNum">      63 </span>            :  * If the planner got the number of batches and buckets right, those won't be
+<span class="lineNum">      64 </span>            :  * necessary, but on the other hand we might finish up needing to expand the
+<span class="lineNum">      65 </span>            :  * buckets or batches multiple times while hashing the inner relation to stay
+<span class="lineNum">      66 </span>            :  * within our memory budget and load factor target.  For that reason it's a
+<span class="lineNum">      67 </span>            :  * separate pair of barriers using circular phases.
+<span class="lineNum">      68 </span>            :  *
+<span class="lineNum">      69 </span>            :  * The PHJ_BUILD_HASHING_OUTER phase is required only for multi-batch joins,
+<span class="lineNum">      70 </span>            :  * because we need to divide the outer relation into batches up front in order
+<span class="lineNum">      71 </span>            :  * to be able to process batches entirely independently.  In contrast, the
+<span class="lineNum">      72 </span>            :  * parallel-oblivious algorithm simply throws tuples 'forward' to 'later'
+<span class="lineNum">      73 </span>            :  * batches whenever it encounters them while scanning and probing, which it
+<span class="lineNum">      74 </span>            :  * can do because it processes batches in serial order.
+<span class="lineNum">      75 </span>            :  *
+<span class="lineNum">      76 </span>            :  * Once PHJ_BUILD_DONE is reached, backends then split up and process
+<span class="lineNum">      77 </span>            :  * different batches, or gang up and work together on probing batches if there
+<span class="lineNum">      78 </span>            :  * aren't enough to go around.  For each batch there is a separate barrier
+<span class="lineNum">      79 </span>            :  * with the following phases:
+<span class="lineNum">      80 </span>            :  *
+<span class="lineNum">      81 </span>            :  *  PHJ_BATCH_ELECTING       -- initial state
+<span class="lineNum">      82 </span>            :  *  PHJ_BATCH_ALLOCATING     -- one allocates buckets
+<span class="lineNum">      83 </span>            :  *  PHJ_BATCH_LOADING        -- all load the hash table from disk
+<span class="lineNum">      84 </span>            :  *  PHJ_BATCH_PROBING        -- all probe
+<span class="lineNum">      85 </span>            :  *  PHJ_BATCH_DONE           -- end
+<span class="lineNum">      86 </span>            :  *
+<span class="lineNum">      87 </span>            :  * Batch 0 is a special case, because it starts out in phase
+<span class="lineNum">      88 </span>            :  * PHJ_BATCH_PROBING; populating batch 0's hash table is done during
+<span class="lineNum">      89 </span>            :  * PHJ_BUILD_HASHING_INNER so we can skip loading.
+<span class="lineNum">      90 </span>            :  *
+<span class="lineNum">      91 </span>            :  * Initially we try to plan for a single-batch hash join using the combined
+<span class="lineNum">      92 </span>            :  * work_mem of all participants to create a large shared hash table.  If that
+<span class="lineNum">      93 </span>            :  * turns out either at planning or execution time to be impossible then we
+<span class="lineNum">      94 </span>            :  * fall back to regular work_mem sized hash tables.
+<span class="lineNum">      95 </span>            :  *
+<span class="lineNum">      96 </span>            :  * To avoid deadlocks, we never wait for any barrier unless it is known that
+<span class="lineNum">      97 </span>            :  * all other backends attached to it are actively executing the node or have
+<span class="lineNum">      98 </span>            :  * already arrived.  Practically, that means that we never return a tuple
+<span class="lineNum">      99 </span>            :  * while attached to a barrier, unless the barrier has reached its final
+<span class="lineNum">     100 </span>            :  * state.  In the slightly special case of the per-batch barrier, we return
+<span class="lineNum">     101 </span>            :  * tuples while in PHJ_BATCH_PROBING phase, but that's OK because we use
+<span class="lineNum">     102 </span>            :  * BarrierArriveAndDetach() to advance it to PHJ_BATCH_DONE without waiting.
+<span class="lineNum">     103 </span>            :  *
+<span class="lineNum">     104 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">     105 </span>            :  */
+<span class="lineNum">     106 </span>            : 
+<span class="lineNum">     107 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">     110 </span>            : #include &quot;access/parallel.h&quot;
+<span class="lineNum">     111 </span>            : #include &quot;executor/executor.h&quot;
+<span class="lineNum">     112 </span>            : #include &quot;executor/hashjoin.h&quot;
+<span class="lineNum">     113 </span>            : #include &quot;executor/nodeHash.h&quot;
+<span class="lineNum">     114 </span>            : #include &quot;executor/nodeHashjoin.h&quot;
+<span class="lineNum">     115 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">     116 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">     117 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">     118 </span>            : #include &quot;utils/sharedtuplestore.h&quot;
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span>            : /*
+<span class="lineNum">     122 </span>            :  * States of the ExecHashJoin state machine
+<span class="lineNum">     123 </span>            :  */
+<span class="lineNum">     124 </span>            : #define HJ_BUILD_HASHTABLE      1
+<span class="lineNum">     125 </span>            : #define HJ_NEED_NEW_OUTER       2
+<span class="lineNum">     126 </span>            : #define HJ_SCAN_BUCKET          3
+<span class="lineNum">     127 </span>            : #define HJ_FILL_OUTER_TUPLE     4
+<span class="lineNum">     128 </span>            : #define HJ_FILL_INNER_TUPLES    5
+<span class="lineNum">     129 </span>            : #define HJ_NEED_NEW_BATCH       6
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span>            : /* Returns true if doing null-fill on outer relation */
+<span class="lineNum">     132 </span>            : #define HJ_FILL_OUTER(hjstate)  ((hjstate)-&gt;hj_NullInnerTupleSlot != NULL)
+<span class="lineNum">     133 </span>            : /* Returns true if doing null-fill on inner relation */
+<span class="lineNum">     134 </span>            : #define HJ_FILL_INNER(hjstate)  ((hjstate)-&gt;hj_NullOuterTupleSlot != NULL)
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span>            : static TupleTableSlot *ExecHashJoinOuterGetTuple(PlanState *outerNode,
+<span class="lineNum">     137 </span>            :                                                  HashJoinState *hjstate,
+<span class="lineNum">     138 </span>            :                                                  uint32 *hashvalue);
+<span class="lineNum">     139 </span>            : static TupleTableSlot *ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,
+<span class="lineNum">     140 </span>            :                                                          HashJoinState *hjstate,
+<span class="lineNum">     141 </span>            :                                                          uint32 *hashvalue);
+<span class="lineNum">     142 </span>            : static TupleTableSlot *ExecHashJoinGetSavedTuple(HashJoinState *hjstate,
+<span class="lineNum">     143 </span>            :                                                  BufFile *file,
+<span class="lineNum">     144 </span>            :                                                  uint32 *hashvalue,
+<span class="lineNum">     145 </span>            :                                                  TupleTableSlot *tupleSlot);
+<span class="lineNum">     146 </span>            : static bool ExecHashJoinNewBatch(HashJoinState *hjstate);
+<span class="lineNum">     147 </span>            : static bool ExecParallelHashJoinNewBatch(HashJoinState *hjstate);
+<span class="lineNum">     148 </span>            : static void ExecParallelHashJoinPartitionOuter(HashJoinState *node);
+<span class="lineNum">     149 </span>            : 
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     152 </span>            :  *      ExecHashJoinImpl
+<span class="lineNum">     153 </span>            :  *
+<span class="lineNum">     154 </span>            :  *      This function implements the Hybrid Hashjoin algorithm.  It is marked
+<span class="lineNum">     155 </span>            :  *      with an always-inline attribute so that ExecHashJoin() and
+<span class="lineNum">     156 </span>            :  *      ExecParallelHashJoin() can inline it.  Compilers that respect the
+<span class="lineNum">     157 </span>            :  *      attribute should create versions specialized for parallel == true and
+<span class="lineNum">     158 </span>            :  *      parallel == false with unnecessary branches removed.
+<span class="lineNum">     159 </span>            :  *
+<span class="lineNum">     160 </span>            :  *      Note: the relation we build hash table on is the &quot;inner&quot;
+<span class="lineNum">     161 </span>            :  *            the other one is &quot;outer&quot;.
+<span class="lineNum">     162 </span>            :  * ----------------------------------------------------------------
+<a name="163"><span class="lineNum">     163 </span>            :  */</a>
+<span class="lineNum">     164 </span>            : static pg_attribute_always_inline TupleTableSlot *
+<span class="lineNum">     165 </span><span class="lineCov">    2082182 : ExecHashJoinImpl(PlanState *pstate, bool parallel)</span>
+<span class="lineNum">     166 </span>            : {
+<span class="lineNum">     167 </span><span class="lineCov">    2082182 :     HashJoinState *node = castNode(HashJoinState, pstate);</span>
+<span class="lineNum">     168 </span>            :     PlanState  *outerNode;
+<span class="lineNum">     169 </span>            :     HashState  *hashNode;
+<span class="lineNum">     170 </span>            :     ExprState  *joinqual;
+<span class="lineNum">     171 </span>            :     ExprState  *otherqual;
+<span class="lineNum">     172 </span>            :     ExprContext *econtext;
+<span class="lineNum">     173 </span>            :     HashJoinTable hashtable;
+<span class="lineNum">     174 </span>            :     TupleTableSlot *outerTupleSlot;
+<span class="lineNum">     175 </span>            :     uint32      hashvalue;
+<span class="lineNum">     176 </span>            :     int         batchno;
+<span class="lineNum">     177 </span>            :     ParallelHashJoinState *parallel_state;
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span>            :     /*
+<span class="lineNum">     180 </span>            :      * get information from HashJoin node
+<span class="lineNum">     181 </span>            :      */
+<span class="lineNum">     182 </span><span class="lineCov">    2082182 :     joinqual = node-&gt;js.joinqual;</span>
+<span class="lineNum">     183 </span><span class="lineCov">    2082182 :     otherqual = node-&gt;js.ps.qual;</span>
+<span class="lineNum">     184 </span><span class="lineCov">    2082182 :     hashNode = (HashState *) innerPlanState(node);</span>
+<span class="lineNum">     185 </span><span class="lineCov">    2082182 :     outerNode = outerPlanState(node);</span>
+<span class="lineNum">     186 </span><span class="lineCov">    2082182 :     hashtable = node-&gt;hj_HashTable;</span>
+<span class="lineNum">     187 </span><span class="lineCov">    2082182 :     econtext = node-&gt;js.ps.ps_ExprContext;</span>
+<span class="lineNum">     188 </span><span class="lineCov">    2082182 :     parallel_state = hashNode-&gt;parallel_state;</span>
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span>            :     /*
+<span class="lineNum">     191 </span>            :      * Reset per-tuple memory context to free any expression evaluation
+<span class="lineNum">     192 </span>            :      * storage allocated in the previous tuple cycle.
+<span class="lineNum">     193 </span>            :      */
+<span class="lineNum">     194 </span><span class="lineCov">    2082182 :     ResetExprContext(econtext);</span>
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span>            :     /*
+<span class="lineNum">     197 </span>            :      * run the hash join state machine
+<span class="lineNum">     198 </span>            :      */
+<span class="lineNum">     199 </span>            :     for (;;)
+<span class="lineNum">     200 </span>            :     {
+<span class="lineNum">     201 </span>            :         /*
+<span class="lineNum">     202 </span>            :          * It's possible to iterate this loop many times before returning a
+<span class="lineNum">     203 </span>            :          * tuple, in some pathological cases such as needing to move much of
+<span class="lineNum">     204 </span>            :          * the current batch to a later batch.  So let's check for interrupts
+<span class="lineNum">     205 </span>            :          * each time through.
+<span class="lineNum">     206 </span>            :          */
+<span class="lineNum">     207 </span><span class="lineCov">    7606504 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineCov">    7606504 :         switch (node-&gt;hj_JoinState)</span>
+<span class="lineNum">     210 </span>            :         {
+<span class="lineNum">     211 </span>            :             case HJ_BUILD_HASHTABLE:
+<span class="lineNum">     212 </span>            : 
+<span class="lineNum">     213 </span>            :                 /*
+<span class="lineNum">     214 </span>            :                  * First time through: build hash table for inner relation.
+<span class="lineNum">     215 </span>            :                  */
+<span class="lineNum">     216 </span><span class="lineCov">       4684 :                 Assert(hashtable == NULL);</span>
+<span class="lineNum">     217 </span>            : 
+<span class="lineNum">     218 </span>            :                 /*
+<span class="lineNum">     219 </span>            :                  * If the outer relation is completely empty, and it's not
+<span class="lineNum">     220 </span>            :                  * right/full join, we can quit without building the hash
+<span class="lineNum">     221 </span>            :                  * table.  However, for an inner join it is only a win to
+<span class="lineNum">     222 </span>            :                  * check this when the outer relation's startup cost is less
+<span class="lineNum">     223 </span>            :                  * than the projected cost of building the hash table.
+<span class="lineNum">     224 </span>            :                  * Otherwise it's best to build the hash table first and see
+<span class="lineNum">     225 </span>            :                  * if the inner relation is empty.  (When it's a left join, we
+<span class="lineNum">     226 </span>            :                  * should always make this check, since we aren't going to be
+<span class="lineNum">     227 </span>            :                  * able to skip the join on the strength of an empty inner
+<span class="lineNum">     228 </span>            :                  * relation anyway.)
+<span class="lineNum">     229 </span>            :                  *
+<span class="lineNum">     230 </span>            :                  * If we are rescanning the join, we make use of information
+<span class="lineNum">     231 </span>            :                  * gained on the previous scan: don't bother to try the
+<span class="lineNum">     232 </span>            :                  * prefetch if the previous scan found the outer relation
+<span class="lineNum">     233 </span>            :                  * nonempty. This is not 100% reliable since with new
+<span class="lineNum">     234 </span>            :                  * parameters the outer relation might yield different
+<span class="lineNum">     235 </span>            :                  * results, but it's a good heuristic.
+<span class="lineNum">     236 </span>            :                  *
+<span class="lineNum">     237 </span>            :                  * The only way to make the check is to try to fetch a tuple
+<span class="lineNum">     238 </span>            :                  * from the outer plan node.  If we succeed, we have to stash
+<span class="lineNum">     239 </span>            :                  * it away for later consumption by ExecHashJoinOuterGetTuple.
+<span class="lineNum">     240 </span>            :                  */
+<span class="lineNum">     241 </span><span class="lineCov">       4684 :                 if (HJ_FILL_INNER(node))</span>
+<span class="lineNum">     242 </span>            :                 {
+<span class="lineNum">     243 </span>            :                     /* no chance to not build the hash table */
+<span class="lineNum">     244 </span><span class="lineCov">       1134 :                     node-&gt;hj_FirstOuterTupleSlot = NULL;</span>
+<span class="lineNum">     245 </span>            :                 }
+<span class="lineNum">     246 </span><span class="lineCov">       3550 :                 else if (parallel)</span>
+<span class="lineNum">     247 </span>            :                 {
+<span class="lineNum">     248 </span>            :                     /*
+<span class="lineNum">     249 </span>            :                      * The empty-outer optimization is not implemented for
+<span class="lineNum">     250 </span>            :                      * shared hash tables, because no one participant can
+<span class="lineNum">     251 </span>            :                      * determine that there are no outer tuples, and it's not
+<span class="lineNum">     252 </span>            :                      * yet clear that it's worth the synchronization overhead
+<span class="lineNum">     253 </span>            :                      * of reaching consensus to figure that out.  So we have
+<span class="lineNum">     254 </span>            :                      * to build the hash table.
+<span class="lineNum">     255 </span>            :                      */
+<span class="lineNum">     256 </span><span class="lineCov">        112 :                     node-&gt;hj_FirstOuterTupleSlot = NULL;</span>
+<span class="lineNum">     257 </span>            :                 }
+<span class="lineNum">     258 </span><span class="lineCov">       6218 :                 else if (HJ_FILL_OUTER(node) ||</span>
+<span class="lineNum">     259 </span><span class="lineCov">       5486 :                          (outerNode-&gt;plan-&gt;startup_cost &lt; hashNode-&gt;ps.plan-&gt;total_cost &amp;&amp;</span>
+<span class="lineNum">     260 </span><span class="lineCov">       2706 :                           !node-&gt;hj_OuterNotEmpty))</span>
+<span class="lineNum">     261 </span>            :                 {
+<span class="lineNum">     262 </span><span class="lineCov">       3270 :                     node-&gt;hj_FirstOuterTupleSlot = ExecProcNode(outerNode);</span>
+<span class="lineNum">     263 </span><span class="lineCov">       5788 :                     if (TupIsNull(node-&gt;hj_FirstOuterTupleSlot))</span>
+<span class="lineNum">     264 </span>            :                     {
+<span class="lineNum">     265 </span><span class="lineCov">        752 :                         node-&gt;hj_OuterNotEmpty = false;</span>
+<span class="lineNum">     266 </span><span class="lineCov">        752 :                         return NULL;</span>
+<span class="lineNum">     267 </span>            :                     }
+<span class="lineNum">     268 </span>            :                     else
+<span class="lineNum">     269 </span><span class="lineCov">       2518 :                         node-&gt;hj_OuterNotEmpty = true;</span>
+<span class="lineNum">     270 </span>            :                 }
+<span class="lineNum">     271 </span>            :                 else
+<span class="lineNum">     272 </span><span class="lineCov">        168 :                     node-&gt;hj_FirstOuterTupleSlot = NULL;</span>
+<span class="lineNum">     273 </span>            : 
+<span class="lineNum">     274 </span>            :                 /*
+<span class="lineNum">     275 </span>            :                  * Create the hash table.  If using Parallel Hash, then
+<span class="lineNum">     276 </span>            :                  * whoever gets here first will create the hash table and any
+<span class="lineNum">     277 </span>            :                  * later arrivals will merely attach to it.
+<span class="lineNum">     278 </span>            :                  */
+<span class="lineNum">     279 </span><span class="lineCov">       3932 :                 hashtable = ExecHashTableCreate(hashNode,</span>
+<span class="lineNum">     280 </span>            :                                                 node-&gt;hj_HashOperators,
+<span class="lineNum">     281 </span>            :                                                 node-&gt;hj_Collations,
+<span class="lineNum">     282 </span><span class="lineCov">       3932 :                                                 HJ_FILL_INNER(node));</span>
+<span class="lineNum">     283 </span><span class="lineCov">       3932 :                 node-&gt;hj_HashTable = hashtable;</span>
+<span class="lineNum">     284 </span>            : 
+<span class="lineNum">     285 </span>            :                 /*
+<span class="lineNum">     286 </span>            :                  * Execute the Hash node, to build the hash table.  If using
+<span class="lineNum">     287 </span>            :                  * Parallel Hash, then we'll try to help hashing unless we
+<span class="lineNum">     288 </span>            :                  * arrived too late.
+<span class="lineNum">     289 </span>            :                  */
+<span class="lineNum">     290 </span><span class="lineCov">       3932 :                 hashNode-&gt;hashtable = hashtable;</span>
+<span class="lineNum">     291 </span><span class="lineCov">       3932 :                 (void) MultiExecProcNode((PlanState *) hashNode);</span>
+<span class="lineNum">     292 </span>            : 
+<span class="lineNum">     293 </span>            :                 /*
+<span class="lineNum">     294 </span>            :                  * If the inner relation is completely empty, and we're not
+<span class="lineNum">     295 </span>            :                  * doing a left outer join, we can quit without scanning the
+<span class="lineNum">     296 </span>            :                  * outer relation.
+<span class="lineNum">     297 </span>            :                  */
+<span class="lineNum">     298 </span><span class="lineCov">       3932 :                 if (hashtable-&gt;totalTuples == 0 &amp;&amp; !HJ_FILL_OUTER(node))</span>
+<span class="lineNum">     299 </span><span class="lineCov">        368 :                     return NULL;</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            :                 /*
+<span class="lineNum">     302 </span>            :                  * need to remember whether nbatch has increased since we
+<span class="lineNum">     303 </span>            :                  * began scanning the outer relation
+<span class="lineNum">     304 </span>            :                  */
+<span class="lineNum">     305 </span><span class="lineCov">       3564 :                 hashtable-&gt;nbatch_outstart = hashtable-&gt;nbatch;</span>
+<span class="lineNum">     306 </span>            : 
+<span class="lineNum">     307 </span>            :                 /*
+<span class="lineNum">     308 </span>            :                  * Reset OuterNotEmpty for scan.  (It's OK if we fetched a
+<span class="lineNum">     309 </span>            :                  * tuple above, because ExecHashJoinOuterGetTuple will
+<span class="lineNum">     310 </span>            :                  * immediately set it again.)
+<span class="lineNum">     311 </span>            :                  */
+<span class="lineNum">     312 </span><span class="lineCov">       3564 :                 node-&gt;hj_OuterNotEmpty = false;</span>
+<span class="lineNum">     313 </span>            : 
+<span class="lineNum">     314 </span><span class="lineCov">       3564 :                 if (parallel)</span>
+<span class="lineNum">     315 </span>            :                 {
+<span class="lineNum">     316 </span>            :                     Barrier    *build_barrier;
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span><span class="lineCov">        112 :                     build_barrier = &amp;parallel_state-&gt;build_barrier;</span>
+<span class="lineNum">     319 </span><span class="lineCov">        112 :                     Assert(BarrierPhase(build_barrier) == PHJ_BUILD_HASHING_OUTER ||</span>
+<span class="lineNum">     320 </span>            :                            BarrierPhase(build_barrier) == PHJ_BUILD_DONE);
+<span class="lineNum">     321 </span><span class="lineCov">        112 :                     if (BarrierPhase(build_barrier) == PHJ_BUILD_HASHING_OUTER)</span>
+<span class="lineNum">     322 </span>            :                     {
+<span class="lineNum">     323 </span>            :                         /*
+<span class="lineNum">     324 </span>            :                          * If multi-batch, we need to hash the outer relation
+<span class="lineNum">     325 </span>            :                          * up front.
+<span class="lineNum">     326 </span>            :                          */
+<span class="lineNum">     327 </span><span class="lineCov">         88 :                         if (hashtable-&gt;nbatch &gt; 1)</span>
+<span class="lineNum">     328 </span><span class="lineCov">         52 :                             ExecParallelHashJoinPartitionOuter(node);</span>
+<span class="lineNum">     329 </span><span class="lineCov">         88 :                         BarrierArriveAndWait(build_barrier,</span>
+<span class="lineNum">     330 </span>            :                                              WAIT_EVENT_HASH_BUILD_HASHING_OUTER);
+<span class="lineNum">     331 </span>            :                     }
+<span class="lineNum">     332 </span><span class="lineCov">        112 :                     Assert(BarrierPhase(build_barrier) == PHJ_BUILD_DONE);</span>
+<span class="lineNum">     333 </span>            : 
+<span class="lineNum">     334 </span>            :                     /* Each backend should now select a batch to work on. */
+<span class="lineNum">     335 </span><span class="lineCov">        112 :                     hashtable-&gt;curbatch = -1;</span>
+<span class="lineNum">     336 </span><span class="lineCov">        112 :                     node-&gt;hj_JoinState = HJ_NEED_NEW_BATCH;</span>
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span><span class="lineCov">        112 :                     continue;</span>
+<span class="lineNum">     339 </span>            :                 }
+<span class="lineNum">     340 </span>            :                 else
+<span class="lineNum">     341 </span><span class="lineCov">       3452 :                     node-&gt;hj_JoinState = HJ_NEED_NEW_OUTER;</span>
+<span class="lineNum">     342 </span>            : 
+<span class="lineNum">     343 </span>            :                 /* FALL THRU */
+<span class="lineNum">     344 </span>            : 
+<span class="lineNum">     345 </span>            :             case HJ_NEED_NEW_OUTER:
+<span class="lineNum">     346 </span>            : 
+<span class="lineNum">     347 </span>            :                 /*
+<span class="lineNum">     348 </span>            :                  * We don't have an outer tuple, try to get the next one
+<span class="lineNum">     349 </span>            :                  */
+<span class="lineNum">     350 </span><span class="lineCov">    3129012 :                 if (parallel)</span>
+<span class="lineNum">     351 </span><span class="lineCov">     600290 :                     outerTupleSlot =</span>
+<span class="lineNum">     352 </span>            :                         ExecParallelHashJoinOuterGetTuple(outerNode, node,
+<span class="lineNum">     353 </span>            :                                                           &amp;hashvalue);
+<span class="lineNum">     354 </span>            :                 else
+<span class="lineNum">     355 </span><span class="lineCov">    2528722 :                     outerTupleSlot =</span>
+<span class="lineNum">     356 </span>            :                         ExecHashJoinOuterGetTuple(outerNode, node, &amp;hashvalue);
+<span class="lineNum">     357 </span>            : 
+<span class="lineNum">     358 </span><span class="lineCov">    3129012 :                 if (TupIsNull(outerTupleSlot))</span>
+<span class="lineNum">     359 </span>            :                 {
+<span class="lineNum">     360 </span>            :                     /* end of batch, or maybe whole join */
+<span class="lineNum">     361 </span><span class="lineCov">       4258 :                     if (HJ_FILL_INNER(node))</span>
+<span class="lineNum">     362 </span>            :                     {
+<span class="lineNum">     363 </span>            :                         /* set up to scan for unmatched inner tuples */
+<span class="lineNum">     364 </span><span class="lineCov">       1106 :                         ExecPrepHashTableForUnmatched(node);</span>
+<span class="lineNum">     365 </span><span class="lineCov">       1106 :                         node-&gt;hj_JoinState = HJ_FILL_INNER_TUPLES;</span>
+<span class="lineNum">     366 </span>            :                     }
+<span class="lineNum">     367 </span>            :                     else
+<span class="lineNum">     368 </span><span class="lineCov">       3152 :                         node-&gt;hj_JoinState = HJ_NEED_NEW_BATCH;</span>
+<span class="lineNum">     369 </span><span class="lineCov">       4258 :                     continue;</span>
+<span class="lineNum">     370 </span>            :                 }
+<span class="lineNum">     371 </span>            : 
+<span class="lineNum">     372 </span><span class="lineCov">    3124754 :                 econtext-&gt;ecxt_outertuple = outerTupleSlot;</span>
+<span class="lineNum">     373 </span><span class="lineCov">    3124754 :                 node-&gt;hj_MatchedOuter = false;</span>
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span>            :                 /*
+<span class="lineNum">     376 </span>            :                  * Find the corresponding bucket for this tuple in the main
+<span class="lineNum">     377 </span>            :                  * hash table or skew hash table.
+<span class="lineNum">     378 </span>            :                  */
+<span class="lineNum">     379 </span><span class="lineCov">    3124754 :                 node-&gt;hj_CurHashValue = hashvalue;</span>
+<span class="lineNum">     380 </span><span class="lineCov">    3124754 :                 ExecHashGetBucketAndBatch(hashtable, hashvalue,</span>
+<span class="lineNum">     381 </span>            :                                           &amp;node-&gt;hj_CurBucketNo, &amp;batchno);
+<span class="lineNum">     382 </span><span class="lineCov">    3124754 :                 node-&gt;hj_CurSkewBucketNo = ExecHashGetSkewBucket(hashtable,</span>
+<span class="lineNum">     383 </span>            :                                                                  hashvalue);
+<span class="lineNum">     384 </span><span class="lineCov">    3124754 :                 node-&gt;hj_CurTuple = NULL;</span>
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span>            :                 /*
+<span class="lineNum">     387 </span>            :                  * The tuple might not belong to the current batch (where
+<span class="lineNum">     388 </span>            :                  * &quot;current batch&quot; includes the skew buckets if any).
+<span class="lineNum">     389 </span>            :                  */
+<span class="lineNum">     390 </span><span class="lineCov">    3618018 :                 if (batchno != hashtable-&gt;curbatch &amp;&amp;</span>
+<span class="lineNum">     391 </span><span class="lineCov">     493264 :                     node-&gt;hj_CurSkewBucketNo == INVALID_SKEW_BUCKET_NO)</span>
+<span class="lineNum">     392 </span>            :                 {
+<span class="lineNum">     393 </span>            :                     bool        shouldFree;
+<span class="lineNum">     394 </span><span class="lineCov">     493064 :                     MinimalTuple mintuple = ExecFetchSlotMinimalTuple(outerTupleSlot,</span>
+<span class="lineNum">     395 </span>            :                                                                       &amp;shouldFree);
+<span class="lineNum">     396 </span>            : 
+<span class="lineNum">     397 </span>            :                     /*
+<span class="lineNum">     398 </span>            :                      * Need to postpone this outer tuple to a later batch.
+<span class="lineNum">     399 </span>            :                      * Save it in the corresponding outer-batch file.
+<span class="lineNum">     400 </span>            :                      */
+<span class="lineNum">     401 </span><span class="lineCov">     493064 :                     Assert(parallel_state == NULL);</span>
+<span class="lineNum">     402 </span><span class="lineCov">     493064 :                     Assert(batchno &gt; hashtable-&gt;curbatch);</span>
+<span class="lineNum">     403 </span><span class="lineCov">     986128 :                     ExecHashJoinSaveTuple(mintuple, hashvalue,</span>
+<span class="lineNum">     404 </span><span class="lineCov">     986128 :                                           &amp;hashtable-&gt;outerBatchFile[batchno]);</span>
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span><span class="lineCov">     493064 :                     if (shouldFree)</span>
+<span class="lineNum">     407 </span><span class="lineCov">     493064 :                         heap_free_minimal_tuple(mintuple);</span>
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span>            :                     /* Loop around, staying in HJ_NEED_NEW_OUTER state */
+<span class="lineNum">     410 </span><span class="lineCov">     493064 :                     continue;</span>
+<span class="lineNum">     411 </span>            :                 }
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            :                 /* OK, let's scan the bucket for matches */
+<span class="lineNum">     414 </span><span class="lineCov">    2631690 :                 node-&gt;hj_JoinState = HJ_SCAN_BUCKET;</span>
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span>            :                 /* FALL THRU */
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span>            :             case HJ_SCAN_BUCKET:
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span>            :                 /*
+<span class="lineNum">     421 </span>            :                  * Scan the selected hash bucket for matches to current outer
+<span class="lineNum">     422 </span>            :                  */
+<span class="lineNum">     423 </span><span class="lineCov">    4575848 :                 if (parallel)</span>
+<span class="lineNum">     424 </span>            :                 {
+<span class="lineNum">     425 </span><span class="lineCov">    1200016 :                     if (!ExecParallelScanHashBucket(node, econtext))</span>
+<span class="lineNum">     426 </span>            :                     {
+<span class="lineNum">     427 </span>            :                         /* out of matches; check for possible outer-join fill */
+<span class="lineNum">     428 </span><span class="lineCov">     600008 :                         node-&gt;hj_JoinState = HJ_FILL_OUTER_TUPLE;</span>
+<span class="lineNum">     429 </span><span class="lineCov">     600008 :                         continue;</span>
+<span class="lineNum">     430 </span>            :                     }
+<span class="lineNum">     431 </span>            :                 }
+<span class="lineNum">     432 </span>            :                 else
+<span class="lineNum">     433 </span>            :                 {
+<span class="lineNum">     434 </span><span class="lineCov">    3375832 :                     if (!ExecScanHashBucket(node, econtext))</span>
+<span class="lineNum">     435 </span>            :                     {
+<span class="lineNum">     436 </span>            :                         /* out of matches; check for possible outer-join fill */
+<span class="lineNum">     437 </span><span class="lineCov">    1843978 :                         node-&gt;hj_JoinState = HJ_FILL_OUTER_TUPLE;</span>
+<span class="lineNum">     438 </span><span class="lineCov">    1843978 :                         continue;</span>
+<span class="lineNum">     439 </span>            :                     }
+<span class="lineNum">     440 </span>            :                 }
+<span class="lineNum">     441 </span>            : 
+<span class="lineNum">     442 </span>            :                 /*
+<span class="lineNum">     443 </span>            :                  * We've got a match, but still need to test non-hashed quals.
+<span class="lineNum">     444 </span>            :                  * ExecScanHashBucket already set up all the state needed to
+<span class="lineNum">     445 </span>            :                  * call ExecQual.
+<span class="lineNum">     446 </span>            :                  *
+<span class="lineNum">     447 </span>            :                  * If we pass the qual, then save state for next call and have
+<span class="lineNum">     448 </span>            :                  * ExecProject form the projection, store it in the tuple
+<span class="lineNum">     449 </span>            :                  * table, and return the slot.
+<span class="lineNum">     450 </span>            :                  *
+<span class="lineNum">     451 </span>            :                  * Only the joinquals determine tuple match status, but all
+<span class="lineNum">     452 </span>            :                  * quals must pass to actually return the tuple.
+<span class="lineNum">     453 </span>            :                  */
+<span class="lineNum">     454 </span><span class="lineCov">    2131862 :                 if (joinqual == NULL || ExecQual(joinqual, econtext))</span>
+<span class="lineNum">     455 </span>            :                 {
+<span class="lineNum">     456 </span><span class="lineCov">    2089964 :                     node-&gt;hj_MatchedOuter = true;</span>
+<span class="lineNum">     457 </span><span class="lineCov">    2089964 :                     HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node-&gt;hj_CurTuple));</span>
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span>            :                     /* In an antijoin, we never return a matched tuple */
+<span class="lineNum">     460 </span><span class="lineCov">    2089964 :                     if (node-&gt;js.jointype == JOIN_ANTI)</span>
+<span class="lineNum">     461 </span>            :                     {
+<span class="lineNum">     462 </span><span class="lineCov">     167030 :                         node-&gt;hj_JoinState = HJ_NEED_NEW_OUTER;</span>
+<span class="lineNum">     463 </span><span class="lineCov">     167030 :                         continue;</span>
+<span class="lineNum">     464 </span>            :                     }
+<span class="lineNum">     465 </span>            : 
+<span class="lineNum">     466 </span>            :                     /*
+<span class="lineNum">     467 </span>            :                      * If we only need to join to the first matching inner
+<span class="lineNum">     468 </span>            :                      * tuple, then consider returning this one, but after that
+<span class="lineNum">     469 </span>            :                      * continue with next outer tuple.
+<span class="lineNum">     470 </span>            :                      */
+<span class="lineNum">     471 </span><span class="lineCov">    1922934 :                     if (node-&gt;js.single_match)</span>
+<span class="lineNum">     472 </span><span class="lineCov">      20658 :                         node-&gt;hj_JoinState = HJ_NEED_NEW_OUTER;</span>
+<span class="lineNum">     473 </span>            : 
+<span class="lineNum">     474 </span><span class="lineCov">    1951890 :                     if (otherqual == NULL || ExecQual(otherqual, econtext))</span>
+<span class="lineNum">     475 </span><span class="lineCov">    1893978 :                         return ExecProject(node-&gt;js.ps.ps_ProjInfo);</span>
+<span class="lineNum">     476 </span>            :                     else
+<span class="lineNum">     477 </span><span class="lineCov">      28956 :                         InstrCountFiltered2(node, 1);</span>
+<span class="lineNum">     478 </span>            :                 }
+<span class="lineNum">     479 </span>            :                 else
+<span class="lineNum">     480 </span><span class="lineCov">      41898 :                     InstrCountFiltered1(node, 1);</span>
+<span class="lineNum">     481 </span><span class="lineCov">      70854 :                 break;</span>
+<span class="lineNum">     482 </span>            : 
+<span class="lineNum">     483 </span>            :             case HJ_FILL_OUTER_TUPLE:
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span>            :                 /*
+<span class="lineNum">     486 </span>            :                  * The current outer tuple has run out of matches, so check
+<span class="lineNum">     487 </span>            :                  * whether to emit a dummy outer-join tuple.  Whether we emit
+<span class="lineNum">     488 </span>            :                  * one or not, the next state is NEED_NEW_OUTER.
+<span class="lineNum">     489 </span>            :                  */
+<span class="lineNum">     490 </span><span class="lineCov">    2443986 :                 node-&gt;hj_JoinState = HJ_NEED_NEW_OUTER;</span>
+<span class="lineNum">     491 </span>            : 
+<span class="lineNum">     492 </span><span class="lineCov">    3420348 :                 if (!node-&gt;hj_MatchedOuter &amp;&amp;</span>
+<span class="lineNum">     493 </span><span class="lineCov">     976362 :                     HJ_FILL_OUTER(node))</span>
+<span class="lineNum">     494 </span>            :                 {
+<span class="lineNum">     495 </span>            :                     /*
+<span class="lineNum">     496 </span>            :                      * Generate a fake join tuple with nulls for the inner
+<span class="lineNum">     497 </span>            :                      * tuple, and return it if it passes the non-join quals.
+<span class="lineNum">     498 </span>            :                      */
+<span class="lineNum">     499 </span><span class="lineCov">     122976 :                     econtext-&gt;ecxt_innertuple = node-&gt;hj_NullInnerTupleSlot;</span>
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span><span class="lineCov">     122976 :                     if (otherqual == NULL || ExecQual(otherqual, econtext))</span>
+<span class="lineNum">     502 </span><span class="lineCov">     101102 :                         return ExecProject(node-&gt;js.ps.ps_ProjInfo);</span>
+<span class="lineNum">     503 </span>            :                     else
+<span class="lineNum">     504 </span><span class="lineCov">      21874 :                         InstrCountFiltered2(node, 1);</span>
+<span class="lineNum">     505 </span>            :                 }
+<span class="lineNum">     506 </span><span class="lineCov">    2342884 :                 break;</span>
+<span class="lineNum">     507 </span>            : 
+<span class="lineNum">     508 </span>            :             case HJ_FILL_INNER_TUPLES:
+<span class="lineNum">     509 </span>            : 
+<span class="lineNum">     510 </span>            :                 /*
+<span class="lineNum">     511 </span>            :                  * We have finished a batch, but we are doing right/full join,
+<span class="lineNum">     512 </span>            :                  * so any unmatched inner tuples in the hashtable have to be
+<span class="lineNum">     513 </span>            :                  * emitted before we continue to the next batch.
+<span class="lineNum">     514 </span>            :                  */
+<span class="lineNum">     515 </span><span class="lineCov">      83748 :                 if (!ExecScanHashTableForUnmatched(node, econtext))</span>
+<span class="lineNum">     516 </span>            :                 {
+<span class="lineNum">     517 </span>            :                     /* no more unmatched tuples */
+<span class="lineNum">     518 </span><span class="lineCov">       1104 :                     node-&gt;hj_JoinState = HJ_NEED_NEW_BATCH;</span>
+<span class="lineNum">     519 </span><span class="lineCov">       1104 :                     continue;</span>
+<span class="lineNum">     520 </span>            :                 }
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            :                 /*
+<span class="lineNum">     523 </span>            :                  * Generate a fake join tuple with nulls for the outer tuple,
+<span class="lineNum">     524 </span>            :                  * and return it if it passes the non-join quals.
+<span class="lineNum">     525 </span>            :                  */
+<span class="lineNum">     526 </span><span class="lineCov">      82644 :                 econtext-&gt;ecxt_outertuple = node-&gt;hj_NullOuterTupleSlot;</span>
+<span class="lineNum">     527 </span>            : 
+<span class="lineNum">     528 </span><span class="lineCov">      82644 :                 if (otherqual == NULL || ExecQual(otherqual, econtext))</span>
+<span class="lineNum">     529 </span><span class="lineCov">      82416 :                     return ExecProject(node-&gt;js.ps.ps_ProjInfo);</span>
+<span class="lineNum">     530 </span>            :                 else
+<span class="lineNum">     531 </span><span class="lineCov">        228 :                     InstrCountFiltered2(node, 1);</span>
+<span class="lineNum">     532 </span><span class="lineCov">        228 :                 break;</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span>            :             case HJ_NEED_NEW_BATCH:
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span>            :                 /*
+<span class="lineNum">     537 </span>            :                  * Try to advance to next batch.  Done if there are no more.
+<span class="lineNum">     538 </span>            :                  */
+<span class="lineNum">     539 </span><span class="lineCov">       4368 :                 if (parallel)</span>
+<span class="lineNum">     540 </span>            :                 {
+<span class="lineNum">     541 </span><span class="lineCov">        394 :                     if (!ExecParallelHashJoinNewBatch(node))</span>
+<span class="lineNum">     542 </span><span class="lineCov">        112 :                         return NULL;    /* end of parallel-aware join */</span>
+<span class="lineNum">     543 </span>            :                 }
+<span class="lineNum">     544 </span>            :                 else
+<span class="lineNum">     545 </span>            :                 {
+<span class="lineNum">     546 </span><span class="lineCov">       3974 :                     if (!ExecHashJoinNewBatch(node))</span>
+<span class="lineNum">     547 </span><span class="lineCov">       3454 :                         return NULL;    /* end of parallel-oblivious join */</span>
+<span class="lineNum">     548 </span>            :                 }
+<span class="lineNum">     549 </span><span class="lineCov">        802 :                 node-&gt;hj_JoinState = HJ_NEED_NEW_OUTER;</span>
+<span class="lineNum">     550 </span><span class="lineCov">        802 :                 break;</span>
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span>            :             default:
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;unrecognized hashjoin state: %d&quot;,</span>
+<span class="lineNum">     554 </span>            :                      (int) node-&gt;hj_JoinState);
+<span class="lineNum">     555 </span>            :         }
+<span class="lineNum">     556 </span><span class="lineCov">    5524322 :     }</span>
+<span class="lineNum">     557 </span>            : }
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     560 </span>            :  *      ExecHashJoin
+<span class="lineNum">     561 </span>            :  *
+<span class="lineNum">     562 </span>            :  *      Parallel-oblivious version.
+<span class="lineNum">     563 </span>            :  * ----------------------------------------------------------------
+<a name="564"><span class="lineNum">     564 </span>            :  */</a>
+<span class="lineNum">     565 </span>            : static TupleTableSlot *         /* return: a tuple or NULL */
+<span class="lineNum">     566 </span><span class="lineCov">    1482062 : ExecHashJoin(PlanState *pstate)</span>
+<span class="lineNum">     567 </span>            : {
+<span class="lineNum">     568 </span>            :     /*
+<span class="lineNum">     569 </span>            :      * On sufficiently smart compilers this should be inlined with the
+<span class="lineNum">     570 </span>            :      * parallel-aware branches removed.
+<span class="lineNum">     571 </span>            :      */
+<span class="lineNum">     572 </span><span class="lineCov">    1482062 :     return ExecHashJoinImpl(pstate, false);</span>
+<span class="lineNum">     573 </span>            : }
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     576 </span>            :  *      ExecParallelHashJoin
+<span class="lineNum">     577 </span>            :  *
+<span class="lineNum">     578 </span>            :  *      Parallel-aware version.
+<span class="lineNum">     579 </span>            :  * ----------------------------------------------------------------
+<a name="580"><span class="lineNum">     580 </span>            :  */</a>
+<span class="lineNum">     581 </span>            : static TupleTableSlot *         /* return: a tuple or NULL */
+<span class="lineNum">     582 </span><span class="lineCov">     600120 : ExecParallelHashJoin(PlanState *pstate)</span>
+<span class="lineNum">     583 </span>            : {
+<span class="lineNum">     584 </span>            :     /*
+<span class="lineNum">     585 </span>            :      * On sufficiently smart compilers this should be inlined with the
+<span class="lineNum">     586 </span>            :      * parallel-oblivious branches removed.
+<span class="lineNum">     587 </span>            :      */
+<span class="lineNum">     588 </span><span class="lineCov">     600120 :     return ExecHashJoinImpl(pstate, true);</span>
+<span class="lineNum">     589 </span>            : }
+<span class="lineNum">     590 </span>            : 
+<span class="lineNum">     591 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     592 </span>            :  *      ExecInitHashJoin
+<span class="lineNum">     593 </span>            :  *
+<span class="lineNum">     594 </span>            :  *      Init routine for HashJoin node.
+<span class="lineNum">     595 </span>            :  * ----------------------------------------------------------------
+<a name="596"><span class="lineNum">     596 </span>            :  */</a>
+<span class="lineNum">     597 </span>            : HashJoinState *
+<span class="lineNum">     598 </span><span class="lineCov">       5550 : ExecInitHashJoin(HashJoin *node, EState *estate, int eflags)</span>
+<span class="lineNum">     599 </span>            : {
+<span class="lineNum">     600 </span>            :     HashJoinState *hjstate;
+<span class="lineNum">     601 </span>            :     Plan       *outerNode;
+<span class="lineNum">     602 </span>            :     Hash       *hashNode;
+<span class="lineNum">     603 </span>            :     TupleDesc   outerDesc,
+<span class="lineNum">     604 </span>            :                 innerDesc;
+<span class="lineNum">     605 </span>            :     const TupleTableSlotOps *ops;
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span>            :     /* check for unsupported flags */
+<span class="lineNum">     608 </span><span class="lineCov">       5550 :     Assert(!(eflags &amp; (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));</span>
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span>            :     /*
+<span class="lineNum">     611 </span>            :      * create state structure
+<span class="lineNum">     612 </span>            :      */
+<span class="lineNum">     613 </span><span class="lineCov">       5550 :     hjstate = makeNode(HashJoinState);</span>
+<span class="lineNum">     614 </span><span class="lineCov">       5550 :     hjstate-&gt;js.ps.plan = (Plan *) node;</span>
+<span class="lineNum">     615 </span><span class="lineCov">       5550 :     hjstate-&gt;js.ps.state = estate;</span>
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span>            :     /*
+<span class="lineNum">     618 </span>            :      * See ExecHashJoinInitializeDSM() and ExecHashJoinInitializeWorker()
+<span class="lineNum">     619 </span>            :      * where this function may be replaced with a parallel version, if we
+<span class="lineNum">     620 </span>            :      * managed to launch a parallel query.
+<span class="lineNum">     621 </span>            :      */
+<span class="lineNum">     622 </span><span class="lineCov">       5550 :     hjstate-&gt;js.ps.ExecProcNode = ExecHashJoin;</span>
+<span class="lineNum">     623 </span><span class="lineCov">       5550 :     hjstate-&gt;js.jointype = node-&gt;join.jointype;</span>
+<span class="lineNum">     624 </span>            : 
+<span class="lineNum">     625 </span>            :     /*
+<span class="lineNum">     626 </span>            :      * Miscellaneous initialization
+<span class="lineNum">     627 </span>            :      *
+<span class="lineNum">     628 </span>            :      * create expression context for node
+<span class="lineNum">     629 </span>            :      */
+<span class="lineNum">     630 </span><span class="lineCov">       5550 :     ExecAssignExprContext(estate, &amp;hjstate-&gt;js.ps);</span>
+<span class="lineNum">     631 </span>            : 
+<span class="lineNum">     632 </span>            :     /*
+<span class="lineNum">     633 </span>            :      * initialize child nodes
+<span class="lineNum">     634 </span>            :      *
+<span class="lineNum">     635 </span>            :      * Note: we could suppress the REWIND flag for the inner input, which
+<span class="lineNum">     636 </span>            :      * would amount to betting that the hash will be a single batch.  Not
+<span class="lineNum">     637 </span>            :      * clear if this would be a win or not.
+<span class="lineNum">     638 </span>            :      */
+<span class="lineNum">     639 </span><span class="lineCov">       5550 :     outerNode = outerPlan(node);</span>
+<span class="lineNum">     640 </span><span class="lineCov">       5550 :     hashNode = (Hash *) innerPlan(node);</span>
+<span class="lineNum">     641 </span>            : 
+<span class="lineNum">     642 </span><span class="lineCov">       5550 :     outerPlanState(hjstate) = ExecInitNode(outerNode, estate, eflags);</span>
+<span class="lineNum">     643 </span><span class="lineCov">       5550 :     outerDesc = ExecGetResultType(outerPlanState(hjstate));</span>
+<span class="lineNum">     644 </span><span class="lineCov">       5550 :     innerPlanState(hjstate) = ExecInitNode((Plan *) hashNode, estate, eflags);</span>
+<span class="lineNum">     645 </span><span class="lineCov">       5550 :     innerDesc = ExecGetResultType(innerPlanState(hjstate));</span>
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span>            :     /*
+<span class="lineNum">     648 </span>            :      * Initialize result slot, type and projection.
+<span class="lineNum">     649 </span>            :      */
+<span class="lineNum">     650 </span><span class="lineCov">       5550 :     ExecInitResultTupleSlotTL(&amp;hjstate-&gt;js.ps, &amp;TTSOpsVirtual);</span>
+<span class="lineNum">     651 </span><span class="lineCov">       5550 :     ExecAssignProjectionInfo(&amp;hjstate-&gt;js.ps, NULL);</span>
+<span class="lineNum">     652 </span>            : 
+<span class="lineNum">     653 </span>            :     /*
+<span class="lineNum">     654 </span>            :      * tuple table initialization
+<span class="lineNum">     655 </span>            :      */
+<span class="lineNum">     656 </span><span class="lineCov">       5550 :     ops = ExecGetResultSlotOps(outerPlanState(hjstate), NULL);</span>
+<span class="lineNum">     657 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_OuterTupleSlot = ExecInitExtraTupleSlot(estate, outerDesc,</span>
+<span class="lineNum">     658 </span>            :                                                         ops);
+<span class="lineNum">     659 </span>            : 
+<span class="lineNum">     660 </span>            :     /*
+<span class="lineNum">     661 </span>            :      * detect whether we need only consider the first matching inner tuple
+<span class="lineNum">     662 </span>            :      */
+<span class="lineNum">     663 </span><span class="lineCov">       9830 :     hjstate-&gt;js.single_match = (node-&gt;join.inner_unique ||</span>
+<span class="lineNum">     664 </span><span class="lineCov">       4280 :                                 node-&gt;join.jointype == JOIN_SEMI);</span>
+<span class="lineNum">     665 </span>            : 
+<span class="lineNum">     666 </span>            :     /* set up null tuples for outer joins, if needed */
+<span class="lineNum">     667 </span><span class="lineCov">       5550 :     switch (node-&gt;join.jointype)</span>
+<span class="lineNum">     668 </span>            :     {
+<span class="lineNum">     669 </span>            :         case JOIN_INNER:
+<span class="lineNum">     670 </span>            :         case JOIN_SEMI:
+<span class="lineNum">     671 </span><span class="lineCov">       3570 :             break;</span>
+<span class="lineNum">     672 </span>            :         case JOIN_LEFT:
+<span class="lineNum">     673 </span>            :         case JOIN_ANTI:
+<span class="lineNum">     674 </span><span class="lineCov">        716 :             hjstate-&gt;hj_NullInnerTupleSlot =</span>
+<span class="lineNum">     675 </span><span class="lineCov">        716 :                 ExecInitNullTupleSlot(estate, innerDesc, &amp;TTSOpsVirtual);</span>
+<span class="lineNum">     676 </span><span class="lineCov">        716 :             break;</span>
+<span class="lineNum">     677 </span>            :         case JOIN_RIGHT:
+<span class="lineNum">     678 </span><span class="lineCov">       1124 :             hjstate-&gt;hj_NullOuterTupleSlot =</span>
+<span class="lineNum">     679 </span><span class="lineCov">       1124 :                 ExecInitNullTupleSlot(estate, outerDesc, &amp;TTSOpsVirtual);</span>
+<span class="lineNum">     680 </span><span class="lineCov">       1124 :             break;</span>
+<span class="lineNum">     681 </span>            :         case JOIN_FULL:
+<span class="lineNum">     682 </span><span class="lineCov">        140 :             hjstate-&gt;hj_NullOuterTupleSlot =</span>
+<span class="lineNum">     683 </span><span class="lineCov">        140 :                 ExecInitNullTupleSlot(estate, outerDesc, &amp;TTSOpsVirtual);</span>
+<span class="lineNum">     684 </span><span class="lineCov">        140 :             hjstate-&gt;hj_NullInnerTupleSlot =</span>
+<span class="lineNum">     685 </span><span class="lineCov">        140 :                 ExecInitNullTupleSlot(estate, innerDesc, &amp;TTSOpsVirtual);</span>
+<span class="lineNum">     686 </span><span class="lineCov">        140 :             break;</span>
+<span class="lineNum">     687 </span>            :         default:
+<span class="lineNum">     688 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized join type: %d&quot;,</span>
+<span class="lineNum">     689 </span>            :                  (int) node-&gt;join.jointype);
+<span class="lineNum">     690 </span>            :     }
+<span class="lineNum">     691 </span>            : 
+<span class="lineNum">     692 </span>            :     /*
+<span class="lineNum">     693 </span>            :      * now for some voodoo.  our temporary tuple slot is actually the result
+<span class="lineNum">     694 </span>            :      * tuple slot of the Hash node (which is our inner plan).  we can do this
+<span class="lineNum">     695 </span>            :      * because Hash nodes don't return tuples via ExecProcNode() -- instead
+<span class="lineNum">     696 </span>            :      * the hash join node uses ExecScanHashBucket() to get at the contents of
+<span class="lineNum">     697 </span>            :      * the hash table.  -cim 6/9/91
+<span class="lineNum">     698 </span>            :      */
+<span class="lineNum">     699 </span>            :     {
+<span class="lineNum">     700 </span><span class="lineCov">       5550 :         HashState  *hashstate = (HashState *) innerPlanState(hjstate);</span>
+<span class="lineNum">     701 </span><span class="lineCov">       5550 :         TupleTableSlot *slot = hashstate-&gt;ps.ps_ResultTupleSlot;</span>
+<span class="lineNum">     702 </span>            : 
+<span class="lineNum">     703 </span><span class="lineCov">       5550 :         hjstate-&gt;hj_HashTupleSlot = slot;</span>
+<span class="lineNum">     704 </span>            :     }
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span>            :     /*
+<span class="lineNum">     707 </span>            :      * initialize child expressions
+<span class="lineNum">     708 </span>            :      */
+<span class="lineNum">     709 </span><span class="lineCov">       5550 :     hjstate-&gt;js.ps.qual =</span>
+<span class="lineNum">     710 </span><span class="lineCov">       5550 :         ExecInitQual(node-&gt;join.plan.qual, (PlanState *) hjstate);</span>
+<span class="lineNum">     711 </span><span class="lineCov">       5550 :     hjstate-&gt;js.joinqual =</span>
+<span class="lineNum">     712 </span><span class="lineCov">       5550 :         ExecInitQual(node-&gt;join.joinqual, (PlanState *) hjstate);</span>
+<span class="lineNum">     713 </span><span class="lineCov">       5550 :     hjstate-&gt;hashclauses =</span>
+<span class="lineNum">     714 </span><span class="lineCov">       5550 :         ExecInitQual(node-&gt;hashclauses, (PlanState *) hjstate);</span>
+<span class="lineNum">     715 </span>            : 
+<span class="lineNum">     716 </span>            :     /*
+<span class="lineNum">     717 </span>            :      * initialize hash-specific info
+<span class="lineNum">     718 </span>            :      */
+<span class="lineNum">     719 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_HashTable = NULL;</span>
+<span class="lineNum">     720 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_FirstOuterTupleSlot = NULL;</span>
+<span class="lineNum">     721 </span>            : 
+<span class="lineNum">     722 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_CurHashValue = 0;</span>
+<span class="lineNum">     723 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_CurBucketNo = 0;</span>
+<span class="lineNum">     724 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_CurSkewBucketNo = INVALID_SKEW_BUCKET_NO;</span>
+<span class="lineNum">     725 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_CurTuple = NULL;</span>
+<span class="lineNum">     726 </span>            : 
+<span class="lineNum">     727 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_OuterHashKeys = ExecInitExprList(node-&gt;hashkeys,</span>
+<span class="lineNum">     728 </span>            :                                                  (PlanState *) hjstate);
+<span class="lineNum">     729 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_HashOperators = node-&gt;hashoperators;</span>
+<span class="lineNum">     730 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_Collations = node-&gt;hashcollations;</span>
+<span class="lineNum">     731 </span>            : 
+<span class="lineNum">     732 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_JoinState = HJ_BUILD_HASHTABLE;</span>
+<span class="lineNum">     733 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_MatchedOuter = false;</span>
+<span class="lineNum">     734 </span><span class="lineCov">       5550 :     hjstate-&gt;hj_OuterNotEmpty = false;</span>
+<span class="lineNum">     735 </span>            : 
+<span class="lineNum">     736 </span><span class="lineCov">       5550 :     return hjstate;</span>
+<span class="lineNum">     737 </span>            : }
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     740 </span>            :  *      ExecEndHashJoin
+<span class="lineNum">     741 </span>            :  *
+<span class="lineNum">     742 </span>            :  *      clean up routine for HashJoin node
+<span class="lineNum">     743 </span>            :  * ----------------------------------------------------------------
+<a name="744"><span class="lineNum">     744 </span>            :  */</a>
+<span class="lineNum">     745 </span>            : void
+<span class="lineNum">     746 </span><span class="lineCov">       5536 : ExecEndHashJoin(HashJoinState *node)</span>
+<span class="lineNum">     747 </span>            : {
+<span class="lineNum">     748 </span>            :     /*
+<span class="lineNum">     749 </span>            :      * Free hash table
+<span class="lineNum">     750 </span>            :      */
+<span class="lineNum">     751 </span><span class="lineCov">       5536 :     if (node-&gt;hj_HashTable)</span>
+<span class="lineNum">     752 </span>            :     {
+<span class="lineNum">     753 </span><span class="lineCov">       3816 :         ExecHashTableDestroy(node-&gt;hj_HashTable);</span>
+<span class="lineNum">     754 </span><span class="lineCov">       3816 :         node-&gt;hj_HashTable = NULL;</span>
+<span class="lineNum">     755 </span>            :     }
+<span class="lineNum">     756 </span>            : 
+<span class="lineNum">     757 </span>            :     /*
+<span class="lineNum">     758 </span>            :      * Free the exprcontext
+<span class="lineNum">     759 </span>            :      */
+<span class="lineNum">     760 </span><span class="lineCov">       5536 :     ExecFreeExprContext(&amp;node-&gt;js.ps);</span>
+<span class="lineNum">     761 </span>            : 
+<span class="lineNum">     762 </span>            :     /*
+<span class="lineNum">     763 </span>            :      * clean out the tuple table
+<span class="lineNum">     764 </span>            :      */
+<span class="lineNum">     765 </span><span class="lineCov">       5536 :     ExecClearTuple(node-&gt;js.ps.ps_ResultTupleSlot);</span>
+<span class="lineNum">     766 </span><span class="lineCov">       5536 :     ExecClearTuple(node-&gt;hj_OuterTupleSlot);</span>
+<span class="lineNum">     767 </span><span class="lineCov">       5536 :     ExecClearTuple(node-&gt;hj_HashTupleSlot);</span>
+<span class="lineNum">     768 </span>            : 
+<span class="lineNum">     769 </span>            :     /*
+<span class="lineNum">     770 </span>            :      * clean up subtrees
+<span class="lineNum">     771 </span>            :      */
+<span class="lineNum">     772 </span><span class="lineCov">       5536 :     ExecEndNode(outerPlanState(node));</span>
+<span class="lineNum">     773 </span><span class="lineCov">       5536 :     ExecEndNode(innerPlanState(node));</span>
+<span class="lineNum">     774 </span><span class="lineCov">       5536 : }</span>
+<span class="lineNum">     775 </span>            : 
+<span class="lineNum">     776 </span>            : /*
+<span class="lineNum">     777 </span>            :  * ExecHashJoinOuterGetTuple
+<span class="lineNum">     778 </span>            :  *
+<span class="lineNum">     779 </span>            :  *      get the next outer tuple for a parallel oblivious hashjoin: either by
+<span class="lineNum">     780 </span>            :  *      executing the outer plan node in the first pass, or from the temp
+<span class="lineNum">     781 </span>            :  *      files for the hashjoin batches.
+<span class="lineNum">     782 </span>            :  *
+<span class="lineNum">     783 </span>            :  * Returns a null slot if no more outer tuples (within the current batch).
+<span class="lineNum">     784 </span>            :  *
+<span class="lineNum">     785 </span>            :  * On success, the tuple's hash value is stored at *hashvalue --- this is
+<span class="lineNum">     786 </span>            :  * either originally computed, or re-read from the temp file.
+<a name="787"><span class="lineNum">     787 </span>            :  */</a>
+<span class="lineNum">     788 </span>            : static TupleTableSlot *
+<span class="lineNum">     789 </span><span class="lineCov">    2528722 : ExecHashJoinOuterGetTuple(PlanState *outerNode,</span>
+<span class="lineNum">     790 </span>            :                           HashJoinState *hjstate,
+<span class="lineNum">     791 </span>            :                           uint32 *hashvalue)
+<span class="lineNum">     792 </span>            : {
+<span class="lineNum">     793 </span><span class="lineCov">    2528722 :     HashJoinTable hashtable = hjstate-&gt;hj_HashTable;</span>
+<span class="lineNum">     794 </span><span class="lineCov">    2528722 :     int         curbatch = hashtable-&gt;curbatch;</span>
+<span class="lineNum">     795 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     796 </span>            : 
+<span class="lineNum">     797 </span><span class="lineCov">    2528722 :     if (curbatch == 0)          /* if it is the first pass */</span>
+<span class="lineNum">     798 </span>            :     {
+<span class="lineNum">     799 </span>            :         /*
+<span class="lineNum">     800 </span>            :          * Check to see if first outer tuple was already fetched by
+<span class="lineNum">     801 </span>            :          * ExecHashJoin() and not used yet.
+<span class="lineNum">     802 </span>            :          */
+<span class="lineNum">     803 </span><span class="lineCov">    2035138 :         slot = hjstate-&gt;hj_FirstOuterTupleSlot;</span>
+<span class="lineNum">     804 </span><span class="lineCov">    2035138 :         if (!TupIsNull(slot))</span>
+<span class="lineNum">     805 </span><span class="lineCov">       2226 :             hjstate-&gt;hj_FirstOuterTupleSlot = NULL;</span>
+<span class="lineNum">     806 </span>            :         else
+<span class="lineNum">     807 </span><span class="lineCov">    2032912 :             slot = ExecProcNode(outerNode);</span>
+<span class="lineNum">     808 </span>            : 
+<span class="lineNum">     809 </span><span class="lineCov">    4070508 :         while (!TupIsNull(slot))</span>
+<span class="lineNum">     810 </span>            :         {
+<span class="lineNum">     811 </span>            :             /*
+<span class="lineNum">     812 </span>            :              * We have to compute the tuple's hash value.
+<span class="lineNum">     813 </span>            :              */
+<span class="lineNum">     814 </span><span class="lineCov">    2031914 :             ExprContext *econtext = hjstate-&gt;js.ps.ps_ExprContext;</span>
+<span class="lineNum">     815 </span>            : 
+<span class="lineNum">     816 </span><span class="lineCov">    2031914 :             econtext-&gt;ecxt_outertuple = slot;</span>
+<span class="lineNum">     817 </span><span class="lineCov">    2031914 :             if (ExecHashGetHashValue(hashtable, econtext,</span>
+<span class="lineNum">     818 </span>            :                                      hjstate-&gt;hj_OuterHashKeys,
+<span class="lineNum">     819 </span>            :                                      true,  /* outer tuple */
+<span class="lineNum">     820 </span><span class="lineCov">    2031914 :                                      HJ_FILL_OUTER(hjstate),</span>
+<span class="lineNum">     821 </span>            :                                      hashvalue))
+<span class="lineNum">     822 </span>            :             {
+<span class="lineNum">     823 </span>            :                 /* remember outer relation is not empty for possible rescan */
+<span class="lineNum">     824 </span><span class="lineCov">    2031682 :                 hjstate-&gt;hj_OuterNotEmpty = true;</span>
+<span class="lineNum">     825 </span>            : 
+<span class="lineNum">     826 </span><span class="lineCov">    2031682 :                 return slot;</span>
+<span class="lineNum">     827 </span>            :             }
+<span class="lineNum">     828 </span>            : 
+<span class="lineNum">     829 </span>            :             /*
+<span class="lineNum">     830 </span>            :              * That tuple couldn't match because of a NULL, so discard it and
+<span class="lineNum">     831 </span>            :              * continue with the next one.
+<span class="lineNum">     832 </span>            :              */
+<span class="lineNum">     833 </span><span class="lineCov">        232 :             slot = ExecProcNode(outerNode);</span>
+<span class="lineNum">     834 </span>            :         }
+<span class="lineNum">     835 </span>            :     }
+<span class="lineNum">     836 </span><span class="lineCov">     493584 :     else if (curbatch &lt; hashtable-&gt;nbatch)</span>
+<span class="lineNum">     837 </span>            :     {
+<span class="lineNum">     838 </span><span class="lineCov">     493584 :         BufFile    *file = hashtable-&gt;outerBatchFile[curbatch];</span>
+<span class="lineNum">     839 </span>            : 
+<span class="lineNum">     840 </span>            :         /*
+<span class="lineNum">     841 </span>            :          * In outer-join cases, we could get here even though the batch file
+<span class="lineNum">     842 </span>            :          * is empty.
+<span class="lineNum">     843 </span>            :          */
+<span class="lineNum">     844 </span><span class="lineCov">     493584 :         if (file == NULL)</span>
+<span class="lineNum">     845 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     846 </span>            : 
+<span class="lineNum">     847 </span><span class="lineCov">     493584 :         slot = ExecHashJoinGetSavedTuple(hjstate,</span>
+<span class="lineNum">     848 </span>            :                                          file,
+<span class="lineNum">     849 </span>            :                                          hashvalue,
+<span class="lineNum">     850 </span>            :                                          hjstate-&gt;hj_OuterTupleSlot);
+<span class="lineNum">     851 </span><span class="lineCov">     493584 :         if (!TupIsNull(slot))</span>
+<span class="lineNum">     852 </span><span class="lineCov">     493064 :             return slot;</span>
+<span class="lineNum">     853 </span>            :     }
+<span class="lineNum">     854 </span>            : 
+<span class="lineNum">     855 </span>            :     /* End of this batch */
+<span class="lineNum">     856 </span><span class="lineCov">       3976 :     return NULL;</span>
+<span class="lineNum">     857 </span>            : }
+<span class="lineNum">     858 </span>            : 
+<span class="lineNum">     859 </span>            : /*
+<span class="lineNum">     860 </span>            :  * ExecHashJoinOuterGetTuple variant for the parallel case.
+<a name="861"><span class="lineNum">     861 </span>            :  */</a>
+<span class="lineNum">     862 </span>            : static TupleTableSlot *
+<span class="lineNum">     863 </span><span class="lineCov">     600290 : ExecParallelHashJoinOuterGetTuple(PlanState *outerNode,</span>
+<span class="lineNum">     864 </span>            :                                   HashJoinState *hjstate,
+<span class="lineNum">     865 </span>            :                                   uint32 *hashvalue)
+<span class="lineNum">     866 </span>            : {
+<span class="lineNum">     867 </span><span class="lineCov">     600290 :     HashJoinTable hashtable = hjstate-&gt;hj_HashTable;</span>
+<span class="lineNum">     868 </span><span class="lineCov">     600290 :     int         curbatch = hashtable-&gt;curbatch;</span>
+<span class="lineNum">     869 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     870 </span>            : 
+<span class="lineNum">     871 </span>            :     /*
+<span class="lineNum">     872 </span>            :      * In the Parallel Hash case we only run the outer plan directly for
+<span class="lineNum">     873 </span>            :      * single-batch hash joins.  Otherwise we have to go to batch files, even
+<span class="lineNum">     874 </span>            :      * for batch 0.
+<span class="lineNum">     875 </span>            :      */
+<span class="lineNum">     876 </span><span class="lineCov">     600332 :     if (curbatch == 0 &amp;&amp; hashtable-&gt;nbatch == 1)</span>
+<span class="lineNum">     877 </span>            :     {
+<span class="lineNum">     878 </span><span class="lineCov">     240042 :         slot = ExecProcNode(outerNode);</span>
+<span class="lineNum">     879 </span>            : 
+<span class="lineNum">     880 </span><span class="lineCov">     480084 :         while (!TupIsNull(slot))</span>
+<span class="lineNum">     881 </span>            :         {
+<span class="lineNum">     882 </span><span class="lineCov">     240000 :             ExprContext *econtext = hjstate-&gt;js.ps.ps_ExprContext;</span>
+<span class="lineNum">     883 </span>            : 
+<span class="lineNum">     884 </span><span class="lineCov">     240000 :             econtext-&gt;ecxt_outertuple = slot;</span>
+<span class="lineNum">     885 </span><span class="lineCov">     240000 :             if (ExecHashGetHashValue(hashtable, econtext,</span>
+<span class="lineNum">     886 </span>            :                                      hjstate-&gt;hj_OuterHashKeys,
+<span class="lineNum">     887 </span>            :                                      true,  /* outer tuple */
+<span class="lineNum">     888 </span><span class="lineCov">     240000 :                                      HJ_FILL_OUTER(hjstate),</span>
+<span class="lineNum">     889 </span>            :                                      hashvalue))
+<span class="lineNum">     890 </span><span class="lineCov">     240000 :                 return slot;</span>
+<span class="lineNum">     891 </span>            : 
+<span class="lineNum">     892 </span>            :             /*
+<span class="lineNum">     893 </span>            :              * That tuple couldn't match because of a NULL, so discard it and
+<span class="lineNum">     894 </span>            :              * continue with the next one.
+<span class="lineNum">     895 </span>            :              */
+<span class="lineNum">     896 </span><span class="lineNoCov">          0 :             slot = ExecProcNode(outerNode);</span>
+<span class="lineNum">     897 </span>            :         }
+<span class="lineNum">     898 </span>            :     }
+<span class="lineNum">     899 </span><span class="lineCov">     360248 :     else if (curbatch &lt; hashtable-&gt;nbatch)</span>
+<span class="lineNum">     900 </span>            :     {
+<span class="lineNum">     901 </span>            :         MinimalTuple tuple;
+<span class="lineNum">     902 </span>            : 
+<span class="lineNum">     903 </span><span class="lineCov">     360248 :         tuple = sts_parallel_scan_next(hashtable-&gt;batches[curbatch].outer_tuples,</span>
+<span class="lineNum">     904 </span>            :                                        hashvalue);
+<span class="lineNum">     905 </span><span class="lineCov">     360248 :         if (tuple != NULL)</span>
+<span class="lineNum">     906 </span>            :         {
+<span class="lineNum">     907 </span><span class="lineCov">     360008 :             ExecForceStoreMinimalTuple(tuple,</span>
+<span class="lineNum">     908 </span>            :                                        hjstate-&gt;hj_OuterTupleSlot,
+<span class="lineNum">     909 </span>            :                                        false);
+<span class="lineNum">     910 </span><span class="lineCov">     360008 :             slot = hjstate-&gt;hj_OuterTupleSlot;</span>
+<span class="lineNum">     911 </span><span class="lineCov">     360008 :             return slot;</span>
+<span class="lineNum">     912 </span>            :         }
+<span class="lineNum">     913 </span>            :         else
+<span class="lineNum">     914 </span><span class="lineCov">        240 :             ExecClearTuple(hjstate-&gt;hj_OuterTupleSlot);</span>
+<span class="lineNum">     915 </span>            :     }
+<span class="lineNum">     916 </span>            : 
+<span class="lineNum">     917 </span>            :     /* End of this batch */
+<span class="lineNum">     918 </span><span class="lineCov">        282 :     return NULL;</span>
+<span class="lineNum">     919 </span>            : }
+<span class="lineNum">     920 </span>            : 
+<span class="lineNum">     921 </span>            : /*
+<span class="lineNum">     922 </span>            :  * ExecHashJoinNewBatch
+<span class="lineNum">     923 </span>            :  *      switch to a new hashjoin batch
+<span class="lineNum">     924 </span>            :  *
+<span class="lineNum">     925 </span>            :  * Returns true if successful, false if there are no more batches.
+<a name="926"><span class="lineNum">     926 </span>            :  */</a>
+<span class="lineNum">     927 </span>            : static bool
+<span class="lineNum">     928 </span><span class="lineCov">       3974 : ExecHashJoinNewBatch(HashJoinState *hjstate)</span>
+<span class="lineNum">     929 </span>            : {
+<span class="lineNum">     930 </span><span class="lineCov">       3974 :     HashJoinTable hashtable = hjstate-&gt;hj_HashTable;</span>
+<span class="lineNum">     931 </span>            :     int         nbatch;
+<span class="lineNum">     932 </span>            :     int         curbatch;
+<span class="lineNum">     933 </span>            :     BufFile    *innerFile;
+<span class="lineNum">     934 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     935 </span>            :     uint32      hashvalue;
+<span class="lineNum">     936 </span>            : 
+<span class="lineNum">     937 </span><span class="lineCov">       3974 :     nbatch = hashtable-&gt;nbatch;</span>
+<span class="lineNum">     938 </span><span class="lineCov">       3974 :     curbatch = hashtable-&gt;curbatch;</span>
+<span class="lineNum">     939 </span>            : 
+<span class="lineNum">     940 </span><span class="lineCov">       3974 :     if (curbatch &gt; 0)</span>
+<span class="lineNum">     941 </span>            :     {
+<span class="lineNum">     942 </span>            :         /*
+<span class="lineNum">     943 </span>            :          * We no longer need the previous outer batch file; close it right
+<span class="lineNum">     944 </span>            :          * away to free disk space.
+<span class="lineNum">     945 </span>            :          */
+<span class="lineNum">     946 </span><span class="lineCov">        520 :         if (hashtable-&gt;outerBatchFile[curbatch])</span>
+<span class="lineNum">     947 </span><span class="lineCov">        520 :             BufFileClose(hashtable-&gt;outerBatchFile[curbatch]);</span>
+<span class="lineNum">     948 </span><span class="lineCov">        520 :         hashtable-&gt;outerBatchFile[curbatch] = NULL;</span>
+<span class="lineNum">     949 </span>            :     }
+<span class="lineNum">     950 </span>            :     else                        /* we just finished the first batch */
+<span class="lineNum">     951 </span>            :     {
+<span class="lineNum">     952 </span>            :         /*
+<span class="lineNum">     953 </span>            :          * Reset some of the skew optimization state variables, since we no
+<span class="lineNum">     954 </span>            :          * longer need to consider skew tuples after the first batch. The
+<span class="lineNum">     955 </span>            :          * memory context reset we are about to do will release the skew
+<span class="lineNum">     956 </span>            :          * hashtable itself.
+<span class="lineNum">     957 </span>            :          */
+<span class="lineNum">     958 </span><span class="lineCov">       3454 :         hashtable-&gt;skewEnabled = false;</span>
+<span class="lineNum">     959 </span><span class="lineCov">       3454 :         hashtable-&gt;skewBucket = NULL;</span>
+<span class="lineNum">     960 </span><span class="lineCov">       3454 :         hashtable-&gt;skewBucketNums = NULL;</span>
+<span class="lineNum">     961 </span><span class="lineCov">       3454 :         hashtable-&gt;nSkewBuckets = 0;</span>
+<span class="lineNum">     962 </span><span class="lineCov">       3454 :         hashtable-&gt;spaceUsedSkew = 0;</span>
+<span class="lineNum">     963 </span>            :     }
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span>            :     /*
+<span class="lineNum">     966 </span>            :      * We can always skip over any batches that are completely empty on both
+<span class="lineNum">     967 </span>            :      * sides.  We can sometimes skip over batches that are empty on only one
+<span class="lineNum">     968 </span>            :      * side, but there are exceptions:
+<span class="lineNum">     969 </span>            :      *
+<span class="lineNum">     970 </span>            :      * 1. In a left/full outer join, we have to process outer batches even if
+<span class="lineNum">     971 </span>            :      * the inner batch is empty.  Similarly, in a right/full outer join, we
+<span class="lineNum">     972 </span>            :      * have to process inner batches even if the outer batch is empty.
+<span class="lineNum">     973 </span>            :      *
+<span class="lineNum">     974 </span>            :      * 2. If we have increased nbatch since the initial estimate, we have to
+<span class="lineNum">     975 </span>            :      * scan inner batches since they might contain tuples that need to be
+<span class="lineNum">     976 </span>            :      * reassigned to later inner batches.
+<span class="lineNum">     977 </span>            :      *
+<span class="lineNum">     978 </span>            :      * 3. Similarly, if we have increased nbatch since starting the outer
+<span class="lineNum">     979 </span>            :      * scan, we have to rescan outer batches in case they contain tuples that
+<span class="lineNum">     980 </span>            :      * need to be reassigned.
+<span class="lineNum">     981 </span>            :      */
+<span class="lineNum">     982 </span><span class="lineCov">       3974 :     curbatch++;</span>
+<span class="lineNum">     983 </span><span class="lineCov">       8468 :     while (curbatch &lt; nbatch &amp;&amp;</span>
+<span class="lineNum">     984 </span><span class="lineCov">       1040 :            (hashtable-&gt;outerBatchFile[curbatch] == NULL ||</span>
+<span class="lineNum">     985 </span><span class="lineCov">        520 :             hashtable-&gt;innerBatchFile[curbatch] == NULL))</span>
+<span class="lineNum">     986 </span>            :     {
+<span class="lineNum">     987 </span><span class="lineNoCov">          0 :         if (hashtable-&gt;outerBatchFile[curbatch] &amp;&amp;</span>
+<span class="lineNum">     988 </span><span class="lineNoCov">          0 :             HJ_FILL_OUTER(hjstate))</span>
+<span class="lineNum">     989 </span><span class="lineNoCov">          0 :             break;              /* must process due to rule 1 */</span>
+<span class="lineNum">     990 </span><span class="lineNoCov">          0 :         if (hashtable-&gt;innerBatchFile[curbatch] &amp;&amp;</span>
+<span class="lineNum">     991 </span><span class="lineNoCov">          0 :             HJ_FILL_INNER(hjstate))</span>
+<span class="lineNum">     992 </span><span class="lineNoCov">          0 :             break;              /* must process due to rule 1 */</span>
+<span class="lineNum">     993 </span><span class="lineNoCov">          0 :         if (hashtable-&gt;innerBatchFile[curbatch] &amp;&amp;</span>
+<span class="lineNum">     994 </span><span class="lineNoCov">          0 :             nbatch != hashtable-&gt;nbatch_original)</span>
+<span class="lineNum">     995 </span><span class="lineNoCov">          0 :             break;              /* must process due to rule 2 */</span>
+<span class="lineNum">     996 </span><span class="lineNoCov">          0 :         if (hashtable-&gt;outerBatchFile[curbatch] &amp;&amp;</span>
+<span class="lineNum">     997 </span><span class="lineNoCov">          0 :             nbatch != hashtable-&gt;nbatch_outstart)</span>
+<span class="lineNum">     998 </span><span class="lineNoCov">          0 :             break;              /* must process due to rule 3 */</span>
+<span class="lineNum">     999 </span>            :         /* We can ignore this batch. */
+<span class="lineNum">    1000 </span>            :         /* Release associated temp files right away. */
+<span class="lineNum">    1001 </span><span class="lineNoCov">          0 :         if (hashtable-&gt;innerBatchFile[curbatch])</span>
+<span class="lineNum">    1002 </span><span class="lineNoCov">          0 :             BufFileClose(hashtable-&gt;innerBatchFile[curbatch]);</span>
+<span class="lineNum">    1003 </span><span class="lineNoCov">          0 :         hashtable-&gt;innerBatchFile[curbatch] = NULL;</span>
+<span class="lineNum">    1004 </span><span class="lineNoCov">          0 :         if (hashtable-&gt;outerBatchFile[curbatch])</span>
+<span class="lineNum">    1005 </span><span class="lineNoCov">          0 :             BufFileClose(hashtable-&gt;outerBatchFile[curbatch]);</span>
+<span class="lineNum">    1006 </span><span class="lineNoCov">          0 :         hashtable-&gt;outerBatchFile[curbatch] = NULL;</span>
+<span class="lineNum">    1007 </span><span class="lineNoCov">          0 :         curbatch++;</span>
+<span class="lineNum">    1008 </span>            :     }
+<span class="lineNum">    1009 </span>            : 
+<span class="lineNum">    1010 </span><span class="lineCov">       3974 :     if (curbatch &gt;= nbatch)</span>
+<span class="lineNum">    1011 </span><span class="lineCov">       3454 :         return false;           /* no more batches */</span>
+<span class="lineNum">    1012 </span>            : 
+<span class="lineNum">    1013 </span><span class="lineCov">        520 :     hashtable-&gt;curbatch = curbatch;</span>
+<span class="lineNum">    1014 </span>            : 
+<span class="lineNum">    1015 </span>            :     /*
+<span class="lineNum">    1016 </span>            :      * Reload the hash table with the new inner batch (which could be empty)
+<span class="lineNum">    1017 </span>            :      */
+<span class="lineNum">    1018 </span><span class="lineCov">        520 :     ExecHashTableReset(hashtable);</span>
+<span class="lineNum">    1019 </span>            : 
+<span class="lineNum">    1020 </span><span class="lineCov">        520 :     innerFile = hashtable-&gt;innerBatchFile[curbatch];</span>
+<span class="lineNum">    1021 </span>            : 
+<span class="lineNum">    1022 </span><span class="lineCov">        520 :     if (innerFile != NULL)</span>
+<span class="lineNum">    1023 </span>            :     {
+<span class="lineNum">    1024 </span><span class="lineCov">        520 :         if (BufFileSeek(innerFile, 0, 0L, SEEK_SET))</span>
+<span class="lineNum">    1025 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">    1026 </span>            :                     (errcode_for_file_access(),
+<span class="lineNum">    1027 </span>            :                      errmsg(&quot;could not rewind hash-join temporary file: %m&quot;)));
+<span class="lineNum">    1028 </span>            : 
+<span class="lineNum">    1029 </span><span class="lineCov">    1173408 :         while ((slot = ExecHashJoinGetSavedTuple(hjstate,</span>
+<span class="lineNum">    1030 </span>            :                                                  innerFile,
+<span class="lineNum">    1031 </span>            :                                                  &amp;hashvalue,
+<span class="lineNum">    1032 </span>            :                                                  hjstate-&gt;hj_HashTupleSlot)))
+<span class="lineNum">    1033 </span>            :         {
+<span class="lineNum">    1034 </span>            :             /*
+<span class="lineNum">    1035 </span>            :              * NOTE: some tuples may be sent to future batches.  Also, it is
+<span class="lineNum">    1036 </span>            :              * possible for hashtable-&gt;nbatch to be increased here!
+<span class="lineNum">    1037 </span>            :              */
+<span class="lineNum">    1038 </span><span class="lineCov">    1172368 :             ExecHashTableInsert(hashtable, slot, hashvalue);</span>
+<span class="lineNum">    1039 </span>            :         }
+<span class="lineNum">    1040 </span>            : 
+<span class="lineNum">    1041 </span>            :         /*
+<span class="lineNum">    1042 </span>            :          * after we build the hash table, the inner batch file is no longer
+<span class="lineNum">    1043 </span>            :          * needed
+<span class="lineNum">    1044 </span>            :          */
+<span class="lineNum">    1045 </span><span class="lineCov">        520 :         BufFileClose(innerFile);</span>
+<span class="lineNum">    1046 </span><span class="lineCov">        520 :         hashtable-&gt;innerBatchFile[curbatch] = NULL;</span>
+<span class="lineNum">    1047 </span>            :     }
+<span class="lineNum">    1048 </span>            : 
+<span class="lineNum">    1049 </span>            :     /*
+<span class="lineNum">    1050 </span>            :      * Rewind outer batch file (if present), so that we can start reading it.
+<span class="lineNum">    1051 </span>            :      */
+<span class="lineNum">    1052 </span><span class="lineCov">        520 :     if (hashtable-&gt;outerBatchFile[curbatch] != NULL)</span>
+<span class="lineNum">    1053 </span>            :     {
+<span class="lineNum">    1054 </span><span class="lineCov">        520 :         if (BufFileSeek(hashtable-&gt;outerBatchFile[curbatch], 0, 0L, SEEK_SET))</span>
+<span class="lineNum">    1055 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">    1056 </span>            :                     (errcode_for_file_access(),
+<span class="lineNum">    1057 </span>            :                      errmsg(&quot;could not rewind hash-join temporary file: %m&quot;)));
+<span class="lineNum">    1058 </span>            :     }
+<span class="lineNum">    1059 </span>            : 
+<span class="lineNum">    1060 </span><span class="lineCov">        520 :     return true;</span>
+<span class="lineNum">    1061 </span>            : }
+<span class="lineNum">    1062 </span>            : 
+<span class="lineNum">    1063 </span>            : /*
+<span class="lineNum">    1064 </span>            :  * Choose a batch to work on, and attach to it.  Returns true if successful,
+<span class="lineNum">    1065 </span>            :  * false if there are no more batches.
+<a name="1066"><span class="lineNum">    1066 </span>            :  */</a>
+<span class="lineNum">    1067 </span>            : static bool
+<span class="lineNum">    1068 </span><span class="lineCov">        394 : ExecParallelHashJoinNewBatch(HashJoinState *hjstate)</span>
+<span class="lineNum">    1069 </span>            : {
+<span class="lineNum">    1070 </span><span class="lineCov">        394 :     HashJoinTable hashtable = hjstate-&gt;hj_HashTable;</span>
+<span class="lineNum">    1071 </span>            :     int         start_batchno;
+<span class="lineNum">    1072 </span>            :     int         batchno;
+<span class="lineNum">    1073 </span>            : 
+<span class="lineNum">    1074 </span>            :     /*
+<span class="lineNum">    1075 </span>            :      * If we started up so late that the batch tracking array has been freed
+<span class="lineNum">    1076 </span>            :      * already by ExecHashTableDetach(), then we are finished.  See also
+<span class="lineNum">    1077 </span>            :      * ExecParallelHashEnsureBatchAccessors().
+<span class="lineNum">    1078 </span>            :      */
+<span class="lineNum">    1079 </span><span class="lineCov">        394 :     if (hashtable-&gt;batches == NULL)</span>
+<span class="lineNum">    1080 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1081 </span>            : 
+<span class="lineNum">    1082 </span>            :     /*
+<span class="lineNum">    1083 </span>            :      * If we were already attached to a batch, remember not to bother checking
+<span class="lineNum">    1084 </span>            :      * it again, and detach from it (possibly freeing the hash table if we are
+<span class="lineNum">    1085 </span>            :      * last to detach).
+<span class="lineNum">    1086 </span>            :      */
+<span class="lineNum">    1087 </span><span class="lineCov">        394 :     if (hashtable-&gt;curbatch &gt;= 0)</span>
+<span class="lineNum">    1088 </span>            :     {
+<span class="lineNum">    1089 </span><span class="lineCov">        282 :         hashtable-&gt;batches[hashtable-&gt;curbatch].done = true;</span>
+<span class="lineNum">    1090 </span><span class="lineCov">        282 :         ExecHashTableDetachBatch(hashtable);</span>
+<span class="lineNum">    1091 </span>            :     }
+<span class="lineNum">    1092 </span>            : 
+<span class="lineNum">    1093 </span>            :     /*
+<span class="lineNum">    1094 </span>            :      * Search for a batch that isn't done.  We use an atomic counter to start
+<span class="lineNum">    1095 </span>            :      * our search at a different batch in every participant when there are
+<span class="lineNum">    1096 </span>            :      * more batches than participants.
+<span class="lineNum">    1097 </span>            :      */
+<span class="lineNum">    1098 </span><span class="lineCov">        394 :     batchno = start_batchno =</span>
+<span class="lineNum">    1099 </span><span class="lineCov">        788 :         pg_atomic_fetch_add_u32(&amp;hashtable-&gt;parallel_state-&gt;distributor, 1) %</span>
+<span class="lineNum">    1100 </span><span class="lineCov">        394 :         hashtable-&gt;nbatch;</span>
+<span class="lineNum">    1101 </span>            :     do
+<span class="lineNum">    1102 </span>            :     {
+<span class="lineNum">    1103 </span>            :         uint32      hashvalue;
+<span class="lineNum">    1104 </span>            :         MinimalTuple tuple;
+<span class="lineNum">    1105 </span>            :         TupleTableSlot *slot;
+<span class="lineNum">    1106 </span>            : 
+<span class="lineNum">    1107 </span><span class="lineCov">        984 :         if (!hashtable-&gt;batches[batchno].done)</span>
+<span class="lineNum">    1108 </span>            :         {
+<span class="lineNum">    1109 </span>            :             SharedTuplestoreAccessor *inner_tuples;
+<span class="lineNum">    1110 </span><span class="lineCov">        528 :             Barrier    *batch_barrier =</span>
+<span class="lineNum">    1111 </span><span class="lineCov">        528 :             &amp;hashtable-&gt;batches[batchno].shared-&gt;batch_barrier;</span>
+<span class="lineNum">    1112 </span>            : 
+<span class="lineNum">    1113 </span><span class="lineCov">        528 :             switch (BarrierAttach(batch_barrier))</span>
+<span class="lineNum">    1114 </span>            :             {
+<span class="lineNum">    1115 </span>            :                 case PHJ_BATCH_ELECTING:
+<span class="lineNum">    1116 </span>            : 
+<span class="lineNum">    1117 </span>            :                     /* One backend allocates the hash table. */
+<span class="lineNum">    1118 </span><span class="lineCov">        180 :                     if (BarrierArriveAndWait(batch_barrier,</span>
+<span class="lineNum">    1119 </span>            :                                              WAIT_EVENT_HASH_BATCH_ELECTING))
+<span class="lineNum">    1120 </span><span class="lineCov">        180 :                         ExecParallelHashTableAlloc(hashtable, batchno);</span>
+<span class="lineNum">    1121 </span>            :                     /* Fall through. */
+<span class="lineNum">    1122 </span>            : 
+<span class="lineNum">    1123 </span>            :                 case PHJ_BATCH_ALLOCATING:
+<span class="lineNum">    1124 </span>            :                     /* Wait for allocation to complete. */
+<span class="lineNum">    1125 </span><span class="lineCov">        180 :                     BarrierArriveAndWait(batch_barrier,</span>
+<span class="lineNum">    1126 </span>            :                                          WAIT_EVENT_HASH_BATCH_ALLOCATING);
+<span class="lineNum">    1127 </span>            :                     /* Fall through. */
+<span class="lineNum">    1128 </span>            : 
+<span class="lineNum">    1129 </span>            :                 case PHJ_BATCH_LOADING:
+<span class="lineNum">    1130 </span>            :                     /* Start (or join in) loading tuples. */
+<span class="lineNum">    1131 </span><span class="lineCov">        186 :                     ExecParallelHashTableSetCurrentBatch(hashtable, batchno);</span>
+<span class="lineNum">    1132 </span><span class="lineCov">        186 :                     inner_tuples = hashtable-&gt;batches[batchno].inner_tuples;</span>
+<span class="lineNum">    1133 </span><span class="lineCov">        186 :                     sts_begin_parallel_scan(inner_tuples);</span>
+<span class="lineNum">    1134 </span><span class="lineCov">     326308 :                     while ((tuple = sts_parallel_scan_next(inner_tuples,</span>
+<span class="lineNum">    1135 </span>            :                                                            &amp;hashvalue)))
+<span class="lineNum">    1136 </span>            :                     {
+<span class="lineNum">    1137 </span><span class="lineCov">     325936 :                         ExecForceStoreMinimalTuple(tuple,</span>
+<span class="lineNum">    1138 </span>            :                                                    hjstate-&gt;hj_HashTupleSlot,
+<span class="lineNum">    1139 </span>            :                                                    false);
+<span class="lineNum">    1140 </span><span class="lineCov">     325936 :                         slot = hjstate-&gt;hj_HashTupleSlot;</span>
+<span class="lineNum">    1141 </span><span class="lineCov">     325936 :                         ExecParallelHashTableInsertCurrentBatch(hashtable, slot,</span>
+<span class="lineNum">    1142 </span>            :                                                                 hashvalue);
+<span class="lineNum">    1143 </span>            :                     }
+<span class="lineNum">    1144 </span><span class="lineCov">        186 :                     sts_end_parallel_scan(inner_tuples);</span>
+<span class="lineNum">    1145 </span><span class="lineCov">        186 :                     BarrierArriveAndWait(batch_barrier,</span>
+<span class="lineNum">    1146 </span>            :                                          WAIT_EVENT_HASH_BATCH_LOADING);
+<span class="lineNum">    1147 </span>            :                     /* Fall through. */
+<span class="lineNum">    1148 </span>            : 
+<span class="lineNum">    1149 </span>            :                 case PHJ_BATCH_PROBING:
+<span class="lineNum">    1150 </span>            : 
+<span class="lineNum">    1151 </span>            :                     /*
+<span class="lineNum">    1152 </span>            :                      * This batch is ready to probe.  Return control to
+<span class="lineNum">    1153 </span>            :                      * caller. We stay attached to batch_barrier so that the
+<span class="lineNum">    1154 </span>            :                      * hash table stays alive until everyone's finished
+<span class="lineNum">    1155 </span>            :                      * probing it, but no participant is allowed to wait at
+<span class="lineNum">    1156 </span>            :                      * this barrier again (or else a deadlock could occur).
+<span class="lineNum">    1157 </span>            :                      * All attached participants must eventually call
+<span class="lineNum">    1158 </span>            :                      * BarrierArriveAndDetach() so that the final phase
+<span class="lineNum">    1159 </span>            :                      * PHJ_BATCH_DONE can be reached.
+<span class="lineNum">    1160 </span>            :                      */
+<span class="lineNum">    1161 </span><span class="lineCov">        282 :                     ExecParallelHashTableSetCurrentBatch(hashtable, batchno);</span>
+<span class="lineNum">    1162 </span><span class="lineCov">        282 :                     sts_begin_parallel_scan(hashtable-&gt;batches[batchno].outer_tuples);</span>
+<span class="lineNum">    1163 </span><span class="lineCov">        282 :                     return true;</span>
+<span class="lineNum">    1164 </span>            : 
+<span class="lineNum">    1165 </span>            :                 case PHJ_BATCH_DONE:
+<span class="lineNum">    1166 </span>            : 
+<span class="lineNum">    1167 </span>            :                     /*
+<span class="lineNum">    1168 </span>            :                      * Already done.  Detach and go around again (if any
+<span class="lineNum">    1169 </span>            :                      * remain).
+<span class="lineNum">    1170 </span>            :                      */
+<span class="lineNum">    1171 </span><span class="lineCov">        246 :                     BarrierDetach(batch_barrier);</span>
+<span class="lineNum">    1172 </span><span class="lineCov">        246 :                     hashtable-&gt;batches[batchno].done = true;</span>
+<span class="lineNum">    1173 </span><span class="lineCov">        246 :                     hashtable-&gt;curbatch = -1;</span>
+<span class="lineNum">    1174 </span><span class="lineCov">        246 :                     break;</span>
+<span class="lineNum">    1175 </span>            : 
+<span class="lineNum">    1176 </span>            :                 default:
+<span class="lineNum">    1177 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;unexpected batch phase %d&quot;,</span>
+<span class="lineNum">    1178 </span>            :                          BarrierPhase(batch_barrier));
+<span class="lineNum">    1179 </span>            :             }
+<span class="lineNum">    1180 </span>            :         }
+<span class="lineNum">    1181 </span><span class="lineCov">        702 :         batchno = (batchno + 1) % hashtable-&gt;nbatch;</span>
+<span class="lineNum">    1182 </span><span class="lineCov">        702 :     } while (batchno != start_batchno);</span>
+<span class="lineNum">    1183 </span>            : 
+<span class="lineNum">    1184 </span><span class="lineCov">        112 :     return false;</span>
+<span class="lineNum">    1185 </span>            : }
+<span class="lineNum">    1186 </span>            : 
+<span class="lineNum">    1187 </span>            : /*
+<span class="lineNum">    1188 </span>            :  * ExecHashJoinSaveTuple
+<span class="lineNum">    1189 </span>            :  *      save a tuple to a batch file.
+<span class="lineNum">    1190 </span>            :  *
+<span class="lineNum">    1191 </span>            :  * The data recorded in the file for each tuple is its hash value,
+<span class="lineNum">    1192 </span>            :  * then the tuple in MinimalTuple format.
+<span class="lineNum">    1193 </span>            :  *
+<span class="lineNum">    1194 </span>            :  * Note: it is important always to call this in the regular executor
+<span class="lineNum">    1195 </span>            :  * context, not in a shorter-lived context; else the temp file buffers
+<span class="lineNum">    1196 </span>            :  * will get messed up.
+<a name="1197"><span class="lineNum">    1197 </span>            :  */</a>
+<span class="lineNum">    1198 </span>            : void
+<span class="lineNum">    1199 </span><span class="lineCov">    1665432 : ExecHashJoinSaveTuple(MinimalTuple tuple, uint32 hashvalue,</span>
+<span class="lineNum">    1200 </span>            :                       BufFile **fileptr)
+<span class="lineNum">    1201 </span>            : {
+<span class="lineNum">    1202 </span><span class="lineCov">    1665432 :     BufFile    *file = *fileptr;</span>
+<span class="lineNum">    1203 </span>            :     size_t      written;
+<span class="lineNum">    1204 </span>            : 
+<span class="lineNum">    1205 </span><span class="lineCov">    1665432 :     if (file == NULL)</span>
+<span class="lineNum">    1206 </span>            :     {
+<span class="lineNum">    1207 </span>            :         /* First write to this batch file, so open it. */
+<span class="lineNum">    1208 </span><span class="lineCov">       1040 :         file = BufFileCreateTemp(false);</span>
+<span class="lineNum">    1209 </span><span class="lineCov">       1040 :         *fileptr = file;</span>
+<span class="lineNum">    1210 </span>            :     }
+<span class="lineNum">    1211 </span>            : 
+<span class="lineNum">    1212 </span><span class="lineCov">    1665432 :     written = BufFileWrite(file, (void *) &amp;hashvalue, sizeof(uint32));</span>
+<span class="lineNum">    1213 </span><span class="lineCov">    1665432 :     if (written != sizeof(uint32))</span>
+<span class="lineNum">    1214 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">    1215 </span>            :                 (errcode_for_file_access(),
+<span class="lineNum">    1216 </span>            :                  errmsg(&quot;could not write to hash-join temporary file: %m&quot;)));
+<span class="lineNum">    1217 </span>            : 
+<span class="lineNum">    1218 </span><span class="lineCov">    1665432 :     written = BufFileWrite(file, (void *) tuple, tuple-&gt;t_len);</span>
+<span class="lineNum">    1219 </span><span class="lineCov">    1665432 :     if (written != tuple-&gt;t_len)</span>
+<span class="lineNum">    1220 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">    1221 </span>            :                 (errcode_for_file_access(),
+<span class="lineNum">    1222 </span>            :                  errmsg(&quot;could not write to hash-join temporary file: %m&quot;)));
+<span class="lineNum">    1223 </span><span class="lineCov">    1665432 : }</span>
+<span class="lineNum">    1224 </span>            : 
+<span class="lineNum">    1225 </span>            : /*
+<span class="lineNum">    1226 </span>            :  * ExecHashJoinGetSavedTuple
+<span class="lineNum">    1227 </span>            :  *      read the next tuple from a batch file.  Return NULL if no more.
+<span class="lineNum">    1228 </span>            :  *
+<span class="lineNum">    1229 </span>            :  * On success, *hashvalue is set to the tuple's hash value, and the tuple
+<span class="lineNum">    1230 </span>            :  * itself is stored in the given slot.
+<a name="1231"><span class="lineNum">    1231 </span>            :  */</a>
+<span class="lineNum">    1232 </span>            : static TupleTableSlot *
+<span class="lineNum">    1233 </span><span class="lineCov">    1666472 : ExecHashJoinGetSavedTuple(HashJoinState *hjstate,</span>
+<span class="lineNum">    1234 </span>            :                           BufFile *file,
+<span class="lineNum">    1235 </span>            :                           uint32 *hashvalue,
+<span class="lineNum">    1236 </span>            :                           TupleTableSlot *tupleSlot)
+<span class="lineNum">    1237 </span>            : {
+<span class="lineNum">    1238 </span>            :     uint32      header[2];
+<span class="lineNum">    1239 </span>            :     size_t      nread;
+<span class="lineNum">    1240 </span>            :     MinimalTuple tuple;
+<span class="lineNum">    1241 </span>            : 
+<span class="lineNum">    1242 </span>            :     /*
+<span class="lineNum">    1243 </span>            :      * We check for interrupts here because this is typically taken as an
+<span class="lineNum">    1244 </span>            :      * alternative code path to an ExecProcNode() call, which would include
+<span class="lineNum">    1245 </span>            :      * such a check.
+<span class="lineNum">    1246 </span>            :      */
+<span class="lineNum">    1247 </span><span class="lineCov">    1666472 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1248 </span>            : 
+<span class="lineNum">    1249 </span>            :     /*
+<span class="lineNum">    1250 </span>            :      * Since both the hash value and the MinimalTuple length word are uint32,
+<span class="lineNum">    1251 </span>            :      * we can read them both in one BufFileRead() call without any type
+<span class="lineNum">    1252 </span>            :      * cheating.
+<span class="lineNum">    1253 </span>            :      */
+<span class="lineNum">    1254 </span><span class="lineCov">    1666472 :     nread = BufFileRead(file, (void *) header, sizeof(header));</span>
+<span class="lineNum">    1255 </span><span class="lineCov">    1666472 :     if (nread == 0)             /* end of file */</span>
+<span class="lineNum">    1256 </span>            :     {
+<span class="lineNum">    1257 </span><span class="lineCov">       1040 :         ExecClearTuple(tupleSlot);</span>
+<span class="lineNum">    1258 </span><span class="lineCov">       1040 :         return NULL;</span>
+<span class="lineNum">    1259 </span>            :     }
+<span class="lineNum">    1260 </span><span class="lineCov">    1665432 :     if (nread != sizeof(header))</span>
+<span class="lineNum">    1261 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">    1262 </span>            :                 (errcode_for_file_access(),
+<span class="lineNum">    1263 </span>            :                  errmsg(&quot;could not read from hash-join temporary file: %m&quot;)));
+<span class="lineNum">    1264 </span><span class="lineCov">    1665432 :     *hashvalue = header[0];</span>
+<span class="lineNum">    1265 </span><span class="lineCov">    1665432 :     tuple = (MinimalTuple) palloc(header[1]);</span>
+<span class="lineNum">    1266 </span><span class="lineCov">    1665432 :     tuple-&gt;t_len = header[1];</span>
+<span class="lineNum">    1267 </span><span class="lineCov">    1665432 :     nread = BufFileRead(file,</span>
+<span class="lineNum">    1268 </span>            :                         (void *) ((char *) tuple + sizeof(uint32)),
+<span class="lineNum">    1269 </span><span class="lineCov">    1665432 :                         header[1] - sizeof(uint32));</span>
+<span class="lineNum">    1270 </span><span class="lineCov">    1665432 :     if (nread != header[1] - sizeof(uint32))</span>
+<span class="lineNum">    1271 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">    1272 </span>            :                 (errcode_for_file_access(),
+<span class="lineNum">    1273 </span>            :                  errmsg(&quot;could not read from hash-join temporary file: %m&quot;)));
+<span class="lineNum">    1274 </span><span class="lineCov">    1665432 :     ExecForceStoreMinimalTuple(tuple, tupleSlot, true);</span>
+<span class="lineNum">    1275 </span><span class="lineCov">    1665432 :     return tupleSlot;</span>
+<span class="lineNum">    1276 </span>            : }
+<span class="lineNum">    1277 </span>            : 
+<a name="1278"><span class="lineNum">    1278 </span>            : </a>
+<span class="lineNum">    1279 </span>            : void
+<span class="lineNum">    1280 </span><span class="lineCov">        176 : ExecReScanHashJoin(HashJoinState *node)</span>
+<span class="lineNum">    1281 </span>            : {
+<span class="lineNum">    1282 </span>            :     /*
+<span class="lineNum">    1283 </span>            :      * In a multi-batch join, we currently have to do rescans the hard way,
+<span class="lineNum">    1284 </span>            :      * primarily because batch temp files may have already been released. But
+<span class="lineNum">    1285 </span>            :      * if it's a single-batch join, and there is no parameter change for the
+<span class="lineNum">    1286 </span>            :      * inner subnode, then we can just re-use the existing hash table without
+<span class="lineNum">    1287 </span>            :      * rebuilding it.
+<span class="lineNum">    1288 </span>            :      */
+<span class="lineNum">    1289 </span><span class="lineCov">        176 :     if (node-&gt;hj_HashTable != NULL)</span>
+<span class="lineNum">    1290 </span>            :     {
+<span class="lineNum">    1291 </span><span class="lineCov">        280 :         if (node-&gt;hj_HashTable-&gt;nbatch == 1 &amp;&amp;</span>
+<span class="lineNum">    1292 </span><span class="lineCov">        140 :             node-&gt;js.ps.righttree-&gt;chgParam == NULL)</span>
+<span class="lineNum">    1293 </span>            :         {
+<span class="lineNum">    1294 </span>            :             /*
+<span class="lineNum">    1295 </span>            :              * Okay to reuse the hash table; needn't rescan inner, either.
+<span class="lineNum">    1296 </span>            :              *
+<span class="lineNum">    1297 </span>            :              * However, if it's a right/full join, we'd better reset the
+<span class="lineNum">    1298 </span>            :              * inner-tuple match flags contained in the table.
+<span class="lineNum">    1299 </span>            :              */
+<span class="lineNum">    1300 </span><span class="lineCov">         38 :             if (HJ_FILL_INNER(node))</span>
+<span class="lineNum">    1301 </span><span class="lineCov">         10 :                 ExecHashTableResetMatchFlags(node-&gt;hj_HashTable);</span>
+<span class="lineNum">    1302 </span>            : 
+<span class="lineNum">    1303 </span>            :             /*
+<span class="lineNum">    1304 </span>            :              * Also, we need to reset our state about the emptiness of the
+<span class="lineNum">    1305 </span>            :              * outer relation, so that the new scan of the outer will update
+<span class="lineNum">    1306 </span>            :              * it correctly if it turns out to be empty this time. (There's no
+<span class="lineNum">    1307 </span>            :              * harm in clearing it now because ExecHashJoin won't need the
+<span class="lineNum">    1308 </span>            :              * info.  In the other cases, where the hash table doesn't exist
+<span class="lineNum">    1309 </span>            :              * or we are destroying it, we leave this state alone because
+<span class="lineNum">    1310 </span>            :              * ExecHashJoin will need it the first time through.)
+<span class="lineNum">    1311 </span>            :              */
+<span class="lineNum">    1312 </span><span class="lineCov">         38 :             node-&gt;hj_OuterNotEmpty = false;</span>
+<span class="lineNum">    1313 </span>            : 
+<span class="lineNum">    1314 </span>            :             /* ExecHashJoin can skip the BUILD_HASHTABLE step */
+<span class="lineNum">    1315 </span><span class="lineCov">         38 :             node-&gt;hj_JoinState = HJ_NEED_NEW_OUTER;</span>
+<span class="lineNum">    1316 </span>            :         }
+<span class="lineNum">    1317 </span>            :         else
+<span class="lineNum">    1318 </span>            :         {
+<span class="lineNum">    1319 </span>            :             /* must destroy and rebuild hash table */
+<span class="lineNum">    1320 </span><span class="lineCov">        102 :             ExecHashTableDestroy(node-&gt;hj_HashTable);</span>
+<span class="lineNum">    1321 </span><span class="lineCov">        102 :             node-&gt;hj_HashTable = NULL;</span>
+<span class="lineNum">    1322 </span><span class="lineCov">        102 :             node-&gt;hj_JoinState = HJ_BUILD_HASHTABLE;</span>
+<span class="lineNum">    1323 </span>            : 
+<span class="lineNum">    1324 </span>            :             /*
+<span class="lineNum">    1325 </span>            :              * if chgParam of subnode is not null then plan will be re-scanned
+<span class="lineNum">    1326 </span>            :              * by first ExecProcNode.
+<span class="lineNum">    1327 </span>            :              */
+<span class="lineNum">    1328 </span><span class="lineCov">        102 :             if (node-&gt;js.ps.righttree-&gt;chgParam == NULL)</span>
+<span class="lineNum">    1329 </span><span class="lineNoCov">          0 :                 ExecReScan(node-&gt;js.ps.righttree);</span>
+<span class="lineNum">    1330 </span>            :         }
+<span class="lineNum">    1331 </span>            :     }
+<span class="lineNum">    1332 </span>            : 
+<span class="lineNum">    1333 </span>            :     /* Always reset intra-tuple state */
+<span class="lineNum">    1334 </span><span class="lineCov">        176 :     node-&gt;hj_CurHashValue = 0;</span>
+<span class="lineNum">    1335 </span><span class="lineCov">        176 :     node-&gt;hj_CurBucketNo = 0;</span>
+<span class="lineNum">    1336 </span><span class="lineCov">        176 :     node-&gt;hj_CurSkewBucketNo = INVALID_SKEW_BUCKET_NO;</span>
+<span class="lineNum">    1337 </span><span class="lineCov">        176 :     node-&gt;hj_CurTuple = NULL;</span>
+<span class="lineNum">    1338 </span>            : 
+<span class="lineNum">    1339 </span><span class="lineCov">        176 :     node-&gt;hj_MatchedOuter = false;</span>
+<span class="lineNum">    1340 </span><span class="lineCov">        176 :     node-&gt;hj_FirstOuterTupleSlot = NULL;</span>
+<span class="lineNum">    1341 </span>            : 
+<span class="lineNum">    1342 </span>            :     /*
+<span class="lineNum">    1343 </span>            :      * if chgParam of subnode is not null then plan will be re-scanned by
+<span class="lineNum">    1344 </span>            :      * first ExecProcNode.
+<span class="lineNum">    1345 </span>            :      */
+<span class="lineNum">    1346 </span><span class="lineCov">        176 :     if (node-&gt;js.ps.lefttree-&gt;chgParam == NULL)</span>
+<span class="lineNum">    1347 </span><span class="lineCov">        130 :         ExecReScan(node-&gt;js.ps.lefttree);</span>
+<span class="lineNum">    1348 </span><span class="lineCov">        176 : }</span>
+<a name="1349"><span class="lineNum">    1349 </span>            : </a>
+<span class="lineNum">    1350 </span>            : void
+<span class="lineNum">    1351 </span><span class="lineCov">       5116 : ExecShutdownHashJoin(HashJoinState *node)</span>
+<span class="lineNum">    1352 </span>            : {
+<span class="lineNum">    1353 </span><span class="lineCov">       5116 :     if (node-&gt;hj_HashTable)</span>
+<span class="lineNum">    1354 </span>            :     {
+<span class="lineNum">    1355 </span>            :         /*
+<span class="lineNum">    1356 </span>            :          * Detach from shared state before DSM memory goes away.  This makes
+<span class="lineNum">    1357 </span>            :          * sure that we don't have any pointers into DSM memory by the time
+<span class="lineNum">    1358 </span>            :          * ExecEndHashJoin runs.
+<span class="lineNum">    1359 </span>            :          */
+<span class="lineNum">    1360 </span><span class="lineCov">       3804 :         ExecHashTableDetachBatch(node-&gt;hj_HashTable);</span>
+<span class="lineNum">    1361 </span><span class="lineCov">       3804 :         ExecHashTableDetach(node-&gt;hj_HashTable);</span>
+<span class="lineNum">    1362 </span>            :     }
+<span class="lineNum">    1363 </span><span class="lineCov">       5116 : }</span>
+<a name="1364"><span class="lineNum">    1364 </span>            : </a>
+<span class="lineNum">    1365 </span>            : static void
+<span class="lineNum">    1366 </span><span class="lineCov">         52 : ExecParallelHashJoinPartitionOuter(HashJoinState *hjstate)</span>
+<span class="lineNum">    1367 </span>            : {
+<span class="lineNum">    1368 </span><span class="lineCov">         52 :     PlanState  *outerState = outerPlanState(hjstate);</span>
+<span class="lineNum">    1369 </span><span class="lineCov">         52 :     ExprContext *econtext = hjstate-&gt;js.ps.ps_ExprContext;</span>
+<span class="lineNum">    1370 </span><span class="lineCov">         52 :     HashJoinTable hashtable = hjstate-&gt;hj_HashTable;</span>
+<span class="lineNum">    1371 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">    1372 </span>            :     uint32      hashvalue;
+<span class="lineNum">    1373 </span>            :     int         i;
+<span class="lineNum">    1374 </span>            : 
+<span class="lineNum">    1375 </span><span class="lineCov">         52 :     Assert(hjstate-&gt;hj_FirstOuterTupleSlot == NULL);</span>
+<span class="lineNum">    1376 </span>            : 
+<span class="lineNum">    1377 </span>            :     /* Execute outer plan, writing all tuples to shared tuplestores. */
+<span class="lineNum">    1378 </span>            :     for (;;)
+<span class="lineNum">    1379 </span>            :     {
+<span class="lineNum">    1380 </span><span class="lineCov">     360060 :         slot = ExecProcNode(outerState);</span>
+<span class="lineNum">    1381 </span><span class="lineCov">     360060 :         if (TupIsNull(slot))</span>
+<span class="lineNum">    1382 </span>            :             break;
+<span class="lineNum">    1383 </span><span class="lineCov">     360008 :         econtext-&gt;ecxt_outertuple = slot;</span>
+<span class="lineNum">    1384 </span><span class="lineCov">     360008 :         if (ExecHashGetHashValue(hashtable, econtext,</span>
+<span class="lineNum">    1385 </span>            :                                  hjstate-&gt;hj_OuterHashKeys,
+<span class="lineNum">    1386 </span>            :                                  true,  /* outer tuple */
+<span class="lineNum">    1387 </span><span class="lineCov">     360008 :                                  HJ_FILL_OUTER(hjstate),</span>
+<span class="lineNum">    1388 </span>            :                                  &amp;hashvalue))
+<span class="lineNum">    1389 </span>            :         {
+<span class="lineNum">    1390 </span>            :             int         batchno;
+<span class="lineNum">    1391 </span>            :             int         bucketno;
+<span class="lineNum">    1392 </span>            :             bool        shouldFree;
+<span class="lineNum">    1393 </span><span class="lineCov">     360008 :             MinimalTuple mintup = ExecFetchSlotMinimalTuple(slot, &amp;shouldFree);</span>
+<span class="lineNum">    1394 </span>            : 
+<span class="lineNum">    1395 </span><span class="lineCov">     360008 :             ExecHashGetBucketAndBatch(hashtable, hashvalue, &amp;bucketno,</span>
+<span class="lineNum">    1396 </span>            :                                       &amp;batchno);
+<span class="lineNum">    1397 </span><span class="lineCov">     360008 :             sts_puttuple(hashtable-&gt;batches[batchno].outer_tuples,</span>
+<span class="lineNum">    1398 </span>            :                          &amp;hashvalue, mintup);
+<span class="lineNum">    1399 </span>            : 
+<span class="lineNum">    1400 </span><span class="lineCov">     360008 :             if (shouldFree)</span>
+<span class="lineNum">    1401 </span><span class="lineCov">     360008 :                 heap_free_minimal_tuple(mintup);</span>
+<span class="lineNum">    1402 </span>            :         }
+<span class="lineNum">    1403 </span><span class="lineCov">     360008 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1404 </span><span class="lineCov">     360008 :     }</span>
+<span class="lineNum">    1405 </span>            : 
+<span class="lineNum">    1406 </span>            :     /* Make sure all outer partitions are readable by any backend. */
+<span class="lineNum">    1407 </span><span class="lineCov">        436 :     for (i = 0; i &lt; hashtable-&gt;nbatch; ++i)</span>
+<span class="lineNum">    1408 </span><span class="lineCov">        384 :         sts_end_write(hashtable-&gt;batches[i].outer_tuples);</span>
+<span class="lineNum">    1409 </span><span class="lineCov">         52 : }</span>
+<a name="1410"><span class="lineNum">    1410 </span>            : </a>
+<span class="lineNum">    1411 </span>            : void
+<span class="lineNum">    1412 </span><span class="lineCov">         32 : ExecHashJoinEstimate(HashJoinState *state, ParallelContext *pcxt)</span>
+<span class="lineNum">    1413 </span>            : {
+<span class="lineNum">    1414 </span><span class="lineCov">         32 :     shm_toc_estimate_chunk(&amp;pcxt-&gt;estimator, sizeof(ParallelHashJoinState));</span>
+<span class="lineNum">    1415 </span><span class="lineCov">         32 :     shm_toc_estimate_keys(&amp;pcxt-&gt;estimator, 1);</span>
+<span class="lineNum">    1416 </span><span class="lineCov">         32 : }</span>
+<a name="1417"><span class="lineNum">    1417 </span>            : </a>
+<span class="lineNum">    1418 </span>            : void
+<span class="lineNum">    1419 </span><span class="lineCov">         32 : ExecHashJoinInitializeDSM(HashJoinState *state, ParallelContext *pcxt)</span>
+<span class="lineNum">    1420 </span>            : {
+<span class="lineNum">    1421 </span><span class="lineCov">         32 :     int         plan_node_id = state-&gt;js.ps.plan-&gt;plan_node_id;</span>
+<span class="lineNum">    1422 </span>            :     HashState  *hashNode;
+<span class="lineNum">    1423 </span>            :     ParallelHashJoinState *pstate;
+<span class="lineNum">    1424 </span>            : 
+<span class="lineNum">    1425 </span>            :     /*
+<span class="lineNum">    1426 </span>            :      * Disable shared hash table mode if we failed to create a real DSM
+<span class="lineNum">    1427 </span>            :      * segment, because that means that we don't have a DSA area to work with.
+<span class="lineNum">    1428 </span>            :      */
+<span class="lineNum">    1429 </span><span class="lineCov">         32 :     if (pcxt-&gt;seg == NULL)</span>
+<span class="lineNum">    1430 </span><span class="lineCov">         32 :         return;</span>
+<span class="lineNum">    1431 </span>            : 
+<span class="lineNum">    1432 </span><span class="lineCov">         32 :     ExecSetExecProcNode(&amp;state-&gt;js.ps, ExecParallelHashJoin);</span>
+<span class="lineNum">    1433 </span>            : 
+<span class="lineNum">    1434 </span>            :     /*
+<span class="lineNum">    1435 </span>            :      * Set up the state needed to coordinate access to the shared hash
+<span class="lineNum">    1436 </span>            :      * table(s), using the plan node ID as the toc key.
+<span class="lineNum">    1437 </span>            :      */
+<span class="lineNum">    1438 </span><span class="lineCov">         32 :     pstate = shm_toc_allocate(pcxt-&gt;toc, sizeof(ParallelHashJoinState));</span>
+<span class="lineNum">    1439 </span><span class="lineCov">         32 :     shm_toc_insert(pcxt-&gt;toc, plan_node_id, pstate);</span>
+<span class="lineNum">    1440 </span>            : 
+<span class="lineNum">    1441 </span>            :     /*
+<span class="lineNum">    1442 </span>            :      * Set up the shared hash join state with no batches initially.
+<span class="lineNum">    1443 </span>            :      * ExecHashTableCreate() will prepare at least one later and set nbatch
+<span class="lineNum">    1444 </span>            :      * and space_allowed.
+<span class="lineNum">    1445 </span>            :      */
+<span class="lineNum">    1446 </span><span class="lineCov">         32 :     pstate-&gt;nbatch = 0;</span>
+<span class="lineNum">    1447 </span><span class="lineCov">         32 :     pstate-&gt;space_allowed = 0;</span>
+<span class="lineNum">    1448 </span><span class="lineCov">         32 :     pstate-&gt;batches = InvalidDsaPointer;</span>
+<span class="lineNum">    1449 </span><span class="lineCov">         32 :     pstate-&gt;old_batches = InvalidDsaPointer;</span>
+<span class="lineNum">    1450 </span><span class="lineCov">         32 :     pstate-&gt;nbuckets = 0;</span>
+<span class="lineNum">    1451 </span><span class="lineCov">         32 :     pstate-&gt;growth = PHJ_GROWTH_OK;</span>
+<span class="lineNum">    1452 </span><span class="lineCov">         32 :     pstate-&gt;chunk_work_queue = InvalidDsaPointer;</span>
+<span class="lineNum">    1453 </span><span class="lineCov">         32 :     pg_atomic_init_u32(&amp;pstate-&gt;distributor, 0);</span>
+<span class="lineNum">    1454 </span><span class="lineCov">         32 :     pstate-&gt;nparticipants = pcxt-&gt;nworkers + 1;</span>
+<span class="lineNum">    1455 </span><span class="lineCov">         32 :     pstate-&gt;total_tuples = 0;</span>
+<span class="lineNum">    1456 </span><span class="lineCov">         32 :     LWLockInitialize(&amp;pstate-&gt;lock,</span>
+<span class="lineNum">    1457 </span>            :                      LWTRANCHE_PARALLEL_HASH_JOIN);
+<span class="lineNum">    1458 </span><span class="lineCov">         32 :     BarrierInit(&amp;pstate-&gt;build_barrier, 0);</span>
+<span class="lineNum">    1459 </span><span class="lineCov">         32 :     BarrierInit(&amp;pstate-&gt;grow_batches_barrier, 0);</span>
+<span class="lineNum">    1460 </span><span class="lineCov">         32 :     BarrierInit(&amp;pstate-&gt;grow_buckets_barrier, 0);</span>
+<span class="lineNum">    1461 </span>            : 
+<span class="lineNum">    1462 </span>            :     /* Set up the space we'll use for shared temporary files. */
+<span class="lineNum">    1463 </span><span class="lineCov">         32 :     SharedFileSetInit(&amp;pstate-&gt;fileset, pcxt-&gt;seg);</span>
+<span class="lineNum">    1464 </span>            : 
+<span class="lineNum">    1465 </span>            :     /* Initialize the shared state in the hash node. */
+<span class="lineNum">    1466 </span><span class="lineCov">         32 :     hashNode = (HashState *) innerPlanState(state);</span>
+<span class="lineNum">    1467 </span><span class="lineCov">         32 :     hashNode-&gt;parallel_state = pstate;</span>
+<span class="lineNum">    1468 </span>            : }
+<span class="lineNum">    1469 </span>            : 
+<span class="lineNum">    1470 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">    1471 </span>            :  *      ExecHashJoinReInitializeDSM
+<span class="lineNum">    1472 </span>            :  *
+<span class="lineNum">    1473 </span>            :  *      Reset shared state before beginning a fresh scan.
+<span class="lineNum">    1474 </span>            :  * ----------------------------------------------------------------
+<a name="1475"><span class="lineNum">    1475 </span>            :  */</a>
+<span class="lineNum">    1476 </span>            : void
+<span class="lineNum">    1477 </span><span class="lineCov">         16 : ExecHashJoinReInitializeDSM(HashJoinState *state, ParallelContext *cxt)</span>
+<span class="lineNum">    1478 </span>            : {
+<span class="lineNum">    1479 </span><span class="lineCov">         16 :     int         plan_node_id = state-&gt;js.ps.plan-&gt;plan_node_id;</span>
+<span class="lineNum">    1480 </span><span class="lineCov">         16 :     ParallelHashJoinState *pstate =</span>
+<span class="lineNum">    1481 </span><span class="lineCov">         16 :     shm_toc_lookup(cxt-&gt;toc, plan_node_id, false);</span>
+<span class="lineNum">    1482 </span>            : 
+<span class="lineNum">    1483 </span>            :     /*
+<span class="lineNum">    1484 </span>            :      * It would be possible to reuse the shared hash table in single-batch
+<span class="lineNum">    1485 </span>            :      * cases by resetting and then fast-forwarding build_barrier to
+<span class="lineNum">    1486 </span>            :      * PHJ_BUILD_DONE and batch 0's batch_barrier to PHJ_BATCH_PROBING, but
+<span class="lineNum">    1487 </span>            :      * currently shared hash tables are already freed by now (by the last
+<span class="lineNum">    1488 </span>            :      * participant to detach from the batch).  We could consider keeping it
+<span class="lineNum">    1489 </span>            :      * around for single-batch joins.  We'd also need to adjust
+<span class="lineNum">    1490 </span>            :      * finalize_plan() so that it doesn't record a dummy dependency for
+<span class="lineNum">    1491 </span>            :      * Parallel Hash nodes, preventing the rescan optimization.  For now we
+<span class="lineNum">    1492 </span>            :      * don't try.
+<span class="lineNum">    1493 </span>            :      */
+<span class="lineNum">    1494 </span>            : 
+<span class="lineNum">    1495 </span>            :     /* Detach, freeing any remaining shared memory. */
+<span class="lineNum">    1496 </span><span class="lineCov">         16 :     if (state-&gt;hj_HashTable != NULL)</span>
+<span class="lineNum">    1497 </span>            :     {
+<span class="lineNum">    1498 </span><span class="lineNoCov">          0 :         ExecHashTableDetachBatch(state-&gt;hj_HashTable);</span>
+<span class="lineNum">    1499 </span><span class="lineNoCov">          0 :         ExecHashTableDetach(state-&gt;hj_HashTable);</span>
+<span class="lineNum">    1500 </span>            :     }
+<span class="lineNum">    1501 </span>            : 
+<span class="lineNum">    1502 </span>            :     /* Clear any shared batch files. */
+<span class="lineNum">    1503 </span><span class="lineCov">         16 :     SharedFileSetDeleteAll(&amp;pstate-&gt;fileset);</span>
+<span class="lineNum">    1504 </span>            : 
+<span class="lineNum">    1505 </span>            :     /* Reset build_barrier to PHJ_BUILD_ELECTING so we can go around again. */
+<span class="lineNum">    1506 </span><span class="lineCov">         16 :     BarrierInit(&amp;pstate-&gt;build_barrier, 0);</span>
+<span class="lineNum">    1507 </span><span class="lineCov">         16 : }</span>
+<a name="1508"><span class="lineNum">    1508 </span>            : </a>
+<span class="lineNum">    1509 </span>            : void
+<span class="lineNum">    1510 </span><span class="lineCov">         90 : ExecHashJoinInitializeWorker(HashJoinState *state,</span>
+<span class="lineNum">    1511 </span>            :                              ParallelWorkerContext *pwcxt)
+<span class="lineNum">    1512 </span>            : {
+<span class="lineNum">    1513 </span>            :     HashState  *hashNode;
+<span class="lineNum">    1514 </span><span class="lineCov">         90 :     int         plan_node_id = state-&gt;js.ps.plan-&gt;plan_node_id;</span>
+<span class="lineNum">    1515 </span><span class="lineCov">         90 :     ParallelHashJoinState *pstate =</span>
+<span class="lineNum">    1516 </span><span class="lineCov">         90 :     shm_toc_lookup(pwcxt-&gt;toc, plan_node_id, false);</span>
+<span class="lineNum">    1517 </span>            : 
+<span class="lineNum">    1518 </span>            :     /* Attach to the space for shared temporary files. */
+<span class="lineNum">    1519 </span><span class="lineCov">         90 :     SharedFileSetAttach(&amp;pstate-&gt;fileset, pwcxt-&gt;seg);</span>
+<span class="lineNum">    1520 </span>            : 
+<span class="lineNum">    1521 </span>            :     /* Attach to the shared state in the hash node. */
+<span class="lineNum">    1522 </span><span class="lineCov">         90 :     hashNode = (HashState *) innerPlanState(state);</span>
+<span class="lineNum">    1523 </span><span class="lineCov">         90 :     hashNode-&gt;parallel_state = pstate;</span>
+<span class="lineNum">    1524 </span>            : 
+<span class="lineNum">    1525 </span><span class="lineCov">         90 :     ExecSetExecProcNode(&amp;state-&gt;js.ps, ExecParallelHashJoin);</span>
+<span class="lineNum">    1526 </span><span class="lineCov">         90 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

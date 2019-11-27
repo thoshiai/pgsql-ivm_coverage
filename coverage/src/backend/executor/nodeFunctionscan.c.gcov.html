@@ -1,0 +1,704 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/nodeFunctionscan.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - nodeFunctionscan.c<span style="font-size: 80%;"> (source / <a href="nodeFunctionscan.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">162</td>
+            <td class="headerCovTableEntry">165</td>
+            <td class="headerCovTableEntryHi">98.2 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">5</td>
+            <td class="headerCovTableEntry">6</td>
+            <td class="headerCovTableEntryMed">83.3 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * nodeFunctionscan.c
+<span class="lineNum">       4 </span>            :  *    Support routines for scanning RangeFunctions (functions in rangetable).
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/executor/nodeFunctionscan.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : /*
+<span class="lineNum">      16 </span>            :  * INTERFACE ROUTINES
+<span class="lineNum">      17 </span>            :  *      ExecFunctionScan        scans a function.
+<span class="lineNum">      18 </span>            :  *      ExecFunctionNext        retrieve next tuple in sequential order.
+<span class="lineNum">      19 </span>            :  *      ExecInitFunctionScan    creates and initializes a functionscan node.
+<span class="lineNum">      20 </span>            :  *      ExecEndFunctionScan     releases any storage allocated.
+<span class="lineNum">      21 </span>            :  *      ExecReScanFunctionScan  rescans the function
+<span class="lineNum">      22 </span>            :  */
+<span class="lineNum">      23 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;executor/nodeFunctionscan.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;funcapi.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      31 </span>            : 
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /*
+<span class="lineNum">      34 </span>            :  * Runtime data for each function being scanned.
+<span class="lineNum">      35 </span>            :  */
+<span class="lineNum">      36 </span>            : typedef struct FunctionScanPerFuncState
+<span class="lineNum">      37 </span>            : {
+<span class="lineNum">      38 </span>            :     SetExprState *setexpr;      /* state of the expression being evaluated */
+<span class="lineNum">      39 </span>            :     TupleDesc   tupdesc;        /* desc of the function result type */
+<span class="lineNum">      40 </span>            :     int         colcount;       /* expected number of result columns */
+<span class="lineNum">      41 </span>            :     Tuplestorestate *tstore;    /* holds the function result set */
+<span class="lineNum">      42 </span>            :     int64       rowcount;       /* # of rows in result set, -1 if not known */
+<span class="lineNum">      43 </span>            :     TupleTableSlot *func_slot;  /* function result slot (or NULL) */
+<span class="lineNum">      44 </span>            : } FunctionScanPerFuncState;
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span>            : static TupleTableSlot *FunctionNext(FunctionScanState *node);
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">      50 </span>            :  *                      Scan Support
+<span class="lineNum">      51 </span>            :  * ----------------------------------------------------------------
+<span class="lineNum">      52 </span>            :  */
+<span class="lineNum">      53 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">      54 </span>            :  *      FunctionNext
+<span class="lineNum">      55 </span>            :  *
+<span class="lineNum">      56 </span>            :  *      This is a workhorse for ExecFunctionScan
+<span class="lineNum">      57 </span>            :  * ----------------------------------------------------------------
+<a name="58"><span class="lineNum">      58 </span>            :  */</a>
+<span class="lineNum">      59 </span>            : static TupleTableSlot *
+<span class="lineNum">      60 </span><span class="lineCov">    1841718 : FunctionNext(FunctionScanState *node)</span>
+<span class="lineNum">      61 </span>            : {
+<span class="lineNum">      62 </span>            :     EState     *estate;
+<span class="lineNum">      63 </span>            :     ScanDirection direction;
+<span class="lineNum">      64 </span>            :     TupleTableSlot *scanslot;
+<span class="lineNum">      65 </span>            :     bool        alldone;
+<span class="lineNum">      66 </span>            :     int64       oldpos;
+<span class="lineNum">      67 </span>            :     int         funcno;
+<span class="lineNum">      68 </span>            :     int         att;
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span>            :     /*
+<span class="lineNum">      71 </span>            :      * get information from the estate and scan state
+<span class="lineNum">      72 </span>            :      */
+<span class="lineNum">      73 </span><span class="lineCov">    1841718 :     estate = node-&gt;ss.ps.state;</span>
+<span class="lineNum">      74 </span><span class="lineCov">    1841718 :     direction = estate-&gt;es_direction;</span>
+<span class="lineNum">      75 </span><span class="lineCov">    1841718 :     scanslot = node-&gt;ss.ss_ScanTupleSlot;</span>
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span><span class="lineCov">    1841718 :     if (node-&gt;simple)</span>
+<span class="lineNum">      78 </span>            :     {
+<span class="lineNum">      79 </span>            :         /*
+<span class="lineNum">      80 </span>            :          * Fast path for the trivial case: the function return type and scan
+<span class="lineNum">      81 </span>            :          * result type are the same, so we fetch the function result straight
+<span class="lineNum">      82 </span>            :          * into the scan result slot. No need to update ordinality or
+<span class="lineNum">      83 </span>            :          * rowcounts either.
+<span class="lineNum">      84 </span>            :          */
+<span class="lineNum">      85 </span><span class="lineCov">    1840242 :         Tuplestorestate *tstore = node-&gt;funcstates[0].tstore;</span>
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            :         /*
+<span class="lineNum">      88 </span>            :          * If first time through, read all tuples from function and put them
+<span class="lineNum">      89 </span>            :          * in a tuplestore. Subsequent calls just fetch tuples from
+<span class="lineNum">      90 </span>            :          * tuplestore.
+<span class="lineNum">      91 </span>            :          */
+<span class="lineNum">      92 </span><span class="lineCov">    1840242 :         if (tstore == NULL)</span>
+<span class="lineNum">      93 </span>            :         {
+<span class="lineNum">      94 </span><span class="lineCov">      62304 :             node-&gt;funcstates[0].tstore = tstore =</span>
+<span class="lineNum">      95 </span><span class="lineCov">      62304 :                 ExecMakeTableFunctionResult(node-&gt;funcstates[0].setexpr,</span>
+<span class="lineNum">      96 </span>            :                                             node-&gt;ss.ps.ps_ExprContext,
+<span class="lineNum">      97 </span>            :                                             node-&gt;argcontext,
+<span class="lineNum">      98 </span><span class="lineCov">      31152 :                                             node-&gt;funcstates[0].tupdesc,</span>
+<span class="lineNum">      99 </span><span class="lineCov">      31152 :                                             node-&gt;eflags &amp; EXEC_FLAG_BACKWARD);</span>
+<span class="lineNum">     100 </span>            : 
+<span class="lineNum">     101 </span>            :             /*
+<span class="lineNum">     102 </span>            :              * paranoia - cope if the function, which may have constructed the
+<span class="lineNum">     103 </span>            :              * tuplestore itself, didn't leave it pointing at the start. This
+<span class="lineNum">     104 </span>            :              * call is fast, so the overhead shouldn't be an issue.
+<span class="lineNum">     105 </span>            :              */
+<span class="lineNum">     106 </span><span class="lineCov">      30982 :             tuplestore_rescan(tstore);</span>
+<span class="lineNum">     107 </span>            :         }
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            :         /*
+<span class="lineNum">     110 </span>            :          * Get the next tuple from tuplestore.
+<span class="lineNum">     111 </span>            :          */
+<span class="lineNum">     112 </span><span class="lineCov">    1840072 :         (void) tuplestore_gettupleslot(tstore,</span>
+<span class="lineNum">     113 </span>            :                                        ScanDirectionIsForward(direction),
+<span class="lineNum">     114 </span>            :                                        false,
+<span class="lineNum">     115 </span>            :                                        scanslot);
+<span class="lineNum">     116 </span><span class="lineCov">    1840072 :         return scanslot;</span>
+<span class="lineNum">     117 </span>            :     }
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span>            :     /*
+<span class="lineNum">     120 </span>            :      * Increment or decrement ordinal counter before checking for end-of-data,
+<span class="lineNum">     121 </span>            :      * so that we can move off either end of the result by 1 (and no more than
+<span class="lineNum">     122 </span>            :      * 1) without losing correct count.  See PortalRunSelect for why we can
+<span class="lineNum">     123 </span>            :      * assume that we won't be called repeatedly in the end-of-data state.
+<span class="lineNum">     124 </span>            :      */
+<span class="lineNum">     125 </span><span class="lineCov">       1476 :     oldpos = node-&gt;ordinal;</span>
+<span class="lineNum">     126 </span><span class="lineCov">       1476 :     if (ScanDirectionIsForward(direction))</span>
+<span class="lineNum">     127 </span><span class="lineCov">       1456 :         node-&gt;ordinal++;</span>
+<span class="lineNum">     128 </span>            :     else
+<span class="lineNum">     129 </span><span class="lineCov">         20 :         node-&gt;ordinal--;</span>
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span>            :     /*
+<span class="lineNum">     132 </span>            :      * Main loop over functions.
+<span class="lineNum">     133 </span>            :      *
+<span class="lineNum">     134 </span>            :      * We fetch the function results into func_slots (which match the function
+<span class="lineNum">     135 </span>            :      * return types), and then copy the values to scanslot (which matches the
+<span class="lineNum">     136 </span>            :      * scan result type), setting the ordinal column (if any) as well.
+<span class="lineNum">     137 </span>            :      */
+<span class="lineNum">     138 </span><span class="lineCov">       1476 :     ExecClearTuple(scanslot);</span>
+<span class="lineNum">     139 </span><span class="lineCov">       1476 :     att = 0;</span>
+<span class="lineNum">     140 </span><span class="lineCov">       1476 :     alldone = true;</span>
+<span class="lineNum">     141 </span><span class="lineCov">       3362 :     for (funcno = 0; funcno &lt; node-&gt;nfuncs; funcno++)</span>
+<span class="lineNum">     142 </span>            :     {
+<span class="lineNum">     143 </span><span class="lineCov">       1886 :         FunctionScanPerFuncState *fs = &amp;node-&gt;funcstates[funcno];</span>
+<span class="lineNum">     144 </span>            :         int         i;
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span>            :         /*
+<span class="lineNum">     147 </span>            :          * If first time through, read all tuples from function and put them
+<span class="lineNum">     148 </span>            :          * in a tuplestore. Subsequent calls just fetch tuples from
+<span class="lineNum">     149 </span>            :          * tuplestore.
+<span class="lineNum">     150 </span>            :          */
+<span class="lineNum">     151 </span><span class="lineCov">       1886 :         if (fs-&gt;tstore == NULL)</span>
+<span class="lineNum">     152 </span>            :         {
+<span class="lineNum">     153 </span><span class="lineCov">        402 :             fs-&gt;tstore =</span>
+<span class="lineNum">     154 </span><span class="lineCov">        402 :                 ExecMakeTableFunctionResult(fs-&gt;setexpr,</span>
+<span class="lineNum">     155 </span>            :                                             node-&gt;ss.ps.ps_ExprContext,
+<span class="lineNum">     156 </span>            :                                             node-&gt;argcontext,
+<span class="lineNum">     157 </span>            :                                             fs-&gt;tupdesc,
+<span class="lineNum">     158 </span><span class="lineCov">        402 :                                             node-&gt;eflags &amp; EXEC_FLAG_BACKWARD);</span>
+<span class="lineNum">     159 </span>            : 
+<span class="lineNum">     160 </span>            :             /*
+<span class="lineNum">     161 </span>            :              * paranoia - cope if the function, which may have constructed the
+<span class="lineNum">     162 </span>            :              * tuplestore itself, didn't leave it pointing at the start. This
+<span class="lineNum">     163 </span>            :              * call is fast, so the overhead shouldn't be an issue.
+<span class="lineNum">     164 </span>            :              */
+<span class="lineNum">     165 </span><span class="lineCov">        402 :             tuplestore_rescan(fs-&gt;tstore);</span>
+<span class="lineNum">     166 </span>            :         }
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            :         /*
+<span class="lineNum">     169 </span>            :          * Get the next tuple from tuplestore.
+<span class="lineNum">     170 </span>            :          *
+<span class="lineNum">     171 </span>            :          * If we have a rowcount for the function, and we know the previous
+<span class="lineNum">     172 </span>            :          * read position was out of bounds, don't try the read. This allows
+<span class="lineNum">     173 </span>            :          * backward scan to work when there are mixed row counts present.
+<span class="lineNum">     174 </span>            :          */
+<span class="lineNum">     175 </span><span class="lineCov">       1886 :         if (fs-&gt;rowcount != -1 &amp;&amp; fs-&gt;rowcount &lt; oldpos)</span>
+<span class="lineNum">     176 </span><span class="lineCov">         24 :             ExecClearTuple(fs-&gt;func_slot);</span>
+<span class="lineNum">     177 </span>            :         else
+<span class="lineNum">     178 </span><span class="lineCov">       1862 :             (void) tuplestore_gettupleslot(fs-&gt;tstore,</span>
+<span class="lineNum">     179 </span>            :                                            ScanDirectionIsForward(direction),
+<span class="lineNum">     180 </span>            :                                            false,
+<span class="lineNum">     181 </span>            :                                            fs-&gt;func_slot);
+<span class="lineNum">     182 </span>            : 
+<span class="lineNum">     183 </span><span class="lineCov">       2404 :         if (TupIsNull(fs-&gt;func_slot))</span>
+<span class="lineNum">     184 </span>            :         {
+<span class="lineNum">     185 </span>            :             /*
+<span class="lineNum">     186 </span>            :              * If we ran out of data for this function in the forward
+<span class="lineNum">     187 </span>            :              * direction then we now know how many rows it returned. We need
+<span class="lineNum">     188 </span>            :              * to know this in order to handle backwards scans. The row count
+<span class="lineNum">     189 </span>            :              * we store is actually 1+ the actual number, because we have to
+<span class="lineNum">     190 </span>            :              * position the tuplestore 1 off its end sometimes.
+<span class="lineNum">     191 </span>            :              */
+<span class="lineNum">     192 </span><span class="lineCov">        518 :             if (ScanDirectionIsForward(direction) &amp;&amp; fs-&gt;rowcount == -1)</span>
+<span class="lineNum">     193 </span><span class="lineCov">        394 :                 fs-&gt;rowcount = node-&gt;ordinal;</span>
+<span class="lineNum">     194 </span>            : 
+<span class="lineNum">     195 </span>            :             /*
+<span class="lineNum">     196 </span>            :              * populate the result cols with nulls
+<span class="lineNum">     197 </span>            :              */
+<span class="lineNum">     198 </span><span class="lineCov">       1364 :             for (i = 0; i &lt; fs-&gt;colcount; i++)</span>
+<span class="lineNum">     199 </span>            :             {
+<span class="lineNum">     200 </span><span class="lineCov">        846 :                 scanslot-&gt;tts_values[att] = (Datum) 0;</span>
+<span class="lineNum">     201 </span><span class="lineCov">        846 :                 scanslot-&gt;tts_isnull[att] = true;</span>
+<span class="lineNum">     202 </span><span class="lineCov">        846 :                 att++;</span>
+<span class="lineNum">     203 </span>            :             }
+<span class="lineNum">     204 </span>            :         }
+<span class="lineNum">     205 </span>            :         else
+<span class="lineNum">     206 </span>            :         {
+<span class="lineNum">     207 </span>            :             /*
+<span class="lineNum">     208 </span>            :              * we have a result, so just copy it to the result cols.
+<span class="lineNum">     209 </span>            :              */
+<span class="lineNum">     210 </span><span class="lineCov">       1368 :             slot_getallattrs(fs-&gt;func_slot);</span>
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span><span class="lineCov">       3282 :             for (i = 0; i &lt; fs-&gt;colcount; i++)</span>
+<span class="lineNum">     213 </span>            :             {
+<span class="lineNum">     214 </span><span class="lineCov">       1914 :                 scanslot-&gt;tts_values[att] = fs-&gt;func_slot-&gt;tts_values[i];</span>
+<span class="lineNum">     215 </span><span class="lineCov">       1914 :                 scanslot-&gt;tts_isnull[att] = fs-&gt;func_slot-&gt;tts_isnull[i];</span>
+<span class="lineNum">     216 </span><span class="lineCov">       1914 :                 att++;</span>
+<span class="lineNum">     217 </span>            :             }
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span>            :             /*
+<span class="lineNum">     220 </span>            :              * We're not done until every function result is exhausted; we pad
+<span class="lineNum">     221 </span>            :              * the shorter results with nulls until then.
+<span class="lineNum">     222 </span>            :              */
+<span class="lineNum">     223 </span><span class="lineCov">       1368 :             alldone = false;</span>
+<span class="lineNum">     224 </span>            :         }
+<span class="lineNum">     225 </span>            :     }
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span>            :     /*
+<span class="lineNum">     228 </span>            :      * ordinal col is always last, per spec.
+<span class="lineNum">     229 </span>            :      */
+<span class="lineNum">     230 </span><span class="lineCov">       1476 :     if (node-&gt;ordinality)</span>
+<span class="lineNum">     231 </span>            :     {
+<span class="lineNum">     232 </span><span class="lineCov">       1350 :         scanslot-&gt;tts_values[att] = Int64GetDatumFast(node-&gt;ordinal);</span>
+<span class="lineNum">     233 </span><span class="lineCov">       1350 :         scanslot-&gt;tts_isnull[att] = false;</span>
+<span class="lineNum">     234 </span>            :     }
+<span class="lineNum">     235 </span>            : 
+<span class="lineNum">     236 </span>            :     /*
+<span class="lineNum">     237 </span>            :      * If alldone, we just return the previously-cleared scanslot.  Otherwise,
+<span class="lineNum">     238 </span>            :      * finish creating the virtual tuple.
+<span class="lineNum">     239 </span>            :      */
+<span class="lineNum">     240 </span><span class="lineCov">       1476 :     if (!alldone)</span>
+<span class="lineNum">     241 </span><span class="lineCov">       1162 :         ExecStoreVirtualTuple(scanslot);</span>
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span><span class="lineCov">       1476 :     return scanslot;</span>
+<span class="lineNum">     244 </span>            : }
+<span class="lineNum">     245 </span>            : 
+<span class="lineNum">     246 </span>            : /*
+<span class="lineNum">     247 </span>            :  * FunctionRecheck -- access method routine to recheck a tuple in EvalPlanQual
+<a name="248"><span class="lineNum">     248 </span>            :  */</a>
+<span class="lineNum">     249 </span>            : static bool
+<span class="lineNum">     250 </span><span class="lineNoCov">          0 : FunctionRecheck(FunctionScanState *node, TupleTableSlot *slot)</span>
+<span class="lineNum">     251 </span>            : {
+<span class="lineNum">     252 </span>            :     /* nothing to check */
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     254 </span>            : }
+<span class="lineNum">     255 </span>            : 
+<span class="lineNum">     256 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     257 </span>            :  *      ExecFunctionScan(node)
+<span class="lineNum">     258 </span>            :  *
+<span class="lineNum">     259 </span>            :  *      Scans the function sequentially and returns the next qualifying
+<span class="lineNum">     260 </span>            :  *      tuple.
+<span class="lineNum">     261 </span>            :  *      We call the ExecScan() routine and pass it the appropriate
+<span class="lineNum">     262 </span>            :  *      access method functions.
+<span class="lineNum">     263 </span>            :  * ----------------------------------------------------------------
+<a name="264"><span class="lineNum">     264 </span>            :  */</a>
+<span class="lineNum">     265 </span>            : static TupleTableSlot *
+<span class="lineNum">     266 </span><span class="lineCov">    1834144 : ExecFunctionScan(PlanState *pstate)</span>
+<span class="lineNum">     267 </span>            : {
+<span class="lineNum">     268 </span><span class="lineCov">    1834144 :     FunctionScanState *node = castNode(FunctionScanState, pstate);</span>
+<span class="lineNum">     269 </span>            : 
+<span class="lineNum">     270 </span><span class="lineCov">    1834144 :     return ExecScan(&amp;node-&gt;ss,</span>
+<span class="lineNum">     271 </span>            :                     (ExecScanAccessMtd) FunctionNext,
+<span class="lineNum">     272 </span>            :                     (ExecScanRecheckMtd) FunctionRecheck);
+<span class="lineNum">     273 </span>            : }
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     276 </span>            :  *      ExecInitFunctionScan
+<span class="lineNum">     277 </span>            :  * ----------------------------------------------------------------
+<a name="278"><span class="lineNum">     278 </span>            :  */</a>
+<span class="lineNum">     279 </span>            : FunctionScanState *
+<span class="lineNum">     280 </span><span class="lineCov">       5372 : ExecInitFunctionScan(FunctionScan *node, EState *estate, int eflags)</span>
+<span class="lineNum">     281 </span>            : {
+<span class="lineNum">     282 </span>            :     FunctionScanState *scanstate;
+<span class="lineNum">     283 </span><span class="lineCov">       5372 :     int         nfuncs = list_length(node-&gt;functions);</span>
+<span class="lineNum">     284 </span>            :     TupleDesc   scan_tupdesc;
+<span class="lineNum">     285 </span>            :     int         i,
+<span class="lineNum">     286 </span>            :                 natts;
+<span class="lineNum">     287 </span>            :     ListCell   *lc;
+<span class="lineNum">     288 </span>            : 
+<span class="lineNum">     289 </span>            :     /* check for unsupported flags */
+<span class="lineNum">     290 </span><span class="lineCov">       5372 :     Assert(!(eflags &amp; EXEC_FLAG_MARK));</span>
+<span class="lineNum">     291 </span>            : 
+<span class="lineNum">     292 </span>            :     /*
+<span class="lineNum">     293 </span>            :      * FunctionScan should not have any children.
+<span class="lineNum">     294 </span>            :      */
+<span class="lineNum">     295 </span><span class="lineCov">       5372 :     Assert(outerPlan(node) == NULL);</span>
+<span class="lineNum">     296 </span><span class="lineCov">       5372 :     Assert(innerPlan(node) == NULL);</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span>            :     /*
+<span class="lineNum">     299 </span>            :      * create new ScanState for node
+<span class="lineNum">     300 </span>            :      */
+<span class="lineNum">     301 </span><span class="lineCov">       5372 :     scanstate = makeNode(FunctionScanState);</span>
+<span class="lineNum">     302 </span><span class="lineCov">       5372 :     scanstate-&gt;ss.ps.plan = (Plan *) node;</span>
+<span class="lineNum">     303 </span><span class="lineCov">       5372 :     scanstate-&gt;ss.ps.state = estate;</span>
+<span class="lineNum">     304 </span><span class="lineCov">       5372 :     scanstate-&gt;ss.ps.ExecProcNode = ExecFunctionScan;</span>
+<span class="lineNum">     305 </span><span class="lineCov">       5372 :     scanstate-&gt;eflags = eflags;</span>
+<span class="lineNum">     306 </span>            : 
+<span class="lineNum">     307 </span>            :     /*
+<span class="lineNum">     308 </span>            :      * are we adding an ordinality column?
+<span class="lineNum">     309 </span>            :      */
+<span class="lineNum">     310 </span><span class="lineCov">       5372 :     scanstate-&gt;ordinality = node-&gt;funcordinality;</span>
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span><span class="lineCov">       5372 :     scanstate-&gt;nfuncs = nfuncs;</span>
+<span class="lineNum">     313 </span><span class="lineCov">       5372 :     if (nfuncs == 1 &amp;&amp; !node-&gt;funcordinality)</span>
+<span class="lineNum">     314 </span><span class="lineCov">       5224 :         scanstate-&gt;simple = true;</span>
+<span class="lineNum">     315 </span>            :     else
+<span class="lineNum">     316 </span><span class="lineCov">        148 :         scanstate-&gt;simple = false;</span>
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span>            :     /*
+<span class="lineNum">     319 </span>            :      * Ordinal 0 represents the &quot;before the first row&quot; position.
+<span class="lineNum">     320 </span>            :      *
+<span class="lineNum">     321 </span>            :      * We need to track ordinal position even when not adding an ordinality
+<span class="lineNum">     322 </span>            :      * column to the result, in order to handle backwards scanning properly
+<span class="lineNum">     323 </span>            :      * with multiple functions with different result sizes. (We can't position
+<span class="lineNum">     324 </span>            :      * any individual function's tuplestore any more than 1 place beyond its
+<span class="lineNum">     325 </span>            :      * end, so when scanning backwards, we need to know when to start
+<span class="lineNum">     326 </span>            :      * including the function in the scan again.)
+<span class="lineNum">     327 </span>            :      */
+<span class="lineNum">     328 </span><span class="lineCov">       5372 :     scanstate-&gt;ordinal = 0;</span>
+<span class="lineNum">     329 </span>            : 
+<span class="lineNum">     330 </span>            :     /*
+<span class="lineNum">     331 </span>            :      * Miscellaneous initialization
+<span class="lineNum">     332 </span>            :      *
+<span class="lineNum">     333 </span>            :      * create expression context for node
+<span class="lineNum">     334 </span>            :      */
+<span class="lineNum">     335 </span><span class="lineCov">       5372 :     ExecAssignExprContext(estate, &amp;scanstate-&gt;ss.ps);</span>
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span><span class="lineCov">       5372 :     scanstate-&gt;funcstates = palloc(nfuncs * sizeof(FunctionScanPerFuncState));</span>
+<span class="lineNum">     338 </span>            : 
+<span class="lineNum">     339 </span><span class="lineCov">       5372 :     natts = 0;</span>
+<span class="lineNum">     340 </span><span class="lineCov">       5372 :     i = 0;</span>
+<span class="lineNum">     341 </span><span class="lineCov">      10840 :     foreach(lc, node-&gt;functions)</span>
+<span class="lineNum">     342 </span>            :     {
+<span class="lineNum">     343 </span><span class="lineCov">       5468 :         RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);</span>
+<span class="lineNum">     344 </span><span class="lineCov">       5468 :         Node       *funcexpr = rtfunc-&gt;funcexpr;</span>
+<span class="lineNum">     345 </span><span class="lineCov">       5468 :         int         colcount = rtfunc-&gt;funccolcount;</span>
+<span class="lineNum">     346 </span><span class="lineCov">       5468 :         FunctionScanPerFuncState *fs = &amp;scanstate-&gt;funcstates[i];</span>
+<span class="lineNum">     347 </span>            :         TypeFuncClass functypclass;
+<span class="lineNum">     348 </span>            :         Oid         funcrettype;
+<span class="lineNum">     349 </span>            :         TupleDesc   tupdesc;
+<span class="lineNum">     350 </span>            : 
+<span class="lineNum">     351 </span><span class="lineCov">       5468 :         fs-&gt;setexpr =</span>
+<span class="lineNum">     352 </span><span class="lineCov">       5468 :             ExecInitTableFunctionResult((Expr *) funcexpr,</span>
+<span class="lineNum">     353 </span>            :                                         scanstate-&gt;ss.ps.ps_ExprContext,
+<span class="lineNum">     354 </span>            :                                         &amp;scanstate-&gt;ss.ps);
+<span class="lineNum">     355 </span>            : 
+<span class="lineNum">     356 </span>            :         /*
+<span class="lineNum">     357 </span>            :          * Don't allocate the tuplestores; the actual calls to the functions
+<span class="lineNum">     358 </span>            :          * do that.  NULL means that we have not called the function yet (or
+<span class="lineNum">     359 </span>            :          * need to call it again after a rescan).
+<span class="lineNum">     360 </span>            :          */
+<span class="lineNum">     361 </span><span class="lineCov">       5468 :         fs-&gt;tstore = NULL;</span>
+<span class="lineNum">     362 </span><span class="lineCov">       5468 :         fs-&gt;rowcount = -1;</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span>            :         /*
+<span class="lineNum">     365 </span>            :          * Now determine if the function returns a simple or composite type,
+<span class="lineNum">     366 </span>            :          * and build an appropriate tupdesc.  Note that in the composite case,
+<span class="lineNum">     367 </span>            :          * the function may now return more columns than it did when the plan
+<span class="lineNum">     368 </span>            :          * was made; we have to ignore any columns beyond &quot;colcount&quot;.
+<span class="lineNum">     369 </span>            :          */
+<span class="lineNum">     370 </span><span class="lineCov">       5468 :         functypclass = get_expr_result_type(funcexpr,</span>
+<span class="lineNum">     371 </span>            :                                             &amp;funcrettype,
+<span class="lineNum">     372 </span>            :                                             &amp;tupdesc);
+<span class="lineNum">     373 </span>            : 
+<span class="lineNum">     374 </span><span class="lineCov">       5468 :         if (functypclass == TYPEFUNC_COMPOSITE ||</span>
+<span class="lineNum">     375 </span>            :             functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
+<span class="lineNum">     376 </span>            :         {
+<span class="lineNum">     377 </span>            :             /* Composite data type, e.g. a table's row type */
+<span class="lineNum">     378 </span><span class="lineCov">       1342 :             Assert(tupdesc);</span>
+<span class="lineNum">     379 </span><span class="lineCov">       1342 :             Assert(tupdesc-&gt;natts &gt;= colcount);</span>
+<span class="lineNum">     380 </span>            :             /* Must copy it out of typcache for safety */
+<span class="lineNum">     381 </span><span class="lineCov">       1342 :             tupdesc = CreateTupleDescCopy(tupdesc);</span>
+<span class="lineNum">     382 </span>            :         }
+<span class="lineNum">     383 </span><span class="lineCov">       4126 :         else if (functypclass == TYPEFUNC_SCALAR)</span>
+<span class="lineNum">     384 </span>            :         {
+<span class="lineNum">     385 </span>            :             /* Base data type, i.e. scalar */
+<span class="lineNum">     386 </span><span class="lineCov">       3978 :             tupdesc = CreateTemplateTupleDesc(1);</span>
+<span class="lineNum">     387 </span><span class="lineCov">       3978 :             TupleDescInitEntry(tupdesc,</span>
+<span class="lineNum">     388 </span>            :                                (AttrNumber) 1,
+<span class="lineNum">     389 </span>            :                                NULL,    /* don't care about the name here */
+<span class="lineNum">     390 </span>            :                                funcrettype,
+<span class="lineNum">     391 </span>            :                                -1,
+<span class="lineNum">     392 </span>            :                                0);
+<span class="lineNum">     393 </span><span class="lineCov">       3978 :             TupleDescInitEntryCollation(tupdesc,</span>
+<span class="lineNum">     394 </span>            :                                         (AttrNumber) 1,
+<span class="lineNum">     395 </span>            :                                         exprCollation(funcexpr));
+<span class="lineNum">     396 </span>            :         }
+<span class="lineNum">     397 </span><span class="lineCov">        148 :         else if (functypclass == TYPEFUNC_RECORD)</span>
+<span class="lineNum">     398 </span>            :         {
+<span class="lineNum">     399 </span><span class="lineCov">        148 :             tupdesc = BuildDescFromLists(rtfunc-&gt;funccolnames,</span>
+<span class="lineNum">     400 </span>            :                                          rtfunc-&gt;funccoltypes,
+<span class="lineNum">     401 </span>            :                                          rtfunc-&gt;funccoltypmods,
+<span class="lineNum">     402 </span>            :                                          rtfunc-&gt;funccolcollations);
+<span class="lineNum">     403 </span>            : 
+<span class="lineNum">     404 </span>            :             /*
+<span class="lineNum">     405 </span>            :              * For RECORD results, make sure a typmod has been assigned.  (The
+<span class="lineNum">     406 </span>            :              * function should do this for itself, but let's cover things in
+<span class="lineNum">     407 </span>            :              * case it doesn't.)
+<span class="lineNum">     408 </span>            :              */
+<span class="lineNum">     409 </span><span class="lineCov">        148 :             BlessTupleDesc(tupdesc);</span>
+<span class="lineNum">     410 </span>            :         }
+<span class="lineNum">     411 </span>            :         else
+<span class="lineNum">     412 </span>            :         {
+<span class="lineNum">     413 </span>            :             /* crummy error message, but parser should have caught this */
+<span class="lineNum">     414 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;function in FROM has unsupported return type&quot;);</span>
+<span class="lineNum">     415 </span>            :         }
+<span class="lineNum">     416 </span>            : 
+<span class="lineNum">     417 </span><span class="lineCov">       5468 :         fs-&gt;tupdesc = tupdesc;</span>
+<span class="lineNum">     418 </span><span class="lineCov">       5468 :         fs-&gt;colcount = colcount;</span>
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span>            :         /*
+<span class="lineNum">     421 </span>            :          * We only need separate slots for the function results if we are
+<span class="lineNum">     422 </span>            :          * doing ordinality or multiple functions; otherwise, we'll fetch
+<span class="lineNum">     423 </span>            :          * function results directly into the scan slot.
+<span class="lineNum">     424 </span>            :          */
+<span class="lineNum">     425 </span><span class="lineCov">       5468 :         if (!scanstate-&gt;simple)</span>
+<span class="lineNum">     426 </span>            :         {
+<span class="lineNum">     427 </span><span class="lineCov">        244 :             fs-&gt;func_slot = ExecInitExtraTupleSlot(estate, fs-&gt;tupdesc,</span>
+<span class="lineNum">     428 </span>            :                                                    &amp;TTSOpsMinimalTuple);
+<span class="lineNum">     429 </span>            :         }
+<span class="lineNum">     430 </span>            :         else
+<span class="lineNum">     431 </span><span class="lineCov">       5224 :             fs-&gt;func_slot = NULL;</span>
+<span class="lineNum">     432 </span>            : 
+<span class="lineNum">     433 </span><span class="lineCov">       5468 :         natts += colcount;</span>
+<span class="lineNum">     434 </span><span class="lineCov">       5468 :         i++;</span>
+<span class="lineNum">     435 </span>            :     }
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span>            :     /*
+<span class="lineNum">     438 </span>            :      * Create the combined TupleDesc
+<span class="lineNum">     439 </span>            :      *
+<span class="lineNum">     440 </span>            :      * If there is just one function without ordinality, the scan result
+<span class="lineNum">     441 </span>            :      * tupdesc is the same as the function result tupdesc --- except that we
+<span class="lineNum">     442 </span>            :      * may stuff new names into it below, so drop any rowtype label.
+<span class="lineNum">     443 </span>            :      */
+<span class="lineNum">     444 </span><span class="lineCov">       5372 :     if (scanstate-&gt;simple)</span>
+<span class="lineNum">     445 </span>            :     {
+<span class="lineNum">     446 </span><span class="lineCov">       5224 :         scan_tupdesc = CreateTupleDescCopy(scanstate-&gt;funcstates[0].tupdesc);</span>
+<span class="lineNum">     447 </span><span class="lineCov">       5224 :         scan_tupdesc-&gt;tdtypeid = RECORDOID;</span>
+<span class="lineNum">     448 </span><span class="lineCov">       5224 :         scan_tupdesc-&gt;tdtypmod = -1;</span>
+<span class="lineNum">     449 </span>            :     }
+<span class="lineNum">     450 </span>            :     else
+<span class="lineNum">     451 </span>            :     {
+<span class="lineNum">     452 </span><span class="lineCov">        148 :         AttrNumber  attno = 0;</span>
+<span class="lineNum">     453 </span>            : 
+<span class="lineNum">     454 </span><span class="lineCov">        148 :         if (node-&gt;funcordinality)</span>
+<span class="lineNum">     455 </span><span class="lineCov">        128 :             natts++;</span>
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span><span class="lineCov">        148 :         scan_tupdesc = CreateTemplateTupleDesc(natts);</span>
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span><span class="lineCov">        392 :         for (i = 0; i &lt; nfuncs; i++)</span>
+<span class="lineNum">     460 </span>            :         {
+<span class="lineNum">     461 </span><span class="lineCov">        244 :             TupleDesc   tupdesc = scanstate-&gt;funcstates[i].tupdesc;</span>
+<span class="lineNum">     462 </span><span class="lineCov">        244 :             int         colcount = scanstate-&gt;funcstates[i].colcount;</span>
+<span class="lineNum">     463 </span>            :             int         j;
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span><span class="lineCov">        700 :             for (j = 1; j &lt;= colcount; j++)</span>
+<span class="lineNum">     466 </span><span class="lineCov">        456 :                 TupleDescCopyEntry(scan_tupdesc, ++attno, tupdesc, j);</span>
+<span class="lineNum">     467 </span>            :         }
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span>            :         /* If doing ordinality, add a column of type &quot;bigint&quot; at the end */
+<span class="lineNum">     470 </span><span class="lineCov">        148 :         if (node-&gt;funcordinality)</span>
+<span class="lineNum">     471 </span>            :         {
+<span class="lineNum">     472 </span><span class="lineCov">        128 :             TupleDescInitEntry(scan_tupdesc,</span>
+<span class="lineNum">     473 </span>            :                                ++attno,
+<span class="lineNum">     474 </span>            :                                NULL,    /* don't care about the name here */
+<span class="lineNum">     475 </span>            :                                INT8OID,
+<span class="lineNum">     476 </span>            :                                -1,
+<span class="lineNum">     477 </span>            :                                0);
+<span class="lineNum">     478 </span>            :         }
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span><span class="lineCov">        148 :         Assert(attno == natts);</span>
+<span class="lineNum">     481 </span>            :     }
+<span class="lineNum">     482 </span>            : 
+<span class="lineNum">     483 </span>            :     /*
+<span class="lineNum">     484 </span>            :      * Initialize scan slot and type.
+<span class="lineNum">     485 </span>            :      */
+<span class="lineNum">     486 </span><span class="lineCov">       5372 :     ExecInitScanTupleSlot(estate, &amp;scanstate-&gt;ss, scan_tupdesc,</span>
+<span class="lineNum">     487 </span>            :                           &amp;TTSOpsMinimalTuple);
+<span class="lineNum">     488 </span>            : 
+<span class="lineNum">     489 </span>            :     /*
+<span class="lineNum">     490 </span>            :      * Initialize result slot, type and projection.
+<span class="lineNum">     491 </span>            :      */
+<span class="lineNum">     492 </span><span class="lineCov">       5372 :     ExecInitResultTypeTL(&amp;scanstate-&gt;ss.ps);</span>
+<span class="lineNum">     493 </span><span class="lineCov">       5372 :     ExecAssignScanProjectionInfo(&amp;scanstate-&gt;ss);</span>
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span>            :     /*
+<span class="lineNum">     496 </span>            :      * initialize child expressions
+<span class="lineNum">     497 </span>            :      */
+<span class="lineNum">     498 </span><span class="lineCov">       5372 :     scanstate-&gt;ss.ps.qual =</span>
+<span class="lineNum">     499 </span><span class="lineCov">       5372 :         ExecInitQual(node-&gt;scan.plan.qual, (PlanState *) scanstate);</span>
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span>            :     /*
+<span class="lineNum">     502 </span>            :      * Create a memory context that ExecMakeTableFunctionResult can use to
+<span class="lineNum">     503 </span>            :      * evaluate function arguments in.  We can't use the per-tuple context for
+<span class="lineNum">     504 </span>            :      * this because it gets reset too often; but we don't want to leak
+<span class="lineNum">     505 </span>            :      * evaluation results into the query-lifespan context either.  We just
+<span class="lineNum">     506 </span>            :      * need one context, because we evaluate each function separately.
+<span class="lineNum">     507 </span>            :      */
+<span class="lineNum">     508 </span><span class="lineCov">       5372 :     scanstate-&gt;argcontext = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     509 </span>            :                                                   &quot;Table function arguments&quot;,
+<span class="lineNum">     510 </span>            :                                                   ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     511 </span>            : 
+<span class="lineNum">     512 </span><span class="lineCov">       5372 :     return scanstate;</span>
+<span class="lineNum">     513 </span>            : }
+<span class="lineNum">     514 </span>            : 
+<span class="lineNum">     515 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     516 </span>            :  *      ExecEndFunctionScan
+<span class="lineNum">     517 </span>            :  *
+<span class="lineNum">     518 </span>            :  *      frees any storage allocated through C routines.
+<span class="lineNum">     519 </span>            :  * ----------------------------------------------------------------
+<a name="520"><span class="lineNum">     520 </span>            :  */</a>
+<span class="lineNum">     521 </span>            : void
+<span class="lineNum">     522 </span><span class="lineCov">       5164 : ExecEndFunctionScan(FunctionScanState *node)</span>
+<span class="lineNum">     523 </span>            : {
+<span class="lineNum">     524 </span>            :     int         i;
+<span class="lineNum">     525 </span>            : 
+<span class="lineNum">     526 </span>            :     /*
+<span class="lineNum">     527 </span>            :      * Free the exprcontext
+<span class="lineNum">     528 </span>            :      */
+<span class="lineNum">     529 </span><span class="lineCov">       5164 :     ExecFreeExprContext(&amp;node-&gt;ss.ps);</span>
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span>            :     /*
+<span class="lineNum">     532 </span>            :      * clean out the tuple table
+<span class="lineNum">     533 </span>            :      */
+<span class="lineNum">     534 </span><span class="lineCov">       5164 :     if (node-&gt;ss.ps.ps_ResultTupleSlot)</span>
+<span class="lineNum">     535 </span><span class="lineCov">       1810 :         ExecClearTuple(node-&gt;ss.ps.ps_ResultTupleSlot);</span>
+<span class="lineNum">     536 </span><span class="lineCov">       5164 :     ExecClearTuple(node-&gt;ss.ss_ScanTupleSlot);</span>
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span>            :     /*
+<span class="lineNum">     539 </span>            :      * Release slots and tuplestore resources
+<span class="lineNum">     540 </span>            :      */
+<span class="lineNum">     541 </span><span class="lineCov">      10420 :     for (i = 0; i &lt; node-&gt;nfuncs; i++)</span>
+<span class="lineNum">     542 </span>            :     {
+<span class="lineNum">     543 </span><span class="lineCov">       5256 :         FunctionScanPerFuncState *fs = &amp;node-&gt;funcstates[i];</span>
+<span class="lineNum">     544 </span>            : 
+<span class="lineNum">     545 </span><span class="lineCov">       5256 :         if (fs-&gt;func_slot)</span>
+<span class="lineNum">     546 </span><span class="lineCov">        236 :             ExecClearTuple(fs-&gt;func_slot);</span>
+<span class="lineNum">     547 </span>            : 
+<span class="lineNum">     548 </span><span class="lineCov">       5256 :         if (fs-&gt;tstore != NULL)</span>
+<span class="lineNum">     549 </span>            :         {
+<span class="lineNum">     550 </span><span class="lineCov">       4448 :             tuplestore_end(node-&gt;funcstates[i].tstore);</span>
+<span class="lineNum">     551 </span><span class="lineCov">       4448 :             fs-&gt;tstore = NULL;</span>
+<span class="lineNum">     552 </span>            :         }
+<span class="lineNum">     553 </span>            :     }
+<span class="lineNum">     554 </span><span class="lineCov">       5164 : }</span>
+<span class="lineNum">     555 </span>            : 
+<span class="lineNum">     556 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     557 </span>            :  *      ExecReScanFunctionScan
+<span class="lineNum">     558 </span>            :  *
+<span class="lineNum">     559 </span>            :  *      Rescans the relation.
+<span class="lineNum">     560 </span>            :  * ----------------------------------------------------------------
+<a name="561"><span class="lineNum">     561 </span>            :  */</a>
+<span class="lineNum">     562 </span>            : void
+<span class="lineNum">     563 </span><span class="lineCov">      29346 : ExecReScanFunctionScan(FunctionScanState *node)</span>
+<span class="lineNum">     564 </span>            : {
+<span class="lineNum">     565 </span><span class="lineCov">      29346 :     FunctionScan *scan = (FunctionScan *) node-&gt;ss.ps.plan;</span>
+<span class="lineNum">     566 </span>            :     int         i;
+<span class="lineNum">     567 </span><span class="lineCov">      29346 :     Bitmapset  *chgparam = node-&gt;ss.ps.chgParam;</span>
+<span class="lineNum">     568 </span>            : 
+<span class="lineNum">     569 </span><span class="lineCov">      29346 :     if (node-&gt;ss.ps.ps_ResultTupleSlot)</span>
+<span class="lineNum">     570 </span><span class="lineCov">        764 :         ExecClearTuple(node-&gt;ss.ps.ps_ResultTupleSlot);</span>
+<span class="lineNum">     571 </span><span class="lineCov">      58728 :     for (i = 0; i &lt; node-&gt;nfuncs; i++)</span>
+<span class="lineNum">     572 </span>            :     {
+<span class="lineNum">     573 </span><span class="lineCov">      29382 :         FunctionScanPerFuncState *fs = &amp;node-&gt;funcstates[i];</span>
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span><span class="lineCov">      29382 :         if (fs-&gt;func_slot)</span>
+<span class="lineNum">     576 </span><span class="lineCov">        242 :             ExecClearTuple(fs-&gt;func_slot);</span>
+<span class="lineNum">     577 </span>            :     }
+<span class="lineNum">     578 </span>            : 
+<span class="lineNum">     579 </span><span class="lineCov">      29346 :     ExecScanReScan(&amp;node-&gt;ss);</span>
+<span class="lineNum">     580 </span>            : 
+<span class="lineNum">     581 </span>            :     /*
+<span class="lineNum">     582 </span>            :      * Here we have a choice whether to drop the tuplestores (and recompute
+<span class="lineNum">     583 </span>            :      * the function outputs) or just rescan them.  We must recompute if an
+<span class="lineNum">     584 </span>            :      * expression contains changed parameters, else we rescan.
+<span class="lineNum">     585 </span>            :      *
+<span class="lineNum">     586 </span>            :      * XXX maybe we should recompute if the function is volatile?  But in
+<span class="lineNum">     587 </span>            :      * general the executor doesn't conditionalize its actions on that.
+<span class="lineNum">     588 </span>            :      */
+<span class="lineNum">     589 </span><span class="lineCov">      29346 :     if (chgparam)</span>
+<span class="lineNum">     590 </span>            :     {
+<span class="lineNum">     591 </span>            :         ListCell   *lc;
+<span class="lineNum">     592 </span>            : 
+<span class="lineNum">     593 </span><span class="lineCov">      28754 :         i = 0;</span>
+<span class="lineNum">     594 </span><span class="lineCov">      57536 :         foreach(lc, scan-&gt;functions)</span>
+<span class="lineNum">     595 </span>            :         {
+<span class="lineNum">     596 </span><span class="lineCov">      28782 :             RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(lc);</span>
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span><span class="lineCov">      28782 :             if (bms_overlap(chgparam, rtfunc-&gt;funcparams))</span>
+<span class="lineNum">     599 </span>            :             {
+<span class="lineNum">     600 </span><span class="lineCov">      28752 :                 if (node-&gt;funcstates[i].tstore != NULL)</span>
+<span class="lineNum">     601 </span>            :                 {
+<span class="lineNum">     602 </span><span class="lineCov">      26894 :                     tuplestore_end(node-&gt;funcstates[i].tstore);</span>
+<span class="lineNum">     603 </span><span class="lineCov">      26894 :                     node-&gt;funcstates[i].tstore = NULL;</span>
+<span class="lineNum">     604 </span>            :                 }
+<span class="lineNum">     605 </span><span class="lineCov">      28752 :                 node-&gt;funcstates[i].rowcount = -1;</span>
+<span class="lineNum">     606 </span>            :             }
+<span class="lineNum">     607 </span><span class="lineCov">      28782 :             i++;</span>
+<span class="lineNum">     608 </span>            :         }
+<span class="lineNum">     609 </span>            :     }
+<span class="lineNum">     610 </span>            : 
+<span class="lineNum">     611 </span>            :     /* Reset ordinality counter */
+<span class="lineNum">     612 </span><span class="lineCov">      29346 :     node-&gt;ordinal = 0;</span>
+<span class="lineNum">     613 </span>            : 
+<span class="lineNum">     614 </span>            :     /* Make sure we rewind any remaining tuplestores */
+<span class="lineNum">     615 </span><span class="lineCov">      58728 :     for (i = 0; i &lt; node-&gt;nfuncs; i++)</span>
+<span class="lineNum">     616 </span>            :     {
+<span class="lineNum">     617 </span><span class="lineCov">      29382 :         if (node-&gt;funcstates[i].tstore != NULL)</span>
+<span class="lineNum">     618 </span><span class="lineCov">        574 :             tuplestore_rescan(node-&gt;funcstates[i].tstore);</span>
+<span class="lineNum">     619 </span>            :     }
+<span class="lineNum">     620 </span><span class="lineCov">      29346 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

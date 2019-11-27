@@ -1,0 +1,2026 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/gin/gindatapage.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/gin</a> - gindatapage.c<span style="font-size: 80%;"> (source / <a href="gindatapage.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">476</td>
+            <td class="headerCovTableEntry">683</td>
+            <td class="headerCovTableEntryLo">69.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">24</td>
+            <td class="headerCovTableEntry">29</td>
+            <td class="headerCovTableEntryMed">82.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * gindatapage.c
+<span class="lineNum">       4 </span>            :  *    routines for handling GIN posting tree pages.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *          src/backend/access/gin/gindatapage.c
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/gin_private.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;access/ginxlog.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;access/xloginsert.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;lib/ilist.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;storage/predicate.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : /*
+<span class="lineNum">      26 </span>            :  * Min, Max and Target size of posting lists stored on leaf pages, in bytes.
+<span class="lineNum">      27 </span>            :  *
+<span class="lineNum">      28 </span>            :  * The code can deal with any size, but random access is more efficient when
+<span class="lineNum">      29 </span>            :  * a number of smaller lists are stored, rather than one big list. If a
+<span class="lineNum">      30 </span>            :  * posting list would become larger than Max size as a result of insertions,
+<span class="lineNum">      31 </span>            :  * it is split into two. If a posting list would be smaller than minimum
+<span class="lineNum">      32 </span>            :  * size, it is merged with the next posting list.
+<span class="lineNum">      33 </span>            :  */
+<span class="lineNum">      34 </span>            : #define GinPostingListSegmentMaxSize 384
+<span class="lineNum">      35 </span>            : #define GinPostingListSegmentTargetSize 256
+<span class="lineNum">      36 </span>            : #define GinPostingListSegmentMinSize 128
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : /*
+<span class="lineNum">      39 </span>            :  * At least this many items fit in a GinPostingListSegmentMaxSize-bytes
+<span class="lineNum">      40 </span>            :  * long segment. This is used when estimating how much space is required
+<span class="lineNum">      41 </span>            :  * for N items, at minimum.
+<span class="lineNum">      42 </span>            :  */
+<span class="lineNum">      43 </span>            : #define MinTuplesPerSegment ((GinPostingListSegmentMaxSize - 2) / 6)
+<span class="lineNum">      44 </span>            : 
+<span class="lineNum">      45 </span>            : /*
+<span class="lineNum">      46 </span>            :  * A working struct for manipulating a posting tree leaf page.
+<span class="lineNum">      47 </span>            :  */
+<span class="lineNum">      48 </span>            : typedef struct
+<span class="lineNum">      49 </span>            : {
+<span class="lineNum">      50 </span>            :     dlist_head  segments;       /* a list of leafSegmentInfos */
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            :     /*
+<span class="lineNum">      53 </span>            :      * The following fields represent how the segments are split across pages,
+<span class="lineNum">      54 </span>            :      * if a page split is required. Filled in by leafRepackItems.
+<span class="lineNum">      55 </span>            :      */
+<span class="lineNum">      56 </span>            :     dlist_node *lastleft;       /* last segment on left page */
+<span class="lineNum">      57 </span>            :     int         lsize;          /* total size on left page */
+<span class="lineNum">      58 </span>            :     int         rsize;          /* total size on right page */
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            :     bool        oldformat;      /* page is in pre-9.4 format on disk */
+<span class="lineNum">      61 </span>            : 
+<span class="lineNum">      62 </span>            :     /*
+<span class="lineNum">      63 </span>            :      * If we need WAL data representing the reconstructed leaf page, it's
+<span class="lineNum">      64 </span>            :      * stored here by computeLeafRecompressWALData.
+<span class="lineNum">      65 </span>            :      */
+<span class="lineNum">      66 </span>            :     char       *walinfo;        /* buffer start */
+<span class="lineNum">      67 </span>            :     int         walinfolen;     /* and length */
+<span class="lineNum">      68 </span>            : } disassembledLeaf;
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span>            : typedef struct
+<span class="lineNum">      71 </span>            : {
+<span class="lineNum">      72 </span>            :     dlist_node  node;           /* linked list pointers */
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span>            :     /*-------------
+<span class="lineNum">      75 </span>            :      * 'action' indicates the status of this in-memory segment, compared to
+<span class="lineNum">      76 </span>            :      * what's on disk. It is one of the GIN_SEGMENT_* action codes:
+<span class="lineNum">      77 </span>            :      *
+<span class="lineNum">      78 </span>            :      * UNMODIFIED   no changes
+<span class="lineNum">      79 </span>            :      * DELETE       the segment is to be removed. 'seg' and 'items' are
+<span class="lineNum">      80 </span>            :      *              ignored
+<span class="lineNum">      81 </span>            :      * INSERT       this is a completely new segment
+<span class="lineNum">      82 </span>            :      * REPLACE      this replaces an existing segment with new content
+<span class="lineNum">      83 </span>            :      * ADDITEMS     like REPLACE, but no items have been removed, and we track
+<span class="lineNum">      84 </span>            :      *              in detail what items have been added to this segment, in
+<span class="lineNum">      85 </span>            :      *              'modifieditems'
+<span class="lineNum">      86 </span>            :      *-------------
+<span class="lineNum">      87 </span>            :      */
+<span class="lineNum">      88 </span>            :     char        action;
+<span class="lineNum">      89 </span>            : 
+<span class="lineNum">      90 </span>            :     ItemPointerData *modifieditems;
+<span class="lineNum">      91 </span>            :     uint16      nmodifieditems;
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            :     /*
+<span class="lineNum">      94 </span>            :      * The following fields represent the items in this segment. If 'items' is
+<span class="lineNum">      95 </span>            :      * not NULL, it contains a palloc'd array of the items in this segment. If
+<span class="lineNum">      96 </span>            :      * 'seg' is not NULL, it contains the items in an already-compressed
+<span class="lineNum">      97 </span>            :      * format. It can point to an on-disk page (!modified), or a palloc'd
+<span class="lineNum">      98 </span>            :      * segment in memory. If both are set, they must represent the same items.
+<span class="lineNum">      99 </span>            :      */
+<span class="lineNum">     100 </span>            :     GinPostingList *seg;
+<span class="lineNum">     101 </span>            :     ItemPointer items;
+<span class="lineNum">     102 </span>            :     int         nitems;         /* # of items in 'items', if items != NULL */
+<span class="lineNum">     103 </span>            : } leafSegmentInfo;
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span>            : static ItemPointer dataLeafPageGetUncompressed(Page page, int *nitems);
+<span class="lineNum">     106 </span>            : static void dataSplitPageInternal(GinBtree btree, Buffer origbuf,
+<span class="lineNum">     107 </span>            :                                   GinBtreeStack *stack,
+<span class="lineNum">     108 </span>            :                                   void *insertdata, BlockNumber updateblkno,
+<span class="lineNum">     109 </span>            :                                   Page *newlpage, Page *newrpage);
+<span class="lineNum">     110 </span>            : 
+<span class="lineNum">     111 </span>            : static disassembledLeaf *disassembleLeaf(Page page);
+<span class="lineNum">     112 </span>            : static bool leafRepackItems(disassembledLeaf *leaf, ItemPointer remaining);
+<span class="lineNum">     113 </span>            : static bool addItemsToLeaf(disassembledLeaf *leaf, ItemPointer newItems,
+<span class="lineNum">     114 </span>            :                            int nNewItems);
+<span class="lineNum">     115 </span>            : 
+<span class="lineNum">     116 </span>            : static void computeLeafRecompressWALData(disassembledLeaf *leaf);
+<span class="lineNum">     117 </span>            : static void dataPlaceToPageLeafRecompress(Buffer buf, disassembledLeaf *leaf);
+<span class="lineNum">     118 </span>            : static void dataPlaceToPageLeafSplit(disassembledLeaf *leaf,
+<span class="lineNum">     119 </span>            :                                      ItemPointerData lbound, ItemPointerData rbound,
+<span class="lineNum">     120 </span>            :                                      Page lpage, Page rpage);
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span>            : /*
+<span class="lineNum">     123 </span>            :  * Read TIDs from leaf data page to single uncompressed array. The TIDs are
+<span class="lineNum">     124 </span>            :  * returned in ascending order.
+<span class="lineNum">     125 </span>            :  *
+<span class="lineNum">     126 </span>            :  * advancePast is a hint, indicating that the caller is only interested in
+<span class="lineNum">     127 </span>            :  * TIDs &gt; advancePast. To return all items, use ItemPointerSetMin.
+<span class="lineNum">     128 </span>            :  *
+<span class="lineNum">     129 </span>            :  * Note: This function can still return items smaller than advancePast that
+<span class="lineNum">     130 </span>            :  * are in the same posting list as the items of interest, so the caller must
+<span class="lineNum">     131 </span>            :  * still check all the returned items. But passing it allows this function to
+<span class="lineNum">     132 </span>            :  * skip whole posting lists.
+<a name="133"><span class="lineNum">     133 </span>            :  */</a>
+<span class="lineNum">     134 </span>            : ItemPointer
+<span class="lineNum">     135 </span><span class="lineCov">         12 : GinDataLeafPageGetItems(Page page, int *nitems, ItemPointerData advancePast)</span>
+<span class="lineNum">     136 </span>            : {
+<span class="lineNum">     137 </span>            :     ItemPointer result;
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span><span class="lineCov">         12 :     if (GinPageIsCompressed(page))</span>
+<span class="lineNum">     140 </span>            :     {
+<span class="lineNum">     141 </span><span class="lineCov">         12 :         GinPostingList *seg = GinDataLeafPageGetPostingList(page);</span>
+<span class="lineNum">     142 </span><span class="lineCov">         12 :         Size        len = GinDataLeafPageGetPostingListSize(page);</span>
+<span class="lineNum">     143 </span><span class="lineCov">         12 :         Pointer     endptr = ((Pointer) seg) + len;</span>
+<span class="lineNum">     144 </span>            :         GinPostingList *next;
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span>            :         /* Skip to the segment containing advancePast+1 */
+<span class="lineNum">     147 </span><span class="lineCov">         12 :         if (ItemPointerIsValid(&amp;advancePast))</span>
+<span class="lineNum">     148 </span>            :         {
+<span class="lineNum">     149 </span><span class="lineCov">          8 :             next = GinNextPostingListSegment(seg);</span>
+<span class="lineNum">     150 </span><span class="lineCov">         24 :             while ((Pointer) next &lt; endptr &amp;&amp;</span>
+<span class="lineNum">     151 </span><span class="lineCov">          8 :                    ginCompareItemPointers(&amp;next-&gt;first, &amp;advancePast) &lt;= 0)</span>
+<span class="lineNum">     152 </span>            :             {
+<span class="lineNum">     153 </span><span class="lineNoCov">          0 :                 seg = next;</span>
+<span class="lineNum">     154 </span><span class="lineNoCov">          0 :                 next = GinNextPostingListSegment(seg);</span>
+<span class="lineNum">     155 </span>            :             }
+<span class="lineNum">     156 </span><span class="lineCov">          8 :             len = endptr - (Pointer) seg;</span>
+<span class="lineNum">     157 </span>            :         }
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span><span class="lineCov">         12 :         if (len &gt; 0)</span>
+<span class="lineNum">     160 </span><span class="lineCov">         12 :             result = ginPostingListDecodeAllSegments(seg, len, nitems);</span>
+<span class="lineNum">     161 </span>            :         else
+<span class="lineNum">     162 </span>            :         {
+<span class="lineNum">     163 </span><span class="lineNoCov">          0 :             result = NULL;</span>
+<span class="lineNum">     164 </span><span class="lineNoCov">          0 :             *nitems = 0;</span>
+<span class="lineNum">     165 </span>            :         }
+<span class="lineNum">     166 </span>            :     }
+<span class="lineNum">     167 </span>            :     else
+<span class="lineNum">     168 </span>            :     {
+<span class="lineNum">     169 </span><span class="lineNoCov">          0 :         ItemPointer tmp = dataLeafPageGetUncompressed(page, nitems);</span>
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span><span class="lineNoCov">          0 :         result = palloc((*nitems) * sizeof(ItemPointerData));</span>
+<span class="lineNum">     172 </span><span class="lineNoCov">          0 :         memcpy(result, tmp, (*nitems) * sizeof(ItemPointerData));</span>
+<span class="lineNum">     173 </span>            :     }
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span><span class="lineCov">         12 :     return result;</span>
+<span class="lineNum">     176 </span>            : }
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span>            : /*
+<span class="lineNum">     179 </span>            :  * Places all TIDs from leaf data page to bitmap.
+<a name="180"><span class="lineNum">     180 </span>            :  */</a>
+<span class="lineNum">     181 </span>            : int
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 : GinDataLeafPageGetItemsToTbm(Page page, TIDBitmap *tbm)</span>
+<span class="lineNum">     183 </span>            : {
+<span class="lineNum">     184 </span>            :     ItemPointer uncompressed;
+<span class="lineNum">     185 </span>            :     int         nitems;
+<span class="lineNum">     186 </span>            : 
+<span class="lineNum">     187 </span><span class="lineNoCov">          0 :     if (GinPageIsCompressed(page))</span>
+<span class="lineNum">     188 </span>            :     {
+<span class="lineNum">     189 </span><span class="lineNoCov">          0 :         GinPostingList *segment = GinDataLeafPageGetPostingList(page);</span>
+<span class="lineNum">     190 </span><span class="lineNoCov">          0 :         Size        len = GinDataLeafPageGetPostingListSize(page);</span>
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span><span class="lineNoCov">          0 :         nitems = ginPostingListDecodeAllSegmentsToTbm(segment, len, tbm);</span>
+<span class="lineNum">     193 </span>            :     }
+<span class="lineNum">     194 </span>            :     else
+<span class="lineNum">     195 </span>            :     {
+<span class="lineNum">     196 </span><span class="lineNoCov">          0 :         uncompressed = dataLeafPageGetUncompressed(page, &amp;nitems);</span>
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span><span class="lineNoCov">          0 :         if (nitems &gt; 0)</span>
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 :             tbm_add_tuples(tbm, uncompressed, nitems, false);</span>
+<span class="lineNum">     200 </span>            :     }
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span><span class="lineNoCov">          0 :     return nitems;</span>
+<span class="lineNum">     203 </span>            : }
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span>            : /*
+<span class="lineNum">     206 </span>            :  * Get pointer to the uncompressed array of items on a pre-9.4 format
+<span class="lineNum">     207 </span>            :  * uncompressed leaf page. The number of items in the array is returned in
+<span class="lineNum">     208 </span>            :  * *nitems.
+<a name="209"><span class="lineNum">     209 </span>            :  */</a>
+<span class="lineNum">     210 </span>            : static ItemPointer
+<span class="lineNum">     211 </span><span class="lineNoCov">          0 : dataLeafPageGetUncompressed(Page page, int *nitems)</span>
+<span class="lineNum">     212 </span>            : {
+<span class="lineNum">     213 </span>            :     ItemPointer items;
+<span class="lineNum">     214 </span>            : 
+<span class="lineNum">     215 </span><span class="lineNoCov">          0 :     Assert(!GinPageIsCompressed(page));</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span>            :     /*
+<span class="lineNum">     218 </span>            :      * In the old pre-9.4 page format, the whole page content is used for
+<span class="lineNum">     219 </span>            :      * uncompressed items, and the number of items is stored in 'maxoff'
+<span class="lineNum">     220 </span>            :      */
+<span class="lineNum">     221 </span><span class="lineNoCov">          0 :     items = (ItemPointer) GinDataPageGetData(page);</span>
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :     *nitems = GinPageGetOpaque(page)-&gt;maxoff;</span>
+<span class="lineNum">     223 </span>            : 
+<span class="lineNum">     224 </span><span class="lineNoCov">          0 :     return items;</span>
+<span class="lineNum">     225 </span>            : }
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span>            : /*
+<span class="lineNum">     228 </span>            :  * Check if we should follow the right link to find the item we're searching
+<span class="lineNum">     229 </span>            :  * for.
+<span class="lineNum">     230 </span>            :  *
+<span class="lineNum">     231 </span>            :  * Compares inserting item pointer with the right bound of the current page.
+<a name="232"><span class="lineNum">     232 </span>            :  */</a>
+<span class="lineNum">     233 </span>            : static bool
+<span class="lineNum">     234 </span><span class="lineCov">       6010 : dataIsMoveRight(GinBtree btree, Page page)</span>
+<span class="lineNum">     235 </span>            : {
+<span class="lineNum">     236 </span><span class="lineCov">       6010 :     ItemPointer iptr = GinDataPageGetRightBound(page);</span>
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span><span class="lineCov">       6010 :     if (GinPageRightMost(page))</span>
+<span class="lineNum">     239 </span><span class="lineCov">       6010 :         return false;</span>
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :     if (GinPageIsDeleted(page))</span>
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span><span class="lineNoCov">          0 :     return (ginCompareItemPointers(&amp;btree-&gt;itemptr, iptr) &gt; 0) ? true : false;</span>
+<span class="lineNum">     245 </span>            : }
+<span class="lineNum">     246 </span>            : 
+<span class="lineNum">     247 </span>            : /*
+<span class="lineNum">     248 </span>            :  * Find correct PostingItem in non-leaf page. It is assumed that this is
+<span class="lineNum">     249 </span>            :  * the correct page, and the searched value SHOULD be on the page.
+<a name="250"><span class="lineNum">     250 </span>            :  */</a>
+<span class="lineNum">     251 </span>            : static BlockNumber
+<span class="lineNum">     252 </span><span class="lineCov">       6014 : dataLocateItem(GinBtree btree, GinBtreeStack *stack)</span>
+<span class="lineNum">     253 </span>            : {
+<span class="lineNum">     254 </span>            :     OffsetNumber low,
+<span class="lineNum">     255 </span>            :                 high,
+<span class="lineNum">     256 </span>            :                 maxoff;
+<span class="lineNum">     257 </span><span class="lineCov">       6014 :     PostingItem *pitem = NULL;</span>
+<span class="lineNum">     258 </span>            :     int         result;
+<span class="lineNum">     259 </span><span class="lineCov">       6014 :     Page        page = BufferGetPage(stack-&gt;buffer);</span>
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span><span class="lineCov">       6014 :     Assert(!GinPageIsLeaf(page));</span>
+<span class="lineNum">     262 </span><span class="lineCov">       6014 :     Assert(GinPageIsData(page));</span>
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span><span class="lineCov">       6014 :     if (btree-&gt;fullScan)</span>
+<span class="lineNum">     265 </span>            :     {
+<span class="lineNum">     266 </span><span class="lineCov">          4 :         stack-&gt;off = FirstOffsetNumber;</span>
+<span class="lineNum">     267 </span><span class="lineCov">          4 :         stack-&gt;predictNumber *= GinPageGetOpaque(page)-&gt;maxoff;</span>
+<span class="lineNum">     268 </span><span class="lineCov">          4 :         return btree-&gt;getLeftMostChild(btree, page);</span>
+<span class="lineNum">     269 </span>            :     }
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span><span class="lineCov">       6010 :     low = FirstOffsetNumber;</span>
+<span class="lineNum">     272 </span><span class="lineCov">       6010 :     maxoff = high = GinPageGetOpaque(page)-&gt;maxoff;</span>
+<span class="lineNum">     273 </span><span class="lineCov">       6010 :     Assert(high &gt;= low);</span>
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span><span class="lineCov">       6010 :     high++;</span>
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span><span class="lineCov">      24040 :     while (high &gt; low)</span>
+<span class="lineNum">     278 </span>            :     {
+<span class="lineNum">     279 </span><span class="lineCov">      12020 :         OffsetNumber mid = low + ((high - low) / 2);</span>
+<span class="lineNum">     280 </span>            : 
+<span class="lineNum">     281 </span><span class="lineCov">      12020 :         pitem = GinDataPageGetPostingItem(page, mid);</span>
+<span class="lineNum">     282 </span>            : 
+<span class="lineNum">     283 </span><span class="lineCov">      12020 :         if (mid == maxoff)</span>
+<span class="lineNum">     284 </span>            :         {
+<span class="lineNum">     285 </span>            :             /*
+<span class="lineNum">     286 </span>            :              * Right infinity, page already correctly chosen with a help of
+<span class="lineNum">     287 </span>            :              * dataIsMoveRight
+<span class="lineNum">     288 </span>            :              */
+<span class="lineNum">     289 </span><span class="lineCov">       6010 :             result = -1;</span>
+<span class="lineNum">     290 </span>            :         }
+<span class="lineNum">     291 </span>            :         else
+<span class="lineNum">     292 </span>            :         {
+<span class="lineNum">     293 </span><span class="lineCov">       6010 :             pitem = GinDataPageGetPostingItem(page, mid);</span>
+<span class="lineNum">     294 </span><span class="lineCov">       6010 :             result = ginCompareItemPointers(&amp;btree-&gt;itemptr, &amp;(pitem-&gt;key));</span>
+<span class="lineNum">     295 </span>            :         }
+<span class="lineNum">     296 </span>            : 
+<span class="lineNum">     297 </span><span class="lineCov">      12020 :         if (result == 0)</span>
+<span class="lineNum">     298 </span>            :         {
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :             stack-&gt;off = mid;</span>
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :             return PostingItemGetBlockNumber(pitem);</span>
+<span class="lineNum">     301 </span>            :         }
+<span class="lineNum">     302 </span><span class="lineCov">      12020 :         else if (result &gt; 0)</span>
+<span class="lineNum">     303 </span><span class="lineCov">       6010 :             low = mid + 1;</span>
+<span class="lineNum">     304 </span>            :         else
+<span class="lineNum">     305 </span><span class="lineCov">       6010 :             high = mid;</span>
+<span class="lineNum">     306 </span>            :     }
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span><span class="lineCov">       6010 :     Assert(high &gt;= FirstOffsetNumber &amp;&amp; high &lt;= maxoff);</span>
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span><span class="lineCov">       6010 :     stack-&gt;off = high;</span>
+<span class="lineNum">     311 </span><span class="lineCov">       6010 :     pitem = GinDataPageGetPostingItem(page, high);</span>
+<span class="lineNum">     312 </span><span class="lineCov">       6010 :     return PostingItemGetBlockNumber(pitem);</span>
+<span class="lineNum">     313 </span>            : }
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span>            : /*
+<span class="lineNum">     316 </span>            :  * Find link to blkno on non-leaf page, returns offset of PostingItem
+<a name="317"><span class="lineNum">     317 </span>            :  */</a>
+<span class="lineNum">     318 </span>            : static OffsetNumber
+<span class="lineNum">     319 </span><span class="lineCov">          6 : dataFindChildPtr(GinBtree btree, Page page, BlockNumber blkno, OffsetNumber storedOff)</span>
+<span class="lineNum">     320 </span>            : {
+<span class="lineNum">     321 </span>            :     OffsetNumber i,
+<span class="lineNum">     322 </span><span class="lineCov">          6 :                 maxoff = GinPageGetOpaque(page)-&gt;maxoff;</span>
+<span class="lineNum">     323 </span>            :     PostingItem *pitem;
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span><span class="lineCov">          6 :     Assert(!GinPageIsLeaf(page));</span>
+<span class="lineNum">     326 </span><span class="lineCov">          6 :     Assert(GinPageIsData(page));</span>
+<span class="lineNum">     327 </span>            : 
+<span class="lineNum">     328 </span>            :     /* if page isn't changed, we return storedOff */
+<span class="lineNum">     329 </span><span class="lineCov">          6 :     if (storedOff &gt;= FirstOffsetNumber &amp;&amp; storedOff &lt;= maxoff)</span>
+<span class="lineNum">     330 </span>            :     {
+<span class="lineNum">     331 </span><span class="lineCov">          6 :         pitem = GinDataPageGetPostingItem(page, storedOff);</span>
+<span class="lineNum">     332 </span><span class="lineCov">          6 :         if (PostingItemGetBlockNumber(pitem) == blkno)</span>
+<span class="lineNum">     333 </span><span class="lineCov">          6 :             return storedOff;</span>
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span>            :         /*
+<span class="lineNum">     336 </span>            :          * we hope, that needed pointer goes to right. It's true if there
+<span class="lineNum">     337 </span>            :          * wasn't a deletion
+<span class="lineNum">     338 </span>            :          */
+<span class="lineNum">     339 </span><span class="lineNoCov">          0 :         for (i = storedOff + 1; i &lt;= maxoff; i++)</span>
+<span class="lineNum">     340 </span>            :         {
+<span class="lineNum">     341 </span><span class="lineNoCov">          0 :             pitem = GinDataPageGetPostingItem(page, i);</span>
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :             if (PostingItemGetBlockNumber(pitem) == blkno)</span>
+<span class="lineNum">     343 </span><span class="lineNoCov">          0 :                 return i;</span>
+<span class="lineNum">     344 </span>            :         }
+<span class="lineNum">     345 </span>            : 
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :         maxoff = storedOff - 1;</span>
+<span class="lineNum">     347 </span>            :     }
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span>            :     /* last chance */
+<span class="lineNum">     350 </span><span class="lineNoCov">          0 :     for (i = FirstOffsetNumber; i &lt;= maxoff; i++)</span>
+<span class="lineNum">     351 </span>            :     {
+<span class="lineNum">     352 </span><span class="lineNoCov">          0 :         pitem = GinDataPageGetPostingItem(page, i);</span>
+<span class="lineNum">     353 </span><span class="lineNoCov">          0 :         if (PostingItemGetBlockNumber(pitem) == blkno)</span>
+<span class="lineNum">     354 </span><span class="lineNoCov">          0 :             return i;</span>
+<span class="lineNum">     355 </span>            :     }
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span><span class="lineNoCov">          0 :     return InvalidOffsetNumber;</span>
+<span class="lineNum">     358 </span>            : }
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span>            : /*
+<span class="lineNum">     361 </span>            :  * Return blkno of leftmost child
+<a name="362"><span class="lineNum">     362 </span>            :  */</a>
+<span class="lineNum">     363 </span>            : static BlockNumber
+<span class="lineNum">     364 </span><span class="lineCov">          4 : dataGetLeftMostPage(GinBtree btree, Page page)</span>
+<span class="lineNum">     365 </span>            : {
+<span class="lineNum">     366 </span>            :     PostingItem *pitem;
+<span class="lineNum">     367 </span>            : 
+<span class="lineNum">     368 </span><span class="lineCov">          4 :     Assert(!GinPageIsLeaf(page));</span>
+<span class="lineNum">     369 </span><span class="lineCov">          4 :     Assert(GinPageIsData(page));</span>
+<span class="lineNum">     370 </span><span class="lineCov">          4 :     Assert(GinPageGetOpaque(page)-&gt;maxoff &gt;= FirstOffsetNumber);</span>
+<span class="lineNum">     371 </span>            : 
+<span class="lineNum">     372 </span><span class="lineCov">          4 :     pitem = GinDataPageGetPostingItem(page, FirstOffsetNumber);</span>
+<span class="lineNum">     373 </span><span class="lineCov">          4 :     return PostingItemGetBlockNumber(pitem);</span>
+<span class="lineNum">     374 </span>            : }
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span>            : /*
+<span class="lineNum">     377 </span>            :  * Add PostingItem to a non-leaf page.
+<a name="378"><span class="lineNum">     378 </span>            :  */</a>
+<span class="lineNum">     379 </span>            : void
+<span class="lineNum">     380 </span><span class="lineCov">         18 : GinDataPageAddPostingItem(Page page, PostingItem *data, OffsetNumber offset)</span>
+<span class="lineNum">     381 </span>            : {
+<span class="lineNum">     382 </span><span class="lineCov">         18 :     OffsetNumber maxoff = GinPageGetOpaque(page)-&gt;maxoff;</span>
+<span class="lineNum">     383 </span>            :     char       *ptr;
+<span class="lineNum">     384 </span>            : 
+<span class="lineNum">     385 </span><span class="lineCov">         18 :     Assert(PostingItemGetBlockNumber(data) != InvalidBlockNumber);</span>
+<span class="lineNum">     386 </span><span class="lineCov">         18 :     Assert(!GinPageIsLeaf(page));</span>
+<span class="lineNum">     387 </span>            : 
+<span class="lineNum">     388 </span><span class="lineCov">         18 :     if (offset == InvalidOffsetNumber)</span>
+<span class="lineNum">     389 </span>            :     {
+<span class="lineNum">     390 </span><span class="lineCov">         12 :         ptr = (char *) GinDataPageGetPostingItem(page, maxoff + 1);</span>
+<span class="lineNum">     391 </span>            :     }
+<span class="lineNum">     392 </span>            :     else
+<span class="lineNum">     393 </span>            :     {
+<span class="lineNum">     394 </span><span class="lineCov">          6 :         ptr = (char *) GinDataPageGetPostingItem(page, offset);</span>
+<span class="lineNum">     395 </span><span class="lineCov">          6 :         if (offset != maxoff + 1)</span>
+<span class="lineNum">     396 </span><span class="lineCov">          6 :             memmove(ptr + sizeof(PostingItem),</span>
+<span class="lineNum">     397 </span>            :                     ptr,
+<span class="lineNum">     398 </span><span class="lineCov">          6 :                     (maxoff - offset + 1) * sizeof(PostingItem));</span>
+<span class="lineNum">     399 </span>            :     }
+<span class="lineNum">     400 </span><span class="lineCov">         18 :     memcpy(ptr, data, sizeof(PostingItem));</span>
+<span class="lineNum">     401 </span>            : 
+<span class="lineNum">     402 </span><span class="lineCov">         18 :     maxoff++;</span>
+<span class="lineNum">     403 </span><span class="lineCov">         18 :     GinPageGetOpaque(page)-&gt;maxoff = maxoff;</span>
+<span class="lineNum">     404 </span>            : 
+<span class="lineNum">     405 </span>            :     /*
+<span class="lineNum">     406 </span>            :      * Also set pd_lower to the end of the posting items, to follow the
+<span class="lineNum">     407 </span>            :      * &quot;standard&quot; page layout, so that we can squeeze out the unused space
+<span class="lineNum">     408 </span>            :      * from full-page images.
+<span class="lineNum">     409 </span>            :      */
+<span class="lineNum">     410 </span><span class="lineCov">         18 :     GinDataPageSetDataSize(page, maxoff * sizeof(PostingItem));</span>
+<span class="lineNum">     411 </span><span class="lineCov">         18 : }</span>
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            : /*
+<span class="lineNum">     414 </span>            :  * Delete posting item from non-leaf page
+<a name="415"><span class="lineNum">     415 </span>            :  */</a>
+<span class="lineNum">     416 </span>            : void
+<span class="lineNum">     417 </span><span class="lineNoCov">          0 : GinPageDeletePostingItem(Page page, OffsetNumber offset)</span>
+<span class="lineNum">     418 </span>            : {
+<span class="lineNum">     419 </span><span class="lineNoCov">          0 :     OffsetNumber maxoff = GinPageGetOpaque(page)-&gt;maxoff;</span>
+<span class="lineNum">     420 </span>            : 
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :     Assert(!GinPageIsLeaf(page));</span>
+<span class="lineNum">     422 </span><span class="lineNoCov">          0 :     Assert(offset &gt;= FirstOffsetNumber &amp;&amp; offset &lt;= maxoff);</span>
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineNoCov">          0 :     if (offset != maxoff)</span>
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :         memmove(GinDataPageGetPostingItem(page, offset),</span>
+<span class="lineNum">     426 </span><span class="lineNoCov">          0 :                 GinDataPageGetPostingItem(page, offset + 1),</span>
+<span class="lineNum">     427 </span><span class="lineNoCov">          0 :                 sizeof(PostingItem) * (maxoff - offset));</span>
+<span class="lineNum">     428 </span>            : 
+<span class="lineNum">     429 </span><span class="lineNoCov">          0 :     maxoff--;</span>
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :     GinPageGetOpaque(page)-&gt;maxoff = maxoff;</span>
+<span class="lineNum">     431 </span>            : 
+<span class="lineNum">     432 </span><span class="lineNoCov">          0 :     GinDataPageSetDataSize(page, maxoff * sizeof(PostingItem));</span>
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     434 </span>            : 
+<span class="lineNum">     435 </span>            : /*
+<span class="lineNum">     436 </span>            :  * Prepare to insert data on a leaf data page.
+<span class="lineNum">     437 </span>            :  *
+<span class="lineNum">     438 </span>            :  * If it will fit, return GPTP_INSERT after doing whatever setup is needed
+<span class="lineNum">     439 </span>            :  * before we enter the insertion critical section.  *ptp_workspace can be
+<span class="lineNum">     440 </span>            :  * set to pass information along to the execPlaceToPage function.
+<span class="lineNum">     441 </span>            :  *
+<span class="lineNum">     442 </span>            :  * If it won't fit, perform a page split and return two temporary page
+<span class="lineNum">     443 </span>            :  * images into *newlpage and *newrpage, with result GPTP_SPLIT.
+<span class="lineNum">     444 </span>            :  *
+<span class="lineNum">     445 </span>            :  * In neither case should the given page buffer be modified here.
+<a name="446"><span class="lineNum">     446 </span>            :  */</a>
+<span class="lineNum">     447 </span>            : static GinPlaceToPageRC
+<span class="lineNum">     448 </span><span class="lineCov">       6696 : dataBeginPlaceToPageLeaf(GinBtree btree, Buffer buf, GinBtreeStack *stack,</span>
+<span class="lineNum">     449 </span>            :                          void *insertdata,
+<span class="lineNum">     450 </span>            :                          void **ptp_workspace,
+<span class="lineNum">     451 </span>            :                          Page *newlpage, Page *newrpage)
+<span class="lineNum">     452 </span>            : {
+<span class="lineNum">     453 </span><span class="lineCov">       6696 :     GinBtreeDataLeafInsertData *items = insertdata;</span>
+<span class="lineNum">     454 </span><span class="lineCov">       6696 :     ItemPointer newItems = &amp;items-&gt;items[items-&gt;curitem];</span>
+<span class="lineNum">     455 </span><span class="lineCov">       6696 :     int         maxitems = items-&gt;nitem - items-&gt;curitem;</span>
+<span class="lineNum">     456 </span><span class="lineCov">       6696 :     Page        page = BufferGetPage(buf);</span>
+<span class="lineNum">     457 </span>            :     int         i;
+<span class="lineNum">     458 </span>            :     ItemPointerData rbound;
+<span class="lineNum">     459 </span>            :     ItemPointerData lbound;
+<span class="lineNum">     460 </span>            :     bool        needsplit;
+<span class="lineNum">     461 </span>            :     bool        append;
+<span class="lineNum">     462 </span>            :     int         segsize;
+<span class="lineNum">     463 </span>            :     Size        freespace;
+<span class="lineNum">     464 </span>            :     disassembledLeaf *leaf;
+<span class="lineNum">     465 </span>            :     leafSegmentInfo *lastleftinfo;
+<span class="lineNum">     466 </span>            :     ItemPointerData maxOldItem;
+<span class="lineNum">     467 </span>            :     ItemPointerData remaining;
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span><span class="lineCov">       6696 :     rbound = *GinDataPageGetRightBound(page);</span>
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span>            :     /*
+<span class="lineNum">     472 </span>            :      * Count how many of the new items belong to this page.
+<span class="lineNum">     473 </span>            :      */
+<span class="lineNum">     474 </span><span class="lineCov">       6696 :     if (!GinPageRightMost(page))</span>
+<span class="lineNum">     475 </span>            :     {
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 :         for (i = 0; i &lt; maxitems; i++)</span>
+<span class="lineNum">     477 </span>            :         {
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :             if (ginCompareItemPointers(&amp;newItems[i], &amp;rbound) &gt; 0)</span>
+<span class="lineNum">     479 </span>            :             {
+<span class="lineNum">     480 </span>            :                 /*
+<span class="lineNum">     481 </span>            :                  * This needs to go to some other location in the tree. (The
+<span class="lineNum">     482 </span>            :                  * caller should've chosen the insert location so that at
+<span class="lineNum">     483 </span>            :                  * least the first item goes here.)
+<span class="lineNum">     484 </span>            :                  */
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :                 Assert(i &gt; 0);</span>
+<span class="lineNum">     486 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     487 </span>            :             }
+<span class="lineNum">     488 </span>            :         }
+<span class="lineNum">     489 </span><span class="lineNoCov">          0 :         maxitems = i;</span>
+<span class="lineNum">     490 </span>            :     }
+<span class="lineNum">     491 </span>            : 
+<span class="lineNum">     492 </span>            :     /* Disassemble the data on the page */
+<span class="lineNum">     493 </span><span class="lineCov">       6696 :     leaf = disassembleLeaf(page);</span>
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span>            :     /*
+<span class="lineNum">     496 </span>            :      * Are we appending to the end of the page? IOW, are all the new items
+<span class="lineNum">     497 </span>            :      * larger than any of the existing items.
+<span class="lineNum">     498 </span>            :      */
+<span class="lineNum">     499 </span><span class="lineCov">       6696 :     if (!dlist_is_empty(&amp;leaf-&gt;segments))</span>
+<span class="lineNum">     500 </span>            :     {
+<span class="lineNum">     501 </span><span class="lineCov">       6696 :         lastleftinfo = dlist_container(leafSegmentInfo, node,</span>
+<span class="lineNum">     502 </span>            :                                        dlist_tail_node(&amp;leaf-&gt;segments));
+<span class="lineNum">     503 </span><span class="lineCov">       6696 :         if (!lastleftinfo-&gt;items)</span>
+<span class="lineNum">     504 </span><span class="lineCov">       6696 :             lastleftinfo-&gt;items = ginPostingListDecode(lastleftinfo-&gt;seg,</span>
+<span class="lineNum">     505 </span>            :                                                        &amp;lastleftinfo-&gt;nitems);
+<span class="lineNum">     506 </span><span class="lineCov">       6696 :         maxOldItem = lastleftinfo-&gt;items[lastleftinfo-&gt;nitems - 1];</span>
+<span class="lineNum">     507 </span><span class="lineCov">       6696 :         if (ginCompareItemPointers(&amp;newItems[0], &amp;maxOldItem) &gt;= 0)</span>
+<span class="lineNum">     508 </span><span class="lineCov">       6696 :             append = true;</span>
+<span class="lineNum">     509 </span>            :         else
+<span class="lineNum">     510 </span><span class="lineNoCov">          0 :             append = false;</span>
+<span class="lineNum">     511 </span>            :     }
+<span class="lineNum">     512 </span>            :     else
+<span class="lineNum">     513 </span>            :     {
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :         ItemPointerSetMin(&amp;maxOldItem);</span>
+<span class="lineNum">     515 </span><span class="lineNoCov">          0 :         append = true;</span>
+<span class="lineNum">     516 </span>            :     }
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span>            :     /*
+<span class="lineNum">     519 </span>            :      * If we're appending to the end of the page, we will append as many items
+<span class="lineNum">     520 </span>            :      * as we can fit (after splitting), and stop when the pages becomes full.
+<span class="lineNum">     521 </span>            :      * Otherwise we have to limit the number of new items to insert, because
+<span class="lineNum">     522 </span>            :      * once we start packing we can't just stop when we run out of space,
+<span class="lineNum">     523 </span>            :      * because we must make sure that all the old items still fit.
+<span class="lineNum">     524 </span>            :      */
+<span class="lineNum">     525 </span><span class="lineCov">       6696 :     if (GinPageIsCompressed(page))</span>
+<span class="lineNum">     526 </span><span class="lineCov">       6696 :         freespace = GinDataLeafPageGetFreeSpace(page);</span>
+<span class="lineNum">     527 </span>            :     else
+<span class="lineNum">     528 </span><span class="lineNoCov">          0 :         freespace = 0;</span>
+<span class="lineNum">     529 </span><span class="lineCov">       6696 :     if (append)</span>
+<span class="lineNum">     530 </span>            :     {
+<span class="lineNum">     531 </span>            :         /*
+<span class="lineNum">     532 </span>            :          * Even when appending, trying to append more items than will fit is
+<span class="lineNum">     533 </span>            :          * not completely free, because we will merge the new items and old
+<span class="lineNum">     534 </span>            :          * items into an array below. In the best case, every new item fits in
+<span class="lineNum">     535 </span>            :          * a single byte, and we can use all the free space on the old page as
+<span class="lineNum">     536 </span>            :          * well as the new page. For simplicity, ignore segment overhead etc.
+<span class="lineNum">     537 </span>            :          */
+<span class="lineNum">     538 </span><span class="lineCov">       6696 :         maxitems = Min(maxitems, freespace + GinDataPageMaxDataSize);</span>
+<span class="lineNum">     539 </span>            :     }
+<span class="lineNum">     540 </span>            :     else
+<span class="lineNum">     541 </span>            :     {
+<span class="lineNum">     542 </span>            :         /*
+<span class="lineNum">     543 </span>            :          * Calculate a conservative estimate of how many new items we can fit
+<span class="lineNum">     544 </span>            :          * on the two pages after splitting.
+<span class="lineNum">     545 </span>            :          *
+<span class="lineNum">     546 </span>            :          * We can use any remaining free space on the old page to store full
+<span class="lineNum">     547 </span>            :          * segments, as well as the new page. Each full-sized segment can hold
+<span class="lineNum">     548 </span>            :          * at least MinTuplesPerSegment items
+<span class="lineNum">     549 </span>            :          */
+<span class="lineNum">     550 </span>            :         int         nnewsegments;
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :         nnewsegments = freespace / GinPostingListSegmentMaxSize;</span>
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :         nnewsegments += GinDataPageMaxDataSize / GinPostingListSegmentMaxSize;</span>
+<span class="lineNum">     554 </span><span class="lineNoCov">          0 :         maxitems = Min(maxitems, nnewsegments * MinTuplesPerSegment);</span>
+<span class="lineNum">     555 </span>            :     }
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span>            :     /* Add the new items to the segment list */
+<span class="lineNum">     558 </span><span class="lineCov">       6696 :     if (!addItemsToLeaf(leaf, newItems, maxitems))</span>
+<span class="lineNum">     559 </span>            :     {
+<span class="lineNum">     560 </span>            :         /* all items were duplicates, we have nothing to do */
+<span class="lineNum">     561 </span><span class="lineNoCov">          0 :         items-&gt;curitem += maxitems;</span>
+<span class="lineNum">     562 </span>            : 
+<span class="lineNum">     563 </span><span class="lineNoCov">          0 :         return GPTP_NO_WORK;</span>
+<span class="lineNum">     564 </span>            :     }
+<span class="lineNum">     565 </span>            : 
+<span class="lineNum">     566 </span>            :     /*
+<span class="lineNum">     567 </span>            :      * Pack the items back to compressed segments, ready for writing to disk.
+<span class="lineNum">     568 </span>            :      */
+<span class="lineNum">     569 </span><span class="lineCov">       6696 :     needsplit = leafRepackItems(leaf, &amp;remaining);</span>
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span>            :     /*
+<span class="lineNum">     572 </span>            :      * Did all the new items fit?
+<span class="lineNum">     573 </span>            :      *
+<span class="lineNum">     574 </span>            :      * If we're appending, it's OK if they didn't. But as a sanity check,
+<span class="lineNum">     575 </span>            :      * verify that all the old items fit.
+<span class="lineNum">     576 </span>            :      */
+<span class="lineNum">     577 </span><span class="lineCov">       6696 :     if (ItemPointerIsValid(&amp;remaining))</span>
+<span class="lineNum">     578 </span>            :     {
+<span class="lineNum">     579 </span><span class="lineCov">          4 :         if (!append || ItemPointerCompare(&amp;maxOldItem, &amp;remaining) &gt;= 0)</span>
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;could not split GIN page; all old items didn't fit&quot;);</span>
+<span class="lineNum">     581 </span>            : 
+<span class="lineNum">     582 </span>            :         /* Count how many of the new items did fit. */
+<span class="lineNum">     583 </span><span class="lineCov">      30628 :         for (i = 0; i &lt; maxitems; i++)</span>
+<span class="lineNum">     584 </span>            :         {
+<span class="lineNum">     585 </span><span class="lineCov">      30628 :             if (ginCompareItemPointers(&amp;newItems[i], &amp;remaining) &gt;= 0)</span>
+<span class="lineNum">     586 </span><span class="lineCov">          4 :                 break;</span>
+<span class="lineNum">     587 </span>            :         }
+<span class="lineNum">     588 </span><span class="lineCov">          4 :         if (i == 0)</span>
+<span class="lineNum">     589 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;could not split GIN page; no new items fit&quot;);</span>
+<span class="lineNum">     590 </span><span class="lineCov">          4 :         maxitems = i;</span>
+<span class="lineNum">     591 </span>            :     }
+<span class="lineNum">     592 </span>            : 
+<span class="lineNum">     593 </span><span class="lineCov">       6696 :     if (!needsplit)</span>
+<span class="lineNum">     594 </span>            :     {
+<span class="lineNum">     595 </span>            :         /*
+<span class="lineNum">     596 </span>            :          * Great, all the items fit on a single page.  If needed, prepare data
+<span class="lineNum">     597 </span>            :          * for a WAL record describing the changes we'll make.
+<span class="lineNum">     598 </span>            :          */
+<span class="lineNum">     599 </span><span class="lineCov">       6684 :         if (RelationNeedsWAL(btree-&gt;index) &amp;&amp; !btree-&gt;isBuild)</span>
+<span class="lineNum">     600 </span><span class="lineCov">       6684 :             computeLeafRecompressWALData(leaf);</span>
+<span class="lineNum">     601 </span>            : 
+<span class="lineNum">     602 </span>            :         /*
+<span class="lineNum">     603 </span>            :          * We're ready to enter the critical section, but
+<span class="lineNum">     604 </span>            :          * dataExecPlaceToPageLeaf will need access to the &quot;leaf&quot; data.
+<span class="lineNum">     605 </span>            :          */
+<span class="lineNum">     606 </span><span class="lineCov">       6684 :         *ptp_workspace = leaf;</span>
+<span class="lineNum">     607 </span>            : 
+<span class="lineNum">     608 </span><span class="lineCov">       6684 :         if (append)</span>
+<span class="lineNum">     609 </span><span class="lineCov">       6684 :             elog(DEBUG2, &quot;appended %d new items to block %u; %d bytes (%d to go)&quot;,</span>
+<span class="lineNum">     610 </span>            :                  maxitems, BufferGetBlockNumber(buf), (int) leaf-&gt;lsize,
+<span class="lineNum">     611 </span>            :                  items-&gt;nitem - items-&gt;curitem - maxitems);
+<span class="lineNum">     612 </span>            :         else
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :             elog(DEBUG2, &quot;inserted %d new items to block %u; %d bytes (%d to go)&quot;,</span>
+<span class="lineNum">     614 </span>            :                  maxitems, BufferGetBlockNumber(buf), (int) leaf-&gt;lsize,
+<span class="lineNum">     615 </span>            :                  items-&gt;nitem - items-&gt;curitem - maxitems);
+<span class="lineNum">     616 </span>            :     }
+<span class="lineNum">     617 </span>            :     else
+<span class="lineNum">     618 </span>            :     {
+<span class="lineNum">     619 </span>            :         /*
+<span class="lineNum">     620 </span>            :          * Have to split.
+<span class="lineNum">     621 </span>            :          *
+<span class="lineNum">     622 </span>            :          * leafRepackItems already divided the segments between the left and
+<span class="lineNum">     623 </span>            :          * the right page. It filled the left page as full as possible, and
+<span class="lineNum">     624 </span>            :          * put the rest to the right page. When building a new index, that's
+<span class="lineNum">     625 </span>            :          * good, because the table is scanned from beginning to end and there
+<span class="lineNum">     626 </span>            :          * won't be any more insertions to the left page during the build.
+<span class="lineNum">     627 </span>            :          * This packs the index as tight as possible. But otherwise, split
+<span class="lineNum">     628 </span>            :          * 50/50, by moving segments from the left page to the right page
+<span class="lineNum">     629 </span>            :          * until they're balanced.
+<span class="lineNum">     630 </span>            :          *
+<span class="lineNum">     631 </span>            :          * As a further heuristic, when appending items to the end of the
+<span class="lineNum">     632 </span>            :          * page, try to make the left page 75% full, on the assumption that
+<span class="lineNum">     633 </span>            :          * subsequent insertions will probably also go to the end. This packs
+<span class="lineNum">     634 </span>            :          * the index somewhat tighter when appending to a table, which is very
+<span class="lineNum">     635 </span>            :          * common.
+<span class="lineNum">     636 </span>            :          */
+<span class="lineNum">     637 </span><span class="lineCov">         12 :         if (!btree-&gt;isBuild)</span>
+<span class="lineNum">     638 </span>            :         {
+<span class="lineNum">     639 </span><span class="lineCov">         54 :             while (dlist_has_prev(&amp;leaf-&gt;segments, leaf-&gt;lastleft))</span>
+<span class="lineNum">     640 </span>            :             {
+<span class="lineNum">     641 </span><span class="lineCov">         44 :                 lastleftinfo = dlist_container(leafSegmentInfo, node, leaf-&gt;lastleft);</span>
+<span class="lineNum">     642 </span>            : 
+<span class="lineNum">     643 </span>            :                 /* ignore deleted segments */
+<span class="lineNum">     644 </span><span class="lineCov">         44 :                 if (lastleftinfo-&gt;action != GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">     645 </span>            :                 {
+<span class="lineNum">     646 </span><span class="lineCov">         44 :                     segsize = SizeOfGinPostingList(lastleftinfo-&gt;seg);</span>
+<span class="lineNum">     647 </span>            : 
+<span class="lineNum">     648 </span>            :                     /*
+<span class="lineNum">     649 </span>            :                      * Note that we check that the right page doesn't become
+<span class="lineNum">     650 </span>            :                      * more full than the left page even when appending. It's
+<span class="lineNum">     651 </span>            :                      * possible that we added enough items to make both pages
+<span class="lineNum">     652 </span>            :                      * more than 75% full.
+<span class="lineNum">     653 </span>            :                      */
+<span class="lineNum">     654 </span><span class="lineCov">         44 :                     if ((leaf-&gt;lsize - segsize) - (leaf-&gt;rsize + segsize) &lt; 0)</span>
+<span class="lineNum">     655 </span><span class="lineCov">          8 :                         break;</span>
+<span class="lineNum">     656 </span><span class="lineCov">         36 :                     if (append)</span>
+<span class="lineNum">     657 </span>            :                     {
+<span class="lineNum">     658 </span><span class="lineCov">         36 :                         if ((leaf-&gt;lsize - segsize) &lt; (BLCKSZ * 3) / 4)</span>
+<span class="lineNum">     659 </span><span class="lineCov">          2 :                             break;</span>
+<span class="lineNum">     660 </span>            :                     }
+<span class="lineNum">     661 </span>            : 
+<span class="lineNum">     662 </span><span class="lineCov">         34 :                     leaf-&gt;lsize -= segsize;</span>
+<span class="lineNum">     663 </span><span class="lineCov">         34 :                     leaf-&gt;rsize += segsize;</span>
+<span class="lineNum">     664 </span>            :                 }
+<span class="lineNum">     665 </span><span class="lineCov">         34 :                 leaf-&gt;lastleft = dlist_prev_node(&amp;leaf-&gt;segments, leaf-&gt;lastleft);</span>
+<span class="lineNum">     666 </span>            :             }
+<span class="lineNum">     667 </span>            :         }
+<span class="lineNum">     668 </span><span class="lineCov">         12 :         Assert(leaf-&gt;lsize &lt;= GinDataPageMaxDataSize);</span>
+<span class="lineNum">     669 </span><span class="lineCov">         12 :         Assert(leaf-&gt;rsize &lt;= GinDataPageMaxDataSize);</span>
+<span class="lineNum">     670 </span>            : 
+<span class="lineNum">     671 </span>            :         /*
+<span class="lineNum">     672 </span>            :          * Fetch the max item in the left page's last segment; it becomes the
+<span class="lineNum">     673 </span>            :          * right bound of the page.
+<span class="lineNum">     674 </span>            :          */
+<span class="lineNum">     675 </span><span class="lineCov">         12 :         lastleftinfo = dlist_container(leafSegmentInfo, node, leaf-&gt;lastleft);</span>
+<span class="lineNum">     676 </span><span class="lineCov">         12 :         if (!lastleftinfo-&gt;items)</span>
+<span class="lineNum">     677 </span><span class="lineCov">         12 :             lastleftinfo-&gt;items = ginPostingListDecode(lastleftinfo-&gt;seg,</span>
+<span class="lineNum">     678 </span>            :                                                        &amp;lastleftinfo-&gt;nitems);
+<span class="lineNum">     679 </span><span class="lineCov">         12 :         lbound = lastleftinfo-&gt;items[lastleftinfo-&gt;nitems - 1];</span>
+<span class="lineNum">     680 </span>            : 
+<span class="lineNum">     681 </span>            :         /*
+<span class="lineNum">     682 </span>            :          * Now allocate a couple of temporary page images, and fill them.
+<span class="lineNum">     683 </span>            :          */
+<span class="lineNum">     684 </span><span class="lineCov">         12 :         *newlpage = palloc(BLCKSZ);</span>
+<span class="lineNum">     685 </span><span class="lineCov">         12 :         *newrpage = palloc(BLCKSZ);</span>
+<span class="lineNum">     686 </span>            : 
+<span class="lineNum">     687 </span><span class="lineCov">         12 :         dataPlaceToPageLeafSplit(leaf, lbound, rbound,</span>
+<span class="lineNum">     688 </span>            :                                  *newlpage, *newrpage);
+<span class="lineNum">     689 </span>            : 
+<span class="lineNum">     690 </span><span class="lineCov">         12 :         Assert(GinPageRightMost(page) ||</span>
+<span class="lineNum">     691 </span>            :                ginCompareItemPointers(GinDataPageGetRightBound(*newlpage),
+<span class="lineNum">     692 </span>            :                                       GinDataPageGetRightBound(*newrpage)) &lt; 0);
+<span class="lineNum">     693 </span>            : 
+<span class="lineNum">     694 </span><span class="lineCov">         12 :         if (append)</span>
+<span class="lineNum">     695 </span><span class="lineCov">         12 :             elog(DEBUG2, &quot;appended %d items to block %u; split %d/%d (%d to go)&quot;,</span>
+<span class="lineNum">     696 </span>            :                  maxitems, BufferGetBlockNumber(buf), (int) leaf-&gt;lsize, (int) leaf-&gt;rsize,
+<span class="lineNum">     697 </span>            :                  items-&gt;nitem - items-&gt;curitem - maxitems);
+<span class="lineNum">     698 </span>            :         else
+<span class="lineNum">     699 </span><span class="lineNoCov">          0 :             elog(DEBUG2, &quot;inserted %d items to block %u; split %d/%d (%d to go)&quot;,</span>
+<span class="lineNum">     700 </span>            :                  maxitems, BufferGetBlockNumber(buf), (int) leaf-&gt;lsize, (int) leaf-&gt;rsize,
+<span class="lineNum">     701 </span>            :                  items-&gt;nitem - items-&gt;curitem - maxitems);
+<span class="lineNum">     702 </span>            :     }
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span><span class="lineCov">       6696 :     items-&gt;curitem += maxitems;</span>
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span><span class="lineCov">       6696 :     return needsplit ? GPTP_SPLIT : GPTP_INSERT;</span>
+<span class="lineNum">     707 </span>            : }
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span>            : /*
+<span class="lineNum">     710 </span>            :  * Perform data insertion after beginPlaceToPage has decided it will fit.
+<span class="lineNum">     711 </span>            :  *
+<span class="lineNum">     712 </span>            :  * This is invoked within a critical section, and XLOG record creation (if
+<span class="lineNum">     713 </span>            :  * needed) is already started.  The target buffer is registered in slot 0.
+<a name="714"><span class="lineNum">     714 </span>            :  */</a>
+<span class="lineNum">     715 </span>            : static void
+<span class="lineNum">     716 </span><span class="lineCov">       6684 : dataExecPlaceToPageLeaf(GinBtree btree, Buffer buf, GinBtreeStack *stack,</span>
+<span class="lineNum">     717 </span>            :                         void *insertdata, void *ptp_workspace)
+<span class="lineNum">     718 </span>            : {
+<span class="lineNum">     719 </span><span class="lineCov">       6684 :     disassembledLeaf *leaf = (disassembledLeaf *) ptp_workspace;</span>
+<span class="lineNum">     720 </span>            : 
+<span class="lineNum">     721 </span>            :     /* Apply changes to page */
+<span class="lineNum">     722 </span><span class="lineCov">       6684 :     dataPlaceToPageLeafRecompress(buf, leaf);</span>
+<span class="lineNum">     723 </span>            : 
+<span class="lineNum">     724 </span>            :     /* If needed, register WAL data built by computeLeafRecompressWALData */
+<span class="lineNum">     725 </span><span class="lineCov">       6684 :     if (RelationNeedsWAL(btree-&gt;index) &amp;&amp; !btree-&gt;isBuild)</span>
+<span class="lineNum">     726 </span>            :     {
+<span class="lineNum">     727 </span><span class="lineCov">       6684 :         XLogRegisterBufData(0, leaf-&gt;walinfo, leaf-&gt;walinfolen);</span>
+<span class="lineNum">     728 </span>            :     }
+<span class="lineNum">     729 </span><span class="lineCov">       6684 : }</span>
+<span class="lineNum">     730 </span>            : 
+<span class="lineNum">     731 </span>            : /*
+<span class="lineNum">     732 </span>            :  * Vacuum a posting tree leaf page.
+<a name="733"><span class="lineNum">     733 </span>            :  */</a>
+<span class="lineNum">     734 </span>            : void
+<span class="lineNum">     735 </span><span class="lineNoCov">          0 : ginVacuumPostingTreeLeaf(Relation indexrel, Buffer buffer, GinVacuumState *gvs)</span>
+<span class="lineNum">     736 </span>            : {
+<span class="lineNum">     737 </span><span class="lineNoCov">          0 :     Page        page = BufferGetPage(buffer);</span>
+<span class="lineNum">     738 </span>            :     disassembledLeaf *leaf;
+<span class="lineNum">     739 </span><span class="lineNoCov">          0 :     bool        removedsomething = false;</span>
+<span class="lineNum">     740 </span>            :     dlist_iter  iter;
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span><span class="lineNoCov">          0 :     leaf = disassembleLeaf(page);</span>
+<span class="lineNum">     743 </span>            : 
+<span class="lineNum">     744 </span>            :     /* Vacuum each segment. */
+<span class="lineNum">     745 </span><span class="lineNoCov">          0 :     dlist_foreach(iter, &amp;leaf-&gt;segments)</span>
+<span class="lineNum">     746 </span>            :     {
+<span class="lineNum">     747 </span><span class="lineNoCov">          0 :         leafSegmentInfo *seginfo = dlist_container(leafSegmentInfo, node, iter.cur);</span>
+<span class="lineNum">     748 </span>            :         int         oldsegsize;
+<span class="lineNum">     749 </span>            :         ItemPointer cleaned;
+<span class="lineNum">     750 </span>            :         int         ncleaned;
+<span class="lineNum">     751 </span>            : 
+<span class="lineNum">     752 </span><span class="lineNoCov">          0 :         if (!seginfo-&gt;items)</span>
+<span class="lineNum">     753 </span><span class="lineNoCov">          0 :             seginfo-&gt;items = ginPostingListDecode(seginfo-&gt;seg,</span>
+<span class="lineNum">     754 </span>            :                                                   &amp;seginfo-&gt;nitems);
+<span class="lineNum">     755 </span><span class="lineNoCov">          0 :         if (seginfo-&gt;seg)</span>
+<span class="lineNum">     756 </span><span class="lineNoCov">          0 :             oldsegsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">     757 </span>            :         else
+<span class="lineNum">     758 </span><span class="lineNoCov">          0 :             oldsegsize = GinDataPageMaxDataSize;</span>
+<span class="lineNum">     759 </span>            : 
+<span class="lineNum">     760 </span><span class="lineNoCov">          0 :         cleaned = ginVacuumItemPointers(gvs,</span>
+<span class="lineNum">     761 </span>            :                                         seginfo-&gt;items,
+<span class="lineNum">     762 </span>            :                                         seginfo-&gt;nitems,
+<span class="lineNum">     763 </span>            :                                         &amp;ncleaned);
+<span class="lineNum">     764 </span><span class="lineNoCov">          0 :         pfree(seginfo-&gt;items);</span>
+<span class="lineNum">     765 </span><span class="lineNoCov">          0 :         seginfo-&gt;items = NULL;</span>
+<span class="lineNum">     766 </span><span class="lineNoCov">          0 :         seginfo-&gt;nitems = 0;</span>
+<span class="lineNum">     767 </span><span class="lineNoCov">          0 :         if (cleaned)</span>
+<span class="lineNum">     768 </span>            :         {
+<span class="lineNum">     769 </span><span class="lineNoCov">          0 :             if (ncleaned &gt; 0)</span>
+<span class="lineNum">     770 </span>            :             {
+<span class="lineNum">     771 </span>            :                 int         npacked;
+<span class="lineNum">     772 </span>            : 
+<span class="lineNum">     773 </span><span class="lineNoCov">          0 :                 seginfo-&gt;seg = ginCompressPostingList(cleaned,</span>
+<span class="lineNum">     774 </span>            :                                                       ncleaned,
+<span class="lineNum">     775 </span>            :                                                       oldsegsize,
+<span class="lineNum">     776 </span>            :                                                       &amp;npacked);
+<span class="lineNum">     777 </span>            :                 /* Removing an item never increases the size of the segment */
+<span class="lineNum">     778 </span><span class="lineNoCov">          0 :                 if (npacked != ncleaned)</span>
+<span class="lineNum">     779 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;could not fit vacuumed posting list&quot;);</span>
+<span class="lineNum">     780 </span><span class="lineNoCov">          0 :                 seginfo-&gt;action = GIN_SEGMENT_REPLACE;</span>
+<span class="lineNum">     781 </span>            :             }
+<span class="lineNum">     782 </span>            :             else
+<span class="lineNum">     783 </span>            :             {
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :                 seginfo-&gt;seg = NULL;</span>
+<span class="lineNum">     785 </span><span class="lineNoCov">          0 :                 seginfo-&gt;items = NULL;</span>
+<span class="lineNum">     786 </span><span class="lineNoCov">          0 :                 seginfo-&gt;action = GIN_SEGMENT_DELETE;</span>
+<span class="lineNum">     787 </span>            :             }
+<span class="lineNum">     788 </span><span class="lineNoCov">          0 :             seginfo-&gt;nitems = ncleaned;</span>
+<span class="lineNum">     789 </span>            : 
+<span class="lineNum">     790 </span><span class="lineNoCov">          0 :             removedsomething = true;</span>
+<span class="lineNum">     791 </span>            :         }
+<span class="lineNum">     792 </span>            :     }
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span>            :     /*
+<span class="lineNum">     795 </span>            :      * If we removed any items, reconstruct the page from the pieces.
+<span class="lineNum">     796 </span>            :      *
+<span class="lineNum">     797 </span>            :      * We don't try to re-encode the segments here, even though some of them
+<span class="lineNum">     798 </span>            :      * might be really small now that we've removed some items from them. It
+<span class="lineNum">     799 </span>            :      * seems like a waste of effort, as there isn't really any benefit from
+<span class="lineNum">     800 </span>            :      * larger segments per se; larger segments only help to pack more items in
+<span class="lineNum">     801 </span>            :      * the same space. We might as well delay doing that until the next
+<span class="lineNum">     802 </span>            :      * insertion, which will need to re-encode at least part of the page
+<span class="lineNum">     803 </span>            :      * anyway.
+<span class="lineNum">     804 </span>            :      *
+<span class="lineNum">     805 </span>            :      * Also note if the page was in uncompressed, pre-9.4 format before, it is
+<span class="lineNum">     806 </span>            :      * now represented as one huge segment that contains all the items. It
+<span class="lineNum">     807 </span>            :      * might make sense to split that, to speed up random access, but we don't
+<span class="lineNum">     808 </span>            :      * bother. You'll have to REINDEX anyway if you want the full gain of the
+<span class="lineNum">     809 </span>            :      * new tighter index format.
+<span class="lineNum">     810 </span>            :      */
+<span class="lineNum">     811 </span><span class="lineNoCov">          0 :     if (removedsomething)</span>
+<span class="lineNum">     812 </span>            :     {
+<span class="lineNum">     813 </span>            :         bool        modified;
+<span class="lineNum">     814 </span>            : 
+<span class="lineNum">     815 </span>            :         /*
+<span class="lineNum">     816 </span>            :          * Make sure we have a palloc'd copy of all segments, after the first
+<span class="lineNum">     817 </span>            :          * segment that is modified. (dataPlaceToPageLeafRecompress requires
+<span class="lineNum">     818 </span>            :          * this).
+<span class="lineNum">     819 </span>            :          */
+<span class="lineNum">     820 </span><span class="lineNoCov">          0 :         modified = false;</span>
+<span class="lineNum">     821 </span><span class="lineNoCov">          0 :         dlist_foreach(iter, &amp;leaf-&gt;segments)</span>
+<span class="lineNum">     822 </span>            :         {
+<span class="lineNum">     823 </span><span class="lineNoCov">          0 :             leafSegmentInfo *seginfo = dlist_container(leafSegmentInfo, node,</span>
+<span class="lineNum">     824 </span>            :                                                        iter.cur);
+<span class="lineNum">     825 </span>            : 
+<span class="lineNum">     826 </span><span class="lineNoCov">          0 :             if (seginfo-&gt;action != GIN_SEGMENT_UNMODIFIED)</span>
+<span class="lineNum">     827 </span><span class="lineNoCov">          0 :                 modified = true;</span>
+<span class="lineNum">     828 </span><span class="lineNoCov">          0 :             if (modified &amp;&amp; seginfo-&gt;action != GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">     829 </span>            :             {
+<span class="lineNum">     830 </span><span class="lineNoCov">          0 :                 int         segsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">     831 </span><span class="lineNoCov">          0 :                 GinPostingList *tmp = (GinPostingList *) palloc(segsize);</span>
+<span class="lineNum">     832 </span>            : 
+<span class="lineNum">     833 </span><span class="lineNoCov">          0 :                 memcpy(tmp, seginfo-&gt;seg, segsize);</span>
+<span class="lineNum">     834 </span><span class="lineNoCov">          0 :                 seginfo-&gt;seg = tmp;</span>
+<span class="lineNum">     835 </span>            :             }
+<span class="lineNum">     836 </span>            :         }
+<span class="lineNum">     837 </span>            : 
+<span class="lineNum">     838 </span><span class="lineNoCov">          0 :         if (RelationNeedsWAL(indexrel))</span>
+<span class="lineNum">     839 </span><span class="lineNoCov">          0 :             computeLeafRecompressWALData(leaf);</span>
+<span class="lineNum">     840 </span>            : 
+<span class="lineNum">     841 </span>            :         /* Apply changes to page */
+<span class="lineNum">     842 </span><span class="lineNoCov">          0 :         START_CRIT_SECTION();</span>
+<span class="lineNum">     843 </span>            : 
+<span class="lineNum">     844 </span><span class="lineNoCov">          0 :         dataPlaceToPageLeafRecompress(buffer, leaf);</span>
+<span class="lineNum">     845 </span>            : 
+<span class="lineNum">     846 </span><span class="lineNoCov">          0 :         MarkBufferDirty(buffer);</span>
+<span class="lineNum">     847 </span>            : 
+<span class="lineNum">     848 </span><span class="lineNoCov">          0 :         if (RelationNeedsWAL(indexrel))</span>
+<span class="lineNum">     849 </span>            :         {
+<span class="lineNum">     850 </span>            :             XLogRecPtr  recptr;
+<span class="lineNum">     851 </span>            : 
+<span class="lineNum">     852 </span><span class="lineNoCov">          0 :             XLogBeginInsert();</span>
+<span class="lineNum">     853 </span><span class="lineNoCov">          0 :             XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);</span>
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :             XLogRegisterBufData(0, leaf-&gt;walinfo, leaf-&gt;walinfolen);</span>
+<span class="lineNum">     855 </span><span class="lineNoCov">          0 :             recptr = XLogInsert(RM_GIN_ID, XLOG_GIN_VACUUM_DATA_LEAF_PAGE);</span>
+<span class="lineNum">     856 </span><span class="lineNoCov">          0 :             PageSetLSN(page, recptr);</span>
+<span class="lineNum">     857 </span>            :         }
+<span class="lineNum">     858 </span>            : 
+<span class="lineNum">     859 </span><span class="lineNoCov">          0 :         END_CRIT_SECTION();</span>
+<span class="lineNum">     860 </span>            :     }
+<span class="lineNum">     861 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     862 </span>            : 
+<span class="lineNum">     863 </span>            : /*
+<span class="lineNum">     864 </span>            :  * Construct a ginxlogRecompressDataLeaf record representing the changes
+<span class="lineNum">     865 </span>            :  * in *leaf.  (Because this requires a palloc, we have to do it before
+<span class="lineNum">     866 </span>            :  * we enter the critical section that actually updates the page.)
+<a name="867"><span class="lineNum">     867 </span>            :  */</a>
+<span class="lineNum">     868 </span>            : static void
+<span class="lineNum">     869 </span><span class="lineCov">       6684 : computeLeafRecompressWALData(disassembledLeaf *leaf)</span>
+<span class="lineNum">     870 </span>            : {
+<span class="lineNum">     871 </span><span class="lineCov">       6684 :     int         nmodified = 0;</span>
+<span class="lineNum">     872 </span>            :     char       *walbufbegin;
+<span class="lineNum">     873 </span>            :     char       *walbufend;
+<span class="lineNum">     874 </span>            :     dlist_iter  iter;
+<span class="lineNum">     875 </span>            :     int         segno;
+<span class="lineNum">     876 </span>            :     ginxlogRecompressDataLeaf *recompress_xlog;
+<span class="lineNum">     877 </span>            : 
+<span class="lineNum">     878 </span>            :     /* Count the modified segments */
+<span class="lineNum">     879 </span><span class="lineCov">     126290 :     dlist_foreach(iter, &amp;leaf-&gt;segments)</span>
+<span class="lineNum">     880 </span>            :     {
+<span class="lineNum">     881 </span><span class="lineCov">     119606 :         leafSegmentInfo *seginfo = dlist_container(leafSegmentInfo, node,</span>
+<span class="lineNum">     882 </span>            :                                                    iter.cur);
+<span class="lineNum">     883 </span>            : 
+<span class="lineNum">     884 </span><span class="lineCov">     119606 :         if (seginfo-&gt;action != GIN_SEGMENT_UNMODIFIED)</span>
+<span class="lineNum">     885 </span><span class="lineCov">       6690 :             nmodified++;</span>
+<span class="lineNum">     886 </span>            :     }
+<span class="lineNum">     887 </span>            : 
+<span class="lineNum">     888 </span><span class="lineCov">       6684 :     walbufbegin =</span>
+<span class="lineNum">     889 </span><span class="lineCov">       6684 :         palloc(sizeof(ginxlogRecompressDataLeaf) +</span>
+<span class="lineNum">     890 </span>            :                BLCKSZ +         /* max size needed to hold the segment data */
+<span class="lineNum">     891 </span><span class="lineCov">       6684 :                nmodified * 2    /* (segno + action) per action */</span>
+<span class="lineNum">     892 </span>            :         );
+<span class="lineNum">     893 </span><span class="lineCov">       6684 :     walbufend = walbufbegin;</span>
+<span class="lineNum">     894 </span>            : 
+<span class="lineNum">     895 </span><span class="lineCov">       6684 :     recompress_xlog = (ginxlogRecompressDataLeaf *) walbufend;</span>
+<span class="lineNum">     896 </span><span class="lineCov">       6684 :     walbufend += sizeof(ginxlogRecompressDataLeaf);</span>
+<span class="lineNum">     897 </span>            : 
+<span class="lineNum">     898 </span><span class="lineCov">       6684 :     recompress_xlog-&gt;nactions = nmodified;</span>
+<span class="lineNum">     899 </span>            : 
+<span class="lineNum">     900 </span><span class="lineCov">       6684 :     segno = 0;</span>
+<span class="lineNum">     901 </span><span class="lineCov">     126290 :     dlist_foreach(iter, &amp;leaf-&gt;segments)</span>
+<span class="lineNum">     902 </span>            :     {
+<span class="lineNum">     903 </span><span class="lineCov">     119606 :         leafSegmentInfo *seginfo = dlist_container(leafSegmentInfo, node,</span>
+<span class="lineNum">     904 </span>            :                                                    iter.cur);
+<span class="lineNum">     905 </span><span class="lineCov">     119606 :         int         segsize = 0;</span>
+<span class="lineNum">     906 </span>            :         int         datalen;
+<span class="lineNum">     907 </span><span class="lineCov">     119606 :         uint8       action = seginfo-&gt;action;</span>
+<span class="lineNum">     908 </span>            : 
+<span class="lineNum">     909 </span><span class="lineCov">     119606 :         if (action == GIN_SEGMENT_UNMODIFIED)</span>
+<span class="lineNum">     910 </span>            :         {
+<span class="lineNum">     911 </span><span class="lineCov">     112916 :             segno++;</span>
+<span class="lineNum">     912 </span><span class="lineCov">     112916 :             continue;</span>
+<span class="lineNum">     913 </span>            :         }
+<span class="lineNum">     914 </span>            : 
+<span class="lineNum">     915 </span><span class="lineCov">       6690 :         if (action != GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">     916 </span><span class="lineCov">       6690 :             segsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">     917 </span>            : 
+<span class="lineNum">     918 </span>            :         /*
+<span class="lineNum">     919 </span>            :          * If storing the uncompressed list of added item pointers would take
+<span class="lineNum">     920 </span>            :          * more space than storing the compressed segment as is, do that
+<span class="lineNum">     921 </span>            :          * instead.
+<span class="lineNum">     922 </span>            :          */
+<span class="lineNum">     923 </span><span class="lineCov">      13342 :         if (action == GIN_SEGMENT_ADDITEMS &amp;&amp;</span>
+<span class="lineNum">     924 </span><span class="lineCov">       6652 :             seginfo-&gt;nmodifieditems * sizeof(ItemPointerData) &gt; segsize)</span>
+<span class="lineNum">     925 </span>            :         {
+<span class="lineNum">     926 </span><span class="lineNoCov">          0 :             action = GIN_SEGMENT_REPLACE;</span>
+<span class="lineNum">     927 </span>            :         }
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineCov">       6690 :         *((uint8 *) (walbufend++)) = segno;</span>
+<span class="lineNum">     930 </span><span class="lineCov">       6690 :         *(walbufend++) = action;</span>
+<span class="lineNum">     931 </span>            : 
+<span class="lineNum">     932 </span><span class="lineCov">       6690 :         switch (action)</span>
+<span class="lineNum">     933 </span>            :         {
+<span class="lineNum">     934 </span>            :             case GIN_SEGMENT_DELETE:
+<span class="lineNum">     935 </span><span class="lineNoCov">          0 :                 datalen = 0;</span>
+<span class="lineNum">     936 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     937 </span>            : 
+<span class="lineNum">     938 </span>            :             case GIN_SEGMENT_ADDITEMS:
+<span class="lineNum">     939 </span><span class="lineCov">       6652 :                 datalen = seginfo-&gt;nmodifieditems * sizeof(ItemPointerData);</span>
+<span class="lineNum">     940 </span><span class="lineCov">       6652 :                 memcpy(walbufend, &amp;seginfo-&gt;nmodifieditems, sizeof(uint16));</span>
+<span class="lineNum">     941 </span><span class="lineCov">       6652 :                 memcpy(walbufend + sizeof(uint16), seginfo-&gt;modifieditems, datalen);</span>
+<span class="lineNum">     942 </span><span class="lineCov">       6652 :                 datalen += sizeof(uint16);</span>
+<span class="lineNum">     943 </span><span class="lineCov">       6652 :                 break;</span>
+<span class="lineNum">     944 </span>            : 
+<span class="lineNum">     945 </span>            :             case GIN_SEGMENT_INSERT:
+<span class="lineNum">     946 </span>            :             case GIN_SEGMENT_REPLACE:
+<span class="lineNum">     947 </span><span class="lineCov">         38 :                 datalen = SHORTALIGN(segsize);</span>
+<span class="lineNum">     948 </span><span class="lineCov">         38 :                 memcpy(walbufend, seginfo-&gt;seg, segsize);</span>
+<span class="lineNum">     949 </span><span class="lineCov">         38 :                 break;</span>
+<span class="lineNum">     950 </span>            : 
+<span class="lineNum">     951 </span>            :             default:
+<span class="lineNum">     952 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;unexpected GIN leaf action %d&quot;, action);</span>
+<span class="lineNum">     953 </span>            :         }
+<span class="lineNum">     954 </span><span class="lineCov">       6690 :         walbufend += datalen;</span>
+<span class="lineNum">     955 </span>            : 
+<span class="lineNum">     956 </span><span class="lineCov">       6690 :         if (action != GIN_SEGMENT_INSERT)</span>
+<span class="lineNum">     957 </span><span class="lineCov">       6652 :             segno++;</span>
+<span class="lineNum">     958 </span>            :     }
+<span class="lineNum">     959 </span>            : 
+<span class="lineNum">     960 </span>            :     /* Pass back the constructed info via *leaf */
+<span class="lineNum">     961 </span><span class="lineCov">       6684 :     leaf-&gt;walinfo = walbufbegin;</span>
+<span class="lineNum">     962 </span><span class="lineCov">       6684 :     leaf-&gt;walinfolen = walbufend - walbufbegin;</span>
+<span class="lineNum">     963 </span><span class="lineCov">       6684 : }</span>
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span>            : /*
+<span class="lineNum">     966 </span>            :  * Assemble a disassembled posting tree leaf page back to a buffer.
+<span class="lineNum">     967 </span>            :  *
+<span class="lineNum">     968 </span>            :  * This just updates the target buffer; WAL stuff is caller's responsibility.
+<span class="lineNum">     969 </span>            :  *
+<span class="lineNum">     970 </span>            :  * NOTE: The segment pointers must not point directly to the same buffer,
+<span class="lineNum">     971 </span>            :  * except for segments that have not been modified and whose preceding
+<span class="lineNum">     972 </span>            :  * segments have not been modified either.
+<a name="973"><span class="lineNum">     973 </span>            :  */</a>
+<span class="lineNum">     974 </span>            : static void
+<span class="lineNum">     975 </span><span class="lineCov">       6684 : dataPlaceToPageLeafRecompress(Buffer buf, disassembledLeaf *leaf)</span>
+<span class="lineNum">     976 </span>            : {
+<span class="lineNum">     977 </span><span class="lineCov">       6684 :     Page        page = BufferGetPage(buf);</span>
+<span class="lineNum">     978 </span>            :     char       *ptr;
+<span class="lineNum">     979 </span>            :     int         newsize;
+<span class="lineNum">     980 </span><span class="lineCov">       6684 :     bool        modified = false;</span>
+<span class="lineNum">     981 </span>            :     dlist_iter  iter;
+<span class="lineNum">     982 </span>            :     int         segsize;
+<span class="lineNum">     983 </span>            : 
+<span class="lineNum">     984 </span>            :     /*
+<span class="lineNum">     985 </span>            :      * If the page was in pre-9.4 format before, convert the header, and force
+<span class="lineNum">     986 </span>            :      * all segments to be copied to the page whether they were modified or
+<span class="lineNum">     987 </span>            :      * not.
+<span class="lineNum">     988 </span>            :      */
+<span class="lineNum">     989 </span><span class="lineCov">       6684 :     if (!GinPageIsCompressed(page))</span>
+<span class="lineNum">     990 </span>            :     {
+<span class="lineNum">     991 </span><span class="lineNoCov">          0 :         Assert(leaf-&gt;oldformat);</span>
+<span class="lineNum">     992 </span><span class="lineNoCov">          0 :         GinPageSetCompressed(page);</span>
+<span class="lineNum">     993 </span><span class="lineNoCov">          0 :         GinPageGetOpaque(page)-&gt;maxoff = InvalidOffsetNumber;</span>
+<span class="lineNum">     994 </span><span class="lineNoCov">          0 :         modified = true;</span>
+<span class="lineNum">     995 </span>            :     }
+<span class="lineNum">     996 </span>            : 
+<span class="lineNum">     997 </span><span class="lineCov">       6684 :     ptr = (char *) GinDataLeafPageGetPostingList(page);</span>
+<span class="lineNum">     998 </span><span class="lineCov">       6684 :     newsize = 0;</span>
+<span class="lineNum">     999 </span><span class="lineCov">     126290 :     dlist_foreach(iter, &amp;leaf-&gt;segments)</span>
+<span class="lineNum">    1000 </span>            :     {
+<span class="lineNum">    1001 </span><span class="lineCov">     119606 :         leafSegmentInfo *seginfo = dlist_container(leafSegmentInfo, node, iter.cur);</span>
+<span class="lineNum">    1002 </span>            : 
+<span class="lineNum">    1003 </span><span class="lineCov">     119606 :         if (seginfo-&gt;action != GIN_SEGMENT_UNMODIFIED)</span>
+<span class="lineNum">    1004 </span><span class="lineCov">       6690 :             modified = true;</span>
+<span class="lineNum">    1005 </span>            : 
+<span class="lineNum">    1006 </span><span class="lineCov">     119606 :         if (seginfo-&gt;action != GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">    1007 </span>            :         {
+<span class="lineNum">    1008 </span><span class="lineCov">     119606 :             segsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">    1009 </span>            : 
+<span class="lineNum">    1010 </span><span class="lineCov">     119606 :             if (modified)</span>
+<span class="lineNum">    1011 </span><span class="lineCov">       6690 :                 memcpy(ptr, seginfo-&gt;seg, segsize);</span>
+<span class="lineNum">    1012 </span>            : 
+<span class="lineNum">    1013 </span><span class="lineCov">     119606 :             ptr += segsize;</span>
+<span class="lineNum">    1014 </span><span class="lineCov">     119606 :             newsize += segsize;</span>
+<span class="lineNum">    1015 </span>            :         }
+<span class="lineNum">    1016 </span>            :     }
+<span class="lineNum">    1017 </span>            : 
+<span class="lineNum">    1018 </span><span class="lineCov">       6684 :     Assert(newsize &lt;= GinDataPageMaxDataSize);</span>
+<span class="lineNum">    1019 </span><span class="lineCov">       6684 :     GinDataPageSetDataSize(page, newsize);</span>
+<span class="lineNum">    1020 </span><span class="lineCov">       6684 : }</span>
+<span class="lineNum">    1021 </span>            : 
+<span class="lineNum">    1022 </span>            : /*
+<span class="lineNum">    1023 </span>            :  * Like dataPlaceToPageLeafRecompress, but writes the disassembled leaf
+<span class="lineNum">    1024 </span>            :  * segments to two pages instead of one.
+<span class="lineNum">    1025 </span>            :  *
+<span class="lineNum">    1026 </span>            :  * This is different from the non-split cases in that this does not modify
+<span class="lineNum">    1027 </span>            :  * the original page directly, but writes to temporary in-memory copies of
+<span class="lineNum">    1028 </span>            :  * the new left and right pages.
+<a name="1029"><span class="lineNum">    1029 </span>            :  */</a>
+<span class="lineNum">    1030 </span>            : static void
+<span class="lineNum">    1031 </span><span class="lineCov">         12 : dataPlaceToPageLeafSplit(disassembledLeaf *leaf,</span>
+<span class="lineNum">    1032 </span>            :                          ItemPointerData lbound, ItemPointerData rbound,
+<span class="lineNum">    1033 </span>            :                          Page lpage, Page rpage)
+<span class="lineNum">    1034 </span>            : {
+<span class="lineNum">    1035 </span>            :     char       *ptr;
+<span class="lineNum">    1036 </span>            :     int         segsize;
+<span class="lineNum">    1037 </span>            :     int         lsize;
+<span class="lineNum">    1038 </span>            :     int         rsize;
+<span class="lineNum">    1039 </span>            :     dlist_node *node;
+<span class="lineNum">    1040 </span>            :     dlist_node *firstright;
+<span class="lineNum">    1041 </span>            :     leafSegmentInfo *seginfo;
+<span class="lineNum">    1042 </span>            : 
+<span class="lineNum">    1043 </span>            :     /* Initialize temporary pages to hold the new left and right pages */
+<span class="lineNum">    1044 </span><span class="lineCov">         12 :     GinInitPage(lpage, GIN_DATA | GIN_LEAF | GIN_COMPRESSED, BLCKSZ);</span>
+<span class="lineNum">    1045 </span><span class="lineCov">         12 :     GinInitPage(rpage, GIN_DATA | GIN_LEAF | GIN_COMPRESSED, BLCKSZ);</span>
+<span class="lineNum">    1046 </span>            : 
+<span class="lineNum">    1047 </span>            :     /*
+<span class="lineNum">    1048 </span>            :      * Copy the segments that go to the left page.
+<span class="lineNum">    1049 </span>            :      *
+<span class="lineNum">    1050 </span>            :      * XXX: We should skip copying the unmodified part of the left page, like
+<span class="lineNum">    1051 </span>            :      * we do when recompressing.
+<span class="lineNum">    1052 </span>            :      */
+<span class="lineNum">    1053 </span><span class="lineCov">         12 :     lsize = 0;</span>
+<span class="lineNum">    1054 </span><span class="lineCov">         12 :     ptr = (char *) GinDataLeafPageGetPostingList(lpage);</span>
+<span class="lineNum">    1055 </span><span class="lineCov">         12 :     firstright = dlist_next_node(&amp;leaf-&gt;segments, leaf-&gt;lastleft);</span>
+<span class="lineNum">    1056 </span><span class="lineCov">        302 :     for (node = dlist_head_node(&amp;leaf-&gt;segments);</span>
+<span class="lineNum">    1057 </span>            :          node != firstright;
+<span class="lineNum">    1058 </span><span class="lineCov">        278 :          node = dlist_next_node(&amp;leaf-&gt;segments, node))</span>
+<span class="lineNum">    1059 </span>            :     {
+<span class="lineNum">    1060 </span><span class="lineCov">        278 :         seginfo = dlist_container(leafSegmentInfo, node, node);</span>
+<span class="lineNum">    1061 </span>            : 
+<span class="lineNum">    1062 </span><span class="lineCov">        278 :         if (seginfo-&gt;action != GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">    1063 </span>            :         {
+<span class="lineNum">    1064 </span><span class="lineCov">        278 :             segsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">    1065 </span><span class="lineCov">        278 :             memcpy(ptr, seginfo-&gt;seg, segsize);</span>
+<span class="lineNum">    1066 </span><span class="lineCov">        278 :             ptr += segsize;</span>
+<span class="lineNum">    1067 </span><span class="lineCov">        278 :             lsize += segsize;</span>
+<span class="lineNum">    1068 </span>            :         }
+<span class="lineNum">    1069 </span>            :     }
+<span class="lineNum">    1070 </span><span class="lineCov">         12 :     Assert(lsize == leaf-&gt;lsize);</span>
+<span class="lineNum">    1071 </span><span class="lineCov">         12 :     GinDataPageSetDataSize(lpage, lsize);</span>
+<span class="lineNum">    1072 </span><span class="lineCov">         12 :     *GinDataPageGetRightBound(lpage) = lbound;</span>
+<span class="lineNum">    1073 </span>            : 
+<span class="lineNum">    1074 </span>            :     /* Copy the segments that go to the right page */
+<span class="lineNum">    1075 </span><span class="lineCov">         12 :     ptr = (char *) GinDataLeafPageGetPostingList(rpage);</span>
+<span class="lineNum">    1076 </span><span class="lineCov">         12 :     rsize = 0;</span>
+<span class="lineNum">    1077 </span><span class="lineCov">         12 :     for (node = firstright;</span>
+<span class="lineNum">    1078 </span>            :          ;
+<span class="lineNum">    1079 </span><span class="lineCov">        246 :          node = dlist_next_node(&amp;leaf-&gt;segments, node))</span>
+<span class="lineNum">    1080 </span>            :     {
+<span class="lineNum">    1081 </span><span class="lineCov">        258 :         seginfo = dlist_container(leafSegmentInfo, node, node);</span>
+<span class="lineNum">    1082 </span>            : 
+<span class="lineNum">    1083 </span><span class="lineCov">        258 :         if (seginfo-&gt;action != GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">    1084 </span>            :         {
+<span class="lineNum">    1085 </span><span class="lineCov">        258 :             segsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">    1086 </span><span class="lineCov">        258 :             memcpy(ptr, seginfo-&gt;seg, segsize);</span>
+<span class="lineNum">    1087 </span><span class="lineCov">        258 :             ptr += segsize;</span>
+<span class="lineNum">    1088 </span><span class="lineCov">        258 :             rsize += segsize;</span>
+<span class="lineNum">    1089 </span>            :         }
+<span class="lineNum">    1090 </span>            : 
+<span class="lineNum">    1091 </span><span class="lineCov">        258 :         if (!dlist_has_next(&amp;leaf-&gt;segments, node))</span>
+<span class="lineNum">    1092 </span><span class="lineCov">         12 :             break;</span>
+<span class="lineNum">    1093 </span><span class="lineCov">        246 :     }</span>
+<span class="lineNum">    1094 </span><span class="lineCov">         12 :     Assert(rsize == leaf-&gt;rsize);</span>
+<span class="lineNum">    1095 </span><span class="lineCov">         12 :     GinDataPageSetDataSize(rpage, rsize);</span>
+<span class="lineNum">    1096 </span><span class="lineCov">         12 :     *GinDataPageGetRightBound(rpage) = rbound;</span>
+<span class="lineNum">    1097 </span><span class="lineCov">         12 : }</span>
+<span class="lineNum">    1098 </span>            : 
+<span class="lineNum">    1099 </span>            : /*
+<span class="lineNum">    1100 </span>            :  * Prepare to insert data on an internal data page.
+<span class="lineNum">    1101 </span>            :  *
+<span class="lineNum">    1102 </span>            :  * If it will fit, return GPTP_INSERT after doing whatever setup is needed
+<span class="lineNum">    1103 </span>            :  * before we enter the insertion critical section.  *ptp_workspace can be
+<span class="lineNum">    1104 </span>            :  * set to pass information along to the execPlaceToPage function.
+<span class="lineNum">    1105 </span>            :  *
+<span class="lineNum">    1106 </span>            :  * If it won't fit, perform a page split and return two temporary page
+<span class="lineNum">    1107 </span>            :  * images into *newlpage and *newrpage, with result GPTP_SPLIT.
+<span class="lineNum">    1108 </span>            :  *
+<span class="lineNum">    1109 </span>            :  * In neither case should the given page buffer be modified here.
+<span class="lineNum">    1110 </span>            :  *
+<span class="lineNum">    1111 </span>            :  * Note: on insertion to an internal node, in addition to inserting the given
+<span class="lineNum">    1112 </span>            :  * item, the downlink of the existing item at stack-&gt;off will be updated to
+<span class="lineNum">    1113 </span>            :  * point to updateblkno.
+<a name="1114"><span class="lineNum">    1114 </span>            :  */</a>
+<span class="lineNum">    1115 </span>            : static GinPlaceToPageRC
+<span class="lineNum">    1116 </span><span class="lineCov">          6 : dataBeginPlaceToPageInternal(GinBtree btree, Buffer buf, GinBtreeStack *stack,</span>
+<span class="lineNum">    1117 </span>            :                              void *insertdata, BlockNumber updateblkno,
+<span class="lineNum">    1118 </span>            :                              void **ptp_workspace,
+<span class="lineNum">    1119 </span>            :                              Page *newlpage, Page *newrpage)
+<span class="lineNum">    1120 </span>            : {
+<span class="lineNum">    1121 </span><span class="lineCov">          6 :     Page        page = BufferGetPage(buf);</span>
+<span class="lineNum">    1122 </span>            : 
+<span class="lineNum">    1123 </span>            :     /* If it doesn't fit, deal with split case */
+<span class="lineNum">    1124 </span><span class="lineCov">          6 :     if (GinNonLeafDataPageGetFreeSpace(page) &lt; sizeof(PostingItem))</span>
+<span class="lineNum">    1125 </span>            :     {
+<span class="lineNum">    1126 </span><span class="lineNoCov">          0 :         dataSplitPageInternal(btree, buf, stack, insertdata, updateblkno,</span>
+<span class="lineNum">    1127 </span>            :                               newlpage, newrpage);
+<span class="lineNum">    1128 </span><span class="lineNoCov">          0 :         return GPTP_SPLIT;</span>
+<span class="lineNum">    1129 </span>            :     }
+<span class="lineNum">    1130 </span>            : 
+<span class="lineNum">    1131 </span>            :     /* Else, we're ready to proceed with insertion */
+<span class="lineNum">    1132 </span><span class="lineCov">          6 :     return GPTP_INSERT;</span>
+<span class="lineNum">    1133 </span>            : }
+<span class="lineNum">    1134 </span>            : 
+<span class="lineNum">    1135 </span>            : /*
+<span class="lineNum">    1136 </span>            :  * Perform data insertion after beginPlaceToPage has decided it will fit.
+<span class="lineNum">    1137 </span>            :  *
+<span class="lineNum">    1138 </span>            :  * This is invoked within a critical section, and XLOG record creation (if
+<span class="lineNum">    1139 </span>            :  * needed) is already started.  The target buffer is registered in slot 0.
+<a name="1140"><span class="lineNum">    1140 </span>            :  */</a>
+<span class="lineNum">    1141 </span>            : static void
+<span class="lineNum">    1142 </span><span class="lineCov">          6 : dataExecPlaceToPageInternal(GinBtree btree, Buffer buf, GinBtreeStack *stack,</span>
+<span class="lineNum">    1143 </span>            :                             void *insertdata, BlockNumber updateblkno,
+<span class="lineNum">    1144 </span>            :                             void *ptp_workspace)
+<span class="lineNum">    1145 </span>            : {
+<span class="lineNum">    1146 </span><span class="lineCov">          6 :     Page        page = BufferGetPage(buf);</span>
+<span class="lineNum">    1147 </span><span class="lineCov">          6 :     OffsetNumber off = stack-&gt;off;</span>
+<span class="lineNum">    1148 </span>            :     PostingItem *pitem;
+<span class="lineNum">    1149 </span>            : 
+<span class="lineNum">    1150 </span>            :     /* Update existing downlink to point to next page (on internal page) */
+<span class="lineNum">    1151 </span><span class="lineCov">          6 :     pitem = GinDataPageGetPostingItem(page, off);</span>
+<span class="lineNum">    1152 </span><span class="lineCov">          6 :     PostingItemSetBlockNumber(pitem, updateblkno);</span>
+<span class="lineNum">    1153 </span>            : 
+<span class="lineNum">    1154 </span>            :     /* Add new item */
+<span class="lineNum">    1155 </span><span class="lineCov">          6 :     pitem = (PostingItem *) insertdata;</span>
+<span class="lineNum">    1156 </span><span class="lineCov">          6 :     GinDataPageAddPostingItem(page, pitem, off);</span>
+<span class="lineNum">    1157 </span>            : 
+<span class="lineNum">    1158 </span><span class="lineCov">          6 :     if (RelationNeedsWAL(btree-&gt;index) &amp;&amp; !btree-&gt;isBuild)</span>
+<span class="lineNum">    1159 </span>            :     {
+<span class="lineNum">    1160 </span>            :         /*
+<span class="lineNum">    1161 </span>            :          * This must be static, because it has to survive until XLogInsert,
+<span class="lineNum">    1162 </span>            :          * and we can't palloc here.  Ugly, but the XLogInsert infrastructure
+<span class="lineNum">    1163 </span>            :          * isn't reentrant anyway.
+<span class="lineNum">    1164 </span>            :          */
+<span class="lineNum">    1165 </span>            :         static ginxlogInsertDataInternal data;
+<span class="lineNum">    1166 </span>            : 
+<span class="lineNum">    1167 </span><span class="lineCov">          6 :         data.offset = off;</span>
+<span class="lineNum">    1168 </span><span class="lineCov">          6 :         data.newitem = *pitem;</span>
+<span class="lineNum">    1169 </span>            : 
+<span class="lineNum">    1170 </span><span class="lineCov">          6 :         XLogRegisterBufData(0, (char *) &amp;data,</span>
+<span class="lineNum">    1171 </span>            :                             sizeof(ginxlogInsertDataInternal));
+<span class="lineNum">    1172 </span>            :     }
+<span class="lineNum">    1173 </span><span class="lineCov">          6 : }</span>
+<span class="lineNum">    1174 </span>            : 
+<span class="lineNum">    1175 </span>            : /*
+<span class="lineNum">    1176 </span>            :  * Prepare to insert data on a posting-tree data page.
+<span class="lineNum">    1177 </span>            :  *
+<span class="lineNum">    1178 </span>            :  * If it will fit, return GPTP_INSERT after doing whatever setup is needed
+<span class="lineNum">    1179 </span>            :  * before we enter the insertion critical section.  *ptp_workspace can be
+<span class="lineNum">    1180 </span>            :  * set to pass information along to the execPlaceToPage function.
+<span class="lineNum">    1181 </span>            :  *
+<span class="lineNum">    1182 </span>            :  * If it won't fit, perform a page split and return two temporary page
+<span class="lineNum">    1183 </span>            :  * images into *newlpage and *newrpage, with result GPTP_SPLIT.
+<span class="lineNum">    1184 </span>            :  *
+<span class="lineNum">    1185 </span>            :  * In neither case should the given page buffer be modified here.
+<span class="lineNum">    1186 </span>            :  *
+<span class="lineNum">    1187 </span>            :  * Note: on insertion to an internal node, in addition to inserting the given
+<span class="lineNum">    1188 </span>            :  * item, the downlink of the existing item at stack-&gt;off will be updated to
+<span class="lineNum">    1189 </span>            :  * point to updateblkno.
+<span class="lineNum">    1190 </span>            :  *
+<span class="lineNum">    1191 </span>            :  * Calls relevant function for internal or leaf page because they are handled
+<span class="lineNum">    1192 </span>            :  * very differently.
+<a name="1193"><span class="lineNum">    1193 </span>            :  */</a>
+<span class="lineNum">    1194 </span>            : static GinPlaceToPageRC
+<span class="lineNum">    1195 </span><span class="lineCov">       6702 : dataBeginPlaceToPage(GinBtree btree, Buffer buf, GinBtreeStack *stack,</span>
+<span class="lineNum">    1196 </span>            :                      void *insertdata, BlockNumber updateblkno,
+<span class="lineNum">    1197 </span>            :                      void **ptp_workspace,
+<span class="lineNum">    1198 </span>            :                      Page *newlpage, Page *newrpage)
+<span class="lineNum">    1199 </span>            : {
+<span class="lineNum">    1200 </span><span class="lineCov">       6702 :     Page        page = BufferGetPage(buf);</span>
+<span class="lineNum">    1201 </span>            : 
+<span class="lineNum">    1202 </span><span class="lineCov">       6702 :     Assert(GinPageIsData(page));</span>
+<span class="lineNum">    1203 </span>            : 
+<span class="lineNum">    1204 </span><span class="lineCov">       6702 :     if (GinPageIsLeaf(page))</span>
+<span class="lineNum">    1205 </span><span class="lineCov">       6696 :         return dataBeginPlaceToPageLeaf(btree, buf, stack, insertdata,</span>
+<span class="lineNum">    1206 </span>            :                                         ptp_workspace,
+<span class="lineNum">    1207 </span>            :                                         newlpage, newrpage);
+<span class="lineNum">    1208 </span>            :     else
+<span class="lineNum">    1209 </span><span class="lineCov">          6 :         return dataBeginPlaceToPageInternal(btree, buf, stack,</span>
+<span class="lineNum">    1210 </span>            :                                             insertdata, updateblkno,
+<span class="lineNum">    1211 </span>            :                                             ptp_workspace,
+<span class="lineNum">    1212 </span>            :                                             newlpage, newrpage);
+<span class="lineNum">    1213 </span>            : }
+<span class="lineNum">    1214 </span>            : 
+<span class="lineNum">    1215 </span>            : /*
+<span class="lineNum">    1216 </span>            :  * Perform data insertion after beginPlaceToPage has decided it will fit.
+<span class="lineNum">    1217 </span>            :  *
+<span class="lineNum">    1218 </span>            :  * This is invoked within a critical section, and XLOG record creation (if
+<span class="lineNum">    1219 </span>            :  * needed) is already started.  The target buffer is registered in slot 0.
+<span class="lineNum">    1220 </span>            :  *
+<span class="lineNum">    1221 </span>            :  * Calls relevant function for internal or leaf page because they are handled
+<span class="lineNum">    1222 </span>            :  * very differently.
+<a name="1223"><span class="lineNum">    1223 </span>            :  */</a>
+<span class="lineNum">    1224 </span>            : static void
+<span class="lineNum">    1225 </span><span class="lineCov">       6690 : dataExecPlaceToPage(GinBtree btree, Buffer buf, GinBtreeStack *stack,</span>
+<span class="lineNum">    1226 </span>            :                     void *insertdata, BlockNumber updateblkno,
+<span class="lineNum">    1227 </span>            :                     void *ptp_workspace)
+<span class="lineNum">    1228 </span>            : {
+<span class="lineNum">    1229 </span><span class="lineCov">       6690 :     Page        page = BufferGetPage(buf);</span>
+<span class="lineNum">    1230 </span>            : 
+<span class="lineNum">    1231 </span><span class="lineCov">       6690 :     if (GinPageIsLeaf(page))</span>
+<span class="lineNum">    1232 </span><span class="lineCov">       6684 :         dataExecPlaceToPageLeaf(btree, buf, stack, insertdata,</span>
+<span class="lineNum">    1233 </span>            :                                 ptp_workspace);
+<span class="lineNum">    1234 </span>            :     else
+<span class="lineNum">    1235 </span><span class="lineCov">          6 :         dataExecPlaceToPageInternal(btree, buf, stack, insertdata,</span>
+<span class="lineNum">    1236 </span>            :                                     updateblkno, ptp_workspace);
+<span class="lineNum">    1237 </span><span class="lineCov">       6690 : }</span>
+<span class="lineNum">    1238 </span>            : 
+<span class="lineNum">    1239 </span>            : /*
+<span class="lineNum">    1240 </span>            :  * Split internal page and insert new data.
+<span class="lineNum">    1241 </span>            :  *
+<span class="lineNum">    1242 </span>            :  * Returns new temp pages to *newlpage and *newrpage.
+<span class="lineNum">    1243 </span>            :  * The original buffer is left untouched.
+<a name="1244"><span class="lineNum">    1244 </span>            :  */</a>
+<span class="lineNum">    1245 </span>            : static void
+<span class="lineNum">    1246 </span><span class="lineNoCov">          0 : dataSplitPageInternal(GinBtree btree, Buffer origbuf,</span>
+<span class="lineNum">    1247 </span>            :                       GinBtreeStack *stack,
+<span class="lineNum">    1248 </span>            :                       void *insertdata, BlockNumber updateblkno,
+<span class="lineNum">    1249 </span>            :                       Page *newlpage, Page *newrpage)
+<span class="lineNum">    1250 </span>            : {
+<span class="lineNum">    1251 </span><span class="lineNoCov">          0 :     Page        oldpage = BufferGetPage(origbuf);</span>
+<span class="lineNum">    1252 </span><span class="lineNoCov">          0 :     OffsetNumber off = stack-&gt;off;</span>
+<span class="lineNum">    1253 </span><span class="lineNoCov">          0 :     int         nitems = GinPageGetOpaque(oldpage)-&gt;maxoff;</span>
+<span class="lineNum">    1254 </span>            :     int         nleftitems;
+<span class="lineNum">    1255 </span>            :     int         nrightitems;
+<span class="lineNum">    1256 </span><span class="lineNoCov">          0 :     Size        pageSize = PageGetPageSize(oldpage);</span>
+<span class="lineNum">    1257 </span><span class="lineNoCov">          0 :     ItemPointerData oldbound = *GinDataPageGetRightBound(oldpage);</span>
+<span class="lineNum">    1258 </span>            :     ItemPointer bound;
+<span class="lineNum">    1259 </span>            :     Page        lpage;
+<span class="lineNum">    1260 </span>            :     Page        rpage;
+<span class="lineNum">    1261 </span>            :     OffsetNumber separator;
+<span class="lineNum">    1262 </span>            :     PostingItem allitems[(BLCKSZ / sizeof(PostingItem)) + 1];
+<span class="lineNum">    1263 </span>            : 
+<span class="lineNum">    1264 </span><span class="lineNoCov">          0 :     lpage = PageGetTempPage(oldpage);</span>
+<span class="lineNum">    1265 </span><span class="lineNoCov">          0 :     rpage = PageGetTempPage(oldpage);</span>
+<span class="lineNum">    1266 </span><span class="lineNoCov">          0 :     GinInitPage(lpage, GinPageGetOpaque(oldpage)-&gt;flags, pageSize);</span>
+<span class="lineNum">    1267 </span><span class="lineNoCov">          0 :     GinInitPage(rpage, GinPageGetOpaque(oldpage)-&gt;flags, pageSize);</span>
+<span class="lineNum">    1268 </span>            : 
+<span class="lineNum">    1269 </span>            :     /*
+<span class="lineNum">    1270 </span>            :      * First construct a new list of PostingItems, which includes all the old
+<span class="lineNum">    1271 </span>            :      * items, and the new item.
+<span class="lineNum">    1272 </span>            :      */
+<span class="lineNum">    1273 </span><span class="lineNoCov">          0 :     memcpy(allitems, GinDataPageGetPostingItem(oldpage, FirstOffsetNumber),</span>
+<span class="lineNum">    1274 </span><span class="lineNoCov">          0 :            (off - 1) * sizeof(PostingItem));</span>
+<span class="lineNum">    1275 </span>            : 
+<span class="lineNum">    1276 </span><span class="lineNoCov">          0 :     allitems[off - 1] = *((PostingItem *) insertdata);</span>
+<span class="lineNum">    1277 </span><span class="lineNoCov">          0 :     memcpy(&amp;allitems[off], GinDataPageGetPostingItem(oldpage, off),</span>
+<span class="lineNum">    1278 </span><span class="lineNoCov">          0 :            (nitems - (off - 1)) * sizeof(PostingItem));</span>
+<span class="lineNum">    1279 </span><span class="lineNoCov">          0 :     nitems++;</span>
+<span class="lineNum">    1280 </span>            : 
+<span class="lineNum">    1281 </span>            :     /* Update existing downlink to point to next page */
+<span class="lineNum">    1282 </span><span class="lineNoCov">          0 :     PostingItemSetBlockNumber(&amp;allitems[off], updateblkno);</span>
+<span class="lineNum">    1283 </span>            : 
+<span class="lineNum">    1284 </span>            :     /*
+<span class="lineNum">    1285 </span>            :      * When creating a new index, fit as many tuples as possible on the left
+<span class="lineNum">    1286 </span>            :      * page, on the assumption that the table is scanned from beginning to
+<span class="lineNum">    1287 </span>            :      * end. This packs the index as tight as possible.
+<span class="lineNum">    1288 </span>            :      */
+<span class="lineNum">    1289 </span><span class="lineNoCov">          0 :     if (btree-&gt;isBuild &amp;&amp; GinPageRightMost(oldpage))</span>
+<span class="lineNum">    1290 </span><span class="lineNoCov">          0 :         separator = GinNonLeafDataPageGetFreeSpace(rpage) / sizeof(PostingItem);</span>
+<span class="lineNum">    1291 </span>            :     else
+<span class="lineNum">    1292 </span><span class="lineNoCov">          0 :         separator = nitems / 2;</span>
+<span class="lineNum">    1293 </span><span class="lineNoCov">          0 :     nleftitems = separator;</span>
+<span class="lineNum">    1294 </span><span class="lineNoCov">          0 :     nrightitems = nitems - separator;</span>
+<span class="lineNum">    1295 </span>            : 
+<span class="lineNum">    1296 </span><span class="lineNoCov">          0 :     memcpy(GinDataPageGetPostingItem(lpage, FirstOffsetNumber),</span>
+<span class="lineNum">    1297 </span>            :            allitems,
+<span class="lineNum">    1298 </span>            :            nleftitems * sizeof(PostingItem));
+<span class="lineNum">    1299 </span><span class="lineNoCov">          0 :     GinPageGetOpaque(lpage)-&gt;maxoff = nleftitems;</span>
+<span class="lineNum">    1300 </span><span class="lineNoCov">          0 :     memcpy(GinDataPageGetPostingItem(rpage, FirstOffsetNumber),</span>
+<span class="lineNum">    1301 </span><span class="lineNoCov">          0 :            &amp;allitems[separator],</span>
+<span class="lineNum">    1302 </span>            :            nrightitems * sizeof(PostingItem));
+<span class="lineNum">    1303 </span><span class="lineNoCov">          0 :     GinPageGetOpaque(rpage)-&gt;maxoff = nrightitems;</span>
+<span class="lineNum">    1304 </span>            : 
+<span class="lineNum">    1305 </span>            :     /*
+<span class="lineNum">    1306 </span>            :      * Also set pd_lower for both pages, like GinDataPageAddPostingItem does.
+<span class="lineNum">    1307 </span>            :      */
+<span class="lineNum">    1308 </span><span class="lineNoCov">          0 :     GinDataPageSetDataSize(lpage, nleftitems * sizeof(PostingItem));</span>
+<span class="lineNum">    1309 </span><span class="lineNoCov">          0 :     GinDataPageSetDataSize(rpage, nrightitems * sizeof(PostingItem));</span>
+<span class="lineNum">    1310 </span>            : 
+<span class="lineNum">    1311 </span>            :     /* set up right bound for left page */
+<span class="lineNum">    1312 </span><span class="lineNoCov">          0 :     bound = GinDataPageGetRightBound(lpage);</span>
+<span class="lineNum">    1313 </span><span class="lineNoCov">          0 :     *bound = GinDataPageGetPostingItem(lpage, nleftitems)-&gt;key;</span>
+<span class="lineNum">    1314 </span>            : 
+<span class="lineNum">    1315 </span>            :     /* set up right bound for right page */
+<span class="lineNum">    1316 </span><span class="lineNoCov">          0 :     *GinDataPageGetRightBound(rpage) = oldbound;</span>
+<span class="lineNum">    1317 </span>            : 
+<span class="lineNum">    1318 </span>            :     /* return temp pages to caller */
+<span class="lineNum">    1319 </span><span class="lineNoCov">          0 :     *newlpage = lpage;</span>
+<span class="lineNum">    1320 </span><span class="lineNoCov">          0 :     *newrpage = rpage;</span>
+<span class="lineNum">    1321 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1322 </span>            : 
+<span class="lineNum">    1323 </span>            : /*
+<span class="lineNum">    1324 </span>            :  * Construct insertion payload for inserting the downlink for given buffer.
+<a name="1325"><span class="lineNum">    1325 </span>            :  */</a>
+<span class="lineNum">    1326 </span>            : static void *
+<span class="lineNum">    1327 </span><span class="lineCov">          6 : dataPrepareDownlink(GinBtree btree, Buffer lbuf)</span>
+<span class="lineNum">    1328 </span>            : {
+<span class="lineNum">    1329 </span><span class="lineCov">          6 :     PostingItem *pitem = palloc(sizeof(PostingItem));</span>
+<span class="lineNum">    1330 </span><span class="lineCov">          6 :     Page        lpage = BufferGetPage(lbuf);</span>
+<span class="lineNum">    1331 </span>            : 
+<span class="lineNum">    1332 </span><span class="lineCov">          6 :     PostingItemSetBlockNumber(pitem, BufferGetBlockNumber(lbuf));</span>
+<span class="lineNum">    1333 </span><span class="lineCov">          6 :     pitem-&gt;key = *GinDataPageGetRightBound(lpage);</span>
+<span class="lineNum">    1334 </span>            : 
+<span class="lineNum">    1335 </span><span class="lineCov">          6 :     return pitem;</span>
+<span class="lineNum">    1336 </span>            : }
+<span class="lineNum">    1337 </span>            : 
+<span class="lineNum">    1338 </span>            : /*
+<span class="lineNum">    1339 </span>            :  * Fills new root by right bound values from child.
+<span class="lineNum">    1340 </span>            :  * Also called from ginxlog, should not use btree
+<a name="1341"><span class="lineNum">    1341 </span>            :  */</a>
+<span class="lineNum">    1342 </span>            : void
+<span class="lineNum">    1343 </span><span class="lineCov">          6 : ginDataFillRoot(GinBtree btree, Page root, BlockNumber lblkno, Page lpage, BlockNumber rblkno, Page rpage)</span>
+<span class="lineNum">    1344 </span>            : {
+<span class="lineNum">    1345 </span>            :     PostingItem li,
+<span class="lineNum">    1346 </span>            :                 ri;
+<span class="lineNum">    1347 </span>            : 
+<span class="lineNum">    1348 </span><span class="lineCov">          6 :     li.key = *GinDataPageGetRightBound(lpage);</span>
+<span class="lineNum">    1349 </span><span class="lineCov">          6 :     PostingItemSetBlockNumber(&amp;li, lblkno);</span>
+<span class="lineNum">    1350 </span><span class="lineCov">          6 :     GinDataPageAddPostingItem(root, &amp;li, InvalidOffsetNumber);</span>
+<span class="lineNum">    1351 </span>            : 
+<span class="lineNum">    1352 </span><span class="lineCov">          6 :     ri.key = *GinDataPageGetRightBound(rpage);</span>
+<span class="lineNum">    1353 </span><span class="lineCov">          6 :     PostingItemSetBlockNumber(&amp;ri, rblkno);</span>
+<span class="lineNum">    1354 </span><span class="lineCov">          6 :     GinDataPageAddPostingItem(root, &amp;ri, InvalidOffsetNumber);</span>
+<span class="lineNum">    1355 </span><span class="lineCov">          6 : }</span>
+<span class="lineNum">    1356 </span>            : 
+<span class="lineNum">    1357 </span>            : 
+<span class="lineNum">    1358 </span>            : /*** Functions to work with disassembled leaf pages ***/
+<span class="lineNum">    1359 </span>            : 
+<span class="lineNum">    1360 </span>            : /*
+<span class="lineNum">    1361 </span>            :  * Disassemble page into a disassembledLeaf struct.
+<a name="1362"><span class="lineNum">    1362 </span>            :  */</a>
+<span class="lineNum">    1363 </span>            : static disassembledLeaf *
+<span class="lineNum">    1364 </span><span class="lineCov">       6696 : disassembleLeaf(Page page)</span>
+<span class="lineNum">    1365 </span>            : {
+<span class="lineNum">    1366 </span>            :     disassembledLeaf *leaf;
+<span class="lineNum">    1367 </span>            :     GinPostingList *seg;
+<span class="lineNum">    1368 </span>            :     Pointer     segbegin;
+<span class="lineNum">    1369 </span>            :     Pointer     segend;
+<span class="lineNum">    1370 </span>            : 
+<span class="lineNum">    1371 </span><span class="lineCov">       6696 :     leaf = palloc0(sizeof(disassembledLeaf));</span>
+<span class="lineNum">    1372 </span><span class="lineCov">       6696 :     dlist_init(&amp;leaf-&gt;segments);</span>
+<span class="lineNum">    1373 </span>            : 
+<span class="lineNum">    1374 </span><span class="lineCov">       6696 :     if (GinPageIsCompressed(page))</span>
+<span class="lineNum">    1375 </span>            :     {
+<span class="lineNum">    1376 </span>            :         /*
+<span class="lineNum">    1377 </span>            :          * Create a leafSegmentInfo entry for each segment.
+<span class="lineNum">    1378 </span>            :          */
+<span class="lineNum">    1379 </span><span class="lineCov">       6696 :         seg = GinDataLeafPageGetPostingList(page);</span>
+<span class="lineNum">    1380 </span><span class="lineCov">       6696 :         segbegin = (Pointer) seg;</span>
+<span class="lineNum">    1381 </span><span class="lineCov">       6696 :         segend = segbegin + GinDataLeafPageGetPostingListSize(page);</span>
+<span class="lineNum">    1382 </span><span class="lineCov">     133274 :         while ((Pointer) seg &lt; segend)</span>
+<span class="lineNum">    1383 </span>            :         {
+<span class="lineNum">    1384 </span><span class="lineCov">     119882 :             leafSegmentInfo *seginfo = palloc(sizeof(leafSegmentInfo));</span>
+<span class="lineNum">    1385 </span>            : 
+<span class="lineNum">    1386 </span><span class="lineCov">     119882 :             seginfo-&gt;action = GIN_SEGMENT_UNMODIFIED;</span>
+<span class="lineNum">    1387 </span><span class="lineCov">     119882 :             seginfo-&gt;seg = seg;</span>
+<span class="lineNum">    1388 </span><span class="lineCov">     119882 :             seginfo-&gt;items = NULL;</span>
+<span class="lineNum">    1389 </span><span class="lineCov">     119882 :             seginfo-&gt;nitems = 0;</span>
+<span class="lineNum">    1390 </span><span class="lineCov">     119882 :             dlist_push_tail(&amp;leaf-&gt;segments, &amp;seginfo-&gt;node);</span>
+<span class="lineNum">    1391 </span>            : 
+<span class="lineNum">    1392 </span><span class="lineCov">     119882 :             seg = GinNextPostingListSegment(seg);</span>
+<span class="lineNum">    1393 </span>            :         }
+<span class="lineNum">    1394 </span><span class="lineCov">       6696 :         leaf-&gt;oldformat = false;</span>
+<span class="lineNum">    1395 </span>            :     }
+<span class="lineNum">    1396 </span>            :     else
+<span class="lineNum">    1397 </span>            :     {
+<span class="lineNum">    1398 </span>            :         /*
+<span class="lineNum">    1399 </span>            :          * A pre-9.4 format uncompressed page is represented by a single
+<span class="lineNum">    1400 </span>            :          * segment, with an array of items.  The corner case is uncompressed
+<span class="lineNum">    1401 </span>            :          * page containing no items, which is represented as no segments.
+<span class="lineNum">    1402 </span>            :          */
+<span class="lineNum">    1403 </span>            :         ItemPointer uncompressed;
+<span class="lineNum">    1404 </span>            :         int         nuncompressed;
+<span class="lineNum">    1405 </span>            :         leafSegmentInfo *seginfo;
+<span class="lineNum">    1406 </span>            : 
+<span class="lineNum">    1407 </span><span class="lineNoCov">          0 :         uncompressed = dataLeafPageGetUncompressed(page, &amp;nuncompressed);</span>
+<span class="lineNum">    1408 </span>            : 
+<span class="lineNum">    1409 </span><span class="lineNoCov">          0 :         if (nuncompressed &gt; 0)</span>
+<span class="lineNum">    1410 </span>            :         {
+<span class="lineNum">    1411 </span><span class="lineNoCov">          0 :             seginfo = palloc(sizeof(leafSegmentInfo));</span>
+<span class="lineNum">    1412 </span>            : 
+<span class="lineNum">    1413 </span><span class="lineNoCov">          0 :             seginfo-&gt;action = GIN_SEGMENT_REPLACE;</span>
+<span class="lineNum">    1414 </span><span class="lineNoCov">          0 :             seginfo-&gt;seg = NULL;</span>
+<span class="lineNum">    1415 </span><span class="lineNoCov">          0 :             seginfo-&gt;items = palloc(nuncompressed * sizeof(ItemPointerData));</span>
+<span class="lineNum">    1416 </span><span class="lineNoCov">          0 :             memcpy(seginfo-&gt;items, uncompressed, nuncompressed * sizeof(ItemPointerData));</span>
+<span class="lineNum">    1417 </span><span class="lineNoCov">          0 :             seginfo-&gt;nitems = nuncompressed;</span>
+<span class="lineNum">    1418 </span>            : 
+<span class="lineNum">    1419 </span><span class="lineNoCov">          0 :             dlist_push_tail(&amp;leaf-&gt;segments, &amp;seginfo-&gt;node);</span>
+<span class="lineNum">    1420 </span>            :         }
+<span class="lineNum">    1421 </span>            : 
+<span class="lineNum">    1422 </span><span class="lineNoCov">          0 :         leaf-&gt;oldformat = true;</span>
+<span class="lineNum">    1423 </span>            :     }
+<span class="lineNum">    1424 </span>            : 
+<span class="lineNum">    1425 </span><span class="lineCov">       6696 :     return leaf;</span>
+<span class="lineNum">    1426 </span>            : }
+<span class="lineNum">    1427 </span>            : 
+<span class="lineNum">    1428 </span>            : /*
+<span class="lineNum">    1429 </span>            :  * Distribute newItems to the segments.
+<span class="lineNum">    1430 </span>            :  *
+<span class="lineNum">    1431 </span>            :  * Any segments that acquire new items are decoded, and the new items are
+<span class="lineNum">    1432 </span>            :  * merged with the old items.
+<span class="lineNum">    1433 </span>            :  *
+<span class="lineNum">    1434 </span>            :  * Returns true if any new items were added. False means they were all
+<span class="lineNum">    1435 </span>            :  * duplicates of existing items on the page.
+<a name="1436"><span class="lineNum">    1436 </span>            :  */</a>
+<span class="lineNum">    1437 </span>            : static bool
+<span class="lineNum">    1438 </span><span class="lineCov">       6696 : addItemsToLeaf(disassembledLeaf *leaf, ItemPointer newItems, int nNewItems)</span>
+<span class="lineNum">    1439 </span>            : {
+<span class="lineNum">    1440 </span>            :     dlist_iter  iter;
+<span class="lineNum">    1441 </span><span class="lineCov">       6696 :     ItemPointer nextnew = newItems;</span>
+<span class="lineNum">    1442 </span><span class="lineCov">       6696 :     int         newleft = nNewItems;</span>
+<span class="lineNum">    1443 </span><span class="lineCov">       6696 :     bool        modified = false;</span>
+<span class="lineNum">    1444 </span>            :     leafSegmentInfo *newseg;
+<span class="lineNum">    1445 </span>            : 
+<span class="lineNum">    1446 </span>            :     /*
+<span class="lineNum">    1447 </span>            :      * If the page is completely empty, just construct one new segment to hold
+<span class="lineNum">    1448 </span>            :      * all the new items.
+<span class="lineNum">    1449 </span>            :      */
+<span class="lineNum">    1450 </span><span class="lineCov">       6696 :     if (dlist_is_empty(&amp;leaf-&gt;segments))</span>
+<span class="lineNum">    1451 </span>            :     {
+<span class="lineNum">    1452 </span><span class="lineNoCov">          0 :         newseg = palloc(sizeof(leafSegmentInfo));</span>
+<span class="lineNum">    1453 </span><span class="lineNoCov">          0 :         newseg-&gt;seg = NULL;</span>
+<span class="lineNum">    1454 </span><span class="lineNoCov">          0 :         newseg-&gt;items = newItems;</span>
+<span class="lineNum">    1455 </span><span class="lineNoCov">          0 :         newseg-&gt;nitems = nNewItems;</span>
+<span class="lineNum">    1456 </span><span class="lineNoCov">          0 :         newseg-&gt;action = GIN_SEGMENT_INSERT;</span>
+<span class="lineNum">    1457 </span><span class="lineNoCov">          0 :         dlist_push_tail(&amp;leaf-&gt;segments, &amp;newseg-&gt;node);</span>
+<span class="lineNum">    1458 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">    1459 </span>            :     }
+<span class="lineNum">    1460 </span>            : 
+<span class="lineNum">    1461 </span><span class="lineCov">     119882 :     dlist_foreach(iter, &amp;leaf-&gt;segments)</span>
+<span class="lineNum">    1462 </span>            :     {
+<span class="lineNum">    1463 </span><span class="lineCov">     119882 :         leafSegmentInfo *cur = (leafSegmentInfo *) dlist_container(leafSegmentInfo, node, iter.cur);</span>
+<span class="lineNum">    1464 </span>            :         int         nthis;
+<span class="lineNum">    1465 </span>            :         ItemPointer tmpitems;
+<span class="lineNum">    1466 </span>            :         int         ntmpitems;
+<span class="lineNum">    1467 </span>            : 
+<span class="lineNum">    1468 </span>            :         /*
+<span class="lineNum">    1469 </span>            :          * How many of the new items fall into this segment?
+<span class="lineNum">    1470 </span>            :          */
+<span class="lineNum">    1471 </span><span class="lineCov">     119882 :         if (!dlist_has_next(&amp;leaf-&gt;segments, iter.cur))</span>
+<span class="lineNum">    1472 </span><span class="lineCov">       6696 :             nthis = newleft;</span>
+<span class="lineNum">    1473 </span>            :         else
+<span class="lineNum">    1474 </span>            :         {
+<span class="lineNum">    1475 </span>            :             leafSegmentInfo *next;
+<span class="lineNum">    1476 </span>            :             ItemPointerData next_first;
+<span class="lineNum">    1477 </span>            : 
+<span class="lineNum">    1478 </span><span class="lineCov">     113186 :             next = (leafSegmentInfo *) dlist_container(leafSegmentInfo, node,</span>
+<span class="lineNum">    1479 </span>            :                                                        dlist_next_node(&amp;leaf-&gt;segments, iter.cur));
+<span class="lineNum">    1480 </span><span class="lineCov">     113186 :             if (next-&gt;items)</span>
+<span class="lineNum">    1481 </span><span class="lineCov">       6696 :                 next_first = next-&gt;items[0];</span>
+<span class="lineNum">    1482 </span>            :             else
+<span class="lineNum">    1483 </span>            :             {
+<span class="lineNum">    1484 </span><span class="lineCov">     106490 :                 Assert(next-&gt;seg != NULL);</span>
+<span class="lineNum">    1485 </span><span class="lineCov">     106490 :                 next_first = next-&gt;seg-&gt;first;</span>
+<span class="lineNum">    1486 </span>            :             }
+<span class="lineNum">    1487 </span>            : 
+<span class="lineNum">    1488 </span><span class="lineCov">     113186 :             nthis = 0;</span>
+<span class="lineNum">    1489 </span><span class="lineCov">     226372 :             while (nthis &lt; newleft &amp;&amp; ginCompareItemPointers(&amp;nextnew[nthis], &amp;next_first) &lt; 0)</span>
+<span class="lineNum">    1490 </span><span class="lineNoCov">          0 :                 nthis++;</span>
+<span class="lineNum">    1491 </span>            :         }
+<span class="lineNum">    1492 </span><span class="lineCov">     119882 :         if (nthis == 0)</span>
+<span class="lineNum">    1493 </span><span class="lineCov">     113186 :             continue;</span>
+<span class="lineNum">    1494 </span>            : 
+<span class="lineNum">    1495 </span>            :         /* Merge the new items with the existing items. */
+<span class="lineNum">    1496 </span><span class="lineCov">       6696 :         if (!cur-&gt;items)</span>
+<span class="lineNum">    1497 </span><span class="lineNoCov">          0 :             cur-&gt;items = ginPostingListDecode(cur-&gt;seg, &amp;cur-&gt;nitems);</span>
+<span class="lineNum">    1498 </span>            : 
+<span class="lineNum">    1499 </span>            :         /*
+<span class="lineNum">    1500 </span>            :          * Fast path for the important special case that we're appending to
+<span class="lineNum">    1501 </span>            :          * the end of the page: don't let the last segment on the page grow
+<span class="lineNum">    1502 </span>            :          * larger than the target, create a new segment before that happens.
+<span class="lineNum">    1503 </span>            :          */
+<span class="lineNum">    1504 </span><span class="lineCov">      13392 :         if (!dlist_has_next(&amp;leaf-&gt;segments, iter.cur) &amp;&amp;</span>
+<span class="lineNum">    1505 </span><span class="lineCov">      13392 :             ginCompareItemPointers(&amp;cur-&gt;items[cur-&gt;nitems - 1], &amp;nextnew[0]) &lt; 0 &amp;&amp;</span>
+<span class="lineNum">    1506 </span><span class="lineCov">      13392 :             cur-&gt;seg != NULL &amp;&amp;</span>
+<span class="lineNum">    1507 </span><span class="lineCov">       6696 :             SizeOfGinPostingList(cur-&gt;seg) &gt;= GinPostingListSegmentTargetSize)</span>
+<span class="lineNum">    1508 </span>            :         {
+<span class="lineNum">    1509 </span><span class="lineCov">         42 :             newseg = palloc(sizeof(leafSegmentInfo));</span>
+<span class="lineNum">    1510 </span><span class="lineCov">         42 :             newseg-&gt;seg = NULL;</span>
+<span class="lineNum">    1511 </span><span class="lineCov">         42 :             newseg-&gt;items = nextnew;</span>
+<span class="lineNum">    1512 </span><span class="lineCov">         42 :             newseg-&gt;nitems = nthis;</span>
+<span class="lineNum">    1513 </span><span class="lineCov">         42 :             newseg-&gt;action = GIN_SEGMENT_INSERT;</span>
+<span class="lineNum">    1514 </span><span class="lineCov">         42 :             dlist_push_tail(&amp;leaf-&gt;segments, &amp;newseg-&gt;node);</span>
+<span class="lineNum">    1515 </span><span class="lineCov">         42 :             modified = true;</span>
+<span class="lineNum">    1516 </span><span class="lineCov">       6738 :             break;</span>
+<span class="lineNum">    1517 </span>            :         }
+<span class="lineNum">    1518 </span>            : 
+<span class="lineNum">    1519 </span><span class="lineCov">       6654 :         tmpitems = ginMergeItemPointers(cur-&gt;items, cur-&gt;nitems,</span>
+<span class="lineNum">    1520 </span>            :                                         nextnew, nthis,
+<span class="lineNum">    1521 </span>            :                                         &amp;ntmpitems);
+<span class="lineNum">    1522 </span><span class="lineCov">       6654 :         if (ntmpitems != cur-&gt;nitems)</span>
+<span class="lineNum">    1523 </span>            :         {
+<span class="lineNum">    1524 </span>            :             /*
+<span class="lineNum">    1525 </span>            :              * If there are no duplicates, track the added items so that we
+<span class="lineNum">    1526 </span>            :              * can emit a compact ADDITEMS WAL record later on. (it doesn't
+<span class="lineNum">    1527 </span>            :              * seem worth re-checking which items were duplicates, if there
+<span class="lineNum">    1528 </span>            :              * were any)
+<span class="lineNum">    1529 </span>            :              */
+<span class="lineNum">    1530 </span><span class="lineCov">      13308 :             if (ntmpitems == nthis + cur-&gt;nitems &amp;&amp;</span>
+<span class="lineNum">    1531 </span><span class="lineCov">       6654 :                 cur-&gt;action == GIN_SEGMENT_UNMODIFIED)</span>
+<span class="lineNum">    1532 </span>            :             {
+<span class="lineNum">    1533 </span><span class="lineCov">       6654 :                 cur-&gt;action = GIN_SEGMENT_ADDITEMS;</span>
+<span class="lineNum">    1534 </span><span class="lineCov">       6654 :                 cur-&gt;modifieditems = nextnew;</span>
+<span class="lineNum">    1535 </span><span class="lineCov">       6654 :                 cur-&gt;nmodifieditems = nthis;</span>
+<span class="lineNum">    1536 </span>            :             }
+<span class="lineNum">    1537 </span>            :             else
+<span class="lineNum">    1538 </span><span class="lineNoCov">          0 :                 cur-&gt;action = GIN_SEGMENT_REPLACE;</span>
+<span class="lineNum">    1539 </span>            : 
+<span class="lineNum">    1540 </span><span class="lineCov">       6654 :             cur-&gt;items = tmpitems;</span>
+<span class="lineNum">    1541 </span><span class="lineCov">       6654 :             cur-&gt;nitems = ntmpitems;</span>
+<span class="lineNum">    1542 </span><span class="lineCov">       6654 :             cur-&gt;seg = NULL;</span>
+<span class="lineNum">    1543 </span><span class="lineCov">       6654 :             modified = true;</span>
+<span class="lineNum">    1544 </span>            :         }
+<span class="lineNum">    1545 </span>            : 
+<span class="lineNum">    1546 </span><span class="lineCov">       6654 :         nextnew += nthis;</span>
+<span class="lineNum">    1547 </span><span class="lineCov">       6654 :         newleft -= nthis;</span>
+<span class="lineNum">    1548 </span><span class="lineCov">       6654 :         if (newleft == 0)</span>
+<span class="lineNum">    1549 </span><span class="lineCov">       6654 :             break;</span>
+<span class="lineNum">    1550 </span>            :     }
+<span class="lineNum">    1551 </span>            : 
+<span class="lineNum">    1552 </span><span class="lineCov">       6696 :     return modified;</span>
+<span class="lineNum">    1553 </span>            : }
+<span class="lineNum">    1554 </span>            : 
+<span class="lineNum">    1555 </span>            : /*
+<span class="lineNum">    1556 </span>            :  * Recompresses all segments that have been modified.
+<span class="lineNum">    1557 </span>            :  *
+<span class="lineNum">    1558 </span>            :  * If not all the items fit on two pages (ie. after split), we store as
+<span class="lineNum">    1559 </span>            :  * many items as fit, and set *remaining to the first item that didn't fit.
+<span class="lineNum">    1560 </span>            :  * If all items fit, *remaining is set to invalid.
+<span class="lineNum">    1561 </span>            :  *
+<span class="lineNum">    1562 </span>            :  * Returns true if the page has to be split.
+<a name="1563"><span class="lineNum">    1563 </span>            :  */</a>
+<span class="lineNum">    1564 </span>            : static bool
+<span class="lineNum">    1565 </span><span class="lineCov">       6696 : leafRepackItems(disassembledLeaf *leaf, ItemPointer remaining)</span>
+<span class="lineNum">    1566 </span>            : {
+<span class="lineNum">    1567 </span><span class="lineCov">       6696 :     int         pgused = 0;</span>
+<span class="lineNum">    1568 </span><span class="lineCov">       6696 :     bool        needsplit = false;</span>
+<span class="lineNum">    1569 </span>            :     dlist_iter  iter;
+<span class="lineNum">    1570 </span>            :     int         segsize;
+<span class="lineNum">    1571 </span>            :     leafSegmentInfo *nextseg;
+<span class="lineNum">    1572 </span>            :     int         npacked;
+<span class="lineNum">    1573 </span>            :     bool        modified;
+<span class="lineNum">    1574 </span>            :     dlist_node *cur_node;
+<span class="lineNum">    1575 </span>            :     dlist_node *next_node;
+<span class="lineNum">    1576 </span>            : 
+<span class="lineNum">    1577 </span><span class="lineCov">       6696 :     ItemPointerSetInvalid(remaining);</span>
+<span class="lineNum">    1578 </span>            : 
+<span class="lineNum">    1579 </span>            :     /*
+<span class="lineNum">    1580 </span>            :      * cannot use dlist_foreach_modify here because we insert adjacent items
+<span class="lineNum">    1581 </span>            :      * while iterating.
+<span class="lineNum">    1582 </span>            :      */
+<span class="lineNum">    1583 </span><span class="lineCov">     133534 :     for (cur_node = dlist_head_node(&amp;leaf-&gt;segments);</span>
+<span class="lineNum">    1584 </span>            :          cur_node != NULL;
+<span class="lineNum">    1585 </span><span class="lineCov">     120142 :          cur_node = next_node)</span>
+<span class="lineNum">    1586 </span>            :     {
+<span class="lineNum">    1587 </span><span class="lineCov">     120146 :         leafSegmentInfo *seginfo = dlist_container(leafSegmentInfo, node,</span>
+<span class="lineNum">    1588 </span>            :                                                    cur_node);
+<span class="lineNum">    1589 </span>            : 
+<span class="lineNum">    1590 </span><span class="lineCov">     120146 :         if (dlist_has_next(&amp;leaf-&gt;segments, cur_node))</span>
+<span class="lineNum">    1591 </span><span class="lineCov">     113228 :             next_node = dlist_next_node(&amp;leaf-&gt;segments, cur_node);</span>
+<span class="lineNum">    1592 </span>            :         else
+<span class="lineNum">    1593 </span><span class="lineCov">       6918 :             next_node = NULL;</span>
+<span class="lineNum">    1594 </span>            : 
+<span class="lineNum">    1595 </span>            :         /* Compress the posting list, if necessary */
+<span class="lineNum">    1596 </span><span class="lineCov">     120146 :         if (seginfo-&gt;action != GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">    1597 </span>            :         {
+<span class="lineNum">    1598 </span><span class="lineCov">     120146 :             if (seginfo-&gt;seg == NULL)</span>
+<span class="lineNum">    1599 </span>            :             {
+<span class="lineNum">    1600 </span><span class="lineCov">       6918 :                 if (seginfo-&gt;nitems &gt; GinPostingListSegmentMaxSize)</span>
+<span class="lineNum">    1601 </span><span class="lineCov">        226 :                     npacked = 0;    /* no chance that it would fit. */</span>
+<span class="lineNum">    1602 </span>            :                 else
+<span class="lineNum">    1603 </span>            :                 {
+<span class="lineNum">    1604 </span><span class="lineCov">       6692 :                     seginfo-&gt;seg = ginCompressPostingList(seginfo-&gt;items,</span>
+<span class="lineNum">    1605 </span>            :                                                           seginfo-&gt;nitems,
+<span class="lineNum">    1606 </span>            :                                                           GinPostingListSegmentMaxSize,
+<span class="lineNum">    1607 </span>            :                                                           &amp;npacked);
+<span class="lineNum">    1608 </span>            :                 }
+<span class="lineNum">    1609 </span><span class="lineCov">       6918 :                 if (npacked != seginfo-&gt;nitems)</span>
+<span class="lineNum">    1610 </span>            :                 {
+<span class="lineNum">    1611 </span>            :                     /*
+<span class="lineNum">    1612 </span>            :                      * Too large. Compress again to the target size, and
+<span class="lineNum">    1613 </span>            :                      * create a new segment to represent the remaining items.
+<span class="lineNum">    1614 </span>            :                      * The new segment is inserted after this one, so it will
+<span class="lineNum">    1615 </span>            :                      * be processed in the next iteration of this loop.
+<span class="lineNum">    1616 </span>            :                      */
+<span class="lineNum">    1617 </span><span class="lineCov">        226 :                     if (seginfo-&gt;seg)</span>
+<span class="lineNum">    1618 </span><span class="lineNoCov">          0 :                         pfree(seginfo-&gt;seg);</span>
+<span class="lineNum">    1619 </span><span class="lineCov">        226 :                     seginfo-&gt;seg = ginCompressPostingList(seginfo-&gt;items,</span>
+<span class="lineNum">    1620 </span>            :                                                           seginfo-&gt;nitems,
+<span class="lineNum">    1621 </span>            :                                                           GinPostingListSegmentTargetSize,
+<span class="lineNum">    1622 </span>            :                                                           &amp;npacked);
+<span class="lineNum">    1623 </span><span class="lineCov">        226 :                     if (seginfo-&gt;action != GIN_SEGMENT_INSERT)</span>
+<span class="lineNum">    1624 </span><span class="lineNoCov">          0 :                         seginfo-&gt;action = GIN_SEGMENT_REPLACE;</span>
+<span class="lineNum">    1625 </span>            : 
+<span class="lineNum">    1626 </span><span class="lineCov">        226 :                     nextseg = palloc(sizeof(leafSegmentInfo));</span>
+<span class="lineNum">    1627 </span><span class="lineCov">        226 :                     nextseg-&gt;action = GIN_SEGMENT_INSERT;</span>
+<span class="lineNum">    1628 </span><span class="lineCov">        226 :                     nextseg-&gt;seg = NULL;</span>
+<span class="lineNum">    1629 </span><span class="lineCov">        226 :                     nextseg-&gt;items = &amp;seginfo-&gt;items[npacked];</span>
+<span class="lineNum">    1630 </span><span class="lineCov">        226 :                     nextseg-&gt;nitems = seginfo-&gt;nitems - npacked;</span>
+<span class="lineNum">    1631 </span><span class="lineCov">        226 :                     next_node = &amp;nextseg-&gt;node;</span>
+<span class="lineNum">    1632 </span><span class="lineCov">        226 :                     dlist_insert_after(cur_node, next_node);</span>
+<span class="lineNum">    1633 </span>            :                 }
+<span class="lineNum">    1634 </span>            :             }
+<span class="lineNum">    1635 </span>            : 
+<span class="lineNum">    1636 </span>            :             /*
+<span class="lineNum">    1637 </span>            :              * If the segment is very small, merge it with the next segment.
+<span class="lineNum">    1638 </span>            :              */
+<span class="lineNum">    1639 </span><span class="lineCov">     120146 :             if (SizeOfGinPostingList(seginfo-&gt;seg) &lt; GinPostingListSegmentMinSize &amp;&amp; next_node)</span>
+<span class="lineNum">    1640 </span>            :             {
+<span class="lineNum">    1641 </span>            :                 int         nmerged;
+<span class="lineNum">    1642 </span>            : 
+<span class="lineNum">    1643 </span><span class="lineNoCov">          0 :                 nextseg = dlist_container(leafSegmentInfo, node, next_node);</span>
+<span class="lineNum">    1644 </span>            : 
+<span class="lineNum">    1645 </span><span class="lineNoCov">          0 :                 if (seginfo-&gt;items == NULL)</span>
+<span class="lineNum">    1646 </span><span class="lineNoCov">          0 :                     seginfo-&gt;items = ginPostingListDecode(seginfo-&gt;seg,</span>
+<span class="lineNum">    1647 </span>            :                                                           &amp;seginfo-&gt;nitems);
+<span class="lineNum">    1648 </span><span class="lineNoCov">          0 :                 if (nextseg-&gt;items == NULL)</span>
+<span class="lineNum">    1649 </span><span class="lineNoCov">          0 :                     nextseg-&gt;items = ginPostingListDecode(nextseg-&gt;seg,</span>
+<span class="lineNum">    1650 </span>            :                                                           &amp;nextseg-&gt;nitems);
+<span class="lineNum">    1651 </span><span class="lineNoCov">          0 :                 nextseg-&gt;items =</span>
+<span class="lineNum">    1652 </span><span class="lineNoCov">          0 :                     ginMergeItemPointers(seginfo-&gt;items, seginfo-&gt;nitems,</span>
+<span class="lineNum">    1653 </span><span class="lineNoCov">          0 :                                          nextseg-&gt;items, nextseg-&gt;nitems,</span>
+<span class="lineNum">    1654 </span>            :                                          &amp;nmerged);
+<span class="lineNum">    1655 </span><span class="lineNoCov">          0 :                 Assert(nmerged == seginfo-&gt;nitems + nextseg-&gt;nitems);</span>
+<span class="lineNum">    1656 </span><span class="lineNoCov">          0 :                 nextseg-&gt;nitems = nmerged;</span>
+<span class="lineNum">    1657 </span><span class="lineNoCov">          0 :                 nextseg-&gt;seg = NULL;</span>
+<span class="lineNum">    1658 </span>            : 
+<span class="lineNum">    1659 </span><span class="lineNoCov">          0 :                 nextseg-&gt;action = GIN_SEGMENT_REPLACE;</span>
+<span class="lineNum">    1660 </span><span class="lineNoCov">          0 :                 nextseg-&gt;modifieditems = NULL;</span>
+<span class="lineNum">    1661 </span><span class="lineNoCov">          0 :                 nextseg-&gt;nmodifieditems = 0;</span>
+<span class="lineNum">    1662 </span>            : 
+<span class="lineNum">    1663 </span><span class="lineNoCov">          0 :                 if (seginfo-&gt;action == GIN_SEGMENT_INSERT)</span>
+<span class="lineNum">    1664 </span>            :                 {
+<span class="lineNum">    1665 </span><span class="lineNoCov">          0 :                     dlist_delete(cur_node);</span>
+<span class="lineNum">    1666 </span><span class="lineNoCov">          0 :                     continue;</span>
+<span class="lineNum">    1667 </span>            :                 }
+<span class="lineNum">    1668 </span>            :                 else
+<span class="lineNum">    1669 </span>            :                 {
+<span class="lineNum">    1670 </span><span class="lineNoCov">          0 :                     seginfo-&gt;action = GIN_SEGMENT_DELETE;</span>
+<span class="lineNum">    1671 </span><span class="lineNoCov">          0 :                     seginfo-&gt;seg = NULL;</span>
+<span class="lineNum">    1672 </span>            :                 }
+<span class="lineNum">    1673 </span>            :             }
+<span class="lineNum">    1674 </span>            : 
+<span class="lineNum">    1675 </span><span class="lineCov">     120146 :             seginfo-&gt;items = NULL;</span>
+<span class="lineNum">    1676 </span><span class="lineCov">     120146 :             seginfo-&gt;nitems = 0;</span>
+<span class="lineNum">    1677 </span>            :         }
+<span class="lineNum">    1678 </span>            : 
+<span class="lineNum">    1679 </span><span class="lineCov">     120146 :         if (seginfo-&gt;action == GIN_SEGMENT_DELETE)</span>
+<span class="lineNum">    1680 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1681 </span>            : 
+<span class="lineNum">    1682 </span>            :         /*
+<span class="lineNum">    1683 </span>            :          * OK, we now have a compressed version of this segment ready for
+<span class="lineNum">    1684 </span>            :          * copying to the page. Did we exceed the size that fits on one page?
+<span class="lineNum">    1685 </span>            :          */
+<span class="lineNum">    1686 </span><span class="lineCov">     120146 :         segsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">    1687 </span><span class="lineCov">     120146 :         if (pgused + segsize &gt; GinDataPageMaxDataSize)</span>
+<span class="lineNum">    1688 </span>            :         {
+<span class="lineNum">    1689 </span><span class="lineCov">         16 :             if (!needsplit)</span>
+<span class="lineNum">    1690 </span>            :             {
+<span class="lineNum">    1691 </span>            :                 /* switch to right page */
+<span class="lineNum">    1692 </span><span class="lineCov">         12 :                 Assert(pgused &gt; 0);</span>
+<span class="lineNum">    1693 </span><span class="lineCov">         12 :                 leaf-&gt;lastleft = dlist_prev_node(&amp;leaf-&gt;segments, cur_node);</span>
+<span class="lineNum">    1694 </span><span class="lineCov">         12 :                 needsplit = true;</span>
+<span class="lineNum">    1695 </span><span class="lineCov">         12 :                 leaf-&gt;lsize = pgused;</span>
+<span class="lineNum">    1696 </span><span class="lineCov">         12 :                 pgused = 0;</span>
+<span class="lineNum">    1697 </span>            :             }
+<span class="lineNum">    1698 </span>            :             else
+<span class="lineNum">    1699 </span>            :             {
+<span class="lineNum">    1700 </span>            :                 /*
+<span class="lineNum">    1701 </span>            :                  * Filled both pages. The last segment we constructed did not
+<span class="lineNum">    1702 </span>            :                  * fit.
+<span class="lineNum">    1703 </span>            :                  */
+<span class="lineNum">    1704 </span><span class="lineCov">          4 :                 *remaining = seginfo-&gt;seg-&gt;first;</span>
+<span class="lineNum">    1705 </span>            : 
+<span class="lineNum">    1706 </span>            :                 /*
+<span class="lineNum">    1707 </span>            :                  * remove all segments that did not fit from the list.
+<span class="lineNum">    1708 </span>            :                  */
+<span class="lineNum">    1709 </span><span class="lineCov">         12 :                 while (dlist_has_next(&amp;leaf-&gt;segments, cur_node))</span>
+<span class="lineNum">    1710 </span><span class="lineCov">          4 :                     dlist_delete(dlist_next_node(&amp;leaf-&gt;segments, cur_node));</span>
+<span class="lineNum">    1711 </span><span class="lineCov">          4 :                 dlist_delete(cur_node);</span>
+<span class="lineNum">    1712 </span><span class="lineCov">          4 :                 break;</span>
+<span class="lineNum">    1713 </span>            :             }
+<span class="lineNum">    1714 </span>            :         }
+<span class="lineNum">    1715 </span>            : 
+<span class="lineNum">    1716 </span><span class="lineCov">     120142 :         pgused += segsize;</span>
+<span class="lineNum">    1717 </span>            :     }
+<span class="lineNum">    1718 </span>            : 
+<span class="lineNum">    1719 </span><span class="lineCov">       6696 :     if (!needsplit)</span>
+<span class="lineNum">    1720 </span>            :     {
+<span class="lineNum">    1721 </span><span class="lineCov">       6684 :         leaf-&gt;lsize = pgused;</span>
+<span class="lineNum">    1722 </span><span class="lineCov">       6684 :         leaf-&gt;rsize = 0;</span>
+<span class="lineNum">    1723 </span>            :     }
+<span class="lineNum">    1724 </span>            :     else
+<span class="lineNum">    1725 </span><span class="lineCov">         12 :         leaf-&gt;rsize = pgused;</span>
+<span class="lineNum">    1726 </span>            : 
+<span class="lineNum">    1727 </span><span class="lineCov">       6696 :     Assert(leaf-&gt;lsize &lt;= GinDataPageMaxDataSize);</span>
+<span class="lineNum">    1728 </span><span class="lineCov">       6696 :     Assert(leaf-&gt;rsize &lt;= GinDataPageMaxDataSize);</span>
+<span class="lineNum">    1729 </span>            : 
+<span class="lineNum">    1730 </span>            :     /*
+<span class="lineNum">    1731 </span>            :      * Make a palloc'd copy of every segment after the first modified one,
+<span class="lineNum">    1732 </span>            :      * because as we start copying items to the original page, we might
+<span class="lineNum">    1733 </span>            :      * overwrite an existing segment.
+<span class="lineNum">    1734 </span>            :      */
+<span class="lineNum">    1735 </span><span class="lineCov">       6696 :     modified = false;</span>
+<span class="lineNum">    1736 </span><span class="lineCov">     126838 :     dlist_foreach(iter, &amp;leaf-&gt;segments)</span>
+<span class="lineNum">    1737 </span>            :     {
+<span class="lineNum">    1738 </span><span class="lineCov">     120142 :         leafSegmentInfo *seginfo = dlist_container(leafSegmentInfo, node,</span>
+<span class="lineNum">    1739 </span>            :                                                    iter.cur);
+<span class="lineNum">    1740 </span>            : 
+<span class="lineNum">    1741 </span><span class="lineCov">     120142 :         if (!modified &amp;&amp; seginfo-&gt;action != GIN_SEGMENT_UNMODIFIED)</span>
+<span class="lineNum">    1742 </span>            :         {
+<span class="lineNum">    1743 </span><span class="lineCov">       6696 :             modified = true;</span>
+<span class="lineNum">    1744 </span>            :         }
+<span class="lineNum">    1745 </span><span class="lineCov">     113446 :         else if (modified &amp;&amp; seginfo-&gt;action == GIN_SEGMENT_UNMODIFIED)</span>
+<span class="lineNum">    1746 </span>            :         {
+<span class="lineNum">    1747 </span>            :             GinPostingList *tmp;
+<span class="lineNum">    1748 </span>            : 
+<span class="lineNum">    1749 </span><span class="lineNoCov">          0 :             segsize = SizeOfGinPostingList(seginfo-&gt;seg);</span>
+<span class="lineNum">    1750 </span><span class="lineNoCov">          0 :             tmp = palloc(segsize);</span>
+<span class="lineNum">    1751 </span><span class="lineNoCov">          0 :             memcpy(tmp, seginfo-&gt;seg, segsize);</span>
+<span class="lineNum">    1752 </span><span class="lineNoCov">          0 :             seginfo-&gt;seg = tmp;</span>
+<span class="lineNum">    1753 </span>            :         }
+<span class="lineNum">    1754 </span>            :     }
+<span class="lineNum">    1755 </span>            : 
+<span class="lineNum">    1756 </span><span class="lineCov">       6696 :     return needsplit;</span>
+<span class="lineNum">    1757 </span>            : }
+<span class="lineNum">    1758 </span>            : 
+<span class="lineNum">    1759 </span>            : 
+<span class="lineNum">    1760 </span>            : /*** Functions that are exported to the rest of the GIN code ***/
+<span class="lineNum">    1761 </span>            : 
+<span class="lineNum">    1762 </span>            : /*
+<span class="lineNum">    1763 </span>            :  * Creates new posting tree containing the given TIDs. Returns the page
+<span class="lineNum">    1764 </span>            :  * number of the root of the new posting tree.
+<span class="lineNum">    1765 </span>            :  *
+<span class="lineNum">    1766 </span>            :  * items[] must be in sorted order with no duplicates.
+<a name="1767"><span class="lineNum">    1767 </span>            :  */</a>
+<span class="lineNum">    1768 </span>            : BlockNumber
+<span class="lineNum">    1769 </span><span class="lineCov">          8 : createPostingTree(Relation index, ItemPointerData *items, uint32 nitems,</span>
+<span class="lineNum">    1770 </span>            :                   GinStatsData *buildStats, Buffer entrybuffer)
+<span class="lineNum">    1771 </span>            : {
+<span class="lineNum">    1772 </span>            :     BlockNumber blkno;
+<span class="lineNum">    1773 </span>            :     Buffer      buffer;
+<span class="lineNum">    1774 </span>            :     Page        tmppage;
+<span class="lineNum">    1775 </span>            :     Page        page;
+<span class="lineNum">    1776 </span>            :     Pointer     ptr;
+<span class="lineNum">    1777 </span>            :     int         nrootitems;
+<span class="lineNum">    1778 </span>            :     int         rootsize;
+<span class="lineNum">    1779 </span><span class="lineCov">          8 :     bool        is_build = (buildStats != NULL);</span>
+<span class="lineNum">    1780 </span>            : 
+<span class="lineNum">    1781 </span>            :     /* Construct the new root page in memory first. */
+<span class="lineNum">    1782 </span><span class="lineCov">          8 :     tmppage = (Page) palloc(BLCKSZ);</span>
+<span class="lineNum">    1783 </span><span class="lineCov">          8 :     GinInitPage(tmppage, GIN_DATA | GIN_LEAF | GIN_COMPRESSED, BLCKSZ);</span>
+<span class="lineNum">    1784 </span><span class="lineCov">          8 :     GinPageGetOpaque(tmppage)-&gt;rightlink = InvalidBlockNumber;</span>
+<span class="lineNum">    1785 </span>            : 
+<span class="lineNum">    1786 </span>            :     /*
+<span class="lineNum">    1787 </span>            :      * Write as many of the items to the root page as fit. In segments of max
+<span class="lineNum">    1788 </span>            :      * GinPostingListSegmentMaxSize bytes each.
+<span class="lineNum">    1789 </span>            :      */
+<span class="lineNum">    1790 </span><span class="lineCov">          8 :     nrootitems = 0;</span>
+<span class="lineNum">    1791 </span><span class="lineCov">          8 :     rootsize = 0;</span>
+<span class="lineNum">    1792 </span><span class="lineCov">          8 :     ptr = (Pointer) GinDataLeafPageGetPostingList(tmppage);</span>
+<span class="lineNum">    1793 </span><span class="lineCov">        158 :     while (nrootitems &lt; nitems)</span>
+<span class="lineNum">    1794 </span>            :     {
+<span class="lineNum">    1795 </span>            :         GinPostingList *segment;
+<span class="lineNum">    1796 </span>            :         int         npacked;
+<span class="lineNum">    1797 </span>            :         int         segsize;
+<span class="lineNum">    1798 </span>            : 
+<span class="lineNum">    1799 </span><span class="lineCov">        148 :         segment = ginCompressPostingList(&amp;items[nrootitems],</span>
+<span class="lineNum">    1800 </span><span class="lineCov">        148 :                                          nitems - nrootitems,</span>
+<span class="lineNum">    1801 </span>            :                                          GinPostingListSegmentMaxSize,
+<span class="lineNum">    1802 </span>            :                                          &amp;npacked);
+<span class="lineNum">    1803 </span><span class="lineCov">        148 :         segsize = SizeOfGinPostingList(segment);</span>
+<span class="lineNum">    1804 </span><span class="lineCov">        148 :         if (rootsize + segsize &gt; GinDataPageMaxDataSize)</span>
+<span class="lineNum">    1805 </span><span class="lineCov">          6 :             break;</span>
+<span class="lineNum">    1806 </span>            : 
+<span class="lineNum">    1807 </span><span class="lineCov">        142 :         memcpy(ptr, segment, segsize);</span>
+<span class="lineNum">    1808 </span><span class="lineCov">        142 :         ptr += segsize;</span>
+<span class="lineNum">    1809 </span><span class="lineCov">        142 :         rootsize += segsize;</span>
+<span class="lineNum">    1810 </span><span class="lineCov">        142 :         nrootitems += npacked;</span>
+<span class="lineNum">    1811 </span><span class="lineCov">        142 :         pfree(segment);</span>
+<span class="lineNum">    1812 </span>            :     }
+<span class="lineNum">    1813 </span><span class="lineCov">          8 :     GinDataPageSetDataSize(tmppage, rootsize);</span>
+<span class="lineNum">    1814 </span>            : 
+<span class="lineNum">    1815 </span>            :     /*
+<span class="lineNum">    1816 </span>            :      * All set. Get a new physical page, and copy the in-memory page to it.
+<span class="lineNum">    1817 </span>            :      */
+<span class="lineNum">    1818 </span><span class="lineCov">          8 :     buffer = GinNewBuffer(index);</span>
+<span class="lineNum">    1819 </span><span class="lineCov">          8 :     page = BufferGetPage(buffer);</span>
+<span class="lineNum">    1820 </span><span class="lineCov">          8 :     blkno = BufferGetBlockNumber(buffer);</span>
+<span class="lineNum">    1821 </span>            : 
+<span class="lineNum">    1822 </span>            :     /*
+<span class="lineNum">    1823 </span>            :      * Copy any predicate locks from the entry tree leaf (containing posting
+<span class="lineNum">    1824 </span>            :      * list) to the posting tree.
+<span class="lineNum">    1825 </span>            :      */
+<span class="lineNum">    1826 </span><span class="lineCov">          8 :     PredicateLockPageSplit(index, BufferGetBlockNumber(entrybuffer), blkno);</span>
+<span class="lineNum">    1827 </span>            : 
+<span class="lineNum">    1828 </span><span class="lineCov">          8 :     START_CRIT_SECTION();</span>
+<span class="lineNum">    1829 </span>            : 
+<span class="lineNum">    1830 </span><span class="lineCov">          8 :     PageRestoreTempPage(tmppage, page);</span>
+<span class="lineNum">    1831 </span><span class="lineCov">          8 :     MarkBufferDirty(buffer);</span>
+<span class="lineNum">    1832 </span>            : 
+<span class="lineNum">    1833 </span><span class="lineCov">          8 :     if (RelationNeedsWAL(index) &amp;&amp; !is_build)</span>
+<span class="lineNum">    1834 </span>            :     {
+<span class="lineNum">    1835 </span>            :         XLogRecPtr  recptr;
+<span class="lineNum">    1836 </span>            :         ginxlogCreatePostingTree data;
+<span class="lineNum">    1837 </span>            : 
+<span class="lineNum">    1838 </span><span class="lineCov">          6 :         data.size = rootsize;</span>
+<span class="lineNum">    1839 </span>            : 
+<span class="lineNum">    1840 </span><span class="lineCov">          6 :         XLogBeginInsert();</span>
+<span class="lineNum">    1841 </span><span class="lineCov">          6 :         XLogRegisterData((char *) &amp;data, sizeof(ginxlogCreatePostingTree));</span>
+<span class="lineNum">    1842 </span>            : 
+<span class="lineNum">    1843 </span><span class="lineCov">          6 :         XLogRegisterData((char *) GinDataLeafPageGetPostingList(page),</span>
+<span class="lineNum">    1844 </span>            :                          rootsize);
+<span class="lineNum">    1845 </span><span class="lineCov">          6 :         XLogRegisterBuffer(0, buffer, REGBUF_WILL_INIT);</span>
+<span class="lineNum">    1846 </span>            : 
+<span class="lineNum">    1847 </span><span class="lineCov">          6 :         recptr = XLogInsert(RM_GIN_ID, XLOG_GIN_CREATE_PTREE);</span>
+<span class="lineNum">    1848 </span><span class="lineCov">          6 :         PageSetLSN(page, recptr);</span>
+<span class="lineNum">    1849 </span>            :     }
+<span class="lineNum">    1850 </span>            : 
+<span class="lineNum">    1851 </span><span class="lineCov">          8 :     UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">    1852 </span>            : 
+<span class="lineNum">    1853 </span><span class="lineCov">          8 :     END_CRIT_SECTION();</span>
+<span class="lineNum">    1854 </span>            : 
+<span class="lineNum">    1855 </span>            :     /* During index build, count the newly-added data page */
+<span class="lineNum">    1856 </span><span class="lineCov">          8 :     if (buildStats)</span>
+<span class="lineNum">    1857 </span><span class="lineCov">          2 :         buildStats-&gt;nDataPages++;</span>
+<span class="lineNum">    1858 </span>            : 
+<span class="lineNum">    1859 </span><span class="lineCov">          8 :     elog(DEBUG2, &quot;created GIN posting tree with %d items&quot;, nrootitems);</span>
+<span class="lineNum">    1860 </span>            : 
+<span class="lineNum">    1861 </span>            :     /*
+<span class="lineNum">    1862 </span>            :      * Add any remaining TIDs to the newly-created posting tree.
+<span class="lineNum">    1863 </span>            :      */
+<span class="lineNum">    1864 </span><span class="lineCov">          8 :     if (nitems &gt; nrootitems)</span>
+<span class="lineNum">    1865 </span>            :     {
+<span class="lineNum">    1866 </span><span class="lineCov">         12 :         ginInsertItemPointers(index, blkno,</span>
+<span class="lineNum">    1867 </span><span class="lineCov">          6 :                               items + nrootitems,</span>
+<span class="lineNum">    1868 </span>            :                               nitems - nrootitems,
+<span class="lineNum">    1869 </span>            :                               buildStats);
+<span class="lineNum">    1870 </span>            :     }
+<span class="lineNum">    1871 </span>            : 
+<span class="lineNum">    1872 </span><span class="lineCov">          8 :     return blkno;</span>
+<span class="lineNum">    1873 </span>            : }
+<a name="1874"><span class="lineNum">    1874 </span>            : </a>
+<span class="lineNum">    1875 </span>            : static void
+<span class="lineNum">    1876 </span><span class="lineCov">       6696 : ginPrepareDataScan(GinBtree btree, Relation index, BlockNumber rootBlkno)</span>
+<span class="lineNum">    1877 </span>            : {
+<span class="lineNum">    1878 </span><span class="lineCov">       6696 :     memset(btree, 0, sizeof(GinBtreeData));</span>
+<span class="lineNum">    1879 </span>            : 
+<span class="lineNum">    1880 </span><span class="lineCov">       6696 :     btree-&gt;index = index;</span>
+<span class="lineNum">    1881 </span><span class="lineCov">       6696 :     btree-&gt;rootBlkno = rootBlkno;</span>
+<span class="lineNum">    1882 </span>            : 
+<span class="lineNum">    1883 </span><span class="lineCov">       6696 :     btree-&gt;findChildPage = dataLocateItem;</span>
+<span class="lineNum">    1884 </span><span class="lineCov">       6696 :     btree-&gt;getLeftMostChild = dataGetLeftMostPage;</span>
+<span class="lineNum">    1885 </span><span class="lineCov">       6696 :     btree-&gt;isMoveRight = dataIsMoveRight;</span>
+<span class="lineNum">    1886 </span><span class="lineCov">       6696 :     btree-&gt;findItem = NULL;</span>
+<span class="lineNum">    1887 </span><span class="lineCov">       6696 :     btree-&gt;findChildPtr = dataFindChildPtr;</span>
+<span class="lineNum">    1888 </span><span class="lineCov">       6696 :     btree-&gt;beginPlaceToPage = dataBeginPlaceToPage;</span>
+<span class="lineNum">    1889 </span><span class="lineCov">       6696 :     btree-&gt;execPlaceToPage = dataExecPlaceToPage;</span>
+<span class="lineNum">    1890 </span><span class="lineCov">       6696 :     btree-&gt;fillRoot = ginDataFillRoot;</span>
+<span class="lineNum">    1891 </span><span class="lineCov">       6696 :     btree-&gt;prepareDownlink = dataPrepareDownlink;</span>
+<span class="lineNum">    1892 </span>            : 
+<span class="lineNum">    1893 </span><span class="lineCov">       6696 :     btree-&gt;isData = true;</span>
+<span class="lineNum">    1894 </span><span class="lineCov">       6696 :     btree-&gt;fullScan = false;</span>
+<span class="lineNum">    1895 </span><span class="lineCov">       6696 :     btree-&gt;isBuild = false;</span>
+<span class="lineNum">    1896 </span><span class="lineCov">       6696 : }</span>
+<span class="lineNum">    1897 </span>            : 
+<span class="lineNum">    1898 </span>            : /*
+<span class="lineNum">    1899 </span>            :  * Inserts array of item pointers, may execute several tree scan (very rare)
+<a name="1900"><span class="lineNum">    1900 </span>            :  */</a>
+<span class="lineNum">    1901 </span>            : void
+<span class="lineNum">    1902 </span><span class="lineCov">       6692 : ginInsertItemPointers(Relation index, BlockNumber rootBlkno,</span>
+<span class="lineNum">    1903 </span>            :                       ItemPointerData *items, uint32 nitem,
+<span class="lineNum">    1904 </span>            :                       GinStatsData *buildStats)
+<span class="lineNum">    1905 </span>            : {
+<span class="lineNum">    1906 </span>            :     GinBtreeData btree;
+<span class="lineNum">    1907 </span>            :     GinBtreeDataLeafInsertData insertdata;
+<span class="lineNum">    1908 </span>            :     GinBtreeStack *stack;
+<span class="lineNum">    1909 </span>            : 
+<span class="lineNum">    1910 </span><span class="lineCov">       6692 :     ginPrepareDataScan(&amp;btree, index, rootBlkno);</span>
+<span class="lineNum">    1911 </span><span class="lineCov">       6692 :     btree.isBuild = (buildStats != NULL);</span>
+<span class="lineNum">    1912 </span><span class="lineCov">       6692 :     insertdata.items = items;</span>
+<span class="lineNum">    1913 </span><span class="lineCov">       6692 :     insertdata.nitem = nitem;</span>
+<span class="lineNum">    1914 </span><span class="lineCov">       6692 :     insertdata.curitem = 0;</span>
+<span class="lineNum">    1915 </span>            : 
+<span class="lineNum">    1916 </span><span class="lineCov">      20080 :     while (insertdata.curitem &lt; insertdata.nitem)</span>
+<span class="lineNum">    1917 </span>            :     {
+<span class="lineNum">    1918 </span>            :         /* search for the leaf page where the first item should go to */
+<span class="lineNum">    1919 </span><span class="lineCov">       6696 :         btree.itemptr = insertdata.items[insertdata.curitem];</span>
+<span class="lineNum">    1920 </span><span class="lineCov">       6696 :         stack = ginFindLeafPage(&amp;btree, false, true, NULL);</span>
+<span class="lineNum">    1921 </span>            : 
+<span class="lineNum">    1922 </span><span class="lineCov">       6696 :         ginInsertValue(&amp;btree, stack, &amp;insertdata, buildStats);</span>
+<span class="lineNum">    1923 </span>            :     }
+<span class="lineNum">    1924 </span><span class="lineCov">       6692 : }</span>
+<span class="lineNum">    1925 </span>            : 
+<span class="lineNum">    1926 </span>            : /*
+<span class="lineNum">    1927 </span>            :  * Starts a new scan on a posting tree.
+<a name="1928"><span class="lineNum">    1928 </span>            :  */</a>
+<span class="lineNum">    1929 </span>            : GinBtreeStack *
+<span class="lineNum">    1930 </span><span class="lineCov">          4 : ginScanBeginPostingTree(GinBtree btree, Relation index, BlockNumber rootBlkno,</span>
+<span class="lineNum">    1931 </span>            :                         Snapshot snapshot)
+<span class="lineNum">    1932 </span>            : {
+<span class="lineNum">    1933 </span>            :     GinBtreeStack *stack;
+<span class="lineNum">    1934 </span>            : 
+<span class="lineNum">    1935 </span><span class="lineCov">          4 :     ginPrepareDataScan(btree, index, rootBlkno);</span>
+<span class="lineNum">    1936 </span>            : 
+<span class="lineNum">    1937 </span><span class="lineCov">          4 :     btree-&gt;fullScan = true;</span>
+<span class="lineNum">    1938 </span>            : 
+<span class="lineNum">    1939 </span><span class="lineCov">          4 :     stack = ginFindLeafPage(btree, true, false, snapshot);</span>
+<span class="lineNum">    1940 </span>            : 
+<span class="lineNum">    1941 </span><span class="lineCov">          4 :     return stack;</span>
+<span class="lineNum">    1942 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

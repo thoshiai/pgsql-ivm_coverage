@@ -1,0 +1,618 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/bin/pg_rewind/libpq_fetch.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/bin/pg_rewind</a> - libpq_fetch.c<span style="font-size: 80%;"> (source / <a href="libpq_fetch.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">180</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">10</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * libpq_fetch.c
+<span class="lineNum">       4 </span>            :  *    Functions for fetching files from a remote server.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Copyright (c) 2013-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">       9 </span>            :  */
+<span class="lineNum">      10 </span>            : #include &quot;postgres_fe.h&quot;
+<span class="lineNum">      11 </span>            : 
+<span class="lineNum">      12 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      13 </span>            : #include &lt;dirent.h&gt;
+<span class="lineNum">      14 </span>            : #include &lt;fcntl.h&gt;
+<span class="lineNum">      15 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;catalog/pg_type_d.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;datapagemap.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;fe_utils/connect.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;fetch.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;file_ops.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;filemap.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;pg_rewind.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;port/pg_bswap.h&quot;
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : PGconn *conn = NULL;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : /*
+<span class="lineNum">      29 </span>            :  * Files are fetched max CHUNKSIZE bytes at a time.
+<span class="lineNum">      30 </span>            :  *
+<span class="lineNum">      31 </span>            :  * (This only applies to files that are copied in whole, or for truncated
+<span class="lineNum">      32 </span>            :  * files where we copy the tail. Relation files, where we know the individual
+<span class="lineNum">      33 </span>            :  * blocks that need to be fetched, are fetched in BLCKSZ chunks.)
+<span class="lineNum">      34 </span>            :  */
+<span class="lineNum">      35 </span>            : #define CHUNKSIZE 1000000
+<span class="lineNum">      36 </span>            : 
+<span class="lineNum">      37 </span>            : static void receiveFileChunks(const char *sql);
+<span class="lineNum">      38 </span>            : static void execute_pagemap(datapagemap_t *pagemap, const char *path);
+<span class="lineNum">      39 </span>            : static char *run_simple_query(const char *sql);
+<span class="lineNum">      40 </span>            : static void run_simple_command(const char *sql);
+<a name="41"><span class="lineNum">      41 </span>            : </a>
+<span class="lineNum">      42 </span>            : void
+<span class="lineNum">      43 </span><span class="lineNoCov">          0 : libpqConnect(const char *connstr)</span>
+<span class="lineNum">      44 </span>            : {
+<span class="lineNum">      45 </span>            :     char       *str;
+<span class="lineNum">      46 </span>            :     PGresult   *res;
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span><span class="lineNoCov">          0 :     conn = PQconnectdb(connstr);</span>
+<span class="lineNum">      49 </span><span class="lineNoCov">          0 :     if (PQstatus(conn) == CONNECTION_BAD)</span>
+<span class="lineNum">      50 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not connect to server: %s&quot;,</span>
+<span class="lineNum">      51 </span>            :                  PQerrorMessage(conn));
+<span class="lineNum">      52 </span>            : 
+<span class="lineNum">      53 </span><span class="lineNoCov">          0 :     if (showprogress)</span>
+<span class="lineNum">      54 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;connected to server&quot;);</span>
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            :     /* disable all types of timeouts */
+<span class="lineNum">      57 </span><span class="lineNoCov">          0 :     run_simple_command(&quot;SET statement_timeout = 0&quot;);</span>
+<span class="lineNum">      58 </span><span class="lineNoCov">          0 :     run_simple_command(&quot;SET lock_timeout = 0&quot;);</span>
+<span class="lineNum">      59 </span><span class="lineNoCov">          0 :     run_simple_command(&quot;SET idle_in_transaction_session_timeout = 0&quot;);</span>
+<span class="lineNum">      60 </span>            : 
+<span class="lineNum">      61 </span><span class="lineNoCov">          0 :     res = PQexec(conn, ALWAYS_SECURE_SEARCH_PATH_SQL);</span>
+<span class="lineNum">      62 </span><span class="lineNoCov">          0 :     if (PQresultStatus(res) != PGRES_TUPLES_OK)</span>
+<span class="lineNum">      63 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not clear search_path: %s&quot;,</span>
+<span class="lineNum">      64 </span>            :                  PQresultErrorMessage(res));
+<span class="lineNum">      65 </span><span class="lineNoCov">          0 :     PQclear(res);</span>
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            :     /*
+<span class="lineNum">      68 </span>            :      * Check that the server is not in hot standby mode. There is no
+<span class="lineNum">      69 </span>            :      * fundamental reason that couldn't be made to work, but it doesn't
+<span class="lineNum">      70 </span>            :      * currently because we use a temporary table. Better to check for it
+<span class="lineNum">      71 </span>            :      * explicitly than error out, for a better error message.
+<span class="lineNum">      72 </span>            :      */
+<span class="lineNum">      73 </span><span class="lineNoCov">          0 :     str = run_simple_query(&quot;SELECT pg_is_in_recovery()&quot;);</span>
+<span class="lineNum">      74 </span><span class="lineNoCov">          0 :     if (strcmp(str, &quot;f&quot;) != 0)</span>
+<span class="lineNum">      75 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;source server must not be in recovery mode&quot;);</span>
+<span class="lineNum">      76 </span><span class="lineNoCov">          0 :     pg_free(str);</span>
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            :     /*
+<span class="lineNum">      79 </span>            :      * Also check that full_page_writes is enabled.  We can get torn pages if
+<span class="lineNum">      80 </span>            :      * a page is modified while we read it with pg_read_binary_file(), and we
+<span class="lineNum">      81 </span>            :      * rely on full page images to fix them.
+<span class="lineNum">      82 </span>            :      */
+<span class="lineNum">      83 </span><span class="lineNoCov">          0 :     str = run_simple_query(&quot;SHOW full_page_writes&quot;);</span>
+<span class="lineNum">      84 </span><span class="lineNoCov">          0 :     if (strcmp(str, &quot;on&quot;) != 0)</span>
+<span class="lineNum">      85 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;full_page_writes must be enabled in the source server&quot;);</span>
+<span class="lineNum">      86 </span><span class="lineNoCov">          0 :     pg_free(str);</span>
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            :     /*
+<span class="lineNum">      89 </span>            :      * Although we don't do any &quot;real&quot; updates, we do work with a temporary
+<span class="lineNum">      90 </span>            :      * table. We don't care about synchronous commit for that. It doesn't
+<span class="lineNum">      91 </span>            :      * otherwise matter much, but if the server is using synchronous
+<span class="lineNum">      92 </span>            :      * replication, and replication isn't working for some reason, we don't
+<span class="lineNum">      93 </span>            :      * want to get stuck, waiting for it to start working again.
+<span class="lineNum">      94 </span>            :      */
+<span class="lineNum">      95 </span><span class="lineNoCov">          0 :     run_simple_command(&quot;SET synchronous_commit = off&quot;);</span>
+<span class="lineNum">      96 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">      97 </span>            : 
+<span class="lineNum">      98 </span>            : /*
+<span class="lineNum">      99 </span>            :  * Runs a query that returns a single value.
+<span class="lineNum">     100 </span>            :  * The result should be pg_free'd after use.
+<a name="101"><span class="lineNum">     101 </span>            :  */</a>
+<span class="lineNum">     102 </span>            : static char *
+<span class="lineNum">     103 </span><span class="lineNoCov">          0 : run_simple_query(const char *sql)</span>
+<span class="lineNum">     104 </span>            : {
+<span class="lineNum">     105 </span>            :     PGresult   *res;
+<span class="lineNum">     106 </span>            :     char       *result;
+<span class="lineNum">     107 </span>            : 
+<span class="lineNum">     108 </span><span class="lineNoCov">          0 :     res = PQexec(conn, sql);</span>
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span><span class="lineNoCov">          0 :     if (PQresultStatus(res) != PGRES_TUPLES_OK)</span>
+<span class="lineNum">     111 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;error running query (%s) in source server: %s&quot;,</span>
+<span class="lineNum">     112 </span>            :                  sql, PQresultErrorMessage(res));
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span>            :     /* sanity check the result set */
+<span class="lineNum">     115 </span><span class="lineNoCov">          0 :     if (PQnfields(res) != 1 || PQntuples(res) != 1 || PQgetisnull(res, 0, 0))</span>
+<span class="lineNum">     116 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;unexpected result set from query&quot;);</span>
+<span class="lineNum">     117 </span>            : 
+<span class="lineNum">     118 </span><span class="lineNoCov">          0 :     result = pg_strdup(PQgetvalue(res, 0, 0));</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :     PQclear(res);</span>
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span><span class="lineNoCov">          0 :     return result;</span>
+<span class="lineNum">     123 </span>            : }
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            : /*
+<span class="lineNum">     126 </span>            :  * Runs a command.
+<span class="lineNum">     127 </span>            :  * In the event of a failure, exit immediately.
+<a name="128"><span class="lineNum">     128 </span>            :  */</a>
+<span class="lineNum">     129 </span>            : static void
+<span class="lineNum">     130 </span><span class="lineNoCov">          0 : run_simple_command(const char *sql)</span>
+<span class="lineNum">     131 </span>            : {
+<span class="lineNum">     132 </span>            :     PGresult   *res;
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span><span class="lineNoCov">          0 :     res = PQexec(conn, sql);</span>
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span><span class="lineNoCov">          0 :     if (PQresultStatus(res) != PGRES_COMMAND_OK)</span>
+<span class="lineNum">     137 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;error running query (%s) in source server: %s&quot;,</span>
+<span class="lineNum">     138 </span>            :                  sql, PQresultErrorMessage(res));
+<span class="lineNum">     139 </span>            : 
+<span class="lineNum">     140 </span><span class="lineNoCov">          0 :     PQclear(res);</span>
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     142 </span>            : 
+<span class="lineNum">     143 </span>            : /*
+<span class="lineNum">     144 </span>            :  * Calls pg_current_wal_insert_lsn() function
+<a name="145"><span class="lineNum">     145 </span>            :  */</a>
+<span class="lineNum">     146 </span>            : XLogRecPtr
+<span class="lineNum">     147 </span><span class="lineNoCov">          0 : libpqGetCurrentXlogInsertLocation(void)</span>
+<span class="lineNum">     148 </span>            : {
+<span class="lineNum">     149 </span>            :     XLogRecPtr  result;
+<span class="lineNum">     150 </span>            :     uint32      hi;
+<span class="lineNum">     151 </span>            :     uint32      lo;
+<span class="lineNum">     152 </span>            :     char       *val;
+<span class="lineNum">     153 </span>            : 
+<span class="lineNum">     154 </span><span class="lineNoCov">          0 :     val = run_simple_query(&quot;SELECT pg_current_wal_insert_lsn()&quot;);</span>
+<span class="lineNum">     155 </span>            : 
+<span class="lineNum">     156 </span><span class="lineNoCov">          0 :     if (sscanf(val, &quot;%X/%X&quot;, &amp;hi, &amp;lo) != 2)</span>
+<span class="lineNum">     157 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;unrecognized result \&quot;%s\&quot; for current WAL insert location&quot;, val);</span>
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span><span class="lineNoCov">          0 :     result = ((uint64) hi) &lt;&lt; 32 | lo;</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :     pg_free(val);</span>
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span><span class="lineNoCov">          0 :     return result;</span>
+<span class="lineNum">     164 </span>            : }
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span>            : /*
+<span class="lineNum">     167 </span>            :  * Get a list of all files in the data directory.
+<a name="168"><span class="lineNum">     168 </span>            :  */</a>
+<span class="lineNum">     169 </span>            : void
+<span class="lineNum">     170 </span><span class="lineNoCov">          0 : libpqProcessFileList(void)</span>
+<span class="lineNum">     171 </span>            : {
+<span class="lineNum">     172 </span>            :     PGresult   *res;
+<span class="lineNum">     173 </span>            :     const char *sql;
+<span class="lineNum">     174 </span>            :     int         i;
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span>            :     /*
+<span class="lineNum">     177 </span>            :      * Create a recursive directory listing of the whole data directory.
+<span class="lineNum">     178 </span>            :      *
+<span class="lineNum">     179 </span>            :      * The WITH RECURSIVE part does most of the work. The second part gets the
+<span class="lineNum">     180 </span>            :      * targets of the symlinks in pg_tblspc directory.
+<span class="lineNum">     181 </span>            :      *
+<span class="lineNum">     182 </span>            :      * XXX: There is no backend function to get a symbolic link's target in
+<span class="lineNum">     183 </span>            :      * general, so if the admin has put any custom symbolic links in the data
+<span class="lineNum">     184 </span>            :      * directory, they won't be copied correctly.
+<span class="lineNum">     185 </span>            :      */
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 :     sql =</span>
+<span class="lineNum">     187 </span>            :         &quot;WITH RECURSIVE files (path, filename, size, isdir) AS (\n&quot;
+<span class="lineNum">     188 </span>            :         &quot;  SELECT '' AS path, filename, size, isdir FROM\n&quot;
+<span class="lineNum">     189 </span>            :         &quot;  (SELECT pg_ls_dir('.', true, false) AS filename) AS fn,\n&quot;
+<span class="lineNum">     190 </span>            :         &quot;        pg_stat_file(fn.filename, true) AS this\n&quot;
+<span class="lineNum">     191 </span>            :         &quot;  UNION ALL\n&quot;
+<span class="lineNum">     192 </span>            :         &quot;  SELECT parent.path || parent.filename || '/' AS path,\n&quot;
+<span class="lineNum">     193 </span>            :         &quot;         fn, this.size, this.isdir\n&quot;
+<span class="lineNum">     194 </span>            :         &quot;  FROM files AS parent,\n&quot;
+<span class="lineNum">     195 </span>            :         &quot;       pg_ls_dir(parent.path || parent.filename, true, false) AS fn,\n&quot;
+<span class="lineNum">     196 </span>            :         &quot;       pg_stat_file(parent.path || parent.filename || '/' || fn, true) AS this\n&quot;
+<span class="lineNum">     197 </span>            :         &quot;       WHERE parent.isdir = 't'\n&quot;
+<span class="lineNum">     198 </span>            :         &quot;)\n&quot;
+<span class="lineNum">     199 </span>            :         &quot;SELECT path || filename, size, isdir,\n&quot;
+<span class="lineNum">     200 </span>            :         &quot;       pg_tablespace_location(pg_tablespace.oid) AS link_target\n&quot;
+<span class="lineNum">     201 </span>            :         &quot;FROM files\n&quot;
+<span class="lineNum">     202 </span>            :         &quot;LEFT OUTER JOIN pg_tablespace ON files.path = 'pg_tblspc/'\n&quot;
+<span class="lineNum">     203 </span>            :         &quot;                             AND oid::text = files.filename\n&quot;;
+<span class="lineNum">     204 </span><span class="lineNoCov">          0 :     res = PQexec(conn, sql);</span>
+<span class="lineNum">     205 </span>            : 
+<span class="lineNum">     206 </span><span class="lineNoCov">          0 :     if (PQresultStatus(res) != PGRES_TUPLES_OK)</span>
+<span class="lineNum">     207 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not fetch file list: %s&quot;,</span>
+<span class="lineNum">     208 </span>            :                  PQresultErrorMessage(res));
+<span class="lineNum">     209 </span>            : 
+<span class="lineNum">     210 </span>            :     /* sanity check the result set */
+<span class="lineNum">     211 </span><span class="lineNoCov">          0 :     if (PQnfields(res) != 4)</span>
+<span class="lineNum">     212 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;unexpected result set while fetching file list&quot;);</span>
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span>            :     /* Read result to local variables */
+<span class="lineNum">     215 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; PQntuples(res); i++)</span>
+<span class="lineNum">     216 </span>            :     {
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 :         char       *path = PQgetvalue(res, i, 0);</span>
+<span class="lineNum">     218 </span><span class="lineNoCov">          0 :         int64       filesize = atol(PQgetvalue(res, i, 1));</span>
+<span class="lineNum">     219 </span><span class="lineNoCov">          0 :         bool        isdir = (strcmp(PQgetvalue(res, i, 2), &quot;t&quot;) == 0);</span>
+<span class="lineNum">     220 </span><span class="lineNoCov">          0 :         char       *link_target = PQgetvalue(res, i, 3);</span>
+<span class="lineNum">     221 </span>            :         file_type_t type;
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 :         if (PQgetisnull(res, 0, 1))</span>
+<span class="lineNum">     224 </span>            :         {
+<span class="lineNum">     225 </span>            :             /*
+<span class="lineNum">     226 </span>            :              * The file was removed from the server while the query was
+<span class="lineNum">     227 </span>            :              * running. Ignore it.
+<span class="lineNum">     228 </span>            :              */
+<span class="lineNum">     229 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     230 </span>            :         }
+<span class="lineNum">     231 </span>            : 
+<span class="lineNum">     232 </span><span class="lineNoCov">          0 :         if (link_target[0])</span>
+<span class="lineNum">     233 </span><span class="lineNoCov">          0 :             type = FILE_TYPE_SYMLINK;</span>
+<span class="lineNum">     234 </span><span class="lineNoCov">          0 :         else if (isdir)</span>
+<span class="lineNum">     235 </span><span class="lineNoCov">          0 :             type = FILE_TYPE_DIRECTORY;</span>
+<span class="lineNum">     236 </span>            :         else
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 :             type = FILE_TYPE_REGULAR;</span>
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span><span class="lineNoCov">          0 :         process_source_file(path, type, filesize, link_target);</span>
+<span class="lineNum">     240 </span>            :     }
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :     PQclear(res);</span>
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            : /*----
+<span class="lineNum">     245 </span>            :  * Runs a query, which returns pieces of files from the remote source data
+<span class="lineNum">     246 </span>            :  * directory, and overwrites the corresponding parts of target files with
+<span class="lineNum">     247 </span>            :  * the received parts. The result set is expected to be of format:
+<span class="lineNum">     248 </span>            :  *
+<span class="lineNum">     249 </span>            :  * path     text    -- path in the data directory, e.g &quot;base/1/123&quot;
+<span class="lineNum">     250 </span>            :  * begin    int8    -- offset within the file
+<span class="lineNum">     251 </span>            :  * chunk    bytea   -- file content
+<span class="lineNum">     252 </span>            :  *----
+<a name="253"><span class="lineNum">     253 </span>            :  */</a>
+<span class="lineNum">     254 </span>            : static void
+<span class="lineNum">     255 </span><span class="lineNoCov">          0 : receiveFileChunks(const char *sql)</span>
+<span class="lineNum">     256 </span>            : {
+<span class="lineNum">     257 </span>            :     PGresult   *res;
+<span class="lineNum">     258 </span>            : 
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :     if (PQsendQueryParams(conn, sql, 0, NULL, NULL, NULL, NULL, 1) != 1)</span>
+<span class="lineNum">     260 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not send query: %s&quot;, PQerrorMessage(conn));</span>
+<span class="lineNum">     261 </span>            : 
+<span class="lineNum">     262 </span><span class="lineNoCov">          0 :     pg_log_debug(&quot;getting file chunks&quot;);</span>
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span><span class="lineNoCov">          0 :     if (PQsetSingleRowMode(conn) != 1)</span>
+<span class="lineNum">     265 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not set libpq connection to single row mode&quot;);</span>
+<span class="lineNum">     266 </span>            : 
+<span class="lineNum">     267 </span><span class="lineNoCov">          0 :     while ((res = PQgetResult(conn)) != NULL)</span>
+<span class="lineNum">     268 </span>            :     {
+<span class="lineNum">     269 </span>            :         char       *filename;
+<span class="lineNum">     270 </span>            :         int         filenamelen;
+<span class="lineNum">     271 </span>            :         int64       chunkoff;
+<span class="lineNum">     272 </span>            :         int         chunksize;
+<span class="lineNum">     273 </span>            :         char       *chunk;
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :         switch (PQresultStatus(res))</span>
+<span class="lineNum">     276 </span>            :         {
+<span class="lineNum">     277 </span>            :             case PGRES_SINGLE_TUPLE:
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     279 </span>            : 
+<span class="lineNum">     280 </span>            :             case PGRES_TUPLES_OK:
+<span class="lineNum">     281 </span><span class="lineNoCov">          0 :                 PQclear(res);</span>
+<span class="lineNum">     282 </span><span class="lineNoCov">          0 :                 continue;       /* final zero-row result */</span>
+<span class="lineNum">     283 </span>            : 
+<span class="lineNum">     284 </span>            :             default:
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :                 pg_fatal(&quot;unexpected result while fetching remote files: %s&quot;,</span>
+<span class="lineNum">     286 </span>            :                          PQresultErrorMessage(res));
+<span class="lineNum">     287 </span>            :         }
+<span class="lineNum">     288 </span>            : 
+<span class="lineNum">     289 </span>            :         /* sanity check the result set */
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :         if (PQnfields(res) != 3 || PQntuples(res) != 1)</span>
+<span class="lineNum">     291 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;unexpected result set size while fetching remote files&quot;);</span>
+<span class="lineNum">     292 </span>            : 
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :         if (PQftype(res, 0) != TEXTOID ||</span>
+<span class="lineNum">     294 </span><span class="lineNoCov">          0 :             PQftype(res, 1) != INT8OID ||</span>
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :             PQftype(res, 2) != BYTEAOID)</span>
+<span class="lineNum">     296 </span>            :         {
+<span class="lineNum">     297 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;unexpected data types in result set while fetching remote files: %u %u %u&quot;,</span>
+<span class="lineNum">     298 </span>            :                      PQftype(res, 0), PQftype(res, 1), PQftype(res, 2));
+<span class="lineNum">     299 </span>            :         }
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span><span class="lineNoCov">          0 :         if (PQfformat(res, 0) != 1 &amp;&amp;</span>
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :             PQfformat(res, 1) != 1 &amp;&amp;</span>
+<span class="lineNum">     303 </span><span class="lineNoCov">          0 :             PQfformat(res, 2) != 1)</span>
+<span class="lineNum">     304 </span>            :         {
+<span class="lineNum">     305 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;unexpected result format while fetching remote files&quot;);</span>
+<span class="lineNum">     306 </span>            :         }
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :         if (PQgetisnull(res, 0, 0) ||</span>
+<span class="lineNum">     309 </span><span class="lineNoCov">          0 :             PQgetisnull(res, 0, 1))</span>
+<span class="lineNum">     310 </span>            :         {
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;unexpected null values in result while fetching remote files&quot;);</span>
+<span class="lineNum">     312 </span>            :         }
+<span class="lineNum">     313 </span>            : 
+<span class="lineNum">     314 </span><span class="lineNoCov">          0 :         if (PQgetlength(res, 0, 1) != sizeof(int64))</span>
+<span class="lineNum">     315 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;unexpected result length while fetching remote files&quot;);</span>
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            :         /* Read result set to local variables */
+<span class="lineNum">     318 </span><span class="lineNoCov">          0 :         memcpy(&amp;chunkoff, PQgetvalue(res, 0, 1), sizeof(int64));</span>
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :         chunkoff = pg_ntoh64(chunkoff);</span>
+<span class="lineNum">     320 </span><span class="lineNoCov">          0 :         chunksize = PQgetlength(res, 0, 2);</span>
+<span class="lineNum">     321 </span>            : 
+<span class="lineNum">     322 </span><span class="lineNoCov">          0 :         filenamelen = PQgetlength(res, 0, 0);</span>
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :         filename = pg_malloc(filenamelen + 1);</span>
+<span class="lineNum">     324 </span><span class="lineNoCov">          0 :         memcpy(filename, PQgetvalue(res, 0, 0), filenamelen);</span>
+<span class="lineNum">     325 </span><span class="lineNoCov">          0 :         filename[filenamelen] = '\0';</span>
+<span class="lineNum">     326 </span>            : 
+<span class="lineNum">     327 </span><span class="lineNoCov">          0 :         chunk = PQgetvalue(res, 0, 2);</span>
+<span class="lineNum">     328 </span>            : 
+<span class="lineNum">     329 </span>            :         /*
+<span class="lineNum">     330 </span>            :          * If a file has been deleted on the source, remove it on the target
+<span class="lineNum">     331 </span>            :          * as well.  Note that multiple unlink() calls may happen on the same
+<span class="lineNum">     332 </span>            :          * file if multiple data chunks are associated with it, hence ignore
+<span class="lineNum">     333 </span>            :          * unconditionally anything missing.  If this file is not a relation
+<span class="lineNum">     334 </span>            :          * data file, then it has been already truncated when creating the
+<span class="lineNum">     335 </span>            :          * file chunk list at the previous execution of the filemap.
+<span class="lineNum">     336 </span>            :          */
+<span class="lineNum">     337 </span><span class="lineNoCov">          0 :         if (PQgetisnull(res, 0, 2))</span>
+<span class="lineNum">     338 </span>            :         {
+<span class="lineNum">     339 </span><span class="lineNoCov">          0 :             pg_log_debug(&quot;received null value for chunk for file \&quot;%s\&quot;, file has been deleted&quot;,</span>
+<span class="lineNum">     340 </span>            :                          filename);
+<span class="lineNum">     341 </span><span class="lineNoCov">          0 :             remove_target_file(filename, true);</span>
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :             pg_free(filename);</span>
+<span class="lineNum">     343 </span><span class="lineNoCov">          0 :             PQclear(res);</span>
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     345 </span>            :         }
+<span class="lineNum">     346 </span>            : 
+<span class="lineNum">     347 </span><span class="lineNoCov">          0 :         pg_log_debug(&quot;received chunk for file \&quot;%s\&quot;, offset %lld, size %d&quot;,</span>
+<span class="lineNum">     348 </span>            :                      filename, (long long int) chunkoff, chunksize);
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span><span class="lineNoCov">          0 :         open_target_file(filename, false);</span>
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span><span class="lineNoCov">          0 :         write_target_range(chunk, chunkoff, chunksize);</span>
+<span class="lineNum">     353 </span>            : 
+<span class="lineNum">     354 </span><span class="lineNoCov">          0 :         pg_free(filename);</span>
+<span class="lineNum">     355 </span>            : 
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :         PQclear(res);</span>
+<span class="lineNum">     357 </span>            :     }
+<span class="lineNum">     358 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span>            : /*
+<span class="lineNum">     361 </span>            :  * Receive a single file as a malloc'd buffer.
+<a name="362"><span class="lineNum">     362 </span>            :  */</a>
+<span class="lineNum">     363 </span>            : char *
+<span class="lineNum">     364 </span><span class="lineNoCov">          0 : libpqGetFile(const char *filename, size_t *filesize)</span>
+<span class="lineNum">     365 </span>            : {
+<span class="lineNum">     366 </span>            :     PGresult   *res;
+<span class="lineNum">     367 </span>            :     char       *result;
+<span class="lineNum">     368 </span>            :     int         len;
+<span class="lineNum">     369 </span>            :     const char *paramValues[1];
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineNoCov">          0 :     paramValues[0] = filename;</span>
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :     res = PQexecParams(conn, &quot;SELECT pg_read_binary_file($1)&quot;,</span>
+<span class="lineNum">     373 </span>            :                        1, NULL, paramValues, NULL, NULL, 1);
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :     if (PQresultStatus(res) != PGRES_TUPLES_OK)</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not fetch remote file \&quot;%s\&quot;: %s&quot;,</span>
+<span class="lineNum">     377 </span>            :                  filename, PQresultErrorMessage(res));
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span>            :     /* sanity check the result set */
+<span class="lineNum">     380 </span><span class="lineNoCov">          0 :     if (PQntuples(res) != 1 || PQgetisnull(res, 0, 0))</span>
+<span class="lineNum">     381 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;unexpected result set while fetching remote file \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">     382 </span>            :                  filename);
+<span class="lineNum">     383 </span>            : 
+<span class="lineNum">     384 </span>            :     /* Read result to local variables */
+<span class="lineNum">     385 </span><span class="lineNoCov">          0 :     len = PQgetlength(res, 0, 0);</span>
+<span class="lineNum">     386 </span><span class="lineNoCov">          0 :     result = pg_malloc(len + 1);</span>
+<span class="lineNum">     387 </span><span class="lineNoCov">          0 :     memcpy(result, PQgetvalue(res, 0, 0), len);</span>
+<span class="lineNum">     388 </span><span class="lineNoCov">          0 :     result[len] = '\0';</span>
+<span class="lineNum">     389 </span>            : 
+<span class="lineNum">     390 </span><span class="lineNoCov">          0 :     PQclear(res);</span>
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span><span class="lineNoCov">          0 :     pg_log_debug(&quot;fetched file \&quot;%s\&quot;, length %d&quot;, filename, len);</span>
+<span class="lineNum">     393 </span>            : 
+<span class="lineNum">     394 </span><span class="lineNoCov">          0 :     if (filesize)</span>
+<span class="lineNum">     395 </span><span class="lineNoCov">          0 :         *filesize = len;</span>
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :     return result;</span>
+<span class="lineNum">     397 </span>            : }
+<span class="lineNum">     398 </span>            : 
+<span class="lineNum">     399 </span>            : /*
+<span class="lineNum">     400 </span>            :  * Write a file range to a temporary table in the server.
+<span class="lineNum">     401 </span>            :  *
+<span class="lineNum">     402 </span>            :  * The range is sent to the server as a COPY formatted line, to be inserted
+<span class="lineNum">     403 </span>            :  * into the 'fetchchunks' temporary table. It is used in receiveFileChunks()
+<span class="lineNum">     404 </span>            :  * function to actually fetch the data.
+<a name="405"><span class="lineNum">     405 </span>            :  */</a>
+<span class="lineNum">     406 </span>            : static void
+<span class="lineNum">     407 </span><span class="lineNoCov">          0 : fetch_file_range(const char *path, uint64 begin, uint64 end)</span>
+<span class="lineNum">     408 </span>            : {
+<span class="lineNum">     409 </span>            :     char        linebuf[MAXPGPATH + 23];
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span>            :     /* Split the range into CHUNKSIZE chunks */
+<span class="lineNum">     412 </span><span class="lineNoCov">          0 :     while (end - begin &gt; 0)</span>
+<span class="lineNum">     413 </span>            :     {
+<span class="lineNum">     414 </span>            :         unsigned int len;
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span>            :         /* Fine as long as CHUNKSIZE is not bigger than UINT32_MAX */
+<span class="lineNum">     417 </span><span class="lineNoCov">          0 :         if (end - begin &gt; CHUNKSIZE)</span>
+<span class="lineNum">     418 </span><span class="lineNoCov">          0 :             len = CHUNKSIZE;</span>
+<span class="lineNum">     419 </span>            :         else
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :             len = (unsigned int) (end - begin);</span>
+<span class="lineNum">     421 </span>            : 
+<span class="lineNum">     422 </span><span class="lineNoCov">          0 :         snprintf(linebuf, sizeof(linebuf), &quot;%s\t&quot; UINT64_FORMAT &quot;\t%u\n&quot;, path, begin, len);</span>
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineNoCov">          0 :         if (PQputCopyData(conn, linebuf, strlen(linebuf)) != 1)</span>
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;could not send COPY data: %s&quot;,</span>
+<span class="lineNum">     426 </span>            :                      PQerrorMessage(conn));
+<span class="lineNum">     427 </span>            : 
+<span class="lineNum">     428 </span><span class="lineNoCov">          0 :         begin += len;</span>
+<span class="lineNum">     429 </span>            :     }
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     431 </span>            : 
+<span class="lineNum">     432 </span>            : /*
+<span class="lineNum">     433 </span>            :  * Fetch all changed blocks from remote source data directory.
+<a name="434"><span class="lineNum">     434 </span>            :  */</a>
+<span class="lineNum">     435 </span>            : void
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 : libpq_executeFileMap(filemap_t *map)</span>
+<span class="lineNum">     437 </span>            : {
+<span class="lineNum">     438 </span>            :     file_entry_t *entry;
+<span class="lineNum">     439 </span>            :     const char *sql;
+<span class="lineNum">     440 </span>            :     PGresult   *res;
+<span class="lineNum">     441 </span>            :     int         i;
+<span class="lineNum">     442 </span>            : 
+<span class="lineNum">     443 </span>            :     /*
+<span class="lineNum">     444 </span>            :      * First create a temporary table, and load it with the blocks that we
+<span class="lineNum">     445 </span>            :      * need to fetch.
+<span class="lineNum">     446 </span>            :      */
+<span class="lineNum">     447 </span><span class="lineNoCov">          0 :     sql = &quot;CREATE TEMPORARY TABLE fetchchunks(path text, begin int8, len int4);&quot;;</span>
+<span class="lineNum">     448 </span><span class="lineNoCov">          0 :     run_simple_command(sql);</span>
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span><span class="lineNoCov">          0 :     sql = &quot;COPY fetchchunks FROM STDIN&quot;;</span>
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :     res = PQexec(conn, sql);</span>
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span><span class="lineNoCov">          0 :     if (PQresultStatus(res) != PGRES_COPY_IN)</span>
+<span class="lineNum">     454 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not send file list: %s&quot;,</span>
+<span class="lineNum">     455 </span>            :                  PQresultErrorMessage(res));
+<span class="lineNum">     456 </span><span class="lineNoCov">          0 :     PQclear(res);</span>
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; map-&gt;narray; i++)</span>
+<span class="lineNum">     459 </span>            :     {
+<span class="lineNum">     460 </span><span class="lineNoCov">          0 :         entry = map-&gt;array[i];</span>
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span>            :         /* If this is a relation file, copy the modified blocks */
+<span class="lineNum">     463 </span><span class="lineNoCov">          0 :         execute_pagemap(&amp;entry-&gt;pagemap, entry-&gt;path);</span>
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span><span class="lineNoCov">          0 :         switch (entry-&gt;action)</span>
+<span class="lineNum">     466 </span>            :         {
+<span class="lineNum">     467 </span>            :             case FILE_ACTION_NONE:
+<span class="lineNum">     468 </span>            :                 /* nothing else to do */
+<span class="lineNum">     469 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span>            :             case FILE_ACTION_COPY:
+<span class="lineNum">     472 </span>            :                 /* Truncate the old file out of the way, if any */
+<span class="lineNum">     473 </span><span class="lineNoCov">          0 :                 open_target_file(entry-&gt;path, true);</span>
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :                 fetch_file_range(entry-&gt;path, 0, entry-&gt;newsize);</span>
+<span class="lineNum">     475 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span>            :             case FILE_ACTION_TRUNCATE:
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :                 truncate_target_file(entry-&gt;path, entry-&gt;newsize);</span>
+<span class="lineNum">     479 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     480 </span>            : 
+<span class="lineNum">     481 </span>            :             case FILE_ACTION_COPY_TAIL:
+<span class="lineNum">     482 </span><span class="lineNoCov">          0 :                 fetch_file_range(entry-&gt;path, entry-&gt;oldsize, entry-&gt;newsize);</span>
+<span class="lineNum">     483 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span>            :             case FILE_ACTION_REMOVE:
+<span class="lineNum">     486 </span><span class="lineNoCov">          0 :                 remove_target(entry);</span>
+<span class="lineNum">     487 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     488 </span>            : 
+<span class="lineNum">     489 </span>            :             case FILE_ACTION_CREATE:
+<span class="lineNum">     490 </span><span class="lineNoCov">          0 :                 create_target(entry);</span>
+<span class="lineNum">     491 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     492 </span>            :         }
+<span class="lineNum">     493 </span>            :     }
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span><span class="lineNoCov">          0 :     if (PQputCopyEnd(conn, NULL) != 1)</span>
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :         pg_fatal(&quot;could not send end-of-COPY: %s&quot;,</span>
+<span class="lineNum">     497 </span>            :                  PQerrorMessage(conn));
+<span class="lineNum">     498 </span>            : 
+<span class="lineNum">     499 </span><span class="lineNoCov">          0 :     while ((res = PQgetResult(conn)) != NULL)</span>
+<span class="lineNum">     500 </span>            :     {
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :         if (PQresultStatus(res) != PGRES_COMMAND_OK)</span>
+<span class="lineNum">     502 </span><span class="lineNoCov">          0 :             pg_fatal(&quot;unexpected result while sending file list: %s&quot;,</span>
+<span class="lineNum">     503 </span>            :                      PQresultErrorMessage(res));
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :         PQclear(res);</span>
+<span class="lineNum">     505 </span>            :     }
+<span class="lineNum">     506 </span>            : 
+<span class="lineNum">     507 </span>            :     /*
+<span class="lineNum">     508 </span>            :      * We've now copied the list of file ranges that we need to fetch to the
+<span class="lineNum">     509 </span>            :      * temporary table. Now, actually fetch all of those ranges.
+<span class="lineNum">     510 </span>            :      */
+<span class="lineNum">     511 </span><span class="lineNoCov">          0 :     sql =</span>
+<span class="lineNum">     512 </span>            :         &quot;SELECT path, begin,\n&quot;
+<span class="lineNum">     513 </span>            :         &quot;  pg_read_binary_file(path, begin, len, true) AS chunk\n&quot;
+<span class="lineNum">     514 </span>            :         &quot;FROM fetchchunks\n&quot;;
+<span class="lineNum">     515 </span>            : 
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :     receiveFileChunks(sql);</span>
+<span class="lineNum">     517 </span><span class="lineNoCov">          0 : }</span>
+<a name="518"><span class="lineNum">     518 </span>            : </a>
+<span class="lineNum">     519 </span>            : static void
+<span class="lineNum">     520 </span><span class="lineNoCov">          0 : execute_pagemap(datapagemap_t *pagemap, const char *path)</span>
+<span class="lineNum">     521 </span>            : {
+<span class="lineNum">     522 </span>            :     datapagemap_iterator_t *iter;
+<span class="lineNum">     523 </span>            :     BlockNumber blkno;
+<span class="lineNum">     524 </span>            :     off_t       offset;
+<span class="lineNum">     525 </span>            : 
+<span class="lineNum">     526 </span><span class="lineNoCov">          0 :     iter = datapagemap_iterate(pagemap);</span>
+<span class="lineNum">     527 </span><span class="lineNoCov">          0 :     while (datapagemap_next(iter, &amp;blkno))</span>
+<span class="lineNum">     528 </span>            :     {
+<span class="lineNum">     529 </span><span class="lineNoCov">          0 :         offset = blkno * BLCKSZ;</span>
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span><span class="lineNoCov">          0 :         fetch_file_range(path, offset, offset + BLCKSZ);</span>
+<span class="lineNum">     532 </span>            :     }
+<span class="lineNum">     533 </span><span class="lineNoCov">          0 :     pg_free(iter);</span>
+<span class="lineNum">     534 </span><span class="lineNoCov">          0 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

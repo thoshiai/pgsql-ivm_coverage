@@ -1,0 +1,330 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/file/sharedfileset.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/file</a> - sharedfileset.c<span style="font-size: 80%;"> (source / <a href="sharedfileset.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">68</td>
+            <td class="headerCovTableEntry">70</td>
+            <td class="headerCovTableEntryHi">97.1 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">10</td>
+            <td class="headerCovTableEntry">10</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * sharedfileset.c
+<span class="lineNum">       4 </span>            :  *    Shared temporary file management.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  * IDENTIFICATION
+<span class="lineNum">      10 </span>            :  *    src/backend/storage/file/sharedfileset.c
+<span class="lineNum">      11 </span>            :  *
+<span class="lineNum">      12 </span>            :  * SharedFileSets provide a temporary namespace (think directory) so that
+<span class="lineNum">      13 </span>            :  * files can be discovered by name, and a shared ownership semantics so that
+<span class="lineNum">      14 </span>            :  * shared files survive until the last user detaches.
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      17 </span>            :  */
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      20 </span>            : 
+<span class="lineNum">      21 </span>            : #include &lt;limits.h&gt;
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : #include &quot;catalog/pg_tablespace.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;commands/tablespace.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;storage/dsm.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;storage/sharedfileset.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/hashutils.h&quot;
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : static void SharedFileSetOnDetach(dsm_segment *segment, Datum datum);
+<span class="lineNum">      32 </span>            : static void SharedFileSetPath(char *path, SharedFileSet *fileset, Oid tablespace);
+<span class="lineNum">      33 </span>            : static void SharedFilePath(char *path, SharedFileSet *fileset, const char *name);
+<span class="lineNum">      34 </span>            : static Oid  ChooseTablespace(const SharedFileSet *fileset, const char *name);
+<span class="lineNum">      35 </span>            : 
+<span class="lineNum">      36 </span>            : /*
+<span class="lineNum">      37 </span>            :  * Initialize a space for temporary files that can be opened for read-only
+<span class="lineNum">      38 </span>            :  * access by other backends.  Other backends must attach to it before
+<span class="lineNum">      39 </span>            :  * accessing it.  Associate this SharedFileSet with 'seg'.  Any contained
+<span class="lineNum">      40 </span>            :  * files will be deleted when the last backend detaches.
+<span class="lineNum">      41 </span>            :  *
+<span class="lineNum">      42 </span>            :  * Files will be distributed over the tablespaces configured in
+<span class="lineNum">      43 </span>            :  * temp_tablespaces.
+<span class="lineNum">      44 </span>            :  *
+<span class="lineNum">      45 </span>            :  * Under the covers the set is one or more directories which will eventually
+<span class="lineNum">      46 </span>            :  * be deleted when there are no backends attached.
+<a name="47"><span class="lineNum">      47 </span>            :  */</a>
+<span class="lineNum">      48 </span>            : void
+<span class="lineNum">      49 </span><span class="lineCov">         88 : SharedFileSetInit(SharedFileSet *fileset, dsm_segment *seg)</span>
+<span class="lineNum">      50 </span>            : {
+<span class="lineNum">      51 </span>            :     static uint32 counter = 0;
+<span class="lineNum">      52 </span>            : 
+<span class="lineNum">      53 </span><span class="lineCov">         88 :     SpinLockInit(&amp;fileset-&gt;mutex);</span>
+<span class="lineNum">      54 </span><span class="lineCov">         88 :     fileset-&gt;refcnt = 1;</span>
+<span class="lineNum">      55 </span><span class="lineCov">         88 :     fileset-&gt;creator_pid = MyProcPid;</span>
+<span class="lineNum">      56 </span><span class="lineCov">         88 :     fileset-&gt;number = counter;</span>
+<span class="lineNum">      57 </span><span class="lineCov">         88 :     counter = (counter + 1) % INT_MAX;</span>
+<span class="lineNum">      58 </span>            : 
+<span class="lineNum">      59 </span>            :     /* Capture the tablespace OIDs so that all backends agree on them. */
+<span class="lineNum">      60 </span><span class="lineCov">         88 :     PrepareTempTablespaces();</span>
+<span class="lineNum">      61 </span><span class="lineCov">         88 :     fileset-&gt;ntablespaces =</span>
+<span class="lineNum">      62 </span><span class="lineCov">         88 :         GetTempTablespaces(&amp;fileset-&gt;tablespaces[0],</span>
+<span class="lineNum">      63 </span>            :                            lengthof(fileset-&gt;tablespaces));
+<span class="lineNum">      64 </span><span class="lineCov">         88 :     if (fileset-&gt;ntablespaces == 0)</span>
+<span class="lineNum">      65 </span>            :     {
+<span class="lineNum">      66 </span><span class="lineCov">         88 :         fileset-&gt;tablespaces[0] = DEFAULTTABLESPACE_OID;</span>
+<span class="lineNum">      67 </span><span class="lineCov">         88 :         fileset-&gt;ntablespaces = 1;</span>
+<span class="lineNum">      68 </span>            :     }
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span>            :     /* Register our cleanup callback. */
+<span class="lineNum">      71 </span><span class="lineCov">         88 :     on_dsm_detach(seg, SharedFileSetOnDetach, PointerGetDatum(fileset));</span>
+<span class="lineNum">      72 </span><span class="lineCov">         88 : }</span>
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span>            : /*
+<span class="lineNum">      75 </span>            :  * Attach to a set of directories that was created with SharedFileSetInit.
+<a name="76"><span class="lineNum">      76 </span>            :  */</a>
+<span class="lineNum">      77 </span>            : void
+<span class="lineNum">      78 </span><span class="lineCov">        146 : SharedFileSetAttach(SharedFileSet *fileset, dsm_segment *seg)</span>
+<span class="lineNum">      79 </span>            : {
+<span class="lineNum">      80 </span>            :     bool        success;
+<span class="lineNum">      81 </span>            : 
+<span class="lineNum">      82 </span><span class="lineCov">        146 :     SpinLockAcquire(&amp;fileset-&gt;mutex);</span>
+<span class="lineNum">      83 </span><span class="lineCov">        146 :     if (fileset-&gt;refcnt == 0)</span>
+<span class="lineNum">      84 </span><span class="lineNoCov">          0 :         success = false;</span>
+<span class="lineNum">      85 </span>            :     else
+<span class="lineNum">      86 </span>            :     {
+<span class="lineNum">      87 </span><span class="lineCov">        146 :         ++fileset-&gt;refcnt;</span>
+<span class="lineNum">      88 </span><span class="lineCov">        146 :         success = true;</span>
+<span class="lineNum">      89 </span>            :     }
+<span class="lineNum">      90 </span><span class="lineCov">        146 :     SpinLockRelease(&amp;fileset-&gt;mutex);</span>
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span><span class="lineCov">        146 :     if (!success)</span>
+<span class="lineNum">      93 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">      94 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">      95 </span>            :                  errmsg(&quot;could not attach to a SharedFileSet that is already destroyed&quot;)));
+<span class="lineNum">      96 </span>            : 
+<span class="lineNum">      97 </span>            :     /* Register our cleanup callback. */
+<span class="lineNum">      98 </span><span class="lineCov">        146 :     on_dsm_detach(seg, SharedFileSetOnDetach, PointerGetDatum(fileset));</span>
+<span class="lineNum">      99 </span><span class="lineCov">        146 : }</span>
+<span class="lineNum">     100 </span>            : 
+<span class="lineNum">     101 </span>            : /*
+<span class="lineNum">     102 </span>            :  * Create a new file in the given set.
+<a name="103"><span class="lineNum">     103 </span>            :  */</a>
+<span class="lineNum">     104 </span>            : File
+<span class="lineNum">     105 </span><span class="lineCov">        772 : SharedFileSetCreate(SharedFileSet *fileset, const char *name)</span>
+<span class="lineNum">     106 </span>            : {
+<span class="lineNum">     107 </span>            :     char        path[MAXPGPATH];
+<span class="lineNum">     108 </span>            :     File        file;
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span><span class="lineCov">        772 :     SharedFilePath(path, fileset, name);</span>
+<span class="lineNum">     111 </span><span class="lineCov">        772 :     file = PathNameCreateTemporaryFile(path, false);</span>
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span>            :     /* If we failed, see if we need to create the directory on demand. */
+<span class="lineNum">     114 </span><span class="lineCov">        772 :     if (file &lt;= 0)</span>
+<span class="lineNum">     115 </span>            :     {
+<span class="lineNum">     116 </span>            :         char        tempdirpath[MAXPGPATH];
+<span class="lineNum">     117 </span>            :         char        filesetpath[MAXPGPATH];
+<span class="lineNum">     118 </span><span class="lineCov">         84 :         Oid         tablespace = ChooseTablespace(fileset, name);</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span><span class="lineCov">         84 :         TempTablespacePath(tempdirpath, tablespace);</span>
+<span class="lineNum">     121 </span><span class="lineCov">         84 :         SharedFileSetPath(filesetpath, fileset, tablespace);</span>
+<span class="lineNum">     122 </span><span class="lineCov">         84 :         PathNameCreateTemporaryDir(tempdirpath, filesetpath);</span>
+<span class="lineNum">     123 </span><span class="lineCov">         84 :         file = PathNameCreateTemporaryFile(path, true);</span>
+<span class="lineNum">     124 </span>            :     }
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span><span class="lineCov">        772 :     return file;</span>
+<span class="lineNum">     127 </span>            : }
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span>            : /*
+<span class="lineNum">     130 </span>            :  * Open a file that was created with SharedFileSetCreate(), possibly in
+<span class="lineNum">     131 </span>            :  * another backend.
+<a name="132"><span class="lineNum">     132 </span>            :  */</a>
+<span class="lineNum">     133 </span>            : File
+<span class="lineNum">     134 </span><span class="lineCov">       1536 : SharedFileSetOpen(SharedFileSet *fileset, const char *name)</span>
+<span class="lineNum">     135 </span>            : {
+<span class="lineNum">     136 </span>            :     char        path[MAXPGPATH];
+<span class="lineNum">     137 </span>            :     File        file;
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span><span class="lineCov">       1536 :     SharedFilePath(path, fileset, name);</span>
+<span class="lineNum">     140 </span><span class="lineCov">       1536 :     file = PathNameOpenTemporaryFile(path);</span>
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span><span class="lineCov">       1536 :     return file;</span>
+<span class="lineNum">     143 </span>            : }
+<span class="lineNum">     144 </span>            : 
+<span class="lineNum">     145 </span>            : /*
+<span class="lineNum">     146 </span>            :  * Delete a file that was created with SharedFileSetCreate().
+<span class="lineNum">     147 </span>            :  * Return true if the file existed, false if didn't.
+<a name="148"><span class="lineNum">     148 </span>            :  */</a>
+<span class="lineNum">     149 </span>            : bool
+<span class="lineNum">     150 </span><span class="lineCov">        772 : SharedFileSetDelete(SharedFileSet *fileset, const char *name,</span>
+<span class="lineNum">     151 </span>            :                     bool error_on_failure)
+<span class="lineNum">     152 </span>            : {
+<span class="lineNum">     153 </span>            :     char        path[MAXPGPATH];
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span><span class="lineCov">        772 :     SharedFilePath(path, fileset, name);</span>
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span><span class="lineCov">        772 :     return PathNameDeleteTemporaryFile(path, error_on_failure);</span>
+<span class="lineNum">     158 </span>            : }
+<span class="lineNum">     159 </span>            : 
+<span class="lineNum">     160 </span>            : /*
+<span class="lineNum">     161 </span>            :  * Delete all files in the set.
+<a name="162"><span class="lineNum">     162 </span>            :  */</a>
+<span class="lineNum">     163 </span>            : void
+<span class="lineNum">     164 </span><span class="lineCov">        104 : SharedFileSetDeleteAll(SharedFileSet *fileset)</span>
+<span class="lineNum">     165 </span>            : {
+<span class="lineNum">     166 </span>            :     char        dirpath[MAXPGPATH];
+<span class="lineNum">     167 </span>            :     int         i;
+<span class="lineNum">     168 </span>            : 
+<span class="lineNum">     169 </span>            :     /*
+<span class="lineNum">     170 </span>            :      * Delete the directory we created in each tablespace.  Doesn't fail
+<span class="lineNum">     171 </span>            :      * because we use this in error cleanup paths, but can generate LOG
+<span class="lineNum">     172 </span>            :      * message on IO error.
+<span class="lineNum">     173 </span>            :      */
+<span class="lineNum">     174 </span><span class="lineCov">        208 :     for (i = 0; i &lt; fileset-&gt;ntablespaces; ++i)</span>
+<span class="lineNum">     175 </span>            :     {
+<span class="lineNum">     176 </span><span class="lineCov">        104 :         SharedFileSetPath(dirpath, fileset, fileset-&gt;tablespaces[i]);</span>
+<span class="lineNum">     177 </span><span class="lineCov">        104 :         PathNameDeleteTemporaryDir(dirpath);</span>
+<span class="lineNum">     178 </span>            :     }
+<span class="lineNum">     179 </span><span class="lineCov">        104 : }</span>
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span>            : /*
+<span class="lineNum">     182 </span>            :  * Callback function that will be invoked when this backend detaches from a
+<span class="lineNum">     183 </span>            :  * DSM segment holding a SharedFileSet that it has created or attached to.  If
+<span class="lineNum">     184 </span>            :  * we are the last to detach, then try to remove the directories and
+<span class="lineNum">     185 </span>            :  * everything in them.  We can't raise an error on failures, because this runs
+<span class="lineNum">     186 </span>            :  * in error cleanup paths.
+<a name="187"><span class="lineNum">     187 </span>            :  */</a>
+<span class="lineNum">     188 </span>            : static void
+<span class="lineNum">     189 </span><span class="lineCov">        234 : SharedFileSetOnDetach(dsm_segment *segment, Datum datum)</span>
+<span class="lineNum">     190 </span>            : {
+<span class="lineNum">     191 </span><span class="lineCov">        234 :     bool        unlink_all = false;</span>
+<span class="lineNum">     192 </span><span class="lineCov">        234 :     SharedFileSet *fileset = (SharedFileSet *) DatumGetPointer(datum);</span>
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span><span class="lineCov">        234 :     SpinLockAcquire(&amp;fileset-&gt;mutex);</span>
+<span class="lineNum">     195 </span><span class="lineCov">        234 :     Assert(fileset-&gt;refcnt &gt; 0);</span>
+<span class="lineNum">     196 </span><span class="lineCov">        234 :     if (--fileset-&gt;refcnt == 0)</span>
+<span class="lineNum">     197 </span><span class="lineCov">         88 :         unlink_all = true;</span>
+<span class="lineNum">     198 </span><span class="lineCov">        234 :     SpinLockRelease(&amp;fileset-&gt;mutex);</span>
+<span class="lineNum">     199 </span>            : 
+<span class="lineNum">     200 </span>            :     /*
+<span class="lineNum">     201 </span>            :      * If we are the last to detach, we delete the directory in all
+<span class="lineNum">     202 </span>            :      * tablespaces.  Note that we are still actually attached for the rest of
+<span class="lineNum">     203 </span>            :      * this function so we can safely access its data.
+<span class="lineNum">     204 </span>            :      */
+<span class="lineNum">     205 </span><span class="lineCov">        234 :     if (unlink_all)</span>
+<span class="lineNum">     206 </span><span class="lineCov">         88 :         SharedFileSetDeleteAll(fileset);</span>
+<span class="lineNum">     207 </span><span class="lineCov">        234 : }</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span>            : /*
+<span class="lineNum">     210 </span>            :  * Build the path for the directory holding the files backing a SharedFileSet
+<span class="lineNum">     211 </span>            :  * in a given tablespace.
+<a name="212"><span class="lineNum">     212 </span>            :  */</a>
+<span class="lineNum">     213 </span>            : static void
+<span class="lineNum">     214 </span><span class="lineCov">       3268 : SharedFileSetPath(char *path, SharedFileSet *fileset, Oid tablespace)</span>
+<span class="lineNum">     215 </span>            : {
+<span class="lineNum">     216 </span>            :     char        tempdirpath[MAXPGPATH];
+<span class="lineNum">     217 </span>            : 
+<span class="lineNum">     218 </span><span class="lineCov">       3268 :     TempTablespacePath(tempdirpath, tablespace);</span>
+<span class="lineNum">     219 </span><span class="lineCov">       6536 :     snprintf(path, MAXPGPATH, &quot;%s/%s%lu.%u.sharedfileset&quot;,</span>
+<span class="lineNum">     220 </span>            :              tempdirpath, PG_TEMP_FILE_PREFIX,
+<span class="lineNum">     221 </span><span class="lineCov">       3268 :              (unsigned long) fileset-&gt;creator_pid, fileset-&gt;number);</span>
+<span class="lineNum">     222 </span><span class="lineCov">       3268 : }</span>
+<span class="lineNum">     223 </span>            : 
+<span class="lineNum">     224 </span>            : /*
+<span class="lineNum">     225 </span>            :  * Sorting hat to determine which tablespace a given shared temporary file
+<span class="lineNum">     226 </span>            :  * belongs in.
+<a name="227"><span class="lineNum">     227 </span>            :  */</a>
+<span class="lineNum">     228 </span>            : static Oid
+<span class="lineNum">     229 </span><span class="lineCov">       3164 : ChooseTablespace(const SharedFileSet *fileset, const char *name)</span>
+<span class="lineNum">     230 </span>            : {
+<span class="lineNum">     231 </span><span class="lineCov">       3164 :     uint32      hash = hash_any((const unsigned char *) name, strlen(name));</span>
+<span class="lineNum">     232 </span>            : 
+<span class="lineNum">     233 </span><span class="lineCov">       3164 :     return fileset-&gt;tablespaces[hash % fileset-&gt;ntablespaces];</span>
+<span class="lineNum">     234 </span>            : }
+<span class="lineNum">     235 </span>            : 
+<span class="lineNum">     236 </span>            : /*
+<span class="lineNum">     237 </span>            :  * Compute the full path of a file in a SharedFileSet.
+<a name="238"><span class="lineNum">     238 </span>            :  */</a>
+<span class="lineNum">     239 </span>            : static void
+<span class="lineNum">     240 </span><span class="lineCov">       3080 : SharedFilePath(char *path, SharedFileSet *fileset, const char *name)</span>
+<span class="lineNum">     241 </span>            : {
+<span class="lineNum">     242 </span>            :     char        dirpath[MAXPGPATH];
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span><span class="lineCov">       3080 :     SharedFileSetPath(dirpath, fileset, ChooseTablespace(fileset, name));</span>
+<span class="lineNum">     245 </span><span class="lineCov">       3080 :     snprintf(path, MAXPGPATH, &quot;%s/%s&quot;, dirpath, name);</span>
+<span class="lineNum">     246 </span><span class="lineCov">       3080 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

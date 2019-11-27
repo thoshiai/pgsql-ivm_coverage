@@ -1,0 +1,1105 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/bin/pg_basebackup/walmethods.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/bin/pg_basebackup</a> - walmethods.c<span style="font-size: 80%;"> (source / <a href="walmethods.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">404</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">24</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * walmethods.c - implementations of different ways to write received wal
+<span class="lineNum">       4 </span>            :  *
+<span class="lineNum">       5 </span>            :  * NOTE! The caller must ensure that only one method is instantiated in
+<span class="lineNum">       6 </span>            :  *       any given program, and that it's only instantiated once!
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *        src/bin/pg_basebackup/walmethods.c
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &quot;postgres_fe.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      18 </span>            : #include &lt;time.h&gt;
+<span class="lineNum">      19 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      20 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">      21 </span>            : #include &lt;zlib.h&gt;
+<span class="lineNum">      22 </span>            : #endif
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : #include &quot;common/file_perm.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;common/file_utils.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;pgtar.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;receivelog.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;streamutil.h&quot;
+<span class="lineNum">      29 </span>            : 
+<span class="lineNum">      30 </span>            : /* Size of zlib buffer for .tar.gz */
+<span class="lineNum">      31 </span>            : #define ZLIB_OUT_SIZE 4096
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /*-------------------------------------------------------------------------
+<span class="lineNum">      34 </span>            :  * WalDirectoryMethod - write wal to a directory looking like pg_wal
+<span class="lineNum">      35 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      36 </span>            :  */
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : /*
+<span class="lineNum">      39 </span>            :  * Global static data for this method
+<span class="lineNum">      40 </span>            :  */
+<span class="lineNum">      41 </span>            : typedef struct DirectoryMethodData
+<span class="lineNum">      42 </span>            : {
+<span class="lineNum">      43 </span>            :     char       *basedir;
+<span class="lineNum">      44 </span>            :     int         compression;
+<span class="lineNum">      45 </span>            :     bool        sync;
+<span class="lineNum">      46 </span>            : } DirectoryMethodData;
+<span class="lineNum">      47 </span>            : static DirectoryMethodData *dir_data = NULL;
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : /*
+<span class="lineNum">      50 </span>            :  * Local file handle
+<span class="lineNum">      51 </span>            :  */
+<span class="lineNum">      52 </span>            : typedef struct DirectoryMethodFile
+<span class="lineNum">      53 </span>            : {
+<span class="lineNum">      54 </span>            :     int         fd;
+<span class="lineNum">      55 </span>            :     off_t       currpos;
+<span class="lineNum">      56 </span>            :     char       *pathname;
+<span class="lineNum">      57 </span>            :     char       *fullpath;
+<span class="lineNum">      58 </span>            :     char       *temp_suffix;
+<span class="lineNum">      59 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">      60 </span>            :     gzFile      gzfp;
+<span class="lineNum">      61 </span>            : #endif
+<span class="lineNum">      62 </span>            : } DirectoryMethodFile;
+<a name="63"><span class="lineNum">      63 </span>            : </a>
+<span class="lineNum">      64 </span>            : static const char *
+<span class="lineNum">      65 </span><span class="lineNoCov">          0 : dir_getlasterror(void)</span>
+<span class="lineNum">      66 </span>            : {
+<span class="lineNum">      67 </span>            :     /* Directory method always sets errno, so just use strerror */
+<span class="lineNum">      68 </span><span class="lineNoCov">          0 :     return strerror(errno);</span>
+<span class="lineNum">      69 </span>            : }
+<a name="70"><span class="lineNum">      70 </span>            : </a>
+<span class="lineNum">      71 </span>            : static Walfile
+<span class="lineNum">      72 </span><span class="lineNoCov">          0 : dir_open_for_write(const char *pathname, const char *temp_suffix, size_t pad_to_size)</span>
+<span class="lineNum">      73 </span>            : {
+<span class="lineNum">      74 </span>            :     static char tmppath[MAXPGPATH];
+<span class="lineNum">      75 </span>            :     int         fd;
+<span class="lineNum">      76 </span>            :     DirectoryMethodFile *f;
+<span class="lineNum">      77 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">      78 </span><span class="lineNoCov">          0 :     gzFile      gzfp = NULL;</span>
+<span class="lineNum">      79 </span>            : #endif
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span><span class="lineNoCov">          0 :     snprintf(tmppath, sizeof(tmppath), &quot;%s/%s%s%s&quot;,</span>
+<span class="lineNum">      82 </span><span class="lineNoCov">          0 :              dir_data-&gt;basedir, pathname,</span>
+<span class="lineNum">      83 </span><span class="lineNoCov">          0 :              dir_data-&gt;compression &gt; 0 ? &quot;.gz&quot; : &quot;&quot;,</span>
+<span class="lineNum">      84 </span>            :              temp_suffix ? temp_suffix : &quot;&quot;);
+<span class="lineNum">      85 </span>            : 
+<span class="lineNum">      86 </span>            :     /*
+<span class="lineNum">      87 </span>            :      * Open a file for non-compressed as well as compressed files. Tracking
+<span class="lineNum">      88 </span>            :      * the file descriptor is important for dir_sync() method as gzflush()
+<span class="lineNum">      89 </span>            :      * does not do any system calls to fsync() to make changes permanent on
+<span class="lineNum">      90 </span>            :      * disk.
+<span class="lineNum">      91 </span>            :      */
+<span class="lineNum">      92 </span><span class="lineNoCov">          0 :     fd = open(tmppath, O_WRONLY | O_CREAT | PG_BINARY, pg_file_create_mode);</span>
+<span class="lineNum">      93 </span><span class="lineNoCov">          0 :     if (fd &lt; 0)</span>
+<span class="lineNum">      94 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">      97 </span><span class="lineNoCov">          0 :     if (dir_data-&gt;compression &gt; 0)</span>
+<span class="lineNum">      98 </span>            :     {
+<span class="lineNum">      99 </span><span class="lineNoCov">          0 :         gzfp = gzdopen(fd, &quot;wb&quot;);</span>
+<span class="lineNum">     100 </span><span class="lineNoCov">          0 :         if (gzfp == NULL)</span>
+<span class="lineNum">     101 </span>            :         {
+<span class="lineNum">     102 </span><span class="lineNoCov">          0 :             close(fd);</span>
+<span class="lineNum">     103 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     104 </span>            :         }
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span><span class="lineNoCov">          0 :         if (gzsetparams(gzfp, dir_data-&gt;compression,</span>
+<span class="lineNum">     107 </span>            :                         Z_DEFAULT_STRATEGY) != Z_OK)
+<span class="lineNum">     108 </span>            :         {
+<span class="lineNum">     109 </span><span class="lineNoCov">          0 :             gzclose(gzfp);</span>
+<span class="lineNum">     110 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     111 </span>            :         }
+<span class="lineNum">     112 </span>            :     }
+<span class="lineNum">     113 </span>            : #endif
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span>            :     /* Do pre-padding on non-compressed files */
+<span class="lineNum">     116 </span><span class="lineNoCov">          0 :     if (pad_to_size &amp;&amp; dir_data-&gt;compression == 0)</span>
+<span class="lineNum">     117 </span>            :     {
+<span class="lineNum">     118 </span>            :         PGAlignedXLogBlock zerobuf;
+<span class="lineNum">     119 </span>            :         int         bytes;
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span><span class="lineNoCov">          0 :         memset(zerobuf.data, 0, XLOG_BLCKSZ);</span>
+<span class="lineNum">     122 </span><span class="lineNoCov">          0 :         for (bytes = 0; bytes &lt; pad_to_size; bytes += XLOG_BLCKSZ)</span>
+<span class="lineNum">     123 </span>            :         {
+<span class="lineNum">     124 </span><span class="lineNoCov">          0 :             errno = 0;</span>
+<span class="lineNum">     125 </span><span class="lineNoCov">          0 :             if (write(fd, zerobuf.data, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     126 </span>            :             {
+<span class="lineNum">     127 </span><span class="lineNoCov">          0 :                 int         save_errno = errno;</span>
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span><span class="lineNoCov">          0 :                 close(fd);</span>
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span>            :                 /*
+<span class="lineNum">     132 </span>            :                  * If write didn't set errno, assume problem is no disk space.
+<span class="lineNum">     133 </span>            :                  */
+<span class="lineNum">     134 </span><span class="lineNoCov">          0 :                 errno = save_errno ? save_errno : ENOSPC;</span>
+<span class="lineNum">     135 </span><span class="lineNoCov">          0 :                 return NULL;</span>
+<span class="lineNum">     136 </span>            :             }
+<span class="lineNum">     137 </span>            :         }
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span><span class="lineNoCov">          0 :         if (lseek(fd, 0, SEEK_SET) != 0)</span>
+<span class="lineNum">     140 </span>            :         {
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 :             int         save_errno = errno;</span>
+<span class="lineNum">     142 </span>            : 
+<span class="lineNum">     143 </span><span class="lineNoCov">          0 :             close(fd);</span>
+<span class="lineNum">     144 </span><span class="lineNoCov">          0 :             errno = save_errno;</span>
+<span class="lineNum">     145 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     146 </span>            :         }
+<span class="lineNum">     147 </span>            :     }
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :     /*
+<span class="lineNum">     150 </span>            :      * fsync WAL file and containing directory, to ensure the file is
+<span class="lineNum">     151 </span>            :      * persistently created and zeroed (if padded). That's particularly
+<span class="lineNum">     152 </span>            :      * important when using synchronous mode, where the file is modified and
+<span class="lineNum">     153 </span>            :      * fsynced in-place, without a directory fsync.
+<span class="lineNum">     154 </span>            :      */
+<span class="lineNum">     155 </span><span class="lineNoCov">          0 :     if (dir_data-&gt;sync)</span>
+<span class="lineNum">     156 </span>            :     {
+<span class="lineNum">     157 </span><span class="lineNoCov">          0 :         if (fsync_fname(tmppath, false) != 0 ||</span>
+<span class="lineNum">     158 </span><span class="lineNoCov">          0 :             fsync_parent_path(tmppath) != 0)</span>
+<span class="lineNum">     159 </span>            :         {
+<span class="lineNum">     160 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :             if (dir_data-&gt;compression &gt; 0)</span>
+<span class="lineNum">     162 </span><span class="lineNoCov">          0 :                 gzclose(gzfp);</span>
+<span class="lineNum">     163 </span>            :             else
+<span class="lineNum">     164 </span>            : #endif
+<span class="lineNum">     165 </span><span class="lineNoCov">          0 :                 close(fd);</span>
+<span class="lineNum">     166 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     167 </span>            :         }
+<span class="lineNum">     168 </span>            :     }
+<span class="lineNum">     169 </span>            : 
+<span class="lineNum">     170 </span><span class="lineNoCov">          0 :     f = pg_malloc0(sizeof(DirectoryMethodFile));</span>
+<span class="lineNum">     171 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     172 </span><span class="lineNoCov">          0 :     if (dir_data-&gt;compression &gt; 0)</span>
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :         f-&gt;gzfp = gzfp;</span>
+<span class="lineNum">     174 </span>            : #endif
+<span class="lineNum">     175 </span><span class="lineNoCov">          0 :     f-&gt;fd = fd;</span>
+<span class="lineNum">     176 </span><span class="lineNoCov">          0 :     f-&gt;currpos = 0;</span>
+<span class="lineNum">     177 </span><span class="lineNoCov">          0 :     f-&gt;pathname = pg_strdup(pathname);</span>
+<span class="lineNum">     178 </span><span class="lineNoCov">          0 :     f-&gt;fullpath = pg_strdup(tmppath);</span>
+<span class="lineNum">     179 </span><span class="lineNoCov">          0 :     if (temp_suffix)</span>
+<span class="lineNum">     180 </span><span class="lineNoCov">          0 :         f-&gt;temp_suffix = pg_strdup(temp_suffix);</span>
+<span class="lineNum">     181 </span>            : 
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :     return f;</span>
+<span class="lineNum">     183 </span>            : }
+<a name="184"><span class="lineNum">     184 </span>            : </a>
+<span class="lineNum">     185 </span>            : static ssize_t
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 : dir_write(Walfile f, const void *buf, size_t count)</span>
+<span class="lineNum">     187 </span>            : {
+<span class="lineNum">     188 </span>            :     ssize_t     r;
+<span class="lineNum">     189 </span><span class="lineNoCov">          0 :     DirectoryMethodFile *df = (DirectoryMethodFile *) f;</span>
+<span class="lineNum">     190 </span>            : 
+<span class="lineNum">     191 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     194 </span><span class="lineNoCov">          0 :     if (dir_data-&gt;compression &gt; 0)</span>
+<span class="lineNum">     195 </span><span class="lineNoCov">          0 :         r = (ssize_t) gzwrite(df-&gt;gzfp, buf, count);</span>
+<span class="lineNum">     196 </span>            :     else
+<span class="lineNum">     197 </span>            : #endif
+<span class="lineNum">     198 </span><span class="lineNoCov">          0 :         r = write(df-&gt;fd, buf, count);</span>
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 :     if (r &gt; 0)</span>
+<span class="lineNum">     200 </span><span class="lineNoCov">          0 :         df-&gt;currpos += r;</span>
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :     return r;</span>
+<span class="lineNum">     202 </span>            : }
+<a name="203"><span class="lineNum">     203 </span>            : </a>
+<span class="lineNum">     204 </span>            : static off_t
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 : dir_get_current_pos(Walfile f)</span>
+<span class="lineNum">     206 </span>            : {
+<span class="lineNum">     207 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span>            :     /* Use a cached value to prevent lots of reseeks */
+<span class="lineNum">     210 </span><span class="lineNoCov">          0 :     return ((DirectoryMethodFile *) f)-&gt;currpos;</span>
+<span class="lineNum">     211 </span>            : }
+<a name="212"><span class="lineNum">     212 </span>            : </a>
+<span class="lineNum">     213 </span>            : static int
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 : dir_close(Walfile f, WalCloseMethod method)</span>
+<span class="lineNum">     215 </span>            : {
+<span class="lineNum">     216 </span>            :     int         r;
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 :     DirectoryMethodFile *df = (DirectoryMethodFile *) f;</span>
+<span class="lineNum">     218 </span>            :     static char tmppath[MAXPGPATH];
+<span class="lineNum">     219 </span>            :     static char tmppath2[MAXPGPATH];
+<span class="lineNum">     220 </span>            : 
+<span class="lineNum">     221 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     224 </span><span class="lineNoCov">          0 :     if (dir_data-&gt;compression &gt; 0)</span>
+<span class="lineNum">     225 </span><span class="lineNoCov">          0 :         r = gzclose(df-&gt;gzfp);</span>
+<span class="lineNum">     226 </span>            :     else
+<span class="lineNum">     227 </span>            : #endif
+<span class="lineNum">     228 </span><span class="lineNoCov">          0 :         r = close(df-&gt;fd);</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span><span class="lineNoCov">          0 :     if (r == 0)</span>
+<span class="lineNum">     231 </span>            :     {
+<span class="lineNum">     232 </span>            :         /* Build path to the current version of the file */
+<span class="lineNum">     233 </span><span class="lineNoCov">          0 :         if (method == CLOSE_NORMAL &amp;&amp; df-&gt;temp_suffix)</span>
+<span class="lineNum">     234 </span>            :         {
+<span class="lineNum">     235 </span>            :             /*
+<span class="lineNum">     236 </span>            :              * If we have a temp prefix, normal operation is to rename the
+<span class="lineNum">     237 </span>            :              * file.
+<span class="lineNum">     238 </span>            :              */
+<span class="lineNum">     239 </span><span class="lineNoCov">          0 :             snprintf(tmppath, sizeof(tmppath), &quot;%s/%s%s%s&quot;,</span>
+<span class="lineNum">     240 </span><span class="lineNoCov">          0 :                      dir_data-&gt;basedir, df-&gt;pathname,</span>
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :                      dir_data-&gt;compression &gt; 0 ? &quot;.gz&quot; : &quot;&quot;,</span>
+<span class="lineNum">     242 </span>            :                      df-&gt;temp_suffix);
+<span class="lineNum">     243 </span><span class="lineNoCov">          0 :             snprintf(tmppath2, sizeof(tmppath2), &quot;%s/%s%s&quot;,</span>
+<span class="lineNum">     244 </span><span class="lineNoCov">          0 :                      dir_data-&gt;basedir, df-&gt;pathname,</span>
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :                      dir_data-&gt;compression &gt; 0 ? &quot;.gz&quot; : &quot;&quot;);</span>
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 :             r = durable_rename(tmppath, tmppath2);</span>
+<span class="lineNum">     247 </span>            :         }
+<span class="lineNum">     248 </span><span class="lineNoCov">          0 :         else if (method == CLOSE_UNLINK)</span>
+<span class="lineNum">     249 </span>            :         {
+<span class="lineNum">     250 </span>            :             /* Unlink the file once it's closed */
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :             snprintf(tmppath, sizeof(tmppath), &quot;%s/%s%s%s&quot;,</span>
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :                      dir_data-&gt;basedir, df-&gt;pathname,</span>
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 :                      dir_data-&gt;compression &gt; 0 ? &quot;.gz&quot; : &quot;&quot;,</span>
+<span class="lineNum">     254 </span><span class="lineNoCov">          0 :                      df-&gt;temp_suffix ? df-&gt;temp_suffix : &quot;&quot;);</span>
+<span class="lineNum">     255 </span><span class="lineNoCov">          0 :             r = unlink(tmppath);</span>
+<span class="lineNum">     256 </span>            :         }
+<span class="lineNum">     257 </span>            :         else
+<span class="lineNum">     258 </span>            :         {
+<span class="lineNum">     259 </span>            :             /*
+<span class="lineNum">     260 </span>            :              * Else either CLOSE_NORMAL and no temp suffix, or
+<span class="lineNum">     261 </span>            :              * CLOSE_NO_RENAME. In this case, fsync the file and containing
+<span class="lineNum">     262 </span>            :              * directory if sync mode is requested.
+<span class="lineNum">     263 </span>            :              */
+<span class="lineNum">     264 </span><span class="lineNoCov">          0 :             if (dir_data-&gt;sync)</span>
+<span class="lineNum">     265 </span>            :             {
+<span class="lineNum">     266 </span><span class="lineNoCov">          0 :                 r = fsync_fname(df-&gt;fullpath, false);</span>
+<span class="lineNum">     267 </span><span class="lineNoCov">          0 :                 if (r == 0)</span>
+<span class="lineNum">     268 </span><span class="lineNoCov">          0 :                     r = fsync_parent_path(df-&gt;fullpath);</span>
+<span class="lineNum">     269 </span>            :             }
+<span class="lineNum">     270 </span>            :         }
+<span class="lineNum">     271 </span>            :     }
+<span class="lineNum">     272 </span>            : 
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 :     pg_free(df-&gt;pathname);</span>
+<span class="lineNum">     274 </span><span class="lineNoCov">          0 :     pg_free(df-&gt;fullpath);</span>
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :     if (df-&gt;temp_suffix)</span>
+<span class="lineNum">     276 </span><span class="lineNoCov">          0 :         pg_free(df-&gt;temp_suffix);</span>
+<span class="lineNum">     277 </span><span class="lineNoCov">          0 :     pg_free(df);</span>
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span><span class="lineNoCov">          0 :     return r;</span>
+<span class="lineNum">     280 </span>            : }
+<a name="281"><span class="lineNum">     281 </span>            : </a>
+<span class="lineNum">     282 </span>            : static int
+<span class="lineNum">     283 </span><span class="lineNoCov">          0 : dir_sync(Walfile f)</span>
+<span class="lineNum">     284 </span>            : {
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     286 </span>            : 
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :     if (!dir_data-&gt;sync)</span>
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     289 </span>            : 
+<span class="lineNum">     290 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     291 </span><span class="lineNoCov">          0 :     if (dir_data-&gt;compression &gt; 0)</span>
+<span class="lineNum">     292 </span>            :     {
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :         if (gzflush(((DirectoryMethodFile *) f)-&gt;gzfp, Z_SYNC_FLUSH) != Z_OK)</span>
+<span class="lineNum">     294 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     295 </span>            :     }
+<span class="lineNum">     296 </span>            : #endif
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :     return fsync(((DirectoryMethodFile *) f)-&gt;fd);</span>
+<span class="lineNum">     299 </span>            : }
+<a name="300"><span class="lineNum">     300 </span>            : </a>
+<span class="lineNum">     301 </span>            : static ssize_t
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 : dir_get_file_size(const char *pathname)</span>
+<span class="lineNum">     303 </span>            : {
+<span class="lineNum">     304 </span>            :     struct stat statbuf;
+<span class="lineNum">     305 </span>            :     static char tmppath[MAXPGPATH];
+<span class="lineNum">     306 </span>            : 
+<span class="lineNum">     307 </span><span class="lineNoCov">          0 :     snprintf(tmppath, sizeof(tmppath), &quot;%s/%s&quot;,</span>
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :              dir_data-&gt;basedir, pathname);</span>
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span><span class="lineNoCov">          0 :     if (stat(tmppath, &amp;statbuf) != 0)</span>
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     312 </span>            : 
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :     return statbuf.st_size;</span>
+<span class="lineNum">     314 </span>            : }
+<a name="315"><span class="lineNum">     315 </span>            : </a>
+<span class="lineNum">     316 </span>            : static bool
+<span class="lineNum">     317 </span><span class="lineNoCov">          0 : dir_existsfile(const char *pathname)</span>
+<span class="lineNum">     318 </span>            : {
+<span class="lineNum">     319 </span>            :     static char tmppath[MAXPGPATH];
+<span class="lineNum">     320 </span>            :     int         fd;
+<span class="lineNum">     321 </span>            : 
+<span class="lineNum">     322 </span><span class="lineNoCov">          0 :     snprintf(tmppath, sizeof(tmppath), &quot;%s/%s&quot;,</span>
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :              dir_data-&gt;basedir, pathname);</span>
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span><span class="lineNoCov">          0 :     fd = open(tmppath, O_RDONLY | PG_BINARY, 0);</span>
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :     if (fd &lt; 0)</span>
+<span class="lineNum">     327 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     328 </span><span class="lineNoCov">          0 :     close(fd);</span>
+<span class="lineNum">     329 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     330 </span>            : }
+<a name="331"><span class="lineNum">     331 </span>            : </a>
+<span class="lineNum">     332 </span>            : static bool
+<span class="lineNum">     333 </span><span class="lineNoCov">          0 : dir_finish(void)</span>
+<span class="lineNum">     334 </span>            : {
+<span class="lineNum">     335 </span><span class="lineNoCov">          0 :     if (dir_data-&gt;sync)</span>
+<span class="lineNum">     336 </span>            :     {
+<span class="lineNum">     337 </span>            :         /*
+<span class="lineNum">     338 </span>            :          * Files are fsynced when they are closed, but we need to fsync the
+<span class="lineNum">     339 </span>            :          * directory entry here as well.
+<span class="lineNum">     340 </span>            :          */
+<span class="lineNum">     341 </span><span class="lineNoCov">          0 :         if (fsync_fname(dir_data-&gt;basedir, true) != 0)</span>
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     343 </span>            :     }
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     345 </span>            : }
+<span class="lineNum">     346 </span>            : 
+<a name="347"><span class="lineNum">     347 </span>            : </a>
+<span class="lineNum">     348 </span>            : WalWriteMethod *
+<span class="lineNum">     349 </span><span class="lineNoCov">          0 : CreateWalDirectoryMethod(const char *basedir, int compression, bool sync)</span>
+<span class="lineNum">     350 </span>            : {
+<span class="lineNum">     351 </span>            :     WalWriteMethod *method;
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span><span class="lineNoCov">          0 :     method = pg_malloc0(sizeof(WalWriteMethod));</span>
+<span class="lineNum">     354 </span><span class="lineNoCov">          0 :     method-&gt;open_for_write = dir_open_for_write;</span>
+<span class="lineNum">     355 </span><span class="lineNoCov">          0 :     method-&gt;write = dir_write;</span>
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :     method-&gt;get_current_pos = dir_get_current_pos;</span>
+<span class="lineNum">     357 </span><span class="lineNoCov">          0 :     method-&gt;get_file_size = dir_get_file_size;</span>
+<span class="lineNum">     358 </span><span class="lineNoCov">          0 :     method-&gt;close = dir_close;</span>
+<span class="lineNum">     359 </span><span class="lineNoCov">          0 :     method-&gt;sync = dir_sync;</span>
+<span class="lineNum">     360 </span><span class="lineNoCov">          0 :     method-&gt;existsfile = dir_existsfile;</span>
+<span class="lineNum">     361 </span><span class="lineNoCov">          0 :     method-&gt;finish = dir_finish;</span>
+<span class="lineNum">     362 </span><span class="lineNoCov">          0 :     method-&gt;getlasterror = dir_getlasterror;</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span><span class="lineNoCov">          0 :     dir_data = pg_malloc0(sizeof(DirectoryMethodData));</span>
+<span class="lineNum">     365 </span><span class="lineNoCov">          0 :     dir_data-&gt;compression = compression;</span>
+<span class="lineNum">     366 </span><span class="lineNoCov">          0 :     dir_data-&gt;basedir = pg_strdup(basedir);</span>
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :     dir_data-&gt;sync = sync;</span>
+<span class="lineNum">     368 </span>            : 
+<span class="lineNum">     369 </span><span class="lineNoCov">          0 :     return method;</span>
+<span class="lineNum">     370 </span>            : }
+<a name="371"><span class="lineNum">     371 </span>            : </a>
+<span class="lineNum">     372 </span>            : void
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 : FreeWalDirectoryMethod(void)</span>
+<span class="lineNum">     374 </span>            : {
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :     pg_free(dir_data-&gt;basedir);</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :     pg_free(dir_data);</span>
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span>            : /*-------------------------------------------------------------------------
+<span class="lineNum">     381 </span>            :  * WalTarMethod - write wal to a tar file containing pg_wal contents
+<span class="lineNum">     382 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">     383 </span>            :  */
+<span class="lineNum">     384 </span>            : 
+<span class="lineNum">     385 </span>            : typedef struct TarMethodFile
+<span class="lineNum">     386 </span>            : {
+<span class="lineNum">     387 </span>            :     off_t       ofs_start;      /* Where does the *header* for this file start */
+<span class="lineNum">     388 </span>            :     off_t       currpos;
+<span class="lineNum">     389 </span>            :     char        header[512];
+<span class="lineNum">     390 </span>            :     char       *pathname;
+<span class="lineNum">     391 </span>            :     size_t      pad_to_size;
+<span class="lineNum">     392 </span>            : } TarMethodFile;
+<span class="lineNum">     393 </span>            : 
+<span class="lineNum">     394 </span>            : typedef struct TarMethodData
+<span class="lineNum">     395 </span>            : {
+<span class="lineNum">     396 </span>            :     char       *tarfilename;
+<span class="lineNum">     397 </span>            :     int         fd;
+<span class="lineNum">     398 </span>            :     int         compression;
+<span class="lineNum">     399 </span>            :     bool        sync;
+<span class="lineNum">     400 </span>            :     TarMethodFile *currentfile;
+<span class="lineNum">     401 </span>            :     char        lasterror[1024];
+<span class="lineNum">     402 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     403 </span>            :     z_streamp   zp;
+<span class="lineNum">     404 </span>            :     void       *zlibOut;
+<span class="lineNum">     405 </span>            : #endif
+<span class="lineNum">     406 </span>            : } TarMethodData;
+<span class="lineNum">     407 </span>            : static TarMethodData *tar_data = NULL;
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span>            : #define tar_clear_error() tar_data-&gt;lasterror[0] = '\0'
+<span class="lineNum">     410 </span>            : #define tar_set_error(msg) strlcpy(tar_data-&gt;lasterror, _(msg), sizeof(tar_data-&gt;lasterror))
+<a name="411"><span class="lineNum">     411 </span>            : </a>
+<span class="lineNum">     412 </span>            : static const char *
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 : tar_getlasterror(void)</span>
+<span class="lineNum">     414 </span>            : {
+<span class="lineNum">     415 </span>            :     /*
+<span class="lineNum">     416 </span>            :      * If a custom error is set, return that one. Otherwise, assume errno is
+<span class="lineNum">     417 </span>            :      * set and return that one.
+<span class="lineNum">     418 </span>            :      */
+<span class="lineNum">     419 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;lasterror[0])</span>
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :         return tar_data-&gt;lasterror;</span>
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :     return strerror(errno);</span>
+<span class="lineNum">     422 </span>            : }
+<span class="lineNum">     423 </span>            : 
+<a name="424"><span class="lineNum">     424 </span>            : #ifdef HAVE_LIBZ</a>
+<span class="lineNum">     425 </span>            : static bool
+<span class="lineNum">     426 </span><span class="lineNoCov">          0 : tar_write_compressed_data(void *buf, size_t count, bool flush)</span>
+<span class="lineNum">     427 </span>            : {
+<span class="lineNum">     428 </span><span class="lineNoCov">          0 :     tar_data-&gt;zp-&gt;next_in = buf;</span>
+<span class="lineNum">     429 </span><span class="lineNoCov">          0 :     tar_data-&gt;zp-&gt;avail_in = count;</span>
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span><span class="lineNoCov">          0 :     while (tar_data-&gt;zp-&gt;avail_in || flush)</span>
+<span class="lineNum">     432 </span>            :     {
+<span class="lineNum">     433 </span>            :         int         r;
+<span class="lineNum">     434 </span>            : 
+<span class="lineNum">     435 </span><span class="lineNoCov">          0 :         r = deflate(tar_data-&gt;zp, flush ? Z_FINISH : Z_NO_FLUSH);</span>
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :         if (r == Z_STREAM_ERROR)</span>
+<span class="lineNum">     437 </span>            :         {
+<span class="lineNum">     438 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;could not compress data&quot;);</span>
+<span class="lineNum">     439 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     440 </span>            :         }
+<span class="lineNum">     441 </span>            : 
+<span class="lineNum">     442 </span><span class="lineNoCov">          0 :         if (tar_data-&gt;zp-&gt;avail_out &lt; ZLIB_OUT_SIZE)</span>
+<span class="lineNum">     443 </span>            :         {
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :             size_t      len = ZLIB_OUT_SIZE - tar_data-&gt;zp-&gt;avail_out;</span>
+<span class="lineNum">     445 </span>            : 
+<span class="lineNum">     446 </span><span class="lineNoCov">          0 :             errno = 0;</span>
+<span class="lineNum">     447 </span><span class="lineNoCov">          0 :             if (write(tar_data-&gt;fd, tar_data-&gt;zlibOut, len) != len)</span>
+<span class="lineNum">     448 </span>            :             {
+<span class="lineNum">     449 </span>            :                 /*
+<span class="lineNum">     450 </span>            :                  * If write didn't set errno, assume problem is no disk space.
+<span class="lineNum">     451 </span>            :                  */
+<span class="lineNum">     452 </span><span class="lineNoCov">          0 :                 if (errno == 0)</span>
+<span class="lineNum">     453 </span><span class="lineNoCov">          0 :                     errno = ENOSPC;</span>
+<span class="lineNum">     454 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">     455 </span>            :             }
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp-&gt;next_out = tar_data-&gt;zlibOut;</span>
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp-&gt;avail_out = ZLIB_OUT_SIZE;</span>
+<span class="lineNum">     459 </span>            :         }
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span><span class="lineNoCov">          0 :         if (r == Z_STREAM_END)</span>
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     463 </span>            :     }
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span><span class="lineNoCov">          0 :     if (flush)</span>
+<span class="lineNum">     466 </span>            :     {
+<span class="lineNum">     467 </span>            :         /* Reset the stream for writing */
+<span class="lineNum">     468 </span><span class="lineNoCov">          0 :         if (deflateReset(tar_data-&gt;zp) != Z_OK)</span>
+<span class="lineNum">     469 </span>            :         {
+<span class="lineNum">     470 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;could not reset compression stream&quot;);</span>
+<span class="lineNum">     471 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     472 </span>            :         }
+<span class="lineNum">     473 </span>            :     }
+<span class="lineNum">     474 </span>            : 
+<span class="lineNum">     475 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     476 </span>            : }
+<span class="lineNum">     477 </span>            : #endif
+<a name="478"><span class="lineNum">     478 </span>            : </a>
+<span class="lineNum">     479 </span>            : static ssize_t
+<span class="lineNum">     480 </span><span class="lineNoCov">          0 : tar_write(Walfile f, const void *buf, size_t count)</span>
+<span class="lineNum">     481 </span>            : {
+<span class="lineNum">     482 </span>            :     ssize_t     r;
+<span class="lineNum">     483 </span>            : 
+<span class="lineNum">     484 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            :     /* Tarfile will always be positioned at the end */
+<span class="lineNum">     488 </span><span class="lineNoCov">          0 :     if (!tar_data-&gt;compression)</span>
+<span class="lineNum">     489 </span>            :     {
+<span class="lineNum">     490 </span><span class="lineNoCov">          0 :         r = write(tar_data-&gt;fd, buf, count);</span>
+<span class="lineNum">     491 </span><span class="lineNoCov">          0 :         if (r &gt; 0)</span>
+<span class="lineNum">     492 </span><span class="lineNoCov">          0 :             ((TarMethodFile *) f)-&gt;currpos += r;</span>
+<span class="lineNum">     493 </span><span class="lineNoCov">          0 :         return r;</span>
+<span class="lineNum">     494 </span>            :     }
+<span class="lineNum">     495 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     496 </span>            :     else
+<span class="lineNum">     497 </span>            :     {
+<span class="lineNum">     498 </span><span class="lineNoCov">          0 :         if (!tar_write_compressed_data(unconstify(void *, buf), count, false))</span>
+<span class="lineNum">     499 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     500 </span><span class="lineNoCov">          0 :         ((TarMethodFile *) f)-&gt;currpos += count;</span>
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :         return count;</span>
+<span class="lineNum">     502 </span>            :     }
+<span class="lineNum">     503 </span>            : #else
+<span class="lineNum">     504 </span>            :     else
+<span class="lineNum">     505 </span>            :         /* Can't happen - compression enabled with no libz */
+<span class="lineNum">     506 </span>            :         return -1;
+<span class="lineNum">     507 </span>            : #endif
+<span class="lineNum">     508 </span>            : }
+<a name="509"><span class="lineNum">     509 </span>            : </a>
+<span class="lineNum">     510 </span>            : static bool
+<span class="lineNum">     511 </span><span class="lineNoCov">          0 : tar_write_padding_data(TarMethodFile *f, size_t bytes)</span>
+<span class="lineNum">     512 </span>            : {
+<span class="lineNum">     513 </span>            :     PGAlignedXLogBlock zerobuf;
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :     size_t      bytesleft = bytes;</span>
+<span class="lineNum">     515 </span>            : 
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :     memset(zerobuf.data, 0, XLOG_BLCKSZ);</span>
+<span class="lineNum">     517 </span><span class="lineNoCov">          0 :     while (bytesleft)</span>
+<span class="lineNum">     518 </span>            :     {
+<span class="lineNum">     519 </span><span class="lineNoCov">          0 :         size_t      bytestowrite = Min(bytesleft, XLOG_BLCKSZ);</span>
+<span class="lineNum">     520 </span><span class="lineNoCov">          0 :         ssize_t     r = tar_write(f, zerobuf.data, bytestowrite);</span>
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span><span class="lineNoCov">          0 :         if (r &lt; 0)</span>
+<span class="lineNum">     523 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     524 </span><span class="lineNoCov">          0 :         bytesleft -= r;</span>
+<span class="lineNum">     525 </span>            :     }
+<span class="lineNum">     526 </span>            : 
+<span class="lineNum">     527 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     528 </span>            : }
+<a name="529"><span class="lineNum">     529 </span>            : </a>
+<span class="lineNum">     530 </span>            : static Walfile
+<span class="lineNum">     531 </span><span class="lineNoCov">          0 : tar_open_for_write(const char *pathname, const char *temp_suffix, size_t pad_to_size)</span>
+<span class="lineNum">     532 </span>            : {
+<span class="lineNum">     533 </span>            :     int         save_errno;
+<span class="lineNum">     534 </span>            :     static char tmppath[MAXPGPATH];
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;fd &lt; 0)</span>
+<span class="lineNum">     539 </span>            :     {
+<span class="lineNum">     540 </span>            :         /*
+<span class="lineNum">     541 </span>            :          * We open the tar file only when we first try to write to it.
+<span class="lineNum">     542 </span>            :          */
+<span class="lineNum">     543 </span><span class="lineNoCov">          0 :         tar_data-&gt;fd = open(tar_data-&gt;tarfilename,</span>
+<span class="lineNum">     544 </span>            :                             O_WRONLY | O_CREAT | PG_BINARY,
+<span class="lineNum">     545 </span>            :                             pg_file_create_mode);
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 :         if (tar_data-&gt;fd &lt; 0)</span>
+<span class="lineNum">     547 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     548 </span>            : 
+<span class="lineNum">     549 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     550 </span><span class="lineNoCov">          0 :         if (tar_data-&gt;compression)</span>
+<span class="lineNum">     551 </span>            :         {
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp = (z_streamp) pg_malloc(sizeof(z_stream));</span>
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp-&gt;zalloc = Z_NULL;</span>
+<span class="lineNum">     554 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp-&gt;zfree = Z_NULL;</span>
+<span class="lineNum">     555 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp-&gt;opaque = Z_NULL;</span>
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp-&gt;next_out = tar_data-&gt;zlibOut;</span>
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 :             tar_data-&gt;zp-&gt;avail_out = ZLIB_OUT_SIZE;</span>
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span>            :             /*
+<span class="lineNum">     560 </span>            :              * Initialize deflation library. Adding the magic value 16 to the
+<span class="lineNum">     561 </span>            :              * default 15 for the windowBits parameter makes the output be
+<span class="lineNum">     562 </span>            :              * gzip instead of zlib.
+<span class="lineNum">     563 </span>            :              */
+<span class="lineNum">     564 </span><span class="lineNoCov">          0 :             if (deflateInit2(tar_data-&gt;zp, tar_data-&gt;compression, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)</span>
+<span class="lineNum">     565 </span>            :             {
+<span class="lineNum">     566 </span><span class="lineNoCov">          0 :                 pg_free(tar_data-&gt;zp);</span>
+<span class="lineNum">     567 </span><span class="lineNoCov">          0 :                 tar_data-&gt;zp = NULL;</span>
+<span class="lineNum">     568 </span><span class="lineNoCov">          0 :                 tar_set_error(&quot;could not initialize compression library&quot;);</span>
+<span class="lineNum">     569 </span><span class="lineNoCov">          0 :                 return NULL;</span>
+<span class="lineNum">     570 </span>            :             }
+<span class="lineNum">     571 </span>            :         }
+<span class="lineNum">     572 </span>            : #endif
+<span class="lineNum">     573 </span>            : 
+<span class="lineNum">     574 </span>            :         /* There's no tar header itself, the file starts with regular files */
+<span class="lineNum">     575 </span>            :     }
+<span class="lineNum">     576 </span>            : 
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 :     Assert(tar_data-&gt;currentfile == NULL);</span>
+<span class="lineNum">     578 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;currentfile != NULL)</span>
+<span class="lineNum">     579 </span>            :     {
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :         tar_set_error(&quot;implementation error: tar files can't have more than one open file&quot;);</span>
+<span class="lineNum">     581 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     582 </span>            :     }
+<span class="lineNum">     583 </span>            : 
+<span class="lineNum">     584 </span><span class="lineNoCov">          0 :     tar_data-&gt;currentfile = pg_malloc0(sizeof(TarMethodFile));</span>
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span><span class="lineNoCov">          0 :     snprintf(tmppath, sizeof(tmppath), &quot;%s%s&quot;,</span>
+<span class="lineNum">     587 </span>            :              pathname, temp_suffix ? temp_suffix : &quot;&quot;);
+<span class="lineNum">     588 </span>            : 
+<span class="lineNum">     589 </span>            :     /* Create a header with size set to 0 - we will fill out the size on close */
+<span class="lineNum">     590 </span><span class="lineNoCov">          0 :     if (tarCreateHeader(tar_data-&gt;currentfile-&gt;header, tmppath, NULL, 0, S_IRUSR | S_IWUSR, 0, 0, time(NULL)) != TAR_OK)</span>
+<span class="lineNum">     591 </span>            :     {
+<span class="lineNum">     592 </span><span class="lineNoCov">          0 :         pg_free(tar_data-&gt;currentfile);</span>
+<span class="lineNum">     593 </span><span class="lineNoCov">          0 :         tar_data-&gt;currentfile = NULL;</span>
+<span class="lineNum">     594 </span><span class="lineNoCov">          0 :         tar_set_error(&quot;could not create tar header&quot;);</span>
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     596 </span>            :     }
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     599 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;compression)</span>
+<span class="lineNum">     600 </span>            :     {
+<span class="lineNum">     601 </span>            :         /* Flush existing data */
+<span class="lineNum">     602 </span><span class="lineNoCov">          0 :         if (!tar_write_compressed_data(NULL, 0, true))</span>
+<span class="lineNum">     603 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     604 </span>            : 
+<span class="lineNum">     605 </span>            :         /* Turn off compression for header */
+<span class="lineNum">     606 </span><span class="lineNoCov">          0 :         if (deflateParams(tar_data-&gt;zp, 0, 0) != Z_OK)</span>
+<span class="lineNum">     607 </span>            :         {
+<span class="lineNum">     608 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;could not change compression parameters&quot;);</span>
+<span class="lineNum">     609 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     610 </span>            :         }
+<span class="lineNum">     611 </span>            :     }
+<span class="lineNum">     612 </span>            : #endif
+<span class="lineNum">     613 </span>            : 
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :     tar_data-&gt;currentfile-&gt;ofs_start = lseek(tar_data-&gt;fd, 0, SEEK_CUR);</span>
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;currentfile-&gt;ofs_start == -1)</span>
+<span class="lineNum">     616 </span>            :     {
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :         save_errno = errno;</span>
+<span class="lineNum">     618 </span><span class="lineNoCov">          0 :         pg_free(tar_data-&gt;currentfile);</span>
+<span class="lineNum">     619 </span><span class="lineNoCov">          0 :         tar_data-&gt;currentfile = NULL;</span>
+<span class="lineNum">     620 </span><span class="lineNoCov">          0 :         errno = save_errno;</span>
+<span class="lineNum">     621 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     622 </span>            :     }
+<span class="lineNum">     623 </span><span class="lineNoCov">          0 :     tar_data-&gt;currentfile-&gt;currpos = 0;</span>
+<span class="lineNum">     624 </span>            : 
+<span class="lineNum">     625 </span><span class="lineNoCov">          0 :     if (!tar_data-&gt;compression)</span>
+<span class="lineNum">     626 </span>            :     {
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :         errno = 0;</span>
+<span class="lineNum">     628 </span><span class="lineNoCov">          0 :         if (write(tar_data-&gt;fd, tar_data-&gt;currentfile-&gt;header, 512) != 512)</span>
+<span class="lineNum">     629 </span>            :         {
+<span class="lineNum">     630 </span><span class="lineNoCov">          0 :             save_errno = errno;</span>
+<span class="lineNum">     631 </span><span class="lineNoCov">          0 :             pg_free(tar_data-&gt;currentfile);</span>
+<span class="lineNum">     632 </span><span class="lineNoCov">          0 :             tar_data-&gt;currentfile = NULL;</span>
+<span class="lineNum">     633 </span>            :             /* if write didn't set errno, assume problem is no disk space */
+<span class="lineNum">     634 </span><span class="lineNoCov">          0 :             errno = save_errno ? save_errno : ENOSPC;</span>
+<span class="lineNum">     635 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     636 </span>            :         }
+<span class="lineNum">     637 </span>            :     }
+<span class="lineNum">     638 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     639 </span>            :     else
+<span class="lineNum">     640 </span>            :     {
+<span class="lineNum">     641 </span>            :         /* Write header through the zlib APIs but with no compression */
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :         if (!tar_write_compressed_data(tar_data-&gt;currentfile-&gt;header, 512, true))</span>
+<span class="lineNum">     643 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span>            :         /* Re-enable compression for the rest of the file */
+<span class="lineNum">     646 </span><span class="lineNoCov">          0 :         if (deflateParams(tar_data-&gt;zp, tar_data-&gt;compression, 0) != Z_OK)</span>
+<span class="lineNum">     647 </span>            :         {
+<span class="lineNum">     648 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;could not change compression parameters&quot;);</span>
+<span class="lineNum">     649 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">     650 </span>            :         }
+<span class="lineNum">     651 </span>            :     }
+<span class="lineNum">     652 </span>            : #endif
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span><span class="lineNoCov">          0 :     tar_data-&gt;currentfile-&gt;pathname = pg_strdup(pathname);</span>
+<span class="lineNum">     655 </span>            : 
+<span class="lineNum">     656 </span>            :     /*
+<span class="lineNum">     657 </span>            :      * Uncompressed files are padded on creation, but for compression we can't
+<span class="lineNum">     658 </span>            :      * do that
+<span class="lineNum">     659 </span>            :      */
+<span class="lineNum">     660 </span><span class="lineNoCov">          0 :     if (pad_to_size)</span>
+<span class="lineNum">     661 </span>            :     {
+<span class="lineNum">     662 </span><span class="lineNoCov">          0 :         tar_data-&gt;currentfile-&gt;pad_to_size = pad_to_size;</span>
+<span class="lineNum">     663 </span><span class="lineNoCov">          0 :         if (!tar_data-&gt;compression)</span>
+<span class="lineNum">     664 </span>            :         {
+<span class="lineNum">     665 </span>            :             /* Uncompressed, so pad now */
+<span class="lineNum">     666 </span><span class="lineNoCov">          0 :             tar_write_padding_data(tar_data-&gt;currentfile, pad_to_size);</span>
+<span class="lineNum">     667 </span>            :             /* Seek back to start */
+<span class="lineNum">     668 </span><span class="lineNoCov">          0 :             if (lseek(tar_data-&gt;fd, tar_data-&gt;currentfile-&gt;ofs_start + 512, SEEK_SET) != tar_data-&gt;currentfile-&gt;ofs_start + 512)</span>
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :                 return NULL;</span>
+<span class="lineNum">     670 </span>            : 
+<span class="lineNum">     671 </span><span class="lineNoCov">          0 :             tar_data-&gt;currentfile-&gt;currpos = 0;</span>
+<span class="lineNum">     672 </span>            :         }
+<span class="lineNum">     673 </span>            :     }
+<span class="lineNum">     674 </span>            : 
+<span class="lineNum">     675 </span><span class="lineNoCov">          0 :     return tar_data-&gt;currentfile;</span>
+<span class="lineNum">     676 </span>            : }
+<a name="677"><span class="lineNum">     677 </span>            : </a>
+<span class="lineNum">     678 </span>            : static ssize_t
+<span class="lineNum">     679 </span><span class="lineNoCov">          0 : tar_get_file_size(const char *pathname)</span>
+<span class="lineNum">     680 </span>            : {
+<span class="lineNum">     681 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     682 </span>            : 
+<span class="lineNum">     683 </span>            :     /* Currently not used, so not supported */
+<span class="lineNum">     684 </span><span class="lineNoCov">          0 :     errno = ENOSYS;</span>
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 :     return -1;</span>
+<span class="lineNum">     686 </span>            : }
+<a name="687"><span class="lineNum">     687 </span>            : </a>
+<span class="lineNum">     688 </span>            : static off_t
+<span class="lineNum">     689 </span><span class="lineNoCov">          0 : tar_get_current_pos(Walfile f)</span>
+<span class="lineNum">     690 </span>            : {
+<span class="lineNum">     691 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     692 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     693 </span>            : 
+<span class="lineNum">     694 </span><span class="lineNoCov">          0 :     return ((TarMethodFile *) f)-&gt;currpos;</span>
+<span class="lineNum">     695 </span>            : }
+<a name="696"><span class="lineNum">     696 </span>            : </a>
+<span class="lineNum">     697 </span>            : static int
+<span class="lineNum">     698 </span><span class="lineNoCov">          0 : tar_sync(Walfile f)</span>
+<span class="lineNum">     699 </span>            : {
+<span class="lineNum">     700 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     701 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     702 </span>            : 
+<span class="lineNum">     703 </span><span class="lineNoCov">          0 :     if (!tar_data-&gt;sync)</span>
+<span class="lineNum">     704 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span>            :     /*
+<span class="lineNum">     707 </span>            :      * Always sync the whole tarfile, because that's all we can do. This makes
+<span class="lineNum">     708 </span>            :      * no sense on compressed files, so just ignore those.
+<span class="lineNum">     709 </span>            :      */
+<span class="lineNum">     710 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;compression)</span>
+<span class="lineNum">     711 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     712 </span>            : 
+<span class="lineNum">     713 </span><span class="lineNoCov">          0 :     return fsync(tar_data-&gt;fd);</span>
+<span class="lineNum">     714 </span>            : }
+<a name="715"><span class="lineNum">     715 </span>            : </a>
+<span class="lineNum">     716 </span>            : static int
+<span class="lineNum">     717 </span><span class="lineNoCov">          0 : tar_close(Walfile f, WalCloseMethod method)</span>
+<span class="lineNum">     718 </span>            : {
+<span class="lineNum">     719 </span>            :     ssize_t     filesize;
+<span class="lineNum">     720 </span>            :     int         padding;
+<span class="lineNum">     721 </span><span class="lineNoCov">          0 :     TarMethodFile *tf = (TarMethodFile *) f;</span>
+<span class="lineNum">     722 </span>            : 
+<span class="lineNum">     723 </span><span class="lineNoCov">          0 :     Assert(f != NULL);</span>
+<span class="lineNum">     724 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     725 </span>            : 
+<span class="lineNum">     726 </span><span class="lineNoCov">          0 :     if (method == CLOSE_UNLINK)</span>
+<span class="lineNum">     727 </span>            :     {
+<span class="lineNum">     728 </span><span class="lineNoCov">          0 :         if (tar_data-&gt;compression)</span>
+<span class="lineNum">     729 </span>            :         {
+<span class="lineNum">     730 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;unlink not supported with compression&quot;);</span>
+<span class="lineNum">     731 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     732 </span>            :         }
+<span class="lineNum">     733 </span>            : 
+<span class="lineNum">     734 </span>            :         /*
+<span class="lineNum">     735 </span>            :          * Unlink the file that we just wrote to the tar. We do this by
+<span class="lineNum">     736 </span>            :          * truncating it to the start of the header. This is safe as we only
+<span class="lineNum">     737 </span>            :          * allow writing of the very last file.
+<span class="lineNum">     738 </span>            :          */
+<span class="lineNum">     739 </span><span class="lineNoCov">          0 :         if (ftruncate(tar_data-&gt;fd, tf-&gt;ofs_start) != 0)</span>
+<span class="lineNum">     740 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span><span class="lineNoCov">          0 :         pg_free(tf-&gt;pathname);</span>
+<span class="lineNum">     743 </span><span class="lineNoCov">          0 :         pg_free(tf);</span>
+<span class="lineNum">     744 </span><span class="lineNoCov">          0 :         tar_data-&gt;currentfile = NULL;</span>
+<span class="lineNum">     745 </span>            : 
+<span class="lineNum">     746 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     747 </span>            :     }
+<span class="lineNum">     748 </span>            : 
+<span class="lineNum">     749 </span>            :     /*
+<span class="lineNum">     750 </span>            :      * Pad the file itself with zeroes if necessary. Note that this is
+<span class="lineNum">     751 </span>            :      * different from the tar format padding -- this is the padding we asked
+<span class="lineNum">     752 </span>            :      * for when the file was opened.
+<span class="lineNum">     753 </span>            :      */
+<span class="lineNum">     754 </span><span class="lineNoCov">          0 :     if (tf-&gt;pad_to_size)</span>
+<span class="lineNum">     755 </span>            :     {
+<span class="lineNum">     756 </span><span class="lineNoCov">          0 :         if (tar_data-&gt;compression)</span>
+<span class="lineNum">     757 </span>            :         {
+<span class="lineNum">     758 </span>            :             /*
+<span class="lineNum">     759 </span>            :              * A compressed tarfile is padded on close since we cannot know
+<span class="lineNum">     760 </span>            :              * the size of the compressed output until the end.
+<span class="lineNum">     761 </span>            :              */
+<span class="lineNum">     762 </span><span class="lineNoCov">          0 :             size_t      sizeleft = tf-&gt;pad_to_size - tf-&gt;currpos;</span>
+<span class="lineNum">     763 </span>            : 
+<span class="lineNum">     764 </span><span class="lineNoCov">          0 :             if (sizeleft)</span>
+<span class="lineNum">     765 </span>            :             {
+<span class="lineNum">     766 </span><span class="lineNoCov">          0 :                 if (!tar_write_padding_data(tf, sizeleft))</span>
+<span class="lineNum">     767 </span><span class="lineNoCov">          0 :                     return -1;</span>
+<span class="lineNum">     768 </span>            :             }
+<span class="lineNum">     769 </span>            :         }
+<span class="lineNum">     770 </span>            :         else
+<span class="lineNum">     771 </span>            :         {
+<span class="lineNum">     772 </span>            :             /*
+<span class="lineNum">     773 </span>            :              * An uncompressed tarfile was padded on creation, so just adjust
+<span class="lineNum">     774 </span>            :              * the current position as if we seeked to the end.
+<span class="lineNum">     775 </span>            :              */
+<span class="lineNum">     776 </span><span class="lineNoCov">          0 :             tf-&gt;currpos = tf-&gt;pad_to_size;</span>
+<span class="lineNum">     777 </span>            :         }
+<span class="lineNum">     778 </span>            :     }
+<span class="lineNum">     779 </span>            : 
+<span class="lineNum">     780 </span>            :     /*
+<span class="lineNum">     781 </span>            :      * Get the size of the file, and pad the current data up to the nearest
+<span class="lineNum">     782 </span>            :      * 512 byte boundary.
+<span class="lineNum">     783 </span>            :      */
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :     filesize = tar_get_current_pos(f);</span>
+<span class="lineNum">     785 </span><span class="lineNoCov">          0 :     padding = ((filesize + 511) &amp; ~511) - filesize;</span>
+<span class="lineNum">     786 </span><span class="lineNoCov">          0 :     if (padding)</span>
+<span class="lineNum">     787 </span>            :     {
+<span class="lineNum">     788 </span>            :         char        zerobuf[512];
+<span class="lineNum">     789 </span>            : 
+<span class="lineNum">     790 </span><span class="lineNoCov">          0 :         MemSet(zerobuf, 0, padding);</span>
+<span class="lineNum">     791 </span><span class="lineNoCov">          0 :         if (tar_write(f, zerobuf, padding) != padding)</span>
+<span class="lineNum">     792 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     793 </span>            :     }
+<span class="lineNum">     794 </span>            : 
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     797 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;compression)</span>
+<span class="lineNum">     798 </span>            :     {
+<span class="lineNum">     799 </span>            :         /* Flush the current buffer */
+<span class="lineNum">     800 </span><span class="lineNoCov">          0 :         if (!tar_write_compressed_data(NULL, 0, true))</span>
+<span class="lineNum">     801 </span>            :         {
+<span class="lineNum">     802 </span><span class="lineNoCov">          0 :             errno = EINVAL;</span>
+<span class="lineNum">     803 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     804 </span>            :         }
+<span class="lineNum">     805 </span>            :     }
+<span class="lineNum">     806 </span>            : #endif
+<span class="lineNum">     807 </span>            : 
+<span class="lineNum">     808 </span>            :     /*
+<span class="lineNum">     809 </span>            :      * Now go back and update the header with the correct filesize and
+<span class="lineNum">     810 </span>            :      * possibly also renaming the file. We overwrite the entire current header
+<span class="lineNum">     811 </span>            :      * when done, including the checksum.
+<span class="lineNum">     812 </span>            :      */
+<span class="lineNum">     813 </span><span class="lineNoCov">          0 :     print_tar_number(&amp;(tf-&gt;header[124]), 12, filesize);</span>
+<span class="lineNum">     814 </span>            : 
+<span class="lineNum">     815 </span><span class="lineNoCov">          0 :     if (method == CLOSE_NORMAL)</span>
+<span class="lineNum">     816 </span>            : 
+<span class="lineNum">     817 </span>            :         /*
+<span class="lineNum">     818 </span>            :          * We overwrite it with what it was before if we have no tempname,
+<span class="lineNum">     819 </span>            :          * since we're going to write the buffer anyway.
+<span class="lineNum">     820 </span>            :          */
+<span class="lineNum">     821 </span><span class="lineNoCov">          0 :         strlcpy(&amp;(tf-&gt;header[0]), tf-&gt;pathname, 100);</span>
+<span class="lineNum">     822 </span>            : 
+<span class="lineNum">     823 </span><span class="lineNoCov">          0 :     print_tar_number(&amp;(tf-&gt;header[148]), 8, tarChecksum(((TarMethodFile *) f)-&gt;header));</span>
+<span class="lineNum">     824 </span><span class="lineNoCov">          0 :     if (lseek(tar_data-&gt;fd, tf-&gt;ofs_start, SEEK_SET) != ((TarMethodFile *) f)-&gt;ofs_start)</span>
+<span class="lineNum">     825 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     826 </span><span class="lineNoCov">          0 :     if (!tar_data-&gt;compression)</span>
+<span class="lineNum">     827 </span>            :     {
+<span class="lineNum">     828 </span><span class="lineNoCov">          0 :         errno = 0;</span>
+<span class="lineNum">     829 </span><span class="lineNoCov">          0 :         if (write(tar_data-&gt;fd, tf-&gt;header, 512) != 512)</span>
+<span class="lineNum">     830 </span>            :         {
+<span class="lineNum">     831 </span>            :             /* if write didn't set errno, assume problem is no disk space */
+<span class="lineNum">     832 </span><span class="lineNoCov">          0 :             if (errno == 0)</span>
+<span class="lineNum">     833 </span><span class="lineNoCov">          0 :                 errno = ENOSPC;</span>
+<span class="lineNum">     834 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     835 </span>            :         }
+<span class="lineNum">     836 </span>            :     }
+<span class="lineNum">     837 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     838 </span>            :     else
+<span class="lineNum">     839 </span>            :     {
+<span class="lineNum">     840 </span>            :         /* Turn off compression */
+<span class="lineNum">     841 </span><span class="lineNoCov">          0 :         if (deflateParams(tar_data-&gt;zp, 0, 0) != Z_OK)</span>
+<span class="lineNum">     842 </span>            :         {
+<span class="lineNum">     843 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;could not change compression parameters&quot;);</span>
+<span class="lineNum">     844 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     845 </span>            :         }
+<span class="lineNum">     846 </span>            : 
+<span class="lineNum">     847 </span>            :         /* Overwrite the header, assuming the size will be the same */
+<span class="lineNum">     848 </span><span class="lineNoCov">          0 :         if (!tar_write_compressed_data(tar_data-&gt;currentfile-&gt;header, 512, true))</span>
+<span class="lineNum">     849 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     850 </span>            : 
+<span class="lineNum">     851 </span>            :         /* Turn compression back on */
+<span class="lineNum">     852 </span><span class="lineNoCov">          0 :         if (deflateParams(tar_data-&gt;zp, tar_data-&gt;compression, 0) != Z_OK)</span>
+<span class="lineNum">     853 </span>            :         {
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;could not change compression parameters&quot;);</span>
+<span class="lineNum">     855 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     856 </span>            :         }
+<span class="lineNum">     857 </span>            :     }
+<span class="lineNum">     858 </span>            : #endif
+<span class="lineNum">     859 </span>            : 
+<span class="lineNum">     860 </span>            :     /* Move file pointer back down to end, so we can write the next file */
+<span class="lineNum">     861 </span><span class="lineNoCov">          0 :     if (lseek(tar_data-&gt;fd, 0, SEEK_END) &lt; 0)</span>
+<span class="lineNum">     862 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     863 </span>            : 
+<span class="lineNum">     864 </span>            :     /* Always fsync on close, so the padding gets fsynced */
+<span class="lineNum">     865 </span><span class="lineNoCov">          0 :     if (tar_sync(f) &lt; 0)</span>
+<span class="lineNum">     866 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     867 </span>            : 
+<span class="lineNum">     868 </span>            :     /* Clean up and done */
+<span class="lineNum">     869 </span><span class="lineNoCov">          0 :     pg_free(tf-&gt;pathname);</span>
+<span class="lineNum">     870 </span><span class="lineNoCov">          0 :     pg_free(tf);</span>
+<span class="lineNum">     871 </span><span class="lineNoCov">          0 :     tar_data-&gt;currentfile = NULL;</span>
+<span class="lineNum">     872 </span>            : 
+<span class="lineNum">     873 </span><span class="lineNoCov">          0 :     return 0;</span>
+<span class="lineNum">     874 </span>            : }
+<a name="875"><span class="lineNum">     875 </span>            : </a>
+<span class="lineNum">     876 </span>            : static bool
+<span class="lineNum">     877 </span><span class="lineNoCov">          0 : tar_existsfile(const char *pathname)</span>
+<span class="lineNum">     878 </span>            : {
+<span class="lineNum">     879 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     880 </span>            :     /* We only deal with new tarfiles, so nothing externally created exists */
+<span class="lineNum">     881 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">     882 </span>            : }
+<a name="883"><span class="lineNum">     883 </span>            : </a>
+<span class="lineNum">     884 </span>            : static bool
+<span class="lineNum">     885 </span><span class="lineNoCov">          0 : tar_finish(void)</span>
+<span class="lineNum">     886 </span>            : {
+<span class="lineNum">     887 </span>            :     char        zerobuf[1024];
+<span class="lineNum">     888 </span>            : 
+<span class="lineNum">     889 </span><span class="lineNoCov">          0 :     tar_clear_error();</span>
+<span class="lineNum">     890 </span>            : 
+<span class="lineNum">     891 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;currentfile)</span>
+<span class="lineNum">     892 </span>            :     {
+<span class="lineNum">     893 </span><span class="lineNoCov">          0 :         if (tar_close(tar_data-&gt;currentfile, CLOSE_NORMAL) != 0)</span>
+<span class="lineNum">     894 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     895 </span>            :     }
+<span class="lineNum">     896 </span>            : 
+<span class="lineNum">     897 </span>            :     /* A tarfile always ends with two empty blocks */
+<span class="lineNum">     898 </span><span class="lineNoCov">          0 :     MemSet(zerobuf, 0, sizeof(zerobuf));</span>
+<span class="lineNum">     899 </span><span class="lineNoCov">          0 :     if (!tar_data-&gt;compression)</span>
+<span class="lineNum">     900 </span>            :     {
+<span class="lineNum">     901 </span><span class="lineNoCov">          0 :         errno = 0;</span>
+<span class="lineNum">     902 </span><span class="lineNoCov">          0 :         if (write(tar_data-&gt;fd, zerobuf, sizeof(zerobuf)) != sizeof(zerobuf))</span>
+<span class="lineNum">     903 </span>            :         {
+<span class="lineNum">     904 </span>            :             /* if write didn't set errno, assume problem is no disk space */
+<span class="lineNum">     905 </span><span class="lineNoCov">          0 :             if (errno == 0)</span>
+<span class="lineNum">     906 </span><span class="lineNoCov">          0 :                 errno = ENOSPC;</span>
+<span class="lineNum">     907 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     908 </span>            :         }
+<span class="lineNum">     909 </span>            :     }
+<span class="lineNum">     910 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">     911 </span>            :     else
+<span class="lineNum">     912 </span>            :     {
+<span class="lineNum">     913 </span><span class="lineNoCov">          0 :         if (!tar_write_compressed_data(zerobuf, sizeof(zerobuf), false))</span>
+<span class="lineNum">     914 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     915 </span>            : 
+<span class="lineNum">     916 </span>            :         /* Also flush all data to make sure the gzip stream is finished */
+<span class="lineNum">     917 </span><span class="lineNoCov">          0 :         tar_data-&gt;zp-&gt;next_in = NULL;</span>
+<span class="lineNum">     918 </span><span class="lineNoCov">          0 :         tar_data-&gt;zp-&gt;avail_in = 0;</span>
+<span class="lineNum">     919 </span>            :         while (true)
+<span class="lineNum">     920 </span>            :         {
+<span class="lineNum">     921 </span>            :             int         r;
+<span class="lineNum">     922 </span>            : 
+<span class="lineNum">     923 </span><span class="lineNoCov">          0 :             r = deflate(tar_data-&gt;zp, Z_FINISH);</span>
+<span class="lineNum">     924 </span>            : 
+<span class="lineNum">     925 </span><span class="lineNoCov">          0 :             if (r == Z_STREAM_ERROR)</span>
+<span class="lineNum">     926 </span>            :             {
+<span class="lineNum">     927 </span><span class="lineNoCov">          0 :                 tar_set_error(&quot;could not compress data&quot;);</span>
+<span class="lineNum">     928 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">     929 </span>            :             }
+<span class="lineNum">     930 </span><span class="lineNoCov">          0 :             if (tar_data-&gt;zp-&gt;avail_out &lt; ZLIB_OUT_SIZE)</span>
+<span class="lineNum">     931 </span>            :             {
+<span class="lineNum">     932 </span><span class="lineNoCov">          0 :                 size_t      len = ZLIB_OUT_SIZE - tar_data-&gt;zp-&gt;avail_out;</span>
+<span class="lineNum">     933 </span>            : 
+<span class="lineNum">     934 </span><span class="lineNoCov">          0 :                 errno = 0;</span>
+<span class="lineNum">     935 </span><span class="lineNoCov">          0 :                 if (write(tar_data-&gt;fd, tar_data-&gt;zlibOut, len) != len)</span>
+<span class="lineNum">     936 </span>            :                 {
+<span class="lineNum">     937 </span>            :                     /*
+<span class="lineNum">     938 </span>            :                      * If write didn't set errno, assume problem is no disk
+<span class="lineNum">     939 </span>            :                      * space.
+<span class="lineNum">     940 </span>            :                      */
+<span class="lineNum">     941 </span><span class="lineNoCov">          0 :                     if (errno == 0)</span>
+<span class="lineNum">     942 </span><span class="lineNoCov">          0 :                         errno = ENOSPC;</span>
+<span class="lineNum">     943 </span><span class="lineNoCov">          0 :                     return false;</span>
+<span class="lineNum">     944 </span>            :                 }
+<span class="lineNum">     945 </span>            :             }
+<span class="lineNum">     946 </span><span class="lineNoCov">          0 :             if (r == Z_STREAM_END)</span>
+<span class="lineNum">     947 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     948 </span><span class="lineNoCov">          0 :         }</span>
+<span class="lineNum">     949 </span>            : 
+<span class="lineNum">     950 </span><span class="lineNoCov">          0 :         if (deflateEnd(tar_data-&gt;zp) != Z_OK)</span>
+<span class="lineNum">     951 </span>            :         {
+<span class="lineNum">     952 </span><span class="lineNoCov">          0 :             tar_set_error(&quot;could not close compression stream&quot;);</span>
+<span class="lineNum">     953 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     954 </span>            :         }
+<span class="lineNum">     955 </span>            :     }
+<span class="lineNum">     956 </span>            : #endif
+<span class="lineNum">     957 </span>            : 
+<span class="lineNum">     958 </span>            :     /* sync the empty blocks as well, since they're after the last file */
+<span class="lineNum">     959 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;sync)</span>
+<span class="lineNum">     960 </span>            :     {
+<span class="lineNum">     961 </span><span class="lineNoCov">          0 :         if (fsync(tar_data-&gt;fd) != 0)</span>
+<span class="lineNum">     962 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     963 </span>            :     }
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span><span class="lineNoCov">          0 :     if (close(tar_data-&gt;fd) != 0)</span>
+<span class="lineNum">     966 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     967 </span>            : 
+<span class="lineNum">     968 </span><span class="lineNoCov">          0 :     tar_data-&gt;fd = -1;</span>
+<span class="lineNum">     969 </span>            : 
+<span class="lineNum">     970 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;sync)</span>
+<span class="lineNum">     971 </span>            :     {
+<span class="lineNum">     972 </span><span class="lineNoCov">          0 :         if (fsync_fname(tar_data-&gt;tarfilename, false) != 0)</span>
+<span class="lineNum">     973 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     974 </span><span class="lineNoCov">          0 :         if (fsync_parent_path(tar_data-&gt;tarfilename) != 0)</span>
+<span class="lineNum">     975 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     976 </span>            :     }
+<span class="lineNum">     977 </span>            : 
+<span class="lineNum">     978 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     979 </span>            : }
+<a name="980"><span class="lineNum">     980 </span>            : </a>
+<span class="lineNum">     981 </span>            : WalWriteMethod *
+<span class="lineNum">     982 </span><span class="lineNoCov">          0 : CreateWalTarMethod(const char *tarbase, int compression, bool sync)</span>
+<span class="lineNum">     983 </span>            : {
+<span class="lineNum">     984 </span>            :     WalWriteMethod *method;
+<span class="lineNum">     985 </span><span class="lineNoCov">          0 :     const char *suffix = (compression != 0) ? &quot;.tar.gz&quot; : &quot;.tar&quot;;</span>
+<span class="lineNum">     986 </span>            : 
+<span class="lineNum">     987 </span><span class="lineNoCov">          0 :     method = pg_malloc0(sizeof(WalWriteMethod));</span>
+<span class="lineNum">     988 </span><span class="lineNoCov">          0 :     method-&gt;open_for_write = tar_open_for_write;</span>
+<span class="lineNum">     989 </span><span class="lineNoCov">          0 :     method-&gt;write = tar_write;</span>
+<span class="lineNum">     990 </span><span class="lineNoCov">          0 :     method-&gt;get_current_pos = tar_get_current_pos;</span>
+<span class="lineNum">     991 </span><span class="lineNoCov">          0 :     method-&gt;get_file_size = tar_get_file_size;</span>
+<span class="lineNum">     992 </span><span class="lineNoCov">          0 :     method-&gt;close = tar_close;</span>
+<span class="lineNum">     993 </span><span class="lineNoCov">          0 :     method-&gt;sync = tar_sync;</span>
+<span class="lineNum">     994 </span><span class="lineNoCov">          0 :     method-&gt;existsfile = tar_existsfile;</span>
+<span class="lineNum">     995 </span><span class="lineNoCov">          0 :     method-&gt;finish = tar_finish;</span>
+<span class="lineNum">     996 </span><span class="lineNoCov">          0 :     method-&gt;getlasterror = tar_getlasterror;</span>
+<span class="lineNum">     997 </span>            : 
+<span class="lineNum">     998 </span><span class="lineNoCov">          0 :     tar_data = pg_malloc0(sizeof(TarMethodData));</span>
+<span class="lineNum">     999 </span><span class="lineNoCov">          0 :     tar_data-&gt;tarfilename = pg_malloc0(strlen(tarbase) + strlen(suffix) + 1);</span>
+<span class="lineNum">    1000 </span><span class="lineNoCov">          0 :     sprintf(tar_data-&gt;tarfilename, &quot;%s%s&quot;, tarbase, suffix);</span>
+<span class="lineNum">    1001 </span><span class="lineNoCov">          0 :     tar_data-&gt;fd = -1;</span>
+<span class="lineNum">    1002 </span><span class="lineNoCov">          0 :     tar_data-&gt;compression = compression;</span>
+<span class="lineNum">    1003 </span><span class="lineNoCov">          0 :     tar_data-&gt;sync = sync;</span>
+<span class="lineNum">    1004 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">    1005 </span><span class="lineNoCov">          0 :     if (compression)</span>
+<span class="lineNum">    1006 </span><span class="lineNoCov">          0 :         tar_data-&gt;zlibOut = (char *) pg_malloc(ZLIB_OUT_SIZE + 1);</span>
+<span class="lineNum">    1007 </span>            : #endif
+<span class="lineNum">    1008 </span>            : 
+<span class="lineNum">    1009 </span><span class="lineNoCov">          0 :     return method;</span>
+<span class="lineNum">    1010 </span>            : }
+<a name="1011"><span class="lineNum">    1011 </span>            : </a>
+<span class="lineNum">    1012 </span>            : void
+<span class="lineNum">    1013 </span><span class="lineNoCov">          0 : FreeWalTarMethod(void)</span>
+<span class="lineNum">    1014 </span>            : {
+<span class="lineNum">    1015 </span><span class="lineNoCov">          0 :     pg_free(tar_data-&gt;tarfilename);</span>
+<span class="lineNum">    1016 </span>            : #ifdef HAVE_LIBZ
+<span class="lineNum">    1017 </span><span class="lineNoCov">          0 :     if (tar_data-&gt;compression)</span>
+<span class="lineNum">    1018 </span><span class="lineNoCov">          0 :         pg_free(tar_data-&gt;zlibOut);</span>
+<span class="lineNum">    1019 </span>            : #endif
+<span class="lineNum">    1020 </span><span class="lineNoCov">          0 :     pg_free(tar_data);</span>
+<span class="lineNum">    1021 </span><span class="lineNoCov">          0 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

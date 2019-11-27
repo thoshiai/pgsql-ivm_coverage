@@ -1,0 +1,1587 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/cache/inval.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/cache</a> - inval.c<span style="font-size: 80%;"> (source / <a href="inval.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">321</td>
+            <td class="headerCovTableEntry">344</td>
+            <td class="headerCovTableEntryHi">93.3 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">34</td>
+            <td class="headerCovTableEntry">35</td>
+            <td class="headerCovTableEntryHi">97.1 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * inval.c
+<span class="lineNum">       4 </span>            :  *    POSTGRES cache invalidation dispatcher code.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *  This is subtle stuff, so pay attention:
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  *  When a tuple is updated or deleted, our standard visibility rules
+<span class="lineNum">       9 </span>            :  *  consider that it is *still valid* so long as we are in the same command,
+<span class="lineNum">      10 </span>            :  *  ie, until the next CommandCounterIncrement() or transaction commit.
+<span class="lineNum">      11 </span>            :  *  (See access/heap/heapam_visibility.c, and note that system catalogs are
+<span class="lineNum">      12 </span>            :  *  generally scanned under the most current snapshot available, rather than
+<span class="lineNum">      13 </span>            :  *  the transaction snapshot.)  At the command boundary, the old tuple stops
+<span class="lineNum">      14 </span>            :  *  being valid and the new version, if any, becomes valid.  Therefore,
+<span class="lineNum">      15 </span>            :  *  we cannot simply flush a tuple from the system caches during heap_update()
+<span class="lineNum">      16 </span>            :  *  or heap_delete().  The tuple is still good at that point; what's more,
+<span class="lineNum">      17 </span>            :  *  even if we did flush it, it might be reloaded into the caches by a later
+<span class="lineNum">      18 </span>            :  *  request in the same command.  So the correct behavior is to keep a list
+<span class="lineNum">      19 </span>            :  *  of outdated (updated/deleted) tuples and then do the required cache
+<span class="lineNum">      20 </span>            :  *  flushes at the next command boundary.  We must also keep track of
+<span class="lineNum">      21 </span>            :  *  inserted tuples so that we can flush &quot;negative&quot; cache entries that match
+<span class="lineNum">      22 </span>            :  *  the new tuples; again, that mustn't happen until end of command.
+<span class="lineNum">      23 </span>            :  *
+<span class="lineNum">      24 </span>            :  *  Once we have finished the command, we still need to remember inserted
+<span class="lineNum">      25 </span>            :  *  tuples (including new versions of updated tuples), so that we can flush
+<span class="lineNum">      26 </span>            :  *  them from the caches if we abort the transaction.  Similarly, we'd better
+<span class="lineNum">      27 </span>            :  *  be able to flush &quot;negative&quot; cache entries that may have been loaded in
+<span class="lineNum">      28 </span>            :  *  place of deleted tuples, so we still need the deleted ones too.
+<span class="lineNum">      29 </span>            :  *
+<span class="lineNum">      30 </span>            :  *  If we successfully complete the transaction, we have to broadcast all
+<span class="lineNum">      31 </span>            :  *  these invalidation events to other backends (via the SI message queue)
+<span class="lineNum">      32 </span>            :  *  so that they can flush obsolete entries from their caches.  Note we have
+<span class="lineNum">      33 </span>            :  *  to record the transaction commit before sending SI messages, otherwise
+<span class="lineNum">      34 </span>            :  *  the other backends won't see our updated tuples as good.
+<span class="lineNum">      35 </span>            :  *
+<span class="lineNum">      36 </span>            :  *  When a subtransaction aborts, we can process and discard any events
+<span class="lineNum">      37 </span>            :  *  it has queued.  When a subtransaction commits, we just add its events
+<span class="lineNum">      38 </span>            :  *  to the pending lists of the parent transaction.
+<span class="lineNum">      39 </span>            :  *
+<span class="lineNum">      40 </span>            :  *  In short, we need to remember until xact end every insert or delete
+<span class="lineNum">      41 </span>            :  *  of a tuple that might be in the system caches.  Updates are treated as
+<span class="lineNum">      42 </span>            :  *  two events, delete + insert, for simplicity.  (If the update doesn't
+<span class="lineNum">      43 </span>            :  *  change the tuple hash value, catcache.c optimizes this into one event.)
+<span class="lineNum">      44 </span>            :  *
+<span class="lineNum">      45 </span>            :  *  We do not need to register EVERY tuple operation in this way, just those
+<span class="lineNum">      46 </span>            :  *  on tuples in relations that have associated catcaches.  We do, however,
+<span class="lineNum">      47 </span>            :  *  have to register every operation on every tuple that *could* be in a
+<span class="lineNum">      48 </span>            :  *  catcache, whether or not it currently is in our cache.  Also, if the
+<span class="lineNum">      49 </span>            :  *  tuple is in a relation that has multiple catcaches, we need to register
+<span class="lineNum">      50 </span>            :  *  an invalidation message for each such catcache.  catcache.c's
+<span class="lineNum">      51 </span>            :  *  PrepareToInvalidateCacheTuple() routine provides the knowledge of which
+<span class="lineNum">      52 </span>            :  *  catcaches may need invalidation for a given tuple.
+<span class="lineNum">      53 </span>            :  *
+<span class="lineNum">      54 </span>            :  *  Also, whenever we see an operation on a pg_class, pg_attribute, or
+<span class="lineNum">      55 </span>            :  *  pg_index tuple, we register a relcache flush operation for the relation
+<span class="lineNum">      56 </span>            :  *  described by that tuple (as specified in CacheInvalidateHeapTuple()).
+<span class="lineNum">      57 </span>            :  *  Likewise for pg_constraint tuples for foreign keys on relations.
+<span class="lineNum">      58 </span>            :  *
+<span class="lineNum">      59 </span>            :  *  We keep the relcache flush requests in lists separate from the catcache
+<span class="lineNum">      60 </span>            :  *  tuple flush requests.  This allows us to issue all the pending catcache
+<span class="lineNum">      61 </span>            :  *  flushes before we issue relcache flushes, which saves us from loading
+<span class="lineNum">      62 </span>            :  *  a catcache tuple during relcache load only to flush it again right away.
+<span class="lineNum">      63 </span>            :  *  Also, we avoid queuing multiple relcache flush requests for the same
+<span class="lineNum">      64 </span>            :  *  relation, since a relcache flush is relatively expensive to do.
+<span class="lineNum">      65 </span>            :  *  (XXX is it worth testing likewise for duplicate catcache flush entries?
+<span class="lineNum">      66 </span>            :  *  Probably not.)
+<span class="lineNum">      67 </span>            :  *
+<span class="lineNum">      68 </span>            :  *  If a relcache flush is issued for a system relation that we preload
+<span class="lineNum">      69 </span>            :  *  from the relcache init file, we must also delete the init file so that
+<span class="lineNum">      70 </span>            :  *  it will be rebuilt during the next backend restart.  The actual work of
+<span class="lineNum">      71 </span>            :  *  manipulating the init file is in relcache.c, but we keep track of the
+<span class="lineNum">      72 </span>            :  *  need for it here.
+<span class="lineNum">      73 </span>            :  *
+<span class="lineNum">      74 </span>            :  *  The request lists proper are kept in CurTransactionContext of their
+<span class="lineNum">      75 </span>            :  *  creating (sub)transaction, since they can be forgotten on abort of that
+<span class="lineNum">      76 </span>            :  *  transaction but must be kept till top-level commit otherwise.  For
+<span class="lineNum">      77 </span>            :  *  simplicity we keep the controlling list-of-lists in TopTransactionContext.
+<span class="lineNum">      78 </span>            :  *
+<span class="lineNum">      79 </span>            :  *  Currently, inval messages are sent without regard for the possibility
+<span class="lineNum">      80 </span>            :  *  that the object described by the catalog tuple might be a session-local
+<span class="lineNum">      81 </span>            :  *  object such as a temporary table.  This is because (1) this code has
+<span class="lineNum">      82 </span>            :  *  no practical way to tell the difference, and (2) it is not certain that
+<span class="lineNum">      83 </span>            :  *  other backends don't have catalog cache or even relcache entries for
+<span class="lineNum">      84 </span>            :  *  such tables, anyway; there is nothing that prevents that.  It might be
+<span class="lineNum">      85 </span>            :  *  worth trying to avoid sending such inval traffic in the future, if those
+<span class="lineNum">      86 </span>            :  *  problems can be overcome cheaply.
+<span class="lineNum">      87 </span>            :  *
+<span class="lineNum">      88 </span>            :  *
+<span class="lineNum">      89 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      90 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      91 </span>            :  *
+<span class="lineNum">      92 </span>            :  * IDENTIFICATION
+<span class="lineNum">      93 </span>            :  *    src/backend/utils/cache/inval.c
+<span class="lineNum">      94 </span>            :  *
+<span class="lineNum">      95 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      96 </span>            :  */
+<span class="lineNum">      97 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            : #include &lt;limits.h&gt;
+<span class="lineNum">     100 </span>            : 
+<span class="lineNum">     101 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">     102 </span>            : #include &quot;access/xact.h&quot;
+<span class="lineNum">     103 </span>            : #include &quot;catalog/catalog.h&quot;
+<span class="lineNum">     104 </span>            : #include &quot;catalog/pg_constraint.h&quot;
+<span class="lineNum">     105 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">     106 </span>            : #include &quot;storage/sinval.h&quot;
+<span class="lineNum">     107 </span>            : #include &quot;storage/smgr.h&quot;
+<span class="lineNum">     108 </span>            : #include &quot;utils/catcache.h&quot;
+<span class="lineNum">     109 </span>            : #include &quot;utils/inval.h&quot;
+<span class="lineNum">     110 </span>            : #include &quot;utils/memdebug.h&quot;
+<span class="lineNum">     111 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">     112 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">     113 </span>            : #include &quot;utils/relmapper.h&quot;
+<span class="lineNum">     114 </span>            : #include &quot;utils/snapmgr.h&quot;
+<span class="lineNum">     115 </span>            : #include &quot;utils/syscache.h&quot;
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span>            : 
+<span class="lineNum">     118 </span>            : /*
+<span class="lineNum">     119 </span>            :  * To minimize palloc traffic, we keep pending requests in successively-
+<span class="lineNum">     120 </span>            :  * larger chunks (a slightly more sophisticated version of an expansible
+<span class="lineNum">     121 </span>            :  * array).  All request types can be stored as SharedInvalidationMessage
+<span class="lineNum">     122 </span>            :  * records.  The ordering of requests within a list is never significant.
+<span class="lineNum">     123 </span>            :  */
+<span class="lineNum">     124 </span>            : typedef struct InvalidationChunk
+<span class="lineNum">     125 </span>            : {
+<span class="lineNum">     126 </span>            :     struct InvalidationChunk *next; /* list link */
+<span class="lineNum">     127 </span>            :     int         nitems;         /* # items currently stored in chunk */
+<span class="lineNum">     128 </span>            :     int         maxitems;       /* size of allocated array in this chunk */
+<span class="lineNum">     129 </span>            :     SharedInvalidationMessage msgs[FLEXIBLE_ARRAY_MEMBER];
+<span class="lineNum">     130 </span>            : } InvalidationChunk;
+<span class="lineNum">     131 </span>            : 
+<span class="lineNum">     132 </span>            : typedef struct InvalidationListHeader
+<span class="lineNum">     133 </span>            : {
+<span class="lineNum">     134 </span>            :     InvalidationChunk *cclist;  /* list of chunks holding catcache msgs */
+<span class="lineNum">     135 </span>            :     InvalidationChunk *rclist;  /* list of chunks holding relcache msgs */
+<span class="lineNum">     136 </span>            : } InvalidationListHeader;
+<span class="lineNum">     137 </span>            : 
+<span class="lineNum">     138 </span>            : /*----------------
+<span class="lineNum">     139 </span>            :  * Invalidation info is divided into two lists:
+<span class="lineNum">     140 </span>            :  *  1) events so far in current command, not yet reflected to caches.
+<span class="lineNum">     141 </span>            :  *  2) events in previous commands of current transaction; these have
+<span class="lineNum">     142 </span>            :  *     been reflected to local caches, and must be either broadcast to
+<span class="lineNum">     143 </span>            :  *     other backends or rolled back from local cache when we commit
+<span class="lineNum">     144 </span>            :  *     or abort the transaction.
+<span class="lineNum">     145 </span>            :  * Actually, we need two such lists for each level of nested transaction,
+<span class="lineNum">     146 </span>            :  * so that we can discard events from an aborted subtransaction.  When
+<span class="lineNum">     147 </span>            :  * a subtransaction commits, we append its lists to the parent's lists.
+<span class="lineNum">     148 </span>            :  *
+<span class="lineNum">     149 </span>            :  * The relcache-file-invalidated flag can just be a simple boolean,
+<span class="lineNum">     150 </span>            :  * since we only act on it at transaction commit; we don't care which
+<span class="lineNum">     151 </span>            :  * command of the transaction set it.
+<span class="lineNum">     152 </span>            :  *----------------
+<span class="lineNum">     153 </span>            :  */
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            : typedef struct TransInvalidationInfo
+<span class="lineNum">     156 </span>            : {
+<span class="lineNum">     157 </span>            :     /* Back link to parent transaction's info */
+<span class="lineNum">     158 </span>            :     struct TransInvalidationInfo *parent;
+<span class="lineNum">     159 </span>            : 
+<span class="lineNum">     160 </span>            :     /* Subtransaction nesting depth */
+<span class="lineNum">     161 </span>            :     int         my_level;
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span>            :     /* head of current-command event list */
+<span class="lineNum">     164 </span>            :     InvalidationListHeader CurrentCmdInvalidMsgs;
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span>            :     /* head of previous-commands event list */
+<span class="lineNum">     167 </span>            :     InvalidationListHeader PriorCmdInvalidMsgs;
+<span class="lineNum">     168 </span>            : 
+<span class="lineNum">     169 </span>            :     /* init file must be invalidated? */
+<span class="lineNum">     170 </span>            :     bool        RelcacheInitFileInval;
+<span class="lineNum">     171 </span>            : } TransInvalidationInfo;
+<span class="lineNum">     172 </span>            : 
+<span class="lineNum">     173 </span>            : static TransInvalidationInfo *transInvalInfo = NULL;
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span>            : static SharedInvalidationMessage *SharedInvalidMessagesArray;
+<span class="lineNum">     176 </span>            : static int  numSharedInvalidMessagesArray;
+<span class="lineNum">     177 </span>            : static int  maxSharedInvalidMessagesArray;
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span>            : /*
+<span class="lineNum">     181 </span>            :  * Dynamically-registered callback functions.  Current implementation
+<span class="lineNum">     182 </span>            :  * assumes there won't be enough of these to justify a dynamically resizable
+<span class="lineNum">     183 </span>            :  * array; it'd be easy to improve that if needed.
+<span class="lineNum">     184 </span>            :  *
+<span class="lineNum">     185 </span>            :  * To avoid searching in CallSyscacheCallbacks, all callbacks for a given
+<span class="lineNum">     186 </span>            :  * syscache are linked into a list pointed to by syscache_callback_links[id].
+<span class="lineNum">     187 </span>            :  * The link values are syscache_callback_list[] index plus 1, or 0 for none.
+<span class="lineNum">     188 </span>            :  */
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span>            : #define MAX_SYSCACHE_CALLBACKS 64
+<span class="lineNum">     191 </span>            : #define MAX_RELCACHE_CALLBACKS 10
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            : static struct SYSCACHECALLBACK
+<span class="lineNum">     194 </span>            : {
+<span class="lineNum">     195 </span>            :     int16       id;             /* cache number */
+<span class="lineNum">     196 </span>            :     int16       link;           /* next callback index+1 for same cache */
+<span class="lineNum">     197 </span>            :     SyscacheCallbackFunction function;
+<span class="lineNum">     198 </span>            :     Datum       arg;
+<span class="lineNum">     199 </span>            : }           syscache_callback_list[MAX_SYSCACHE_CALLBACKS];
+<span class="lineNum">     200 </span>            : 
+<span class="lineNum">     201 </span>            : static int16 syscache_callback_links[SysCacheSize];
+<span class="lineNum">     202 </span>            : 
+<span class="lineNum">     203 </span>            : static int  syscache_callback_count = 0;
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span>            : static struct RELCACHECALLBACK
+<span class="lineNum">     206 </span>            : {
+<span class="lineNum">     207 </span>            :     RelcacheCallbackFunction function;
+<span class="lineNum">     208 </span>            :     Datum       arg;
+<span class="lineNum">     209 </span>            : }           relcache_callback_list[MAX_RELCACHE_CALLBACKS];
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span>            : static int  relcache_callback_count = 0;
+<span class="lineNum">     212 </span>            : 
+<span class="lineNum">     213 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     214 </span>            :  *              Invalidation list support functions
+<span class="lineNum">     215 </span>            :  *
+<span class="lineNum">     216 </span>            :  * These three routines encapsulate processing of the &quot;chunked&quot;
+<span class="lineNum">     217 </span>            :  * representation of what is logically just a list of messages.
+<span class="lineNum">     218 </span>            :  * ----------------------------------------------------------------
+<span class="lineNum">     219 </span>            :  */
+<span class="lineNum">     220 </span>            : 
+<span class="lineNum">     221 </span>            : /*
+<span class="lineNum">     222 </span>            :  * AddInvalidationMessage
+<span class="lineNum">     223 </span>            :  *      Add an invalidation message to a list (of chunks).
+<span class="lineNum">     224 </span>            :  *
+<span class="lineNum">     225 </span>            :  * Note that we do not pay any great attention to maintaining the original
+<span class="lineNum">     226 </span>            :  * ordering of the messages.
+<a name="227"><span class="lineNum">     227 </span>            :  */</a>
+<span class="lineNum">     228 </span>            : static void
+<span class="lineNum">     229 </span><span class="lineCov">     685906 : AddInvalidationMessage(InvalidationChunk **listHdr,</span>
+<span class="lineNum">     230 </span>            :                        SharedInvalidationMessage *msg)
+<span class="lineNum">     231 </span>            : {
+<span class="lineNum">     232 </span><span class="lineCov">     685906 :     InvalidationChunk *chunk = *listHdr;</span>
+<span class="lineNum">     233 </span>            : 
+<span class="lineNum">     234 </span><span class="lineCov">     685906 :     if (chunk == NULL)</span>
+<span class="lineNum">     235 </span>            :     {
+<span class="lineNum">     236 </span>            :         /* First time through; create initial chunk */
+<span class="lineNum">     237 </span>            : #define FIRSTCHUNKSIZE 32
+<span class="lineNum">     238 </span><span class="lineCov">     150568 :         chunk = (InvalidationChunk *)</span>
+<span class="lineNum">     239 </span><span class="lineCov">     150568 :             MemoryContextAlloc(CurTransactionContext,</span>
+<span class="lineNum">     240 </span>            :                                offsetof(InvalidationChunk, msgs) +
+<span class="lineNum">     241 </span>            :                                FIRSTCHUNKSIZE * sizeof(SharedInvalidationMessage));
+<span class="lineNum">     242 </span><span class="lineCov">     150568 :         chunk-&gt;nitems = 0;</span>
+<span class="lineNum">     243 </span><span class="lineCov">     150568 :         chunk-&gt;maxitems = FIRSTCHUNKSIZE;</span>
+<span class="lineNum">     244 </span><span class="lineCov">     150568 :         chunk-&gt;next = *listHdr;</span>
+<span class="lineNum">     245 </span><span class="lineCov">     150568 :         *listHdr = chunk;</span>
+<span class="lineNum">     246 </span>            :     }
+<span class="lineNum">     247 </span><span class="lineCov">     535338 :     else if (chunk-&gt;nitems &gt;= chunk-&gt;maxitems)</span>
+<span class="lineNum">     248 </span>            :     {
+<span class="lineNum">     249 </span>            :         /* Need another chunk; double size of last chunk */
+<span class="lineNum">     250 </span><span class="lineCov">        208 :         int         chunksize = 2 * chunk-&gt;maxitems;</span>
+<span class="lineNum">     251 </span>            : 
+<span class="lineNum">     252 </span><span class="lineCov">        208 :         chunk = (InvalidationChunk *)</span>
+<span class="lineNum">     253 </span><span class="lineCov">        208 :             MemoryContextAlloc(CurTransactionContext,</span>
+<span class="lineNum">     254 </span>            :                                offsetof(InvalidationChunk, msgs) +
+<span class="lineNum">     255 </span>            :                                chunksize * sizeof(SharedInvalidationMessage));
+<span class="lineNum">     256 </span><span class="lineCov">        208 :         chunk-&gt;nitems = 0;</span>
+<span class="lineNum">     257 </span><span class="lineCov">        208 :         chunk-&gt;maxitems = chunksize;</span>
+<span class="lineNum">     258 </span><span class="lineCov">        208 :         chunk-&gt;next = *listHdr;</span>
+<span class="lineNum">     259 </span><span class="lineCov">        208 :         *listHdr = chunk;</span>
+<span class="lineNum">     260 </span>            :     }
+<span class="lineNum">     261 </span>            :     /* Okay, add message to current chunk */
+<span class="lineNum">     262 </span><span class="lineCov">     685906 :     chunk-&gt;msgs[chunk-&gt;nitems] = *msg;</span>
+<span class="lineNum">     263 </span><span class="lineCov">     685906 :     chunk-&gt;nitems++;</span>
+<span class="lineNum">     264 </span><span class="lineCov">     685906 : }</span>
+<span class="lineNum">     265 </span>            : 
+<span class="lineNum">     266 </span>            : /*
+<span class="lineNum">     267 </span>            :  * Append one list of invalidation message chunks to another, resetting
+<span class="lineNum">     268 </span>            :  * the source chunk-list pointer to NULL.
+<a name="269"><span class="lineNum">     269 </span>            :  */</a>
+<span class="lineNum">     270 </span>            : static void
+<span class="lineNum">     271 </span><span class="lineCov">     205924 : AppendInvalidationMessageList(InvalidationChunk **destHdr,</span>
+<span class="lineNum">     272 </span>            :                               InvalidationChunk **srcHdr)
+<span class="lineNum">     273 </span>            : {
+<span class="lineNum">     274 </span><span class="lineCov">     205924 :     InvalidationChunk *chunk = *srcHdr;</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span><span class="lineCov">     205924 :     if (chunk == NULL)</span>
+<span class="lineNum">     277 </span><span class="lineCov">     261380 :         return;                 /* nothing to do */</span>
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span><span class="lineCov">     301168 :     while (chunk-&gt;next != NULL)</span>
+<span class="lineNum">     280 </span><span class="lineCov">        232 :         chunk = chunk-&gt;next;</span>
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span><span class="lineCov">     150468 :     chunk-&gt;next = *destHdr;</span>
+<span class="lineNum">     283 </span>            : 
+<span class="lineNum">     284 </span><span class="lineCov">     150468 :     *destHdr = *srcHdr;</span>
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span><span class="lineCov">     150468 :     *srcHdr = NULL;</span>
+<span class="lineNum">     287 </span>            : }
+<span class="lineNum">     288 </span>            : 
+<span class="lineNum">     289 </span>            : /*
+<span class="lineNum">     290 </span>            :  * Process a list of invalidation messages.
+<span class="lineNum">     291 </span>            :  *
+<span class="lineNum">     292 </span>            :  * This is a macro that executes the given code fragment for each message in
+<span class="lineNum">     293 </span>            :  * a message chunk list.  The fragment should refer to the message as *msg.
+<span class="lineNum">     294 </span>            :  */
+<span class="lineNum">     295 </span>            : #define ProcessMessageList(listHdr, codeFragment) \
+<span class="lineNum">     296 </span>            :     do { \
+<span class="lineNum">     297 </span>            :         InvalidationChunk *_chunk; \
+<span class="lineNum">     298 </span>            :         for (_chunk = (listHdr); _chunk != NULL; _chunk = _chunk-&gt;next) \
+<span class="lineNum">     299 </span>            :         { \
+<span class="lineNum">     300 </span>            :             int     _cindex; \
+<span class="lineNum">     301 </span>            :             for (_cindex = 0; _cindex &lt; _chunk-&gt;nitems; _cindex++) \
+<span class="lineNum">     302 </span>            :             { \
+<span class="lineNum">     303 </span>            :                 SharedInvalidationMessage *msg = &amp;_chunk-&gt;msgs[_cindex]; \
+<span class="lineNum">     304 </span>            :                 codeFragment; \
+<span class="lineNum">     305 </span>            :             } \
+<span class="lineNum">     306 </span>            :         } \
+<span class="lineNum">     307 </span>            :     } while (0)
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span>            : /*
+<span class="lineNum">     310 </span>            :  * Process a list of invalidation messages group-wise.
+<span class="lineNum">     311 </span>            :  *
+<span class="lineNum">     312 </span>            :  * As above, but the code fragment can handle an array of messages.
+<span class="lineNum">     313 </span>            :  * The fragment should refer to the messages as msgs[], with n entries.
+<span class="lineNum">     314 </span>            :  */
+<span class="lineNum">     315 </span>            : #define ProcessMessageListMulti(listHdr, codeFragment) \
+<span class="lineNum">     316 </span>            :     do { \
+<span class="lineNum">     317 </span>            :         InvalidationChunk *_chunk; \
+<span class="lineNum">     318 </span>            :         for (_chunk = (listHdr); _chunk != NULL; _chunk = _chunk-&gt;next) \
+<span class="lineNum">     319 </span>            :         { \
+<span class="lineNum">     320 </span>            :             SharedInvalidationMessage *msgs = _chunk-&gt;msgs; \
+<span class="lineNum">     321 </span>            :             int     n = _chunk-&gt;nitems; \
+<span class="lineNum">     322 </span>            :             codeFragment; \
+<span class="lineNum">     323 </span>            :         } \
+<span class="lineNum">     324 </span>            :     } while (0)
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span>            : 
+<span class="lineNum">     327 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     328 </span>            :  *              Invalidation set support functions
+<span class="lineNum">     329 </span>            :  *
+<span class="lineNum">     330 </span>            :  * These routines understand about the division of a logical invalidation
+<span class="lineNum">     331 </span>            :  * list into separate physical lists for catcache and relcache entries.
+<span class="lineNum">     332 </span>            :  * ----------------------------------------------------------------
+<span class="lineNum">     333 </span>            :  */
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span>            : /*
+<span class="lineNum">     336 </span>            :  * Add a catcache inval entry
+<a name="337"><span class="lineNum">     337 </span>            :  */</a>
+<span class="lineNum">     338 </span>            : static void
+<span class="lineNum">     339 </span><span class="lineCov">     547268 : AddCatcacheInvalidationMessage(InvalidationListHeader *hdr,</span>
+<span class="lineNum">     340 </span>            :                                int id, uint32 hashValue, Oid dbId)
+<span class="lineNum">     341 </span>            : {
+<span class="lineNum">     342 </span>            :     SharedInvalidationMessage msg;
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span><span class="lineCov">     547268 :     Assert(id &lt; CHAR_MAX);</span>
+<span class="lineNum">     345 </span><span class="lineCov">     547268 :     msg.cc.id = (int8) id;</span>
+<span class="lineNum">     346 </span><span class="lineCov">     547268 :     msg.cc.dbId = dbId;</span>
+<span class="lineNum">     347 </span><span class="lineCov">     547268 :     msg.cc.hashValue = hashValue;</span>
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span>            :     /*
+<span class="lineNum">     350 </span>            :      * Define padding bytes in SharedInvalidationMessage structs to be
+<span class="lineNum">     351 </span>            :      * defined. Otherwise the sinvaladt.c ringbuffer, which is accessed by
+<span class="lineNum">     352 </span>            :      * multiple processes, will cause spurious valgrind warnings about
+<span class="lineNum">     353 </span>            :      * undefined memory being used. That's because valgrind remembers the
+<span class="lineNum">     354 </span>            :      * undefined bytes from the last local process's store, not realizing that
+<span class="lineNum">     355 </span>            :      * another process has written since, filling the previously uninitialized
+<span class="lineNum">     356 </span>            :      * bytes
+<span class="lineNum">     357 </span>            :      */
+<span class="lineNum">     358 </span>            :     VALGRIND_MAKE_MEM_DEFINED(&amp;msg, sizeof(msg));
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span><span class="lineCov">     547268 :     AddInvalidationMessage(&amp;hdr-&gt;cclist, &amp;msg);</span>
+<span class="lineNum">     361 </span><span class="lineCov">     547268 : }</span>
+<span class="lineNum">     362 </span>            : 
+<span class="lineNum">     363 </span>            : /*
+<span class="lineNum">     364 </span>            :  * Add a whole-catalog inval entry
+<a name="365"><span class="lineNum">     365 </span>            :  */</a>
+<span class="lineNum">     366 </span>            : static void
+<span class="lineNum">     367 </span><span class="lineCov">          6 : AddCatalogInvalidationMessage(InvalidationListHeader *hdr,</span>
+<span class="lineNum">     368 </span>            :                               Oid dbId, Oid catId)
+<span class="lineNum">     369 </span>            : {
+<span class="lineNum">     370 </span>            :     SharedInvalidationMessage msg;
+<span class="lineNum">     371 </span>            : 
+<span class="lineNum">     372 </span><span class="lineCov">          6 :     msg.cat.id = SHAREDINVALCATALOG_ID;</span>
+<span class="lineNum">     373 </span><span class="lineCov">          6 :     msg.cat.dbId = dbId;</span>
+<span class="lineNum">     374 </span><span class="lineCov">          6 :     msg.cat.catId = catId;</span>
+<span class="lineNum">     375 </span>            :     /* check AddCatcacheInvalidationMessage() for an explanation */
+<span class="lineNum">     376 </span>            :     VALGRIND_MAKE_MEM_DEFINED(&amp;msg, sizeof(msg));
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span><span class="lineCov">          6 :     AddInvalidationMessage(&amp;hdr-&gt;cclist, &amp;msg);</span>
+<span class="lineNum">     379 </span><span class="lineCov">          6 : }</span>
+<span class="lineNum">     380 </span>            : 
+<span class="lineNum">     381 </span>            : /*
+<span class="lineNum">     382 </span>            :  * Add a relcache inval entry
+<a name="383"><span class="lineNum">     383 </span>            :  */</a>
+<span class="lineNum">     384 </span>            : static void
+<span class="lineNum">     385 </span><span class="lineCov">     251664 : AddRelcacheInvalidationMessage(InvalidationListHeader *hdr,</span>
+<span class="lineNum">     386 </span>            :                                Oid dbId, Oid relId)
+<span class="lineNum">     387 </span>            : {
+<span class="lineNum">     388 </span>            :     SharedInvalidationMessage msg;
+<span class="lineNum">     389 </span>            : 
+<span class="lineNum">     390 </span>            :     /*
+<span class="lineNum">     391 </span>            :      * Don't add a duplicate item. We assume dbId need not be checked because
+<span class="lineNum">     392 </span>            :      * it will never change. InvalidOid for relId means all relations so we
+<span class="lineNum">     393 </span>            :      * don't need to add individual ones when it is present.
+<span class="lineNum">     394 </span>            :      */
+<span class="lineNum">     395 </span><span class="lineCov">     427914 :     ProcessMessageList(hdr-&gt;rclist,</span>
+<span class="lineNum">     396 </span>            :                        if (msg-&gt;rc.id == SHAREDINVALRELCACHE_ID &amp;&amp;
+<span class="lineNum">     397 </span>            :                            (msg-&gt;rc.relId == relId ||
+<span class="lineNum">     398 </span>            :                             msg-&gt;rc.relId == InvalidOid))
+<span class="lineNum">     399 </span>            :                        return);
+<span class="lineNum">     400 </span>            : 
+<span class="lineNum">     401 </span>            :     /* OK, add the item */
+<span class="lineNum">     402 </span><span class="lineCov">      75414 :     msg.rc.id = SHAREDINVALRELCACHE_ID;</span>
+<span class="lineNum">     403 </span><span class="lineCov">      75414 :     msg.rc.dbId = dbId;</span>
+<span class="lineNum">     404 </span><span class="lineCov">      75414 :     msg.rc.relId = relId;</span>
+<span class="lineNum">     405 </span>            :     /* check AddCatcacheInvalidationMessage() for an explanation */
+<span class="lineNum">     406 </span>            :     VALGRIND_MAKE_MEM_DEFINED(&amp;msg, sizeof(msg));
+<span class="lineNum">     407 </span>            : 
+<span class="lineNum">     408 </span><span class="lineCov">      75414 :     AddInvalidationMessage(&amp;hdr-&gt;rclist, &amp;msg);</span>
+<span class="lineNum">     409 </span>            : }
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span>            : /*
+<span class="lineNum">     412 </span>            :  * Add a snapshot inval entry
+<a name="413"><span class="lineNum">     413 </span>            :  */</a>
+<span class="lineNum">     414 </span>            : static void
+<span class="lineNum">     415 </span><span class="lineCov">     132952 : AddSnapshotInvalidationMessage(InvalidationListHeader *hdr,</span>
+<span class="lineNum">     416 </span>            :                                Oid dbId, Oid relId)
+<span class="lineNum">     417 </span>            : {
+<span class="lineNum">     418 </span>            :     SharedInvalidationMessage msg;
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span>            :     /* Don't add a duplicate item */
+<span class="lineNum">     421 </span>            :     /* We assume dbId need not be checked because it will never change */
+<span class="lineNum">     422 </span><span class="lineCov">     202686 :     ProcessMessageList(hdr-&gt;rclist,</span>
+<span class="lineNum">     423 </span>            :                        if (msg-&gt;sn.id == SHAREDINVALSNAPSHOT_ID &amp;&amp;
+<span class="lineNum">     424 </span>            :                            msg-&gt;sn.relId == relId)
+<span class="lineNum">     425 </span>            :                        return);
+<span class="lineNum">     426 </span>            : 
+<span class="lineNum">     427 </span>            :     /* OK, add the item */
+<span class="lineNum">     428 </span><span class="lineCov">      63218 :     msg.sn.id = SHAREDINVALSNAPSHOT_ID;</span>
+<span class="lineNum">     429 </span><span class="lineCov">      63218 :     msg.sn.dbId = dbId;</span>
+<span class="lineNum">     430 </span><span class="lineCov">      63218 :     msg.sn.relId = relId;</span>
+<span class="lineNum">     431 </span>            :     /* check AddCatcacheInvalidationMessage() for an explanation */
+<span class="lineNum">     432 </span>            :     VALGRIND_MAKE_MEM_DEFINED(&amp;msg, sizeof(msg));
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span><span class="lineCov">      63218 :     AddInvalidationMessage(&amp;hdr-&gt;rclist, &amp;msg);</span>
+<span class="lineNum">     435 </span>            : }
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span>            : /*
+<span class="lineNum">     438 </span>            :  * Append one list of invalidation messages to another, resetting
+<span class="lineNum">     439 </span>            :  * the source list to empty.
+<a name="440"><span class="lineNum">     440 </span>            :  */</a>
+<span class="lineNum">     441 </span>            : static void
+<span class="lineNum">     442 </span><span class="lineCov">     102962 : AppendInvalidationMessages(InvalidationListHeader *dest,</span>
+<span class="lineNum">     443 </span>            :                            InvalidationListHeader *src)
+<span class="lineNum">     444 </span>            : {
+<span class="lineNum">     445 </span><span class="lineCov">     102962 :     AppendInvalidationMessageList(&amp;dest-&gt;cclist, &amp;src-&gt;cclist);</span>
+<span class="lineNum">     446 </span><span class="lineCov">     102962 :     AppendInvalidationMessageList(&amp;dest-&gt;rclist, &amp;src-&gt;rclist);</span>
+<span class="lineNum">     447 </span><span class="lineCov">     102962 : }</span>
+<span class="lineNum">     448 </span>            : 
+<span class="lineNum">     449 </span>            : /*
+<span class="lineNum">     450 </span>            :  * Execute the given function for all the messages in an invalidation list.
+<span class="lineNum">     451 </span>            :  * The list is not altered.
+<span class="lineNum">     452 </span>            :  *
+<span class="lineNum">     453 </span>            :  * catcache entries are processed first, for reasons mentioned above.
+<a name="454"><span class="lineNum">     454 </span>            :  */</a>
+<span class="lineNum">     455 </span>            : static void
+<span class="lineNum">     456 </span><span class="lineCov">      84096 : ProcessInvalidationMessages(InvalidationListHeader *hdr,</span>
+<span class="lineNum">     457 </span>            :                             void (*func) (SharedInvalidationMessage *msg))
+<span class="lineNum">     458 </span>            : {
+<span class="lineNum">     459 </span><span class="lineCov">      84096 :     ProcessMessageList(hdr-&gt;cclist, func(msg));</span>
+<span class="lineNum">     460 </span><span class="lineCov">      84096 :     ProcessMessageList(hdr-&gt;rclist, func(msg));</span>
+<span class="lineNum">     461 </span><span class="lineCov">      84096 : }</span>
+<span class="lineNum">     462 </span>            : 
+<span class="lineNum">     463 </span>            : /*
+<span class="lineNum">     464 </span>            :  * As above, but the function is able to process an array of messages
+<span class="lineNum">     465 </span>            :  * rather than just one at a time.
+<a name="466"><span class="lineNum">     466 </span>            :  */</a>
+<span class="lineNum">     467 </span>            : static void
+<span class="lineNum">     468 </span><span class="lineCov">      59828 : ProcessInvalidationMessagesMulti(InvalidationListHeader *hdr,</span>
+<span class="lineNum">     469 </span>            :                                  void (*func) (const SharedInvalidationMessage *msgs, int n))
+<span class="lineNum">     470 </span>            : {
+<span class="lineNum">     471 </span><span class="lineCov">      59828 :     ProcessMessageListMulti(hdr-&gt;cclist, func(msgs, n));</span>
+<span class="lineNum">     472 </span><span class="lineCov">      59828 :     ProcessMessageListMulti(hdr-&gt;rclist, func(msgs, n));</span>
+<span class="lineNum">     473 </span><span class="lineCov">      59828 : }</span>
+<span class="lineNum">     474 </span>            : 
+<span class="lineNum">     475 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     476 </span>            :  *                    private support functions
+<span class="lineNum">     477 </span>            :  * ----------------------------------------------------------------
+<span class="lineNum">     478 </span>            :  */
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span>            : /*
+<span class="lineNum">     481 </span>            :  * RegisterCatcacheInvalidation
+<span class="lineNum">     482 </span>            :  *
+<span class="lineNum">     483 </span>            :  * Register an invalidation event for a catcache tuple entry.
+<a name="484"><span class="lineNum">     484 </span>            :  */</a>
+<span class="lineNum">     485 </span>            : static void
+<span class="lineNum">     486 </span><span class="lineCov">     547268 : RegisterCatcacheInvalidation(int cacheId,</span>
+<span class="lineNum">     487 </span>            :                              uint32 hashValue,
+<span class="lineNum">     488 </span>            :                              Oid dbId)
+<span class="lineNum">     489 </span>            : {
+<span class="lineNum">     490 </span><span class="lineCov">     547268 :     AddCatcacheInvalidationMessage(&amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs,</span>
+<span class="lineNum">     491 </span>            :                                    cacheId, hashValue, dbId);
+<span class="lineNum">     492 </span><span class="lineCov">     547268 : }</span>
+<span class="lineNum">     493 </span>            : 
+<span class="lineNum">     494 </span>            : /*
+<span class="lineNum">     495 </span>            :  * RegisterCatalogInvalidation
+<span class="lineNum">     496 </span>            :  *
+<span class="lineNum">     497 </span>            :  * Register an invalidation event for all catcache entries from a catalog.
+<a name="498"><span class="lineNum">     498 </span>            :  */</a>
+<span class="lineNum">     499 </span>            : static void
+<span class="lineNum">     500 </span><span class="lineCov">          6 : RegisterCatalogInvalidation(Oid dbId, Oid catId)</span>
+<span class="lineNum">     501 </span>            : {
+<span class="lineNum">     502 </span><span class="lineCov">          6 :     AddCatalogInvalidationMessage(&amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs,</span>
+<span class="lineNum">     503 </span>            :                                   dbId, catId);
+<span class="lineNum">     504 </span><span class="lineCov">          6 : }</span>
+<span class="lineNum">     505 </span>            : 
+<span class="lineNum">     506 </span>            : /*
+<span class="lineNum">     507 </span>            :  * RegisterRelcacheInvalidation
+<span class="lineNum">     508 </span>            :  *
+<span class="lineNum">     509 </span>            :  * As above, but register a relcache invalidation event.
+<a name="510"><span class="lineNum">     510 </span>            :  */</a>
+<span class="lineNum">     511 </span>            : static void
+<span class="lineNum">     512 </span><span class="lineCov">     251664 : RegisterRelcacheInvalidation(Oid dbId, Oid relId)</span>
+<span class="lineNum">     513 </span>            : {
+<span class="lineNum">     514 </span><span class="lineCov">     251664 :     AddRelcacheInvalidationMessage(&amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs,</span>
+<span class="lineNum">     515 </span>            :                                    dbId, relId);
+<span class="lineNum">     516 </span>            : 
+<span class="lineNum">     517 </span>            :     /*
+<span class="lineNum">     518 </span>            :      * Most of the time, relcache invalidation is associated with system
+<span class="lineNum">     519 </span>            :      * catalog updates, but there are a few cases where it isn't.  Quick hack
+<span class="lineNum">     520 </span>            :      * to ensure that the next CommandCounterIncrement() will think that we
+<span class="lineNum">     521 </span>            :      * need to do CommandEndInvalidationMessages().
+<span class="lineNum">     522 </span>            :      */
+<span class="lineNum">     523 </span><span class="lineCov">     251664 :     (void) GetCurrentCommandId(true);</span>
+<span class="lineNum">     524 </span>            : 
+<span class="lineNum">     525 </span>            :     /*
+<span class="lineNum">     526 </span>            :      * If the relation being invalidated is one of those cached in a relcache
+<span class="lineNum">     527 </span>            :      * init file, mark that we need to zap that file at commit. For simplicity
+<span class="lineNum">     528 </span>            :      * invalidations for a specific database always invalidate the shared file
+<span class="lineNum">     529 </span>            :      * as well.  Also zap when we are invalidating whole relcache.
+<span class="lineNum">     530 </span>            :      */
+<span class="lineNum">     531 </span><span class="lineCov">     251664 :     if (relId == InvalidOid || RelationIdIsInInitFile(relId))</span>
+<span class="lineNum">     532 </span><span class="lineCov">        822 :         transInvalInfo-&gt;RelcacheInitFileInval = true;</span>
+<span class="lineNum">     533 </span><span class="lineCov">     251664 : }</span>
+<span class="lineNum">     534 </span>            : 
+<span class="lineNum">     535 </span>            : /*
+<span class="lineNum">     536 </span>            :  * RegisterSnapshotInvalidation
+<span class="lineNum">     537 </span>            :  *
+<span class="lineNum">     538 </span>            :  * Register an invalidation event for MVCC scans against a given catalog.
+<span class="lineNum">     539 </span>            :  * Only needed for catalogs that don't have catcaches.
+<a name="540"><span class="lineNum">     540 </span>            :  */</a>
+<span class="lineNum">     541 </span>            : static void
+<span class="lineNum">     542 </span><span class="lineCov">     132952 : RegisterSnapshotInvalidation(Oid dbId, Oid relId)</span>
+<span class="lineNum">     543 </span>            : {
+<span class="lineNum">     544 </span><span class="lineCov">     132952 :     AddSnapshotInvalidationMessage(&amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs,</span>
+<span class="lineNum">     545 </span>            :                                    dbId, relId);
+<span class="lineNum">     546 </span><span class="lineCov">     132952 : }</span>
+<span class="lineNum">     547 </span>            : 
+<span class="lineNum">     548 </span>            : /*
+<span class="lineNum">     549 </span>            :  * LocalExecuteInvalidationMessage
+<span class="lineNum">     550 </span>            :  *
+<span class="lineNum">     551 </span>            :  * Process a single invalidation message (which could be of any type).
+<span class="lineNum">     552 </span>            :  * Only the local caches are flushed; this does not transmit the message
+<span class="lineNum">     553 </span>            :  * to other backends.
+<a name="554"><span class="lineNum">     554 </span>            :  */</a>
+<span class="lineNum">     555 </span>            : void
+<span class="lineNum">     556 </span><span class="lineCov">    4628866 : LocalExecuteInvalidationMessage(SharedInvalidationMessage *msg)</span>
+<span class="lineNum">     557 </span>            : {
+<span class="lineNum">     558 </span><span class="lineCov">    4628866 :     if (msg-&gt;id &gt;= 0)</span>
+<span class="lineNum">     559 </span>            :     {
+<span class="lineNum">     560 </span><span class="lineCov">    3621184 :         if (msg-&gt;cc.dbId == MyDatabaseId || msg-&gt;cc.dbId == InvalidOid)</span>
+<span class="lineNum">     561 </span>            :         {
+<span class="lineNum">     562 </span><span class="lineCov">    2763944 :             InvalidateCatalogSnapshot();</span>
+<span class="lineNum">     563 </span>            : 
+<span class="lineNum">     564 </span><span class="lineCov">    2763944 :             SysCacheInvalidate(msg-&gt;cc.id, msg-&gt;cc.hashValue);</span>
+<span class="lineNum">     565 </span>            : 
+<span class="lineNum">     566 </span><span class="lineCov">    2763944 :             CallSyscacheCallbacks(msg-&gt;cc.id, msg-&gt;cc.hashValue);</span>
+<span class="lineNum">     567 </span>            :         }
+<span class="lineNum">     568 </span>            :     }
+<span class="lineNum">     569 </span><span class="lineCov">    1007682 :     else if (msg-&gt;id == SHAREDINVALCATALOG_ID)</span>
+<span class="lineNum">     570 </span>            :     {
+<span class="lineNum">     571 </span><span class="lineCov">         72 :         if (msg-&gt;cat.dbId == MyDatabaseId || msg-&gt;cat.dbId == InvalidOid)</span>
+<span class="lineNum">     572 </span>            :         {
+<span class="lineNum">     573 </span><span class="lineCov">         64 :             InvalidateCatalogSnapshot();</span>
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span><span class="lineCov">         64 :             CatalogCacheFlushCatalog(msg-&gt;cat.catId);</span>
+<span class="lineNum">     576 </span>            : 
+<span class="lineNum">     577 </span>            :             /* CatalogCacheFlushCatalog calls CallSyscacheCallbacks as needed */
+<span class="lineNum">     578 </span>            :         }
+<span class="lineNum">     579 </span>            :     }
+<span class="lineNum">     580 </span><span class="lineCov">    1007610 :     else if (msg-&gt;id == SHAREDINVALRELCACHE_ID)</span>
+<span class="lineNum">     581 </span>            :     {
+<span class="lineNum">     582 </span><span class="lineCov">     494628 :         if (msg-&gt;rc.dbId == MyDatabaseId || msg-&gt;rc.dbId == InvalidOid)</span>
+<span class="lineNum">     583 </span>            :         {
+<span class="lineNum">     584 </span>            :             int         i;
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span><span class="lineCov">     371764 :             if (msg-&gt;rc.relId == InvalidOid)</span>
+<span class="lineNum">     587 </span><span class="lineCov">         10 :                 RelationCacheInvalidate();</span>
+<span class="lineNum">     588 </span>            :             else
+<span class="lineNum">     589 </span><span class="lineCov">     371754 :                 RelationCacheInvalidateEntry(msg-&gt;rc.relId);</span>
+<span class="lineNum">     590 </span>            : 
+<span class="lineNum">     591 </span><span class="lineCov">    1041134 :             for (i = 0; i &lt; relcache_callback_count; i++)</span>
+<span class="lineNum">     592 </span>            :             {
+<span class="lineNum">     593 </span><span class="lineCov">     669370 :                 struct RELCACHECALLBACK *ccitem = relcache_callback_list + i;</span>
+<span class="lineNum">     594 </span>            : 
+<span class="lineNum">     595 </span><span class="lineCov">     669370 :                 ccitem-&gt;function(ccitem-&gt;arg, msg-&gt;rc.relId);</span>
+<span class="lineNum">     596 </span>            :             }
+<span class="lineNum">     597 </span>            :         }
+<span class="lineNum">     598 </span>            :     }
+<span class="lineNum">     599 </span><span class="lineCov">     512982 :     else if (msg-&gt;id == SHAREDINVALSMGR_ID)</span>
+<span class="lineNum">     600 </span>            :     {
+<span class="lineNum">     601 </span>            :         /*
+<span class="lineNum">     602 </span>            :          * We could have smgr entries for relations of other databases, so no
+<span class="lineNum">     603 </span>            :          * short-circuit test is possible here.
+<span class="lineNum">     604 </span>            :          */
+<span class="lineNum">     605 </span>            :         RelFileNodeBackend rnode;
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span><span class="lineCov">      82940 :         rnode.node = msg-&gt;sm.rnode;</span>
+<span class="lineNum">     608 </span><span class="lineCov">      82940 :         rnode.backend = (msg-&gt;sm.backend_hi &lt;&lt; 16) | (int) msg-&gt;sm.backend_lo;</span>
+<span class="lineNum">     609 </span><span class="lineCov">      82940 :         smgrclosenode(rnode);</span>
+<span class="lineNum">     610 </span>            :     }
+<span class="lineNum">     611 </span><span class="lineCov">     430042 :     else if (msg-&gt;id == SHAREDINVALRELMAP_ID)</span>
+<span class="lineNum">     612 </span>            :     {
+<span class="lineNum">     613 </span>            :         /* We only care about our own database and shared catalogs */
+<span class="lineNum">     614 </span><span class="lineCov">         44 :         if (msg-&gt;rm.dbId == InvalidOid)</span>
+<span class="lineNum">     615 </span><span class="lineCov">         22 :             RelationMapInvalidate(true);</span>
+<span class="lineNum">     616 </span><span class="lineCov">         22 :         else if (msg-&gt;rm.dbId == MyDatabaseId)</span>
+<span class="lineNum">     617 </span><span class="lineCov">         18 :             RelationMapInvalidate(false);</span>
+<span class="lineNum">     618 </span>            :     }
+<span class="lineNum">     619 </span><span class="lineCov">     429998 :     else if (msg-&gt;id == SHAREDINVALSNAPSHOT_ID)</span>
+<span class="lineNum">     620 </span>            :     {
+<span class="lineNum">     621 </span>            :         /* We only care about our own database and shared catalogs */
+<span class="lineNum">     622 </span><span class="lineCov">     429998 :         if (msg-&gt;rm.dbId == InvalidOid)</span>
+<span class="lineNum">     623 </span><span class="lineCov">      16070 :             InvalidateCatalogSnapshot();</span>
+<span class="lineNum">     624 </span><span class="lineCov">     413928 :         else if (msg-&gt;rm.dbId == MyDatabaseId)</span>
+<span class="lineNum">     625 </span><span class="lineCov">     312610 :             InvalidateCatalogSnapshot();</span>
+<span class="lineNum">     626 </span>            :     }
+<span class="lineNum">     627 </span>            :     else
+<span class="lineNum">     628 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;unrecognized SI message ID: %d&quot;, msg-&gt;id);</span>
+<span class="lineNum">     629 </span><span class="lineCov">    4628866 : }</span>
+<span class="lineNum">     630 </span>            : 
+<span class="lineNum">     631 </span>            : /*
+<span class="lineNum">     632 </span>            :  *      InvalidateSystemCaches
+<span class="lineNum">     633 </span>            :  *
+<span class="lineNum">     634 </span>            :  *      This blows away all tuples in the system catalog caches and
+<span class="lineNum">     635 </span>            :  *      all the cached relation descriptors and smgr cache entries.
+<span class="lineNum">     636 </span>            :  *      Relation descriptors that have positive refcounts are then rebuilt.
+<span class="lineNum">     637 </span>            :  *
+<span class="lineNum">     638 </span>            :  *      We call this when we see a shared-inval-queue overflow signal,
+<span class="lineNum">     639 </span>            :  *      since that tells us we've lost some shared-inval messages and hence
+<span class="lineNum">     640 </span>            :  *      don't know what needs to be invalidated.
+<a name="641"><span class="lineNum">     641 </span>            :  */</a>
+<span class="lineNum">     642 </span>            : void
+<span class="lineNum">     643 </span><span class="lineCov">        780 : InvalidateSystemCaches(void)</span>
+<span class="lineNum">     644 </span>            : {
+<span class="lineNum">     645 </span>            :     int         i;
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span><span class="lineCov">        780 :     InvalidateCatalogSnapshot();</span>
+<span class="lineNum">     648 </span><span class="lineCov">        780 :     ResetCatalogCaches();</span>
+<span class="lineNum">     649 </span><span class="lineCov">        780 :     RelationCacheInvalidate();  /* gets smgr and relmap too */</span>
+<span class="lineNum">     650 </span>            : 
+<span class="lineNum">     651 </span><span class="lineCov">       8730 :     for (i = 0; i &lt; syscache_callback_count; i++)</span>
+<span class="lineNum">     652 </span>            :     {
+<span class="lineNum">     653 </span><span class="lineCov">       7950 :         struct SYSCACHECALLBACK *ccitem = syscache_callback_list + i;</span>
+<span class="lineNum">     654 </span>            : 
+<span class="lineNum">     655 </span><span class="lineCov">       7950 :         ccitem-&gt;function(ccitem-&gt;arg, ccitem-&gt;id, 0);</span>
+<span class="lineNum">     656 </span>            :     }
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span><span class="lineCov">       1574 :     for (i = 0; i &lt; relcache_callback_count; i++)</span>
+<span class="lineNum">     659 </span>            :     {
+<span class="lineNum">     660 </span><span class="lineCov">        794 :         struct RELCACHECALLBACK *ccitem = relcache_callback_list + i;</span>
+<span class="lineNum">     661 </span>            : 
+<span class="lineNum">     662 </span><span class="lineCov">        794 :         ccitem-&gt;function(ccitem-&gt;arg, InvalidOid);</span>
+<span class="lineNum">     663 </span>            :     }
+<span class="lineNum">     664 </span><span class="lineCov">        780 : }</span>
+<span class="lineNum">     665 </span>            : 
+<span class="lineNum">     666 </span>            : 
+<span class="lineNum">     667 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     668 </span>            :  *                    public functions
+<span class="lineNum">     669 </span>            :  * ----------------------------------------------------------------
+<span class="lineNum">     670 </span>            :  */
+<span class="lineNum">     671 </span>            : 
+<span class="lineNum">     672 </span>            : /*
+<span class="lineNum">     673 </span>            :  * AcceptInvalidationMessages
+<span class="lineNum">     674 </span>            :  *      Read and process invalidation messages from the shared invalidation
+<span class="lineNum">     675 </span>            :  *      message queue.
+<span class="lineNum">     676 </span>            :  *
+<span class="lineNum">     677 </span>            :  * Note:
+<span class="lineNum">     678 </span>            :  *      This should be called as the first step in processing a transaction.
+<a name="679"><span class="lineNum">     679 </span>            :  */</a>
+<span class="lineNum">     680 </span>            : void
+<span class="lineNum">     681 </span><span class="lineCov">    3239028 : AcceptInvalidationMessages(void)</span>
+<span class="lineNum">     682 </span>            : {
+<span class="lineNum">     683 </span><span class="lineCov">    3239028 :     ReceiveSharedInvalidMessages(LocalExecuteInvalidationMessage,</span>
+<span class="lineNum">     684 </span>            :                                  InvalidateSystemCaches);
+<span class="lineNum">     685 </span>            : 
+<span class="lineNum">     686 </span>            :     /*
+<span class="lineNum">     687 </span>            :      * Test code to force cache flushes anytime a flush could happen.
+<span class="lineNum">     688 </span>            :      *
+<span class="lineNum">     689 </span>            :      * If used with CLOBBER_FREED_MEMORY, CLOBBER_CACHE_ALWAYS provides a
+<span class="lineNum">     690 </span>            :      * fairly thorough test that the system contains no cache-flush hazards.
+<span class="lineNum">     691 </span>            :      * However, it also makes the system unbelievably slow --- the regression
+<span class="lineNum">     692 </span>            :      * tests take about 100 times longer than normal.
+<span class="lineNum">     693 </span>            :      *
+<span class="lineNum">     694 </span>            :      * If you're a glutton for punishment, try CLOBBER_CACHE_RECURSIVELY. This
+<span class="lineNum">     695 </span>            :      * slows things by at least a factor of 10000, so I wouldn't suggest
+<span class="lineNum">     696 </span>            :      * trying to run the entire regression tests that way.  It's useful to try
+<span class="lineNum">     697 </span>            :      * a few simple tests, to make sure that cache reload isn't subject to
+<span class="lineNum">     698 </span>            :      * internal cache-flush hazards, but after you've done a few thousand
+<span class="lineNum">     699 </span>            :      * recursive reloads it's unlikely you'll learn more.
+<span class="lineNum">     700 </span>            :      */
+<span class="lineNum">     701 </span>            : #if defined(CLOBBER_CACHE_ALWAYS)
+<span class="lineNum">     702 </span>            :     {
+<span class="lineNum">     703 </span>            :         static bool in_recursion = false;
+<span class="lineNum">     704 </span>            : 
+<span class="lineNum">     705 </span>            :         if (!in_recursion)
+<span class="lineNum">     706 </span>            :         {
+<span class="lineNum">     707 </span>            :             in_recursion = true;
+<span class="lineNum">     708 </span>            :             InvalidateSystemCaches();
+<span class="lineNum">     709 </span>            :             in_recursion = false;
+<span class="lineNum">     710 </span>            :         }
+<span class="lineNum">     711 </span>            :     }
+<span class="lineNum">     712 </span>            : #elif defined(CLOBBER_CACHE_RECURSIVELY)
+<span class="lineNum">     713 </span>            :     {
+<span class="lineNum">     714 </span>            :         static int  recursion_depth = 0;
+<span class="lineNum">     715 </span>            : 
+<span class="lineNum">     716 </span>            :         /* Maximum depth is arbitrary depending on your threshold of pain */
+<span class="lineNum">     717 </span>            :         if (recursion_depth &lt; 3)
+<span class="lineNum">     718 </span>            :         {
+<span class="lineNum">     719 </span>            :             recursion_depth++;
+<span class="lineNum">     720 </span>            :             InvalidateSystemCaches();
+<span class="lineNum">     721 </span>            :             recursion_depth--;
+<span class="lineNum">     722 </span>            :         }
+<span class="lineNum">     723 </span>            :     }
+<span class="lineNum">     724 </span>            : #endif
+<span class="lineNum">     725 </span><span class="lineCov">    3239028 : }</span>
+<span class="lineNum">     726 </span>            : 
+<span class="lineNum">     727 </span>            : /*
+<span class="lineNum">     728 </span>            :  * PrepareInvalidationState
+<span class="lineNum">     729 </span>            :  *      Initialize inval lists for the current (sub)transaction.
+<a name="730"><span class="lineNum">     730 </span>            :  */</a>
+<span class="lineNum">     731 </span>            : static void
+<span class="lineNum">     732 </span><span class="lineCov">     462016 : PrepareInvalidationState(void)</span>
+<span class="lineNum">     733 </span>            : {
+<span class="lineNum">     734 </span>            :     TransInvalidationInfo *myInfo;
+<span class="lineNum">     735 </span>            : 
+<span class="lineNum">     736 </span><span class="lineCov">     903274 :     if (transInvalInfo != NULL &amp;&amp;</span>
+<span class="lineNum">     737 </span><span class="lineCov">     441258 :         transInvalInfo-&gt;my_level == GetCurrentTransactionNestLevel())</span>
+<span class="lineNum">     738 </span><span class="lineCov">     903006 :         return;</span>
+<span class="lineNum">     739 </span>            : 
+<span class="lineNum">     740 </span><span class="lineCov">      21026 :     myInfo = (TransInvalidationInfo *)</span>
+<span class="lineNum">     741 </span><span class="lineCov">      21026 :         MemoryContextAllocZero(TopTransactionContext,</span>
+<span class="lineNum">     742 </span>            :                                sizeof(TransInvalidationInfo));
+<span class="lineNum">     743 </span><span class="lineCov">      21026 :     myInfo-&gt;parent = transInvalInfo;</span>
+<span class="lineNum">     744 </span><span class="lineCov">      21026 :     myInfo-&gt;my_level = GetCurrentTransactionNestLevel();</span>
+<span class="lineNum">     745 </span>            : 
+<span class="lineNum">     746 </span>            :     /*
+<span class="lineNum">     747 </span>            :      * If there's any previous entry, this one should be for a deeper nesting
+<span class="lineNum">     748 </span>            :      * level.
+<span class="lineNum">     749 </span>            :      */
+<span class="lineNum">     750 </span><span class="lineCov">      21026 :     Assert(transInvalInfo == NULL ||</span>
+<span class="lineNum">     751 </span>            :            myInfo-&gt;my_level &gt; transInvalInfo-&gt;my_level);
+<span class="lineNum">     752 </span>            : 
+<span class="lineNum">     753 </span><span class="lineCov">      21026 :     transInvalInfo = myInfo;</span>
+<span class="lineNum">     754 </span>            : }
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span>            : /*
+<span class="lineNum">     757 </span>            :  * PostPrepare_Inval
+<span class="lineNum">     758 </span>            :  *      Clean up after successful PREPARE.
+<span class="lineNum">     759 </span>            :  *
+<span class="lineNum">     760 </span>            :  * Here, we want to act as though the transaction aborted, so that we will
+<span class="lineNum">     761 </span>            :  * undo any syscache changes it made, thereby bringing us into sync with the
+<span class="lineNum">     762 </span>            :  * outside world, which doesn't believe the transaction committed yet.
+<span class="lineNum">     763 </span>            :  *
+<span class="lineNum">     764 </span>            :  * If the prepared transaction is later aborted, there is nothing more to
+<span class="lineNum">     765 </span>            :  * do; if it commits, we will receive the consequent inval messages just
+<span class="lineNum">     766 </span>            :  * like everyone else.
+<a name="767"><span class="lineNum">     767 </span>            :  */</a>
+<span class="lineNum">     768 </span>            : void
+<span class="lineNum">     769 </span><span class="lineCov">         12 : PostPrepare_Inval(void)</span>
+<span class="lineNum">     770 </span>            : {
+<span class="lineNum">     771 </span><span class="lineCov">         12 :     AtEOXact_Inval(false);</span>
+<span class="lineNum">     772 </span><span class="lineCov">         12 : }</span>
+<span class="lineNum">     773 </span>            : 
+<span class="lineNum">     774 </span>            : /*
+<span class="lineNum">     775 </span>            :  * Collect invalidation messages into SharedInvalidMessagesArray array.
+<a name="776"><span class="lineNum">     776 </span>            :  */</a>
+<span class="lineNum">     777 </span>            : static void
+<span class="lineNum">     778 </span><span class="lineCov">     128672 : MakeSharedInvalidMessagesArray(const SharedInvalidationMessage *msgs, int n)</span>
+<span class="lineNum">     779 </span>            : {
+<span class="lineNum">     780 </span>            :     /*
+<span class="lineNum">     781 </span>            :      * Initialise array first time through in each commit
+<span class="lineNum">     782 </span>            :      */
+<span class="lineNum">     783 </span><span class="lineCov">     128672 :     if (SharedInvalidMessagesArray == NULL)</span>
+<span class="lineNum">     784 </span>            :     {
+<span class="lineNum">     785 </span><span class="lineCov">      19882 :         maxSharedInvalidMessagesArray = FIRSTCHUNKSIZE;</span>
+<span class="lineNum">     786 </span><span class="lineCov">      19882 :         numSharedInvalidMessagesArray = 0;</span>
+<span class="lineNum">     787 </span>            : 
+<span class="lineNum">     788 </span>            :         /*
+<span class="lineNum">     789 </span>            :          * Although this is being palloc'd we don't actually free it directly.
+<span class="lineNum">     790 </span>            :          * We're so close to EOXact that we now we're going to lose it anyhow.
+<span class="lineNum">     791 </span>            :          */
+<span class="lineNum">     792 </span><span class="lineCov">      19882 :         SharedInvalidMessagesArray = palloc(maxSharedInvalidMessagesArray</span>
+<span class="lineNum">     793 </span>            :                                             * sizeof(SharedInvalidationMessage));
+<span class="lineNum">     794 </span>            :     }
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span><span class="lineCov">     128672 :     if ((numSharedInvalidMessagesArray + n) &gt; maxSharedInvalidMessagesArray)</span>
+<span class="lineNum">     797 </span>            :     {
+<span class="lineNum">     798 </span><span class="lineCov">      23778 :         while ((numSharedInvalidMessagesArray + n) &gt; maxSharedInvalidMessagesArray)</span>
+<span class="lineNum">     799 </span><span class="lineCov">       7934 :             maxSharedInvalidMessagesArray *= 2;</span>
+<span class="lineNum">     800 </span>            : 
+<span class="lineNum">     801 </span><span class="lineCov">       7922 :         SharedInvalidMessagesArray = repalloc(SharedInvalidMessagesArray,</span>
+<span class="lineNum">     802 </span>            :                                               maxSharedInvalidMessagesArray
+<span class="lineNum">     803 </span>            :                                               * sizeof(SharedInvalidationMessage));
+<span class="lineNum">     804 </span>            :     }
+<span class="lineNum">     805 </span>            : 
+<span class="lineNum">     806 </span>            :     /*
+<span class="lineNum">     807 </span>            :      * Append the next chunk onto the array
+<span class="lineNum">     808 </span>            :      */
+<span class="lineNum">     809 </span><span class="lineCov">     128672 :     memcpy(SharedInvalidMessagesArray + numSharedInvalidMessagesArray,</span>
+<span class="lineNum">     810 </span>            :            msgs, n * sizeof(SharedInvalidationMessage));
+<span class="lineNum">     811 </span><span class="lineCov">     128672 :     numSharedInvalidMessagesArray += n;</span>
+<span class="lineNum">     812 </span><span class="lineCov">     128672 : }</span>
+<span class="lineNum">     813 </span>            : 
+<span class="lineNum">     814 </span>            : /*
+<span class="lineNum">     815 </span>            :  * xactGetCommittedInvalidationMessages() is executed by
+<span class="lineNum">     816 </span>            :  * RecordTransactionCommit() to add invalidation messages onto the
+<span class="lineNum">     817 </span>            :  * commit record. This applies only to commit message types, never to
+<span class="lineNum">     818 </span>            :  * abort records. Must always run before AtEOXact_Inval(), since that
+<span class="lineNum">     819 </span>            :  * removes the data we need to see.
+<span class="lineNum">     820 </span>            :  *
+<span class="lineNum">     821 </span>            :  * Remember that this runs before we have officially committed, so we
+<span class="lineNum">     822 </span>            :  * must not do anything here to change what might occur *if* we should
+<span class="lineNum">     823 </span>            :  * fail between here and the actual commit.
+<span class="lineNum">     824 </span>            :  *
+<span class="lineNum">     825 </span>            :  * see also xact_redo_commit() and xact_desc_commit()
+<a name="826"><span class="lineNum">     826 </span>            :  */</a>
+<span class="lineNum">     827 </span>            : int
+<span class="lineNum">     828 </span><span class="lineCov">      62290 : xactGetCommittedInvalidationMessages(SharedInvalidationMessage **msgs,</span>
+<span class="lineNum">     829 </span>            :                                      bool *RelcacheInitFileInval)
+<span class="lineNum">     830 </span>            : {
+<span class="lineNum">     831 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">     832 </span>            : 
+<span class="lineNum">     833 </span>            :     /* Quick exit if we haven't done anything with invalidation messages. */
+<span class="lineNum">     834 </span><span class="lineCov">      62290 :     if (transInvalInfo == NULL)</span>
+<span class="lineNum">     835 </span>            :     {
+<span class="lineNum">     836 </span><span class="lineCov">      42346 :         *RelcacheInitFileInval = false;</span>
+<span class="lineNum">     837 </span><span class="lineCov">      42346 :         *msgs = NULL;</span>
+<span class="lineNum">     838 </span><span class="lineCov">      42346 :         return 0;</span>
+<span class="lineNum">     839 </span>            :     }
+<span class="lineNum">     840 </span>            : 
+<span class="lineNum">     841 </span>            :     /* Must be at top of stack */
+<span class="lineNum">     842 </span><span class="lineCov">      19944 :     Assert(transInvalInfo-&gt;my_level == 1 &amp;&amp; transInvalInfo-&gt;parent == NULL);</span>
+<span class="lineNum">     843 </span>            : 
+<span class="lineNum">     844 </span>            :     /*
+<span class="lineNum">     845 </span>            :      * Relcache init file invalidation requires processing both before and
+<span class="lineNum">     846 </span>            :      * after we send the SI messages.  However, we need not do anything unless
+<span class="lineNum">     847 </span>            :      * we committed.
+<span class="lineNum">     848 </span>            :      */
+<span class="lineNum">     849 </span><span class="lineCov">      19944 :     *RelcacheInitFileInval = transInvalInfo-&gt;RelcacheInitFileInval;</span>
+<span class="lineNum">     850 </span>            : 
+<span class="lineNum">     851 </span>            :     /*
+<span class="lineNum">     852 </span>            :      * Walk through TransInvalidationInfo to collect all the messages into a
+<span class="lineNum">     853 </span>            :      * single contiguous array of invalidation messages. It must be contiguous
+<span class="lineNum">     854 </span>            :      * so we can copy directly into WAL message. Maintain the order that they
+<span class="lineNum">     855 </span>            :      * would be processed in by AtEOXact_Inval(), to ensure emulated behaviour
+<span class="lineNum">     856 </span>            :      * in redo is as similar as possible to original. We want the same bugs,
+<span class="lineNum">     857 </span>            :      * if any, not new ones.
+<span class="lineNum">     858 </span>            :      */
+<span class="lineNum">     859 </span><span class="lineCov">      19944 :     oldcontext = MemoryContextSwitchTo(CurTransactionContext);</span>
+<span class="lineNum">     860 </span>            : 
+<span class="lineNum">     861 </span><span class="lineCov">      19944 :     ProcessInvalidationMessagesMulti(&amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs,</span>
+<span class="lineNum">     862 </span>            :                                      MakeSharedInvalidMessagesArray);
+<span class="lineNum">     863 </span><span class="lineCov">      19944 :     ProcessInvalidationMessagesMulti(&amp;transInvalInfo-&gt;PriorCmdInvalidMsgs,</span>
+<span class="lineNum">     864 </span>            :                                      MakeSharedInvalidMessagesArray);
+<span class="lineNum">     865 </span><span class="lineCov">      19944 :     MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     866 </span>            : 
+<span class="lineNum">     867 </span><span class="lineCov">      19944 :     Assert(!(numSharedInvalidMessagesArray &gt; 0 &amp;&amp;</span>
+<span class="lineNum">     868 </span>            :              SharedInvalidMessagesArray == NULL));
+<span class="lineNum">     869 </span>            : 
+<span class="lineNum">     870 </span><span class="lineCov">      19944 :     *msgs = SharedInvalidMessagesArray;</span>
+<span class="lineNum">     871 </span>            : 
+<span class="lineNum">     872 </span><span class="lineCov">      19944 :     return numSharedInvalidMessagesArray;</span>
+<span class="lineNum">     873 </span>            : }
+<span class="lineNum">     874 </span>            : 
+<span class="lineNum">     875 </span>            : /*
+<span class="lineNum">     876 </span>            :  * ProcessCommittedInvalidationMessages is executed by xact_redo_commit() or
+<span class="lineNum">     877 </span>            :  * standby_redo() to process invalidation messages. Currently that happens
+<span class="lineNum">     878 </span>            :  * only at end-of-xact.
+<span class="lineNum">     879 </span>            :  *
+<span class="lineNum">     880 </span>            :  * Relcache init file invalidation requires processing both
+<span class="lineNum">     881 </span>            :  * before and after we send the SI messages. See AtEOXact_Inval()
+<a name="882"><span class="lineNum">     882 </span>            :  */</a>
+<span class="lineNum">     883 </span>            : void
+<span class="lineNum">     884 </span><span class="lineNoCov">          0 : ProcessCommittedInvalidationMessages(SharedInvalidationMessage *msgs,</span>
+<span class="lineNum">     885 </span>            :                                      int nmsgs, bool RelcacheInitFileInval,
+<span class="lineNum">     886 </span>            :                                      Oid dbid, Oid tsid)
+<span class="lineNum">     887 </span>            : {
+<span class="lineNum">     888 </span><span class="lineNoCov">          0 :     if (nmsgs &lt;= 0)</span>
+<span class="lineNum">     889 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     890 </span>            : 
+<span class="lineNum">     891 </span><span class="lineNoCov">          0 :     elog(trace_recovery(DEBUG4), &quot;replaying commit with %d messages%s&quot;, nmsgs,</span>
+<span class="lineNum">     892 </span>            :          (RelcacheInitFileInval ? &quot; and relcache file invalidation&quot; : &quot;&quot;));
+<span class="lineNum">     893 </span>            : 
+<span class="lineNum">     894 </span><span class="lineNoCov">          0 :     if (RelcacheInitFileInval)</span>
+<span class="lineNum">     895 </span>            :     {
+<span class="lineNum">     896 </span><span class="lineNoCov">          0 :         elog(trace_recovery(DEBUG4), &quot;removing relcache init files for database %u&quot;,</span>
+<span class="lineNum">     897 </span>            :              dbid);
+<span class="lineNum">     898 </span>            : 
+<span class="lineNum">     899 </span>            :         /*
+<span class="lineNum">     900 </span>            :          * RelationCacheInitFilePreInvalidate, when the invalidation message
+<span class="lineNum">     901 </span>            :          * is for a specific database, requires DatabasePath to be set, but we
+<span class="lineNum">     902 </span>            :          * should not use SetDatabasePath during recovery, since it is
+<span class="lineNum">     903 </span>            :          * intended to be used only once by normal backends.  Hence, a quick
+<span class="lineNum">     904 </span>            :          * hack: set DatabasePath directly then unset after use.
+<span class="lineNum">     905 </span>            :          */
+<span class="lineNum">     906 </span><span class="lineNoCov">          0 :         if (OidIsValid(dbid))</span>
+<span class="lineNum">     907 </span><span class="lineNoCov">          0 :             DatabasePath = GetDatabasePath(dbid, tsid);</span>
+<span class="lineNum">     908 </span>            : 
+<span class="lineNum">     909 </span><span class="lineNoCov">          0 :         RelationCacheInitFilePreInvalidate();</span>
+<span class="lineNum">     910 </span>            : 
+<span class="lineNum">     911 </span><span class="lineNoCov">          0 :         if (OidIsValid(dbid))</span>
+<span class="lineNum">     912 </span>            :         {
+<span class="lineNum">     913 </span><span class="lineNoCov">          0 :             pfree(DatabasePath);</span>
+<span class="lineNum">     914 </span><span class="lineNoCov">          0 :             DatabasePath = NULL;</span>
+<span class="lineNum">     915 </span>            :         }
+<span class="lineNum">     916 </span>            :     }
+<span class="lineNum">     917 </span>            : 
+<span class="lineNum">     918 </span><span class="lineNoCov">          0 :     SendSharedInvalidMessages(msgs, nmsgs);</span>
+<span class="lineNum">     919 </span>            : 
+<span class="lineNum">     920 </span><span class="lineNoCov">          0 :     if (RelcacheInitFileInval)</span>
+<span class="lineNum">     921 </span><span class="lineNoCov">          0 :         RelationCacheInitFilePostInvalidate();</span>
+<span class="lineNum">     922 </span>            : }
+<span class="lineNum">     923 </span>            : 
+<span class="lineNum">     924 </span>            : /*
+<span class="lineNum">     925 </span>            :  * AtEOXact_Inval
+<span class="lineNum">     926 </span>            :  *      Process queued-up invalidation messages at end of main transaction.
+<span class="lineNum">     927 </span>            :  *
+<span class="lineNum">     928 </span>            :  * If isCommit, we must send out the messages in our PriorCmdInvalidMsgs list
+<span class="lineNum">     929 </span>            :  * to the shared invalidation message queue.  Note that these will be read
+<span class="lineNum">     930 </span>            :  * not only by other backends, but also by our own backend at the next
+<span class="lineNum">     931 </span>            :  * transaction start (via AcceptInvalidationMessages).  This means that
+<span class="lineNum">     932 </span>            :  * we can skip immediate local processing of anything that's still in
+<span class="lineNum">     933 </span>            :  * CurrentCmdInvalidMsgs, and just send that list out too.
+<span class="lineNum">     934 </span>            :  *
+<span class="lineNum">     935 </span>            :  * If not isCommit, we are aborting, and must locally process the messages
+<span class="lineNum">     936 </span>            :  * in PriorCmdInvalidMsgs.  No messages need be sent to other backends,
+<span class="lineNum">     937 </span>            :  * since they'll not have seen our changed tuples anyway.  We can forget
+<span class="lineNum">     938 </span>            :  * about CurrentCmdInvalidMsgs too, since those changes haven't touched
+<span class="lineNum">     939 </span>            :  * the caches yet.
+<span class="lineNum">     940 </span>            :  *
+<span class="lineNum">     941 </span>            :  * In any case, reset the various lists to empty.  We need not physically
+<span class="lineNum">     942 </span>            :  * free memory here, since TopTransactionContext is about to be emptied
+<span class="lineNum">     943 </span>            :  * anyway.
+<span class="lineNum">     944 </span>            :  *
+<span class="lineNum">     945 </span>            :  * Note:
+<span class="lineNum">     946 </span>            :  *      This should be called as the last step in processing a transaction.
+<a name="947"><span class="lineNum">     947 </span>            :  */</a>
+<span class="lineNum">     948 </span>            : void
+<span class="lineNum">     949 </span><span class="lineCov">      71316 : AtEOXact_Inval(bool isCommit)</span>
+<span class="lineNum">     950 </span>            : {
+<span class="lineNum">     951 </span>            :     /* Quick exit if no messages */
+<span class="lineNum">     952 </span><span class="lineCov">      71316 :     if (transInvalInfo == NULL)</span>
+<span class="lineNum">     953 </span><span class="lineCov">     121888 :         return;</span>
+<span class="lineNum">     954 </span>            : 
+<span class="lineNum">     955 </span>            :     /* Must be at top of stack */
+<span class="lineNum">     956 </span><span class="lineCov">      20744 :     Assert(transInvalInfo-&gt;my_level == 1 &amp;&amp; transInvalInfo-&gt;parent == NULL);</span>
+<span class="lineNum">     957 </span>            : 
+<span class="lineNum">     958 </span><span class="lineCov">      20744 :     if (isCommit)</span>
+<span class="lineNum">     959 </span>            :     {
+<span class="lineNum">     960 </span>            :         /*
+<span class="lineNum">     961 </span>            :          * Relcache init file invalidation requires processing both before and
+<span class="lineNum">     962 </span>            :          * after we send the SI messages.  However, we need not do anything
+<span class="lineNum">     963 </span>            :          * unless we committed.
+<span class="lineNum">     964 </span>            :          */
+<span class="lineNum">     965 </span><span class="lineCov">      19940 :         if (transInvalInfo-&gt;RelcacheInitFileInval)</span>
+<span class="lineNum">     966 </span><span class="lineCov">        242 :             RelationCacheInitFilePreInvalidate();</span>
+<span class="lineNum">     967 </span>            : 
+<span class="lineNum">     968 </span><span class="lineCov">      19940 :         AppendInvalidationMessages(&amp;transInvalInfo-&gt;PriorCmdInvalidMsgs,</span>
+<span class="lineNum">     969 </span><span class="lineCov">      19940 :                                    &amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs);</span>
+<span class="lineNum">     970 </span>            : 
+<span class="lineNum">     971 </span><span class="lineCov">      19940 :         ProcessInvalidationMessagesMulti(&amp;transInvalInfo-&gt;PriorCmdInvalidMsgs,</span>
+<span class="lineNum">     972 </span>            :                                          SendSharedInvalidMessages);
+<span class="lineNum">     973 </span>            : 
+<span class="lineNum">     974 </span><span class="lineCov">      19940 :         if (transInvalInfo-&gt;RelcacheInitFileInval)</span>
+<span class="lineNum">     975 </span><span class="lineCov">        242 :             RelationCacheInitFilePostInvalidate();</span>
+<span class="lineNum">     976 </span>            :     }
+<span class="lineNum">     977 </span>            :     else
+<span class="lineNum">     978 </span>            :     {
+<span class="lineNum">     979 </span><span class="lineCov">        804 :         ProcessInvalidationMessages(&amp;transInvalInfo-&gt;PriorCmdInvalidMsgs,</span>
+<span class="lineNum">     980 </span>            :                                     LocalExecuteInvalidationMessage);
+<span class="lineNum">     981 </span>            :     }
+<span class="lineNum">     982 </span>            : 
+<span class="lineNum">     983 </span>            :     /* Need not free anything explicitly */
+<span class="lineNum">     984 </span><span class="lineCov">      20744 :     transInvalInfo = NULL;</span>
+<span class="lineNum">     985 </span><span class="lineCov">      20744 :     SharedInvalidMessagesArray = NULL;</span>
+<span class="lineNum">     986 </span><span class="lineCov">      20744 :     numSharedInvalidMessagesArray = 0;</span>
+<span class="lineNum">     987 </span>            : }
+<span class="lineNum">     988 </span>            : 
+<span class="lineNum">     989 </span>            : /*
+<span class="lineNum">     990 </span>            :  * AtEOSubXact_Inval
+<span class="lineNum">     991 </span>            :  *      Process queued-up invalidation messages at end of subtransaction.
+<span class="lineNum">     992 </span>            :  *
+<span class="lineNum">     993 </span>            :  * If isCommit, process CurrentCmdInvalidMsgs if any (there probably aren't),
+<span class="lineNum">     994 </span>            :  * and then attach both CurrentCmdInvalidMsgs and PriorCmdInvalidMsgs to the
+<span class="lineNum">     995 </span>            :  * parent's PriorCmdInvalidMsgs list.
+<span class="lineNum">     996 </span>            :  *
+<span class="lineNum">     997 </span>            :  * If not isCommit, we are aborting, and must locally process the messages
+<span class="lineNum">     998 </span>            :  * in PriorCmdInvalidMsgs.  No messages need be sent to other backends.
+<span class="lineNum">     999 </span>            :  * We can forget about CurrentCmdInvalidMsgs too, since those changes haven't
+<span class="lineNum">    1000 </span>            :  * touched the caches yet.
+<span class="lineNum">    1001 </span>            :  *
+<span class="lineNum">    1002 </span>            :  * In any case, pop the transaction stack.  We need not physically free memory
+<span class="lineNum">    1003 </span>            :  * here, since CurTransactionContext is about to be emptied anyway
+<span class="lineNum">    1004 </span>            :  * (if aborting).  Beware of the possibility of aborting the same nesting
+<span class="lineNum">    1005 </span>            :  * level twice, though.
+<a name="1006"><span class="lineNum">    1006 </span>            :  */</a>
+<span class="lineNum">    1007 </span>            : void
+<span class="lineNum">    1008 </span><span class="lineCov">       1058 : AtEOSubXact_Inval(bool isCommit)</span>
+<span class="lineNum">    1009 </span>            : {
+<span class="lineNum">    1010 </span>            :     int         my_level;
+<span class="lineNum">    1011 </span><span class="lineCov">       1058 :     TransInvalidationInfo *myInfo = transInvalInfo;</span>
+<span class="lineNum">    1012 </span>            : 
+<span class="lineNum">    1013 </span>            :     /* Quick exit if no messages. */
+<span class="lineNum">    1014 </span><span class="lineCov">       1058 :     if (myInfo == NULL)</span>
+<span class="lineNum">    1015 </span><span class="lineCov">        616 :         return;</span>
+<span class="lineNum">    1016 </span>            : 
+<span class="lineNum">    1017 </span>            :     /* Also bail out quickly if messages are not for this level. */
+<span class="lineNum">    1018 </span><span class="lineCov">        442 :     my_level = GetCurrentTransactionNestLevel();</span>
+<span class="lineNum">    1019 </span><span class="lineCov">        442 :     if (myInfo-&gt;my_level != my_level)</span>
+<span class="lineNum">    1020 </span>            :     {
+<span class="lineNum">    1021 </span><span class="lineCov">        154 :         Assert(myInfo-&gt;my_level &lt; my_level);</span>
+<span class="lineNum">    1022 </span><span class="lineCov">        154 :         return;</span>
+<span class="lineNum">    1023 </span>            :     }
+<span class="lineNum">    1024 </span>            : 
+<span class="lineNum">    1025 </span><span class="lineCov">        288 :     if (isCommit)</span>
+<span class="lineNum">    1026 </span>            :     {
+<span class="lineNum">    1027 </span>            :         /* If CurrentCmdInvalidMsgs still has anything, fix it */
+<span class="lineNum">    1028 </span><span class="lineCov">         12 :         CommandEndInvalidationMessages();</span>
+<span class="lineNum">    1029 </span>            : 
+<span class="lineNum">    1030 </span>            :         /*
+<span class="lineNum">    1031 </span>            :          * We create invalidation stack entries lazily, so the parent might
+<span class="lineNum">    1032 </span>            :          * not have one.  Instead of creating one, moving all the data over,
+<span class="lineNum">    1033 </span>            :          * and then freeing our own, we can just adjust the level of our own
+<span class="lineNum">    1034 </span>            :          * entry.
+<span class="lineNum">    1035 </span>            :          */
+<span class="lineNum">    1036 </span><span class="lineCov">         12 :         if (myInfo-&gt;parent == NULL || myInfo-&gt;parent-&gt;my_level &lt; my_level - 1)</span>
+<span class="lineNum">    1037 </span>            :         {
+<span class="lineNum">    1038 </span><span class="lineCov">          6 :             myInfo-&gt;my_level--;</span>
+<span class="lineNum">    1039 </span><span class="lineCov">          6 :             return;</span>
+<span class="lineNum">    1040 </span>            :         }
+<span class="lineNum">    1041 </span>            : 
+<span class="lineNum">    1042 </span>            :         /* Pass up my inval messages to parent */
+<span class="lineNum">    1043 </span><span class="lineCov">          6 :         AppendInvalidationMessages(&amp;myInfo-&gt;parent-&gt;PriorCmdInvalidMsgs,</span>
+<span class="lineNum">    1044 </span>            :                                    &amp;myInfo-&gt;PriorCmdInvalidMsgs);
+<span class="lineNum">    1045 </span>            : 
+<span class="lineNum">    1046 </span>            :         /* Pending relcache inval becomes parent's problem too */
+<span class="lineNum">    1047 </span><span class="lineCov">          6 :         if (myInfo-&gt;RelcacheInitFileInval)</span>
+<span class="lineNum">    1048 </span><span class="lineNoCov">          0 :             myInfo-&gt;parent-&gt;RelcacheInitFileInval = true;</span>
+<span class="lineNum">    1049 </span>            : 
+<span class="lineNum">    1050 </span>            :         /* Pop the transaction state stack */
+<span class="lineNum">    1051 </span><span class="lineCov">          6 :         transInvalInfo = myInfo-&gt;parent;</span>
+<span class="lineNum">    1052 </span>            : 
+<span class="lineNum">    1053 </span>            :         /* Need not free anything else explicitly */
+<span class="lineNum">    1054 </span><span class="lineCov">          6 :         pfree(myInfo);</span>
+<span class="lineNum">    1055 </span>            :     }
+<span class="lineNum">    1056 </span>            :     else
+<span class="lineNum">    1057 </span>            :     {
+<span class="lineNum">    1058 </span><span class="lineCov">        276 :         ProcessInvalidationMessages(&amp;myInfo-&gt;PriorCmdInvalidMsgs,</span>
+<span class="lineNum">    1059 </span>            :                                     LocalExecuteInvalidationMessage);
+<span class="lineNum">    1060 </span>            : 
+<span class="lineNum">    1061 </span>            :         /* Pop the transaction state stack */
+<span class="lineNum">    1062 </span><span class="lineCov">        276 :         transInvalInfo = myInfo-&gt;parent;</span>
+<span class="lineNum">    1063 </span>            : 
+<span class="lineNum">    1064 </span>            :         /* Need not free anything else explicitly */
+<span class="lineNum">    1065 </span><span class="lineCov">        276 :         pfree(myInfo);</span>
+<span class="lineNum">    1066 </span>            :     }
+<span class="lineNum">    1067 </span>            : }
+<span class="lineNum">    1068 </span>            : 
+<span class="lineNum">    1069 </span>            : /*
+<span class="lineNum">    1070 </span>            :  * CommandEndInvalidationMessages
+<span class="lineNum">    1071 </span>            :  *      Process queued-up invalidation messages at end of one command
+<span class="lineNum">    1072 </span>            :  *      in a transaction.
+<span class="lineNum">    1073 </span>            :  *
+<span class="lineNum">    1074 </span>            :  * Here, we send no messages to the shared queue, since we don't know yet if
+<span class="lineNum">    1075 </span>            :  * we will commit.  We do need to locally process the CurrentCmdInvalidMsgs
+<span class="lineNum">    1076 </span>            :  * list, so as to flush our caches of any entries we have outdated in the
+<span class="lineNum">    1077 </span>            :  * current command.  We then move the current-cmd list over to become part
+<span class="lineNum">    1078 </span>            :  * of the prior-cmds list.
+<span class="lineNum">    1079 </span>            :  *
+<span class="lineNum">    1080 </span>            :  * Note:
+<span class="lineNum">    1081 </span>            :  *      This should be called during CommandCounterIncrement(),
+<span class="lineNum">    1082 </span>            :  *      after we have advanced the command ID.
+<a name="1083"><span class="lineNum">    1083 </span>            :  */</a>
+<span class="lineNum">    1084 </span>            : void
+<span class="lineNum">    1085 </span><span class="lineCov">      88316 : CommandEndInvalidationMessages(void)</span>
+<span class="lineNum">    1086 </span>            : {
+<span class="lineNum">    1087 </span>            :     /*
+<span class="lineNum">    1088 </span>            :      * You might think this shouldn't be called outside any transaction, but
+<span class="lineNum">    1089 </span>            :      * bootstrap does it, and also ABORT issued when not in a transaction. So
+<span class="lineNum">    1090 </span>            :      * just quietly return if no state to work on.
+<span class="lineNum">    1091 </span>            :      */
+<span class="lineNum">    1092 </span><span class="lineCov">      88316 :     if (transInvalInfo == NULL)</span>
+<span class="lineNum">    1093 </span><span class="lineCov">      93616 :         return;</span>
+<span class="lineNum">    1094 </span>            : 
+<span class="lineNum">    1095 </span><span class="lineCov">      83016 :     ProcessInvalidationMessages(&amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs,</span>
+<span class="lineNum">    1096 </span>            :                                 LocalExecuteInvalidationMessage);
+<span class="lineNum">    1097 </span><span class="lineCov">      83016 :     AppendInvalidationMessages(&amp;transInvalInfo-&gt;PriorCmdInvalidMsgs,</span>
+<span class="lineNum">    1098 </span><span class="lineCov">      83016 :                                &amp;transInvalInfo-&gt;CurrentCmdInvalidMsgs);</span>
+<span class="lineNum">    1099 </span>            : }
+<span class="lineNum">    1100 </span>            : 
+<span class="lineNum">    1101 </span>            : 
+<span class="lineNum">    1102 </span>            : /*
+<span class="lineNum">    1103 </span>            :  * CacheInvalidateHeapTuple
+<span class="lineNum">    1104 </span>            :  *      Register the given tuple for invalidation at end of command
+<span class="lineNum">    1105 </span>            :  *      (ie, current command is creating or outdating this tuple).
+<span class="lineNum">    1106 </span>            :  *      Also, detect whether a relcache invalidation is implied.
+<span class="lineNum">    1107 </span>            :  *
+<span class="lineNum">    1108 </span>            :  * For an insert or delete, tuple is the target tuple and newtuple is NULL.
+<span class="lineNum">    1109 </span>            :  * For an update, we are called just once, with tuple being the old tuple
+<span class="lineNum">    1110 </span>            :  * version and newtuple the new version.  This allows avoidance of duplicate
+<span class="lineNum">    1111 </span>            :  * effort during an update.
+<a name="1112"><span class="lineNum">    1112 </span>            :  */</a>
+<span class="lineNum">    1113 </span>            : void
+<span class="lineNum">    1114 </span><span class="lineCov">    2588660 : CacheInvalidateHeapTuple(Relation relation,</span>
+<span class="lineNum">    1115 </span>            :                          HeapTuple tuple,
+<span class="lineNum">    1116 </span>            :                          HeapTuple newtuple)
+<span class="lineNum">    1117 </span>            : {
+<span class="lineNum">    1118 </span>            :     Oid         tupleRelId;
+<span class="lineNum">    1119 </span>            :     Oid         databaseId;
+<span class="lineNum">    1120 </span>            :     Oid         relationId;
+<span class="lineNum">    1121 </span>            : 
+<span class="lineNum">    1122 </span>            :     /* Do nothing during bootstrap */
+<span class="lineNum">    1123 </span><span class="lineCov">    2588660 :     if (IsBootstrapProcessingMode())</span>
+<span class="lineNum">    1124 </span><span class="lineCov">      15752 :         return;</span>
+<span class="lineNum">    1125 </span>            : 
+<span class="lineNum">    1126 </span>            :     /*
+<span class="lineNum">    1127 </span>            :      * We only need to worry about invalidation for tuples that are in system
+<span class="lineNum">    1128 </span>            :      * catalogs; user-relation tuples are never in catcaches and can't affect
+<span class="lineNum">    1129 </span>            :      * the relcache either.
+<span class="lineNum">    1130 </span>            :      */
+<span class="lineNum">    1131 </span><span class="lineCov">    2572908 :     if (!IsCatalogRelation(relation))</span>
+<span class="lineNum">    1132 </span><span class="lineCov">    2134914 :         return;</span>
+<span class="lineNum">    1133 </span>            : 
+<span class="lineNum">    1134 </span>            :     /*
+<span class="lineNum">    1135 </span>            :      * IsCatalogRelation() will return true for TOAST tables of system
+<span class="lineNum">    1136 </span>            :      * catalogs, but we don't care about those, either.
+<span class="lineNum">    1137 </span>            :      */
+<span class="lineNum">    1138 </span><span class="lineCov">     437994 :     if (IsToastRelation(relation))</span>
+<span class="lineNum">    1139 </span><span class="lineCov">        668 :         return;</span>
+<span class="lineNum">    1140 </span>            : 
+<span class="lineNum">    1141 </span>            :     /*
+<span class="lineNum">    1142 </span>            :      * If we're not prepared to queue invalidation messages for this
+<span class="lineNum">    1143 </span>            :      * subtransaction level, get ready now.
+<span class="lineNum">    1144 </span>            :      */
+<span class="lineNum">    1145 </span><span class="lineCov">     437326 :     PrepareInvalidationState();</span>
+<span class="lineNum">    1146 </span>            : 
+<span class="lineNum">    1147 </span>            :     /*
+<span class="lineNum">    1148 </span>            :      * First let the catcache do its thing
+<span class="lineNum">    1149 </span>            :      */
+<span class="lineNum">    1150 </span><span class="lineCov">     437326 :     tupleRelId = RelationGetRelid(relation);</span>
+<span class="lineNum">    1151 </span><span class="lineCov">     437326 :     if (RelationInvalidatesSnapshotsOnly(tupleRelId))</span>
+<span class="lineNum">    1152 </span>            :     {
+<span class="lineNum">    1153 </span><span class="lineCov">     132952 :         databaseId = IsSharedRelation(tupleRelId) ? InvalidOid : MyDatabaseId;</span>
+<span class="lineNum">    1154 </span><span class="lineCov">     132952 :         RegisterSnapshotInvalidation(databaseId, tupleRelId);</span>
+<span class="lineNum">    1155 </span>            :     }
+<span class="lineNum">    1156 </span>            :     else
+<span class="lineNum">    1157 </span><span class="lineCov">     304374 :         PrepareToInvalidateCacheTuple(relation, tuple, newtuple,</span>
+<span class="lineNum">    1158 </span>            :                                       RegisterCatcacheInvalidation);
+<span class="lineNum">    1159 </span>            : 
+<span class="lineNum">    1160 </span>            :     /*
+<span class="lineNum">    1161 </span>            :      * Now, is this tuple one of the primary definers of a relcache entry? See
+<span class="lineNum">    1162 </span>            :      * comments in file header for deeper explanation.
+<span class="lineNum">    1163 </span>            :      *
+<span class="lineNum">    1164 </span>            :      * Note we ignore newtuple here; we assume an update cannot move a tuple
+<span class="lineNum">    1165 </span>            :      * from being part of one relcache entry to being part of another.
+<span class="lineNum">    1166 </span>            :      */
+<span class="lineNum">    1167 </span><span class="lineCov">     437326 :     if (tupleRelId == RelationRelationId)</span>
+<span class="lineNum">    1168 </span>            :     {
+<span class="lineNum">    1169 </span><span class="lineCov">      50526 :         Form_pg_class classtup = (Form_pg_class) GETSTRUCT(tuple);</span>
+<span class="lineNum">    1170 </span>            : 
+<span class="lineNum">    1171 </span><span class="lineCov">      50526 :         relationId = classtup-&gt;oid;</span>
+<span class="lineNum">    1172 </span><span class="lineCov">      50526 :         if (classtup-&gt;relisshared)</span>
+<span class="lineNum">    1173 </span><span class="lineCov">        106 :             databaseId = InvalidOid;</span>
+<span class="lineNum">    1174 </span>            :         else
+<span class="lineNum">    1175 </span><span class="lineCov">      50420 :             databaseId = MyDatabaseId;</span>
+<span class="lineNum">    1176 </span>            :     }
+<span class="lineNum">    1177 </span><span class="lineCov">     386800 :     else if (tupleRelId == AttributeRelationId)</span>
+<span class="lineNum">    1178 </span>            :     {
+<span class="lineNum">    1179 </span><span class="lineCov">     168368 :         Form_pg_attribute atttup = (Form_pg_attribute) GETSTRUCT(tuple);</span>
+<span class="lineNum">    1180 </span>            : 
+<span class="lineNum">    1181 </span><span class="lineCov">     168368 :         relationId = atttup-&gt;attrelid;</span>
+<span class="lineNum">    1182 </span>            : 
+<span class="lineNum">    1183 </span>            :         /*
+<span class="lineNum">    1184 </span>            :          * KLUGE ALERT: we always send the relcache event with MyDatabaseId,
+<span class="lineNum">    1185 </span>            :          * even if the rel in question is shared (which we can't easily tell).
+<span class="lineNum">    1186 </span>            :          * This essentially means that only backends in this same database
+<span class="lineNum">    1187 </span>            :          * will react to the relcache flush request.  This is in fact
+<span class="lineNum">    1188 </span>            :          * appropriate, since only those backends could see our pg_attribute
+<span class="lineNum">    1189 </span>            :          * change anyway.  It looks a bit ugly though.  (In practice, shared
+<span class="lineNum">    1190 </span>            :          * relations can't have schema changes after bootstrap, so we should
+<span class="lineNum">    1191 </span>            :          * never come here for a shared rel anyway.)
+<span class="lineNum">    1192 </span>            :          */
+<span class="lineNum">    1193 </span><span class="lineCov">     168368 :         databaseId = MyDatabaseId;</span>
+<span class="lineNum">    1194 </span>            :     }
+<span class="lineNum">    1195 </span><span class="lineCov">     218432 :     else if (tupleRelId == IndexRelationId)</span>
+<span class="lineNum">    1196 </span>            :     {
+<span class="lineNum">    1197 </span><span class="lineCov">       8756 :         Form_pg_index indextup = (Form_pg_index) GETSTRUCT(tuple);</span>
+<span class="lineNum">    1198 </span>            : 
+<span class="lineNum">    1199 </span>            :         /*
+<span class="lineNum">    1200 </span>            :          * When a pg_index row is updated, we should send out a relcache inval
+<span class="lineNum">    1201 </span>            :          * for the index relation.  As above, we don't know the shared status
+<span class="lineNum">    1202 </span>            :          * of the index, but in practice it doesn't matter since indexes of
+<span class="lineNum">    1203 </span>            :          * shared catalogs can't have such updates.
+<span class="lineNum">    1204 </span>            :          */
+<span class="lineNum">    1205 </span><span class="lineCov">       8756 :         relationId = indextup-&gt;indexrelid;</span>
+<span class="lineNum">    1206 </span><span class="lineCov">       8756 :         databaseId = MyDatabaseId;</span>
+<span class="lineNum">    1207 </span>            :     }
+<span class="lineNum">    1208 </span><span class="lineCov">     209676 :     else if (tupleRelId == ConstraintRelationId)</span>
+<span class="lineNum">    1209 </span>            :     {
+<span class="lineNum">    1210 </span><span class="lineCov">       4112 :         Form_pg_constraint constrtup = (Form_pg_constraint) GETSTRUCT(tuple);</span>
+<span class="lineNum">    1211 </span>            : 
+<span class="lineNum">    1212 </span>            :         /*
+<span class="lineNum">    1213 </span>            :          * Foreign keys are part of relcache entries, too, so send out an
+<span class="lineNum">    1214 </span>            :          * inval for the table that the FK applies to.
+<span class="lineNum">    1215 </span>            :          */
+<span class="lineNum">    1216 </span><span class="lineCov">       5040 :         if (constrtup-&gt;contype == CONSTRAINT_FOREIGN &amp;&amp;</span>
+<span class="lineNum">    1217 </span><span class="lineCov">        928 :             OidIsValid(constrtup-&gt;conrelid))</span>
+<span class="lineNum">    1218 </span>            :         {
+<span class="lineNum">    1219 </span><span class="lineCov">        928 :             relationId = constrtup-&gt;conrelid;</span>
+<span class="lineNum">    1220 </span><span class="lineCov">        928 :             databaseId = MyDatabaseId;</span>
+<span class="lineNum">    1221 </span>            :         }
+<span class="lineNum">    1222 </span>            :         else
+<span class="lineNum">    1223 </span><span class="lineCov">       3184 :             return;</span>
+<span class="lineNum">    1224 </span>            :     }
+<span class="lineNum">    1225 </span>            :     else
+<span class="lineNum">    1226 </span><span class="lineCov">     205564 :         return;</span>
+<span class="lineNum">    1227 </span>            : 
+<span class="lineNum">    1228 </span>            :     /*
+<span class="lineNum">    1229 </span>            :      * Yes.  We need to register a relcache invalidation event.
+<span class="lineNum">    1230 </span>            :      */
+<span class="lineNum">    1231 </span><span class="lineCov">     228578 :     RegisterRelcacheInvalidation(databaseId, relationId);</span>
+<span class="lineNum">    1232 </span>            : }
+<span class="lineNum">    1233 </span>            : 
+<span class="lineNum">    1234 </span>            : /*
+<span class="lineNum">    1235 </span>            :  * CacheInvalidateCatalog
+<span class="lineNum">    1236 </span>            :  *      Register invalidation of the whole content of a system catalog.
+<span class="lineNum">    1237 </span>            :  *
+<span class="lineNum">    1238 </span>            :  * This is normally used in VACUUM FULL/CLUSTER, where we haven't so much
+<span class="lineNum">    1239 </span>            :  * changed any tuples as moved them around.  Some uses of catcache entries
+<span class="lineNum">    1240 </span>            :  * expect their TIDs to be correct, so we have to blow away the entries.
+<span class="lineNum">    1241 </span>            :  *
+<span class="lineNum">    1242 </span>            :  * Note: we expect caller to verify that the rel actually is a system
+<span class="lineNum">    1243 </span>            :  * catalog.  If it isn't, no great harm is done, just a wasted sinval message.
+<a name="1244"><span class="lineNum">    1244 </span>            :  */</a>
+<span class="lineNum">    1245 </span>            : void
+<span class="lineNum">    1246 </span><span class="lineCov">          6 : CacheInvalidateCatalog(Oid catalogId)</span>
+<span class="lineNum">    1247 </span>            : {
+<span class="lineNum">    1248 </span>            :     Oid         databaseId;
+<span class="lineNum">    1249 </span>            : 
+<span class="lineNum">    1250 </span><span class="lineCov">          6 :     PrepareInvalidationState();</span>
+<span class="lineNum">    1251 </span>            : 
+<span class="lineNum">    1252 </span><span class="lineCov">          6 :     if (IsSharedRelation(catalogId))</span>
+<span class="lineNum">    1253 </span><span class="lineCov">          2 :         databaseId = InvalidOid;</span>
+<span class="lineNum">    1254 </span>            :     else
+<span class="lineNum">    1255 </span><span class="lineCov">          4 :         databaseId = MyDatabaseId;</span>
+<span class="lineNum">    1256 </span>            : 
+<span class="lineNum">    1257 </span><span class="lineCov">          6 :     RegisterCatalogInvalidation(databaseId, catalogId);</span>
+<span class="lineNum">    1258 </span><span class="lineCov">          6 : }</span>
+<span class="lineNum">    1259 </span>            : 
+<span class="lineNum">    1260 </span>            : /*
+<span class="lineNum">    1261 </span>            :  * CacheInvalidateRelcache
+<span class="lineNum">    1262 </span>            :  *      Register invalidation of the specified relation's relcache entry
+<span class="lineNum">    1263 </span>            :  *      at end of command.
+<span class="lineNum">    1264 </span>            :  *
+<span class="lineNum">    1265 </span>            :  * This is used in places that need to force relcache rebuild but aren't
+<span class="lineNum">    1266 </span>            :  * changing any of the tuples recognized as contributors to the relcache
+<span class="lineNum">    1267 </span>            :  * entry by CacheInvalidateHeapTuple.  (An example is dropping an index.)
+<a name="1268"><span class="lineNum">    1268 </span>            :  */</a>
+<span class="lineNum">    1269 </span>            : void
+<span class="lineNum">    1270 </span><span class="lineCov">      15400 : CacheInvalidateRelcache(Relation relation)</span>
+<span class="lineNum">    1271 </span>            : {
+<span class="lineNum">    1272 </span>            :     Oid         databaseId;
+<span class="lineNum">    1273 </span>            :     Oid         relationId;
+<span class="lineNum">    1274 </span>            : 
+<span class="lineNum">    1275 </span><span class="lineCov">      15400 :     PrepareInvalidationState();</span>
+<span class="lineNum">    1276 </span>            : 
+<span class="lineNum">    1277 </span><span class="lineCov">      15400 :     relationId = RelationGetRelid(relation);</span>
+<span class="lineNum">    1278 </span><span class="lineCov">      15400 :     if (relation-&gt;rd_rel-&gt;relisshared)</span>
+<span class="lineNum">    1279 </span><span class="lineCov">         58 :         databaseId = InvalidOid;</span>
+<span class="lineNum">    1280 </span>            :     else
+<span class="lineNum">    1281 </span><span class="lineCov">      15342 :         databaseId = MyDatabaseId;</span>
+<span class="lineNum">    1282 </span>            : 
+<span class="lineNum">    1283 </span><span class="lineCov">      15400 :     RegisterRelcacheInvalidation(databaseId, relationId);</span>
+<span class="lineNum">    1284 </span><span class="lineCov">      15400 : }</span>
+<span class="lineNum">    1285 </span>            : 
+<span class="lineNum">    1286 </span>            : /*
+<span class="lineNum">    1287 </span>            :  * CacheInvalidateRelcacheAll
+<span class="lineNum">    1288 </span>            :  *      Register invalidation of the whole relcache at the end of command.
+<span class="lineNum">    1289 </span>            :  *
+<span class="lineNum">    1290 </span>            :  * This is used by alter publication as changes in publications may affect
+<span class="lineNum">    1291 </span>            :  * large number of tables.
+<a name="1292"><span class="lineNum">    1292 </span>            :  */</a>
+<span class="lineNum">    1293 </span>            : void
+<span class="lineNum">    1294 </span><span class="lineCov">          2 : CacheInvalidateRelcacheAll(void)</span>
+<span class="lineNum">    1295 </span>            : {
+<span class="lineNum">    1296 </span><span class="lineCov">          2 :     PrepareInvalidationState();</span>
+<span class="lineNum">    1297 </span>            : 
+<span class="lineNum">    1298 </span><span class="lineCov">          2 :     RegisterRelcacheInvalidation(InvalidOid, InvalidOid);</span>
+<span class="lineNum">    1299 </span><span class="lineCov">          2 : }</span>
+<span class="lineNum">    1300 </span>            : 
+<span class="lineNum">    1301 </span>            : /*
+<span class="lineNum">    1302 </span>            :  * CacheInvalidateRelcacheByTuple
+<span class="lineNum">    1303 </span>            :  *      As above, but relation is identified by passing its pg_class tuple.
+<a name="1304"><span class="lineNum">    1304 </span>            :  */</a>
+<span class="lineNum">    1305 </span>            : void
+<span class="lineNum">    1306 </span><span class="lineCov">       7684 : CacheInvalidateRelcacheByTuple(HeapTuple classTuple)</span>
+<span class="lineNum">    1307 </span>            : {
+<span class="lineNum">    1308 </span><span class="lineCov">       7684 :     Form_pg_class classtup = (Form_pg_class) GETSTRUCT(classTuple);</span>
+<span class="lineNum">    1309 </span>            :     Oid         databaseId;
+<span class="lineNum">    1310 </span>            :     Oid         relationId;
+<span class="lineNum">    1311 </span>            : 
+<span class="lineNum">    1312 </span><span class="lineCov">       7684 :     PrepareInvalidationState();</span>
+<span class="lineNum">    1313 </span>            : 
+<span class="lineNum">    1314 </span><span class="lineCov">       7684 :     relationId = classtup-&gt;oid;</span>
+<span class="lineNum">    1315 </span><span class="lineCov">       7684 :     if (classtup-&gt;relisshared)</span>
+<span class="lineNum">    1316 </span><span class="lineCov">         18 :         databaseId = InvalidOid;</span>
+<span class="lineNum">    1317 </span>            :     else
+<span class="lineNum">    1318 </span><span class="lineCov">       7666 :         databaseId = MyDatabaseId;</span>
+<span class="lineNum">    1319 </span><span class="lineCov">       7684 :     RegisterRelcacheInvalidation(databaseId, relationId);</span>
+<span class="lineNum">    1320 </span><span class="lineCov">       7684 : }</span>
+<span class="lineNum">    1321 </span>            : 
+<span class="lineNum">    1322 </span>            : /*
+<span class="lineNum">    1323 </span>            :  * CacheInvalidateRelcacheByRelid
+<span class="lineNum">    1324 </span>            :  *      As above, but relation is identified by passing its OID.
+<span class="lineNum">    1325 </span>            :  *      This is the least efficient of the three options; use one of
+<span class="lineNum">    1326 </span>            :  *      the above routines if you have a Relation or pg_class tuple.
+<a name="1327"><span class="lineNum">    1327 </span>            :  */</a>
+<span class="lineNum">    1328 </span>            : void
+<span class="lineNum">    1329 </span><span class="lineCov">       1598 : CacheInvalidateRelcacheByRelid(Oid relid)</span>
+<span class="lineNum">    1330 </span>            : {
+<span class="lineNum">    1331 </span>            :     HeapTuple   tup;
+<span class="lineNum">    1332 </span>            : 
+<span class="lineNum">    1333 </span><span class="lineCov">       1598 :     PrepareInvalidationState();</span>
+<span class="lineNum">    1334 </span>            : 
+<span class="lineNum">    1335 </span><span class="lineCov">       1598 :     tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));</span>
+<span class="lineNum">    1336 </span><span class="lineCov">       1598 :     if (!HeapTupleIsValid(tup))</span>
+<span class="lineNum">    1337 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cache lookup failed for relation %u&quot;, relid);</span>
+<span class="lineNum">    1338 </span><span class="lineCov">       1598 :     CacheInvalidateRelcacheByTuple(tup);</span>
+<span class="lineNum">    1339 </span><span class="lineCov">       1598 :     ReleaseSysCache(tup);</span>
+<span class="lineNum">    1340 </span><span class="lineCov">       1598 : }</span>
+<span class="lineNum">    1341 </span>            : 
+<span class="lineNum">    1342 </span>            : 
+<span class="lineNum">    1343 </span>            : /*
+<span class="lineNum">    1344 </span>            :  * CacheInvalidateSmgr
+<span class="lineNum">    1345 </span>            :  *      Register invalidation of smgr references to a physical relation.
+<span class="lineNum">    1346 </span>            :  *
+<span class="lineNum">    1347 </span>            :  * Sending this type of invalidation msg forces other backends to close open
+<span class="lineNum">    1348 </span>            :  * smgr entries for the rel.  This should be done to flush dangling open-file
+<span class="lineNum">    1349 </span>            :  * references when the physical rel is being dropped or truncated.  Because
+<span class="lineNum">    1350 </span>            :  * these are nontransactional (i.e., not-rollback-able) operations, we just
+<span class="lineNum">    1351 </span>            :  * send the inval message immediately without any queuing.
+<span class="lineNum">    1352 </span>            :  *
+<span class="lineNum">    1353 </span>            :  * Note: in most cases there will have been a relcache flush issued against
+<span class="lineNum">    1354 </span>            :  * the rel at the logical level.  We need a separate smgr-level flush because
+<span class="lineNum">    1355 </span>            :  * it is possible for backends to have open smgr entries for rels they don't
+<span class="lineNum">    1356 </span>            :  * have a relcache entry for, e.g. because the only thing they ever did with
+<span class="lineNum">    1357 </span>            :  * the rel is write out dirty shared buffers.
+<span class="lineNum">    1358 </span>            :  *
+<span class="lineNum">    1359 </span>            :  * Note: because these messages are nontransactional, they won't be captured
+<span class="lineNum">    1360 </span>            :  * in commit/abort WAL entries.  Instead, calls to CacheInvalidateSmgr()
+<span class="lineNum">    1361 </span>            :  * should happen in low-level smgr.c routines, which are executed while
+<span class="lineNum">    1362 </span>            :  * replaying WAL as well as when creating it.
+<span class="lineNum">    1363 </span>            :  *
+<span class="lineNum">    1364 </span>            :  * Note: In order to avoid bloating SharedInvalidationMessage, we store only
+<span class="lineNum">    1365 </span>            :  * three bytes of the backend ID using what would otherwise be padding space.
+<span class="lineNum">    1366 </span>            :  * Thus, the maximum possible backend ID is 2^23-1.
+<a name="1367"><span class="lineNum">    1367 </span>            :  */</a>
+<span class="lineNum">    1368 </span>            : void
+<span class="lineNum">    1369 </span><span class="lineCov">      14486 : CacheInvalidateSmgr(RelFileNodeBackend rnode)</span>
+<span class="lineNum">    1370 </span>            : {
+<span class="lineNum">    1371 </span>            :     SharedInvalidationMessage msg;
+<span class="lineNum">    1372 </span>            : 
+<span class="lineNum">    1373 </span><span class="lineCov">      14486 :     msg.sm.id = SHAREDINVALSMGR_ID;</span>
+<span class="lineNum">    1374 </span><span class="lineCov">      14486 :     msg.sm.backend_hi = rnode.backend &gt;&gt; 16;</span>
+<span class="lineNum">    1375 </span><span class="lineCov">      14486 :     msg.sm.backend_lo = rnode.backend &amp; 0xffff;</span>
+<span class="lineNum">    1376 </span><span class="lineCov">      14486 :     msg.sm.rnode = rnode.node;</span>
+<span class="lineNum">    1377 </span>            :     /* check AddCatcacheInvalidationMessage() for an explanation */
+<span class="lineNum">    1378 </span>            :     VALGRIND_MAKE_MEM_DEFINED(&amp;msg, sizeof(msg));
+<span class="lineNum">    1379 </span>            : 
+<span class="lineNum">    1380 </span><span class="lineCov">      14486 :     SendSharedInvalidMessages(&amp;msg, 1);</span>
+<span class="lineNum">    1381 </span><span class="lineCov">      14486 : }</span>
+<span class="lineNum">    1382 </span>            : 
+<span class="lineNum">    1383 </span>            : /*
+<span class="lineNum">    1384 </span>            :  * CacheInvalidateRelmap
+<span class="lineNum">    1385 </span>            :  *      Register invalidation of the relation mapping for a database,
+<span class="lineNum">    1386 </span>            :  *      or for the shared catalogs if databaseId is zero.
+<span class="lineNum">    1387 </span>            :  *
+<span class="lineNum">    1388 </span>            :  * Sending this type of invalidation msg forces other backends to re-read
+<span class="lineNum">    1389 </span>            :  * the indicated relation mapping file.  It is also necessary to send a
+<span class="lineNum">    1390 </span>            :  * relcache inval for the specific relations whose mapping has been altered,
+<span class="lineNum">    1391 </span>            :  * else the relcache won't get updated with the new filenode data.
+<span class="lineNum">    1392 </span>            :  *
+<span class="lineNum">    1393 </span>            :  * Note: because these messages are nontransactional, they won't be captured
+<span class="lineNum">    1394 </span>            :  * in commit/abort WAL entries.  Instead, calls to CacheInvalidateRelmap()
+<span class="lineNum">    1395 </span>            :  * should happen in low-level relmapper.c routines, which are executed while
+<span class="lineNum">    1396 </span>            :  * replaying WAL as well as when creating it.
+<a name="1397"><span class="lineNum">    1397 </span>            :  */</a>
+<span class="lineNum">    1398 </span>            : void
+<span class="lineNum">    1399 </span><span class="lineCov">          4 : CacheInvalidateRelmap(Oid databaseId)</span>
+<span class="lineNum">    1400 </span>            : {
+<span class="lineNum">    1401 </span>            :     SharedInvalidationMessage msg;
+<span class="lineNum">    1402 </span>            : 
+<span class="lineNum">    1403 </span><span class="lineCov">          4 :     msg.rm.id = SHAREDINVALRELMAP_ID;</span>
+<span class="lineNum">    1404 </span><span class="lineCov">          4 :     msg.rm.dbId = databaseId;</span>
+<span class="lineNum">    1405 </span>            :     /* check AddCatcacheInvalidationMessage() for an explanation */
+<span class="lineNum">    1406 </span>            :     VALGRIND_MAKE_MEM_DEFINED(&amp;msg, sizeof(msg));
+<span class="lineNum">    1407 </span>            : 
+<span class="lineNum">    1408 </span><span class="lineCov">          4 :     SendSharedInvalidMessages(&amp;msg, 1);</span>
+<span class="lineNum">    1409 </span><span class="lineCov">          4 : }</span>
+<span class="lineNum">    1410 </span>            : 
+<span class="lineNum">    1411 </span>            : 
+<span class="lineNum">    1412 </span>            : /*
+<span class="lineNum">    1413 </span>            :  * CacheRegisterSyscacheCallback
+<span class="lineNum">    1414 </span>            :  *      Register the specified function to be called for all future
+<span class="lineNum">    1415 </span>            :  *      invalidation events in the specified cache.  The cache ID and the
+<span class="lineNum">    1416 </span>            :  *      hash value of the tuple being invalidated will be passed to the
+<span class="lineNum">    1417 </span>            :  *      function.
+<span class="lineNum">    1418 </span>            :  *
+<span class="lineNum">    1419 </span>            :  * NOTE: Hash value zero will be passed if a cache reset request is received.
+<span class="lineNum">    1420 </span>            :  * In this case the called routines should flush all cached state.
+<span class="lineNum">    1421 </span>            :  * Yes, there's a possibility of a false match to zero, but it doesn't seem
+<span class="lineNum">    1422 </span>            :  * worth troubling over, especially since most of the current callees just
+<span class="lineNum">    1423 </span>            :  * flush all cached state anyway.
+<a name="1424"><span class="lineNum">    1424 </span>            :  */</a>
+<span class="lineNum">    1425 </span>            : void
+<span class="lineNum">    1426 </span><span class="lineCov">      14868 : CacheRegisterSyscacheCallback(int cacheid,</span>
+<span class="lineNum">    1427 </span>            :                               SyscacheCallbackFunction func,
+<span class="lineNum">    1428 </span>            :                               Datum arg)
+<span class="lineNum">    1429 </span>            : {
+<span class="lineNum">    1430 </span><span class="lineCov">      14868 :     if (cacheid &lt; 0 || cacheid &gt;= SysCacheSize)</span>
+<span class="lineNum">    1431 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;invalid cache ID: %d&quot;, cacheid);</span>
+<span class="lineNum">    1432 </span><span class="lineCov">      14868 :     if (syscache_callback_count &gt;= MAX_SYSCACHE_CALLBACKS)</span>
+<span class="lineNum">    1433 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;out of syscache_callback_list slots&quot;);</span>
+<span class="lineNum">    1434 </span>            : 
+<span class="lineNum">    1435 </span><span class="lineCov">      14868 :     if (syscache_callback_links[cacheid] == 0)</span>
+<span class="lineNum">    1436 </span>            :     {
+<span class="lineNum">    1437 </span>            :         /* first callback for this cache */
+<span class="lineNum">    1438 </span><span class="lineCov">      13252 :         syscache_callback_links[cacheid] = syscache_callback_count + 1;</span>
+<span class="lineNum">    1439 </span>            :     }
+<span class="lineNum">    1440 </span>            :     else
+<span class="lineNum">    1441 </span>            :     {
+<span class="lineNum">    1442 </span>            :         /* add to end of chain, so that older callbacks are called first */
+<span class="lineNum">    1443 </span><span class="lineCov">       1616 :         int         i = syscache_callback_links[cacheid] - 1;</span>
+<span class="lineNum">    1444 </span>            : 
+<span class="lineNum">    1445 </span><span class="lineCov">       3232 :         while (syscache_callback_list[i].link &gt; 0)</span>
+<span class="lineNum">    1446 </span><span class="lineNoCov">          0 :             i = syscache_callback_list[i].link - 1;</span>
+<span class="lineNum">    1447 </span><span class="lineCov">       1616 :         syscache_callback_list[i].link = syscache_callback_count + 1;</span>
+<span class="lineNum">    1448 </span>            :     }
+<span class="lineNum">    1449 </span>            : 
+<span class="lineNum">    1450 </span><span class="lineCov">      14868 :     syscache_callback_list[syscache_callback_count].id = cacheid;</span>
+<span class="lineNum">    1451 </span><span class="lineCov">      14868 :     syscache_callback_list[syscache_callback_count].link = 0;</span>
+<span class="lineNum">    1452 </span><span class="lineCov">      14868 :     syscache_callback_list[syscache_callback_count].function = func;</span>
+<span class="lineNum">    1453 </span><span class="lineCov">      14868 :     syscache_callback_list[syscache_callback_count].arg = arg;</span>
+<span class="lineNum">    1454 </span>            : 
+<span class="lineNum">    1455 </span><span class="lineCov">      14868 :     ++syscache_callback_count;</span>
+<span class="lineNum">    1456 </span><span class="lineCov">      14868 : }</span>
+<span class="lineNum">    1457 </span>            : 
+<span class="lineNum">    1458 </span>            : /*
+<span class="lineNum">    1459 </span>            :  * CacheRegisterRelcacheCallback
+<span class="lineNum">    1460 </span>            :  *      Register the specified function to be called for all future
+<span class="lineNum">    1461 </span>            :  *      relcache invalidation events.  The OID of the relation being
+<span class="lineNum">    1462 </span>            :  *      invalidated will be passed to the function.
+<span class="lineNum">    1463 </span>            :  *
+<span class="lineNum">    1464 </span>            :  * NOTE: InvalidOid will be passed if a cache reset request is received.
+<span class="lineNum">    1465 </span>            :  * In this case the called routines should flush all cached state.
+<a name="1466"><span class="lineNum">    1466 </span>            :  */</a>
+<span class="lineNum">    1467 </span>            : void
+<span class="lineNum">    1468 </span><span class="lineCov">       1514 : CacheRegisterRelcacheCallback(RelcacheCallbackFunction func,</span>
+<span class="lineNum">    1469 </span>            :                               Datum arg)
+<span class="lineNum">    1470 </span>            : {
+<span class="lineNum">    1471 </span><span class="lineCov">       1514 :     if (relcache_callback_count &gt;= MAX_RELCACHE_CALLBACKS)</span>
+<span class="lineNum">    1472 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;out of relcache_callback_list slots&quot;);</span>
+<span class="lineNum">    1473 </span>            : 
+<span class="lineNum">    1474 </span><span class="lineCov">       1514 :     relcache_callback_list[relcache_callback_count].function = func;</span>
+<span class="lineNum">    1475 </span><span class="lineCov">       1514 :     relcache_callback_list[relcache_callback_count].arg = arg;</span>
+<span class="lineNum">    1476 </span>            : 
+<span class="lineNum">    1477 </span><span class="lineCov">       1514 :     ++relcache_callback_count;</span>
+<span class="lineNum">    1478 </span><span class="lineCov">       1514 : }</span>
+<span class="lineNum">    1479 </span>            : 
+<span class="lineNum">    1480 </span>            : /*
+<span class="lineNum">    1481 </span>            :  * CallSyscacheCallbacks
+<span class="lineNum">    1482 </span>            :  *
+<span class="lineNum">    1483 </span>            :  * This is exported so that CatalogCacheFlushCatalog can call it, saving
+<span class="lineNum">    1484 </span>            :  * this module from knowing which catcache IDs correspond to which catalogs.
+<a name="1485"><span class="lineNum">    1485 </span>            :  */</a>
+<span class="lineNum">    1486 </span>            : void
+<span class="lineNum">    1487 </span><span class="lineCov">    2764048 : CallSyscacheCallbacks(int cacheid, uint32 hashvalue)</span>
+<span class="lineNum">    1488 </span>            : {
+<span class="lineNum">    1489 </span>            :     int         i;
+<span class="lineNum">    1490 </span>            : 
+<span class="lineNum">    1491 </span><span class="lineCov">    2764048 :     if (cacheid &lt; 0 || cacheid &gt;= SysCacheSize)</span>
+<span class="lineNum">    1492 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;invalid cache ID: %d&quot;, cacheid);</span>
+<span class="lineNum">    1493 </span>            : 
+<span class="lineNum">    1494 </span><span class="lineCov">    2764048 :     i = syscache_callback_links[cacheid] - 1;</span>
+<span class="lineNum">    1495 </span><span class="lineCov">    6054702 :     while (i &gt;= 0)</span>
+<span class="lineNum">    1496 </span>            :     {
+<span class="lineNum">    1497 </span><span class="lineCov">     526606 :         struct SYSCACHECALLBACK *ccitem = syscache_callback_list + i;</span>
+<span class="lineNum">    1498 </span>            : 
+<span class="lineNum">    1499 </span><span class="lineCov">     526606 :         Assert(ccitem-&gt;id == cacheid);</span>
+<span class="lineNum">    1500 </span><span class="lineCov">     526606 :         ccitem-&gt;function(ccitem-&gt;arg, cacheid, hashvalue);</span>
+<span class="lineNum">    1501 </span><span class="lineCov">     526606 :         i = ccitem-&gt;link - 1;</span>
+<span class="lineNum">    1502 </span>            :     }
+<span class="lineNum">    1503 </span><span class="lineCov">    2764048 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,861 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/bin/pg_basebackup/pg_receivewal.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/bin/pg_basebackup</a> - pg_receivewal.c<span style="font-size: 80%;"> (source / <a href="pg_receivewal.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">290</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * pg_receivewal.c - receive streaming WAL data and write it
+<span class="lineNum">       4 </span>            :  *                    to a local file.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Author: Magnus Hagander &lt;magnus@hagander.net&gt;
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *        src/bin/pg_basebackup/pg_receivewal.c
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &quot;postgres_fe.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &lt;dirent.h&gt;
+<span class="lineNum">      18 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      19 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      20 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      21 </span>            : 
+<span class="lineNum">      22 </span>            : #include &quot;access/xlog_internal.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;common/file_perm.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;common/logging.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;getopt_long.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;libpq-fe.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;receivelog.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;streamutil.h&quot;
+<span class="lineNum">      29 </span>            : 
+<span class="lineNum">      30 </span>            : /* Time to sleep between reconnection attempts */
+<span class="lineNum">      31 </span>            : #define RECONNECT_SLEEP_TIME 5
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /* Global options */
+<span class="lineNum">      34 </span>            : static char *basedir = NULL;
+<span class="lineNum">      35 </span>            : static int  verbose = 0;
+<span class="lineNum">      36 </span>            : static int  compresslevel = 0;
+<span class="lineNum">      37 </span>            : static int  noloop = 0;
+<span class="lineNum">      38 </span>            : static int  standby_message_timeout = 10 * 1000;    /* 10 sec = default */
+<span class="lineNum">      39 </span>            : static volatile bool time_to_stop = false;
+<span class="lineNum">      40 </span>            : static bool do_create_slot = false;
+<span class="lineNum">      41 </span>            : static bool slot_exists_ok = false;
+<span class="lineNum">      42 </span>            : static bool do_drop_slot = false;
+<span class="lineNum">      43 </span>            : static bool do_sync = true;
+<span class="lineNum">      44 </span>            : static bool synchronous = false;
+<span class="lineNum">      45 </span>            : static char *replication_slot = NULL;
+<span class="lineNum">      46 </span>            : static XLogRecPtr endpos = InvalidXLogRecPtr;
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : static void usage(void);
+<span class="lineNum">      50 </span>            : static DIR *get_destination_dir(char *dest_folder);
+<span class="lineNum">      51 </span>            : static void close_destination_dir(DIR *dest_dir, char *dest_folder);
+<span class="lineNum">      52 </span>            : static XLogRecPtr FindStreamingStart(uint32 *tli);
+<span class="lineNum">      53 </span>            : static void StreamLog(void);
+<span class="lineNum">      54 </span>            : static bool stop_streaming(XLogRecPtr segendpos, uint32 timeline,
+<span class="lineNum">      55 </span>            :                            bool segment_finished);
+<a name="56"><span class="lineNum">      56 </span>            : </a>
+<span class="lineNum">      57 </span>            : static void
+<span class="lineNum">      58 </span><span class="lineNoCov">          0 : disconnect_atexit(void)</span>
+<span class="lineNum">      59 </span>            : {
+<span class="lineNum">      60 </span><span class="lineNoCov">          0 :     if (conn != NULL)</span>
+<span class="lineNum">      61 </span><span class="lineNoCov">          0 :         PQfinish(conn);</span>
+<span class="lineNum">      62 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">      63 </span>            : 
+<span class="lineNum">      64 </span>            : /* Routines to evaluate segment file format */
+<span class="lineNum">      65 </span>            : #define IsCompressXLogFileName(fname)    \
+<span class="lineNum">      66 </span>            :     (strlen(fname) == XLOG_FNAME_LEN + strlen(&quot;.gz&quot;) &amp;&amp; \
+<span class="lineNum">      67 </span>            :      strspn(fname, &quot;0123456789ABCDEF&quot;) == XLOG_FNAME_LEN &amp;&amp;       \
+<span class="lineNum">      68 </span>            :      strcmp((fname) + XLOG_FNAME_LEN, &quot;.gz&quot;) == 0)
+<span class="lineNum">      69 </span>            : #define IsPartialCompressXLogFileName(fname)    \
+<span class="lineNum">      70 </span>            :     (strlen(fname) == XLOG_FNAME_LEN + strlen(&quot;.gz.partial&quot;) &amp;&amp; \
+<span class="lineNum">      71 </span>            :      strspn(fname, &quot;0123456789ABCDEF&quot;) == XLOG_FNAME_LEN &amp;&amp;       \
+<span class="lineNum">      72 </span>            :      strcmp((fname) + XLOG_FNAME_LEN, &quot;.gz.partial&quot;) == 0)
+<a name="73"><span class="lineNum">      73 </span>            : </a>
+<span class="lineNum">      74 </span>            : static void
+<span class="lineNum">      75 </span><span class="lineNoCov">          0 : usage(void)</span>
+<span class="lineNum">      76 </span>            : {
+<span class="lineNum">      77 </span><span class="lineNoCov">          0 :     printf(_(&quot;%s receives PostgreSQL streaming write-ahead logs.\n\n&quot;),</span>
+<span class="lineNum">      78 </span>            :            progname);
+<span class="lineNum">      79 </span><span class="lineNoCov">          0 :     printf(_(&quot;Usage:\n&quot;));</span>
+<span class="lineNum">      80 </span><span class="lineNoCov">          0 :     printf(_(&quot;  %s [OPTION]...\n&quot;), progname);</span>
+<span class="lineNum">      81 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nOptions:\n&quot;));</span>
+<span class="lineNum">      82 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -D, --directory=DIR    receive write-ahead log files into this directory\n&quot;));</span>
+<span class="lineNum">      83 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -E, --endpos=LSN       exit after receiving the specified LSN\n&quot;));</span>
+<span class="lineNum">      84 </span><span class="lineNoCov">          0 :     printf(_(&quot;      --if-not-exists    do not error if slot already exists when creating a slot\n&quot;));</span>
+<span class="lineNum">      85 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -n, --no-loop          do not loop on connection lost\n&quot;));</span>
+<span class="lineNum">      86 </span><span class="lineNoCov">          0 :     printf(_(&quot;      --no-sync          do not wait for changes to be written safely to disk\n&quot;));</span>
+<span class="lineNum">      87 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -s, --status-interval=SECS\n&quot;</span>
+<span class="lineNum">      88 </span>            :              &quot;                         time between status packets sent to server (default: %d)\n&quot;), (standby_message_timeout / 1000));
+<span class="lineNum">      89 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -S, --slot=SLOTNAME    replication slot to use\n&quot;));</span>
+<span class="lineNum">      90 </span><span class="lineNoCov">          0 :     printf(_(&quot;      --synchronous      flush write-ahead log immediately after writing\n&quot;));</span>
+<span class="lineNum">      91 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -v, --verbose          output verbose messages\n&quot;));</span>
+<span class="lineNum">      92 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -V, --version          output version information, then exit\n&quot;));</span>
+<span class="lineNum">      93 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -Z, --compress=0-9     compress logs with given compression level\n&quot;));</span>
+<span class="lineNum">      94 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -?, --help             show this help, then exit\n&quot;));</span>
+<span class="lineNum">      95 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nConnection options:\n&quot;));</span>
+<span class="lineNum">      96 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -d, --dbname=CONNSTR   connection string\n&quot;));</span>
+<span class="lineNum">      97 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -h, --host=HOSTNAME    database server host or socket directory\n&quot;));</span>
+<span class="lineNum">      98 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -p, --port=PORT        database server port number\n&quot;));</span>
+<span class="lineNum">      99 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -U, --username=NAME    connect as specified database user\n&quot;));</span>
+<span class="lineNum">     100 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -w, --no-password      never prompt for password\n&quot;));</span>
+<span class="lineNum">     101 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -W, --password         force password prompt (should happen automatically)\n&quot;));</span>
+<span class="lineNum">     102 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nOptional actions:\n&quot;));</span>
+<span class="lineNum">     103 </span><span class="lineNoCov">          0 :     printf(_(&quot;      --create-slot      create a new replication slot (for the slot's name see --slot)\n&quot;));</span>
+<span class="lineNum">     104 </span><span class="lineNoCov">          0 :     printf(_(&quot;      --drop-slot        drop the replication slot (for the slot's name see --slot)\n&quot;));</span>
+<span class="lineNum">     105 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nReport bugs to &lt;pgsql-bugs@lists.postgresql.org&gt;.\n&quot;));</span>
+<span class="lineNum">     106 </span><span class="lineNoCov">          0 : }</span>
+<a name="107"><span class="lineNum">     107 </span>            : </a>
+<span class="lineNum">     108 </span>            : static bool
+<span class="lineNum">     109 </span><span class="lineNoCov">          0 : stop_streaming(XLogRecPtr xlogpos, uint32 timeline, bool segment_finished)</span>
+<span class="lineNum">     110 </span>            : {
+<span class="lineNum">     111 </span>            :     static uint32 prevtimeline = 0;
+<span class="lineNum">     112 </span>            :     static XLogRecPtr prevpos = InvalidXLogRecPtr;
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span>            :     /* we assume that we get called once at the end of each segment */
+<span class="lineNum">     115 </span><span class="lineNoCov">          0 :     if (verbose &amp;&amp; segment_finished)</span>
+<span class="lineNum">     116 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;finished segment at %X/%X (timeline %u)&quot;,</span>
+<span class="lineNum">     117 </span>            :                     (uint32) (xlogpos &gt;&gt; 32), (uint32) xlogpos,
+<span class="lineNum">     118 </span>            :                     timeline);
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :     if (!XLogRecPtrIsInvalid(endpos) &amp;&amp; endpos &lt; xlogpos)</span>
+<span class="lineNum">     121 </span>            :     {
+<span class="lineNum">     122 </span><span class="lineNoCov">          0 :         if (verbose)</span>
+<span class="lineNum">     123 </span><span class="lineNoCov">          0 :             pg_log_info(&quot;stopped log streaming at %X/%X (timeline %u)&quot;,</span>
+<span class="lineNum">     124 </span>            :                         (uint32) (xlogpos &gt;&gt; 32), (uint32) xlogpos,
+<span class="lineNum">     125 </span>            :                         timeline);
+<span class="lineNum">     126 </span><span class="lineNoCov">          0 :         time_to_stop = true;</span>
+<span class="lineNum">     127 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">     128 </span>            :     }
+<span class="lineNum">     129 </span>            : 
+<span class="lineNum">     130 </span>            :     /*
+<span class="lineNum">     131 </span>            :      * Note that we report the previous, not current, position here. After a
+<span class="lineNum">     132 </span>            :      * timeline switch, xlogpos points to the beginning of the segment because
+<span class="lineNum">     133 </span>            :      * that's where we always begin streaming. Reporting the end of previous
+<span class="lineNum">     134 </span>            :      * timeline isn't totally accurate, because the next timeline can begin
+<span class="lineNum">     135 </span>            :      * slightly before the end of the WAL that we received on the previous
+<span class="lineNum">     136 </span>            :      * timeline, but it's close enough for reporting purposes.
+<span class="lineNum">     137 </span>            :      */
+<span class="lineNum">     138 </span><span class="lineNoCov">          0 :     if (verbose &amp;&amp; prevtimeline != 0 &amp;&amp; prevtimeline != timeline)</span>
+<span class="lineNum">     139 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;switched to timeline %u at %X/%X&quot;,</span>
+<span class="lineNum">     140 </span>            :                     timeline,
+<span class="lineNum">     141 </span>            :                     (uint32) (prevpos &gt;&gt; 32), (uint32) prevpos);
+<span class="lineNum">     142 </span>            : 
+<span class="lineNum">     143 </span><span class="lineNoCov">          0 :     prevtimeline = timeline;</span>
+<span class="lineNum">     144 </span><span class="lineNoCov">          0 :     prevpos = xlogpos;</span>
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span><span class="lineNoCov">          0 :     if (time_to_stop)</span>
+<span class="lineNum">     147 </span>            :     {
+<span class="lineNum">     148 </span><span class="lineNoCov">          0 :         if (verbose)</span>
+<span class="lineNum">     149 </span><span class="lineNoCov">          0 :             pg_log_info(&quot;received interrupt signal, exiting&quot;);</span>
+<span class="lineNum">     150 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">     151 </span>            :     }
+<span class="lineNum">     152 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">     153 </span>            : }
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            : 
+<span class="lineNum">     156 </span>            : /*
+<span class="lineNum">     157 </span>            :  * Get destination directory.
+<a name="158"><span class="lineNum">     158 </span>            :  */</a>
+<span class="lineNum">     159 </span>            : static DIR *
+<span class="lineNum">     160 </span><span class="lineNoCov">          0 : get_destination_dir(char *dest_folder)</span>
+<span class="lineNum">     161 </span>            : {
+<span class="lineNum">     162 </span>            :     DIR        *dir;
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span><span class="lineNoCov">          0 :     Assert(dest_folder != NULL);</span>
+<span class="lineNum">     165 </span><span class="lineNoCov">          0 :     dir = opendir(dest_folder);</span>
+<span class="lineNum">     166 </span><span class="lineNoCov">          0 :     if (dir == NULL)</span>
+<span class="lineNum">     167 </span>            :     {
+<span class="lineNum">     168 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not open directory \&quot;%s\&quot;: %m&quot;, basedir);</span>
+<span class="lineNum">     169 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     170 </span>            :     }
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span><span class="lineNoCov">          0 :     return dir;</span>
+<span class="lineNum">     173 </span>            : }
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span>            : /*
+<span class="lineNum">     177 </span>            :  * Close existing directory.
+<a name="178"><span class="lineNum">     178 </span>            :  */</a>
+<span class="lineNum">     179 </span>            : static void
+<span class="lineNum">     180 </span><span class="lineNoCov">          0 : close_destination_dir(DIR *dest_dir, char *dest_folder)</span>
+<span class="lineNum">     181 </span>            : {
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :     Assert(dest_dir != NULL &amp;&amp; dest_folder != NULL);</span>
+<span class="lineNum">     183 </span><span class="lineNoCov">          0 :     if (closedir(dest_dir))</span>
+<span class="lineNum">     184 </span>            :     {
+<span class="lineNum">     185 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not close directory \&quot;%s\&quot;: %m&quot;, dest_folder);</span>
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     187 </span>            :     }
+<span class="lineNum">     188 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span>            : 
+<span class="lineNum">     191 </span>            : /*
+<span class="lineNum">     192 </span>            :  * Determine starting location for streaming, based on any existing xlog
+<span class="lineNum">     193 </span>            :  * segments in the directory. We start at the end of the last one that is
+<span class="lineNum">     194 </span>            :  * complete (size matches wal segment size), on the timeline with highest ID.
+<span class="lineNum">     195 </span>            :  *
+<span class="lineNum">     196 </span>            :  * If there are no WAL files in the directory, returns InvalidXLogRecPtr.
+<a name="197"><span class="lineNum">     197 </span>            :  */</a>
+<span class="lineNum">     198 </span>            : static XLogRecPtr
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 : FindStreamingStart(uint32 *tli)</span>
+<span class="lineNum">     200 </span>            : {
+<span class="lineNum">     201 </span>            :     DIR        *dir;
+<span class="lineNum">     202 </span>            :     struct dirent *dirent;
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :     XLogSegNo   high_segno = 0;</span>
+<span class="lineNum">     204 </span><span class="lineNoCov">          0 :     uint32      high_tli = 0;</span>
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 :     bool        high_ispartial = false;</span>
+<span class="lineNum">     206 </span>            : 
+<span class="lineNum">     207 </span><span class="lineNoCov">          0 :     dir = get_destination_dir(basedir);</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :     while (errno = 0, (dirent = readdir(dir)) != NULL)</span>
+<span class="lineNum">     210 </span>            :     {
+<span class="lineNum">     211 </span>            :         uint32      tli;
+<span class="lineNum">     212 </span>            :         XLogSegNo   segno;
+<span class="lineNum">     213 </span>            :         bool        ispartial;
+<span class="lineNum">     214 </span>            :         bool        iscompress;
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span>            :         /*
+<span class="lineNum">     217 </span>            :          * Check if the filename looks like an xlog file, or a .partial file.
+<span class="lineNum">     218 </span>            :          */
+<span class="lineNum">     219 </span><span class="lineNoCov">          0 :         if (IsXLogFileName(dirent-&gt;d_name))</span>
+<span class="lineNum">     220 </span>            :         {
+<span class="lineNum">     221 </span><span class="lineNoCov">          0 :             ispartial = false;</span>
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :             iscompress = false;</span>
+<span class="lineNum">     223 </span>            :         }
+<span class="lineNum">     224 </span><span class="lineNoCov">          0 :         else if (IsPartialXLogFileName(dirent-&gt;d_name))</span>
+<span class="lineNum">     225 </span>            :         {
+<span class="lineNum">     226 </span><span class="lineNoCov">          0 :             ispartial = true;</span>
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :             iscompress = false;</span>
+<span class="lineNum">     228 </span>            :         }
+<span class="lineNum">     229 </span><span class="lineNoCov">          0 :         else if (IsCompressXLogFileName(dirent-&gt;d_name))</span>
+<span class="lineNum">     230 </span>            :         {
+<span class="lineNum">     231 </span><span class="lineNoCov">          0 :             ispartial = false;</span>
+<span class="lineNum">     232 </span><span class="lineNoCov">          0 :             iscompress = true;</span>
+<span class="lineNum">     233 </span>            :         }
+<span class="lineNum">     234 </span><span class="lineNoCov">          0 :         else if (IsPartialCompressXLogFileName(dirent-&gt;d_name))</span>
+<span class="lineNum">     235 </span>            :         {
+<span class="lineNum">     236 </span><span class="lineNoCov">          0 :             ispartial = true;</span>
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 :             iscompress = true;</span>
+<span class="lineNum">     238 </span>            :         }
+<span class="lineNum">     239 </span>            :         else
+<span class="lineNum">     240 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     241 </span>            : 
+<span class="lineNum">     242 </span>            :         /*
+<span class="lineNum">     243 </span>            :          * Looks like an xlog file. Parse its position.
+<span class="lineNum">     244 </span>            :          */
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :         XLogFromFileName(dirent-&gt;d_name, &amp;tli, &amp;segno, WalSegSz);</span>
+<span class="lineNum">     246 </span>            : 
+<span class="lineNum">     247 </span>            :         /*
+<span class="lineNum">     248 </span>            :          * Check that the segment has the right size, if it's supposed to be
+<span class="lineNum">     249 </span>            :          * completed.  For non-compressed segments just check the on-disk size
+<span class="lineNum">     250 </span>            :          * and see if it matches a completed segment. For compressed segments,
+<span class="lineNum">     251 </span>            :          * look at the last 4 bytes of the compressed file, which is where the
+<span class="lineNum">     252 </span>            :          * uncompressed size is located for gz files with a size lower than
+<span class="lineNum">     253 </span>            :          * 4GB, and then compare it to the size of a completed segment. The 4
+<span class="lineNum">     254 </span>            :          * last bytes correspond to the ISIZE member according to
+<span class="lineNum">     255 </span>            :          * http://www.zlib.org/rfc-gzip.html.
+<span class="lineNum">     256 </span>            :          */
+<span class="lineNum">     257 </span><span class="lineNoCov">          0 :         if (!ispartial &amp;&amp; !iscompress)</span>
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :         {</span>
+<span class="lineNum">     259 </span>            :             struct stat statbuf;
+<span class="lineNum">     260 </span>            :             char        fullpath[MAXPGPATH * 2];
+<span class="lineNum">     261 </span>            : 
+<span class="lineNum">     262 </span><span class="lineNoCov">          0 :             snprintf(fullpath, sizeof(fullpath), &quot;%s/%s&quot;, basedir, dirent-&gt;d_name);</span>
+<span class="lineNum">     263 </span><span class="lineNoCov">          0 :             if (stat(fullpath, &amp;statbuf) != 0)</span>
+<span class="lineNum">     264 </span>            :             {
+<span class="lineNum">     265 </span><span class="lineNoCov">          0 :                 pg_log_error(&quot;could not stat file \&quot;%s\&quot;: %m&quot;, fullpath);</span>
+<span class="lineNum">     266 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">     267 </span>            :             }
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span><span class="lineNoCov">          0 :             if (statbuf.st_size != WalSegSz)</span>
+<span class="lineNum">     270 </span>            :             {
+<span class="lineNum">     271 </span><span class="lineNoCov">          0 :                 pg_log_warning(&quot;segment file \&quot;%s\&quot; has incorrect size %d, skipping&quot;,</span>
+<span class="lineNum">     272 </span>            :                                dirent-&gt;d_name, (int) statbuf.st_size);
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     274 </span>            :             }
+<span class="lineNum">     275 </span>            :         }
+<span class="lineNum">     276 </span><span class="lineNoCov">          0 :         else if (!ispartial &amp;&amp; iscompress)</span>
+<span class="lineNum">     277 </span>            :         {
+<span class="lineNum">     278 </span>            :             int         fd;
+<span class="lineNum">     279 </span>            :             char        buf[4];
+<span class="lineNum">     280 </span>            :             int         bytes_out;
+<span class="lineNum">     281 </span>            :             char        fullpath[MAXPGPATH * 2];
+<span class="lineNum">     282 </span>            :             int         r;
+<span class="lineNum">     283 </span>            : 
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :             snprintf(fullpath, sizeof(fullpath), &quot;%s/%s&quot;, basedir, dirent-&gt;d_name);</span>
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span><span class="lineNoCov">          0 :             fd = open(fullpath, O_RDONLY | PG_BINARY, 0);</span>
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :             if (fd &lt; 0)</span>
+<span class="lineNum">     288 </span>            :             {
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :                 pg_log_error(&quot;could not open compressed file \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     290 </span>            :                              fullpath);
+<span class="lineNum">     291 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">     292 </span>            :             }
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :             if (lseek(fd, (off_t) (-4), SEEK_END) &lt; 0)</span>
+<span class="lineNum">     294 </span>            :             {
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :                 pg_log_error(&quot;could not seek in compressed file \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     296 </span>            :                              fullpath);
+<span class="lineNum">     297 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">     298 </span>            :             }
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :             r = read(fd, (char *) buf, sizeof(buf));</span>
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :             if (r != sizeof(buf))</span>
+<span class="lineNum">     301 </span>            :             {
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :                 if (r &lt; 0)</span>
+<span class="lineNum">     303 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;could not read compressed file \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     304 </span>            :                                  fullpath);
+<span class="lineNum">     305 </span>            :                 else
+<span class="lineNum">     306 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;could not read compressed file \&quot;%s\&quot;: read %d of %zu&quot;,</span>
+<span class="lineNum">     307 </span>            :                                  fullpath, r, sizeof(buf));
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">     309 </span>            :             }
+<span class="lineNum">     310 </span>            : 
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :             close(fd);</span>
+<span class="lineNum">     312 </span><span class="lineNoCov">          0 :             bytes_out = (buf[3] &lt;&lt; 24) | (buf[2] &lt;&lt; 16) |</span>
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :                 (buf[1] &lt;&lt; 8) | buf[0];</span>
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span><span class="lineNoCov">          0 :             if (bytes_out != WalSegSz)</span>
+<span class="lineNum">     316 </span>            :             {
+<span class="lineNum">     317 </span><span class="lineNoCov">          0 :                 pg_log_warning(&quot;compressed segment file \&quot;%s\&quot; has incorrect uncompressed size %d, skipping&quot;,</span>
+<span class="lineNum">     318 </span>            :                                dirent-&gt;d_name, bytes_out);
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     320 </span>            :             }
+<span class="lineNum">     321 </span>            :         }
+<span class="lineNum">     322 </span>            : 
+<span class="lineNum">     323 </span>            :         /* Looks like a valid segment. Remember that we saw it. */
+<span class="lineNum">     324 </span><span class="lineNoCov">          0 :         if ((segno &gt; high_segno) ||</span>
+<span class="lineNum">     325 </span><span class="lineNoCov">          0 :             (segno == high_segno &amp;&amp; tli &gt; high_tli) ||</span>
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :             (segno == high_segno &amp;&amp; tli == high_tli &amp;&amp; high_ispartial &amp;&amp; !ispartial))</span>
+<span class="lineNum">     327 </span>            :         {
+<span class="lineNum">     328 </span><span class="lineNoCov">          0 :             high_segno = segno;</span>
+<span class="lineNum">     329 </span><span class="lineNoCov">          0 :             high_tli = tli;</span>
+<span class="lineNum">     330 </span><span class="lineNoCov">          0 :             high_ispartial = ispartial;</span>
+<span class="lineNum">     331 </span>            :         }
+<span class="lineNum">     332 </span>            :     }
+<span class="lineNum">     333 </span>            : 
+<span class="lineNum">     334 </span><span class="lineNoCov">          0 :     if (errno)</span>
+<span class="lineNum">     335 </span>            :     {
+<span class="lineNum">     336 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not read directory \&quot;%s\&quot;: %m&quot;, basedir);</span>
+<span class="lineNum">     337 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     338 </span>            :     }
+<span class="lineNum">     339 </span>            : 
+<span class="lineNum">     340 </span><span class="lineNoCov">          0 :     close_destination_dir(dir, basedir);</span>
+<span class="lineNum">     341 </span>            : 
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :     if (high_segno &gt; 0)</span>
+<span class="lineNum">     343 </span>            :     {
+<span class="lineNum">     344 </span>            :         XLogRecPtr  high_ptr;
+<span class="lineNum">     345 </span>            : 
+<span class="lineNum">     346 </span>            :         /*
+<span class="lineNum">     347 </span>            :          * Move the starting pointer to the start of the next segment, if the
+<span class="lineNum">     348 </span>            :          * highest one we saw was completed. Otherwise start streaming from
+<span class="lineNum">     349 </span>            :          * the beginning of the .partial segment.
+<span class="lineNum">     350 </span>            :          */
+<span class="lineNum">     351 </span><span class="lineNoCov">          0 :         if (!high_ispartial)</span>
+<span class="lineNum">     352 </span><span class="lineNoCov">          0 :             high_segno++;</span>
+<span class="lineNum">     353 </span>            : 
+<span class="lineNum">     354 </span><span class="lineNoCov">          0 :         XLogSegNoOffsetToRecPtr(high_segno, 0, WalSegSz, high_ptr);</span>
+<span class="lineNum">     355 </span>            : 
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :         *tli = high_tli;</span>
+<span class="lineNum">     357 </span><span class="lineNoCov">          0 :         return high_ptr;</span>
+<span class="lineNum">     358 </span>            :     }
+<span class="lineNum">     359 </span>            :     else
+<span class="lineNum">     360 </span><span class="lineNoCov">          0 :         return InvalidXLogRecPtr;</span>
+<span class="lineNum">     361 </span>            : }
+<span class="lineNum">     362 </span>            : 
+<span class="lineNum">     363 </span>            : /*
+<span class="lineNum">     364 </span>            :  * Start the log streaming
+<a name="365"><span class="lineNum">     365 </span>            :  */</a>
+<span class="lineNum">     366 </span>            : static void
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 : StreamLog(void)</span>
+<span class="lineNum">     368 </span>            : {
+<span class="lineNum">     369 </span>            :     XLogRecPtr  serverpos;
+<span class="lineNum">     370 </span>            :     TimeLineID  servertli;
+<span class="lineNum">     371 </span>            :     StreamCtl   stream;
+<span class="lineNum">     372 </span>            : 
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 :     MemSet(&amp;stream, 0, sizeof(stream));</span>
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span>            :     /*
+<span class="lineNum">     376 </span>            :      * Connect in replication mode to the server
+<span class="lineNum">     377 </span>            :      */
+<span class="lineNum">     378 </span><span class="lineNoCov">          0 :     if (conn == NULL)</span>
+<span class="lineNum">     379 </span><span class="lineNoCov">          0 :         conn = GetConnection();</span>
+<span class="lineNum">     380 </span><span class="lineNoCov">          0 :     if (!conn)</span>
+<span class="lineNum">     381 </span>            :         /* Error message already written in GetConnection() */
+<span class="lineNum">     382 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     383 </span>            : 
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :     if (!CheckServerVersionForStreaming(conn))</span>
+<span class="lineNum">     385 </span>            :     {
+<span class="lineNum">     386 </span>            :         /*
+<span class="lineNum">     387 </span>            :          * Error message already written in CheckServerVersionForStreaming().
+<span class="lineNum">     388 </span>            :          * There's no hope of recovering from a version mismatch, so don't
+<span class="lineNum">     389 </span>            :          * retry.
+<span class="lineNum">     390 </span>            :          */
+<span class="lineNum">     391 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     392 </span>            :     }
+<span class="lineNum">     393 </span>            : 
+<span class="lineNum">     394 </span>            :     /*
+<span class="lineNum">     395 </span>            :      * Identify server, obtaining start LSN position and current timeline ID
+<span class="lineNum">     396 </span>            :      * at the same time, necessary if not valid data can be found in the
+<span class="lineNum">     397 </span>            :      * existing output directory.
+<span class="lineNum">     398 </span>            :      */
+<span class="lineNum">     399 </span><span class="lineNoCov">          0 :     if (!RunIdentifySystem(conn, NULL, &amp;servertli, &amp;serverpos, NULL))</span>
+<span class="lineNum">     400 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     401 </span>            : 
+<span class="lineNum">     402 </span>            :     /*
+<span class="lineNum">     403 </span>            :      * Figure out where to start streaming.
+<span class="lineNum">     404 </span>            :      */
+<span class="lineNum">     405 </span><span class="lineNoCov">          0 :     stream.startpos = FindStreamingStart(&amp;stream.timeline);</span>
+<span class="lineNum">     406 </span><span class="lineNoCov">          0 :     if (stream.startpos == InvalidXLogRecPtr)</span>
+<span class="lineNum">     407 </span>            :     {
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :         stream.startpos = serverpos;</span>
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :         stream.timeline = servertli;</span>
+<span class="lineNum">     410 </span>            :     }
+<span class="lineNum">     411 </span>            : 
+<span class="lineNum">     412 </span>            :     /*
+<span class="lineNum">     413 </span>            :      * Always start streaming at the beginning of a segment
+<span class="lineNum">     414 </span>            :      */
+<span class="lineNum">     415 </span><span class="lineNoCov">          0 :     stream.startpos -= XLogSegmentOffset(stream.startpos, WalSegSz);</span>
+<span class="lineNum">     416 </span>            : 
+<span class="lineNum">     417 </span>            :     /*
+<span class="lineNum">     418 </span>            :      * Start the replication
+<span class="lineNum">     419 </span>            :      */
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :     if (verbose)</span>
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;starting log streaming at %X/%X (timeline %u)&quot;,</span>
+<span class="lineNum">     422 </span>            :                     (uint32) (stream.startpos &gt;&gt; 32), (uint32) stream.startpos,
+<span class="lineNum">     423 </span>            :                     stream.timeline);
+<span class="lineNum">     424 </span>            : 
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :     stream.stream_stop = stop_streaming;</span>
+<span class="lineNum">     426 </span><span class="lineNoCov">          0 :     stream.stop_socket = PGINVALID_SOCKET;</span>
+<span class="lineNum">     427 </span><span class="lineNoCov">          0 :     stream.standby_message_timeout = standby_message_timeout;</span>
+<span class="lineNum">     428 </span><span class="lineNoCov">          0 :     stream.synchronous = synchronous;</span>
+<span class="lineNum">     429 </span><span class="lineNoCov">          0 :     stream.do_sync = do_sync;</span>
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :     stream.mark_done = false;</span>
+<span class="lineNum">     431 </span><span class="lineNoCov">          0 :     stream.walmethod = CreateWalDirectoryMethod(basedir, compresslevel,</span>
+<span class="lineNum">     432 </span><span class="lineNoCov">          0 :                                                 stream.do_sync);</span>
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 :     stream.partial_suffix = &quot;.partial&quot;;</span>
+<span class="lineNum">     434 </span><span class="lineNoCov">          0 :     stream.replication_slot = replication_slot;</span>
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :     ReceiveXlogStream(conn, &amp;stream);</span>
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span><span class="lineNoCov">          0 :     if (!stream.walmethod-&gt;finish())</span>
+<span class="lineNum">     439 </span>            :     {
+<span class="lineNum">     440 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;could not finish writing WAL files: %m&quot;);</span>
+<span class="lineNum">     441 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     442 </span>            :     }
+<span class="lineNum">     443 </span>            : 
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :     PQfinish(conn);</span>
+<span class="lineNum">     445 </span><span class="lineNoCov">          0 :     conn = NULL;</span>
+<span class="lineNum">     446 </span>            : 
+<span class="lineNum">     447 </span><span class="lineNoCov">          0 :     FreeWalDirectoryMethod();</span>
+<span class="lineNum">     448 </span><span class="lineNoCov">          0 :     pg_free(stream.walmethod);</span>
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span><span class="lineNoCov">          0 :     conn = NULL;</span>
+<span class="lineNum">     451 </span>            : }
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span>            : /*
+<span class="lineNum">     454 </span>            :  * When sigint is called, just tell the system to exit at the next possible
+<span class="lineNum">     455 </span>            :  * moment.
+<span class="lineNum">     456 </span>            :  */
+<span class="lineNum">     457 </span>            : #ifndef WIN32
+<a name="458"><span class="lineNum">     458 </span>            : </a>
+<span class="lineNum">     459 </span>            : static void
+<span class="lineNum">     460 </span><span class="lineNoCov">          0 : sigint_handler(int signum)</span>
+<span class="lineNum">     461 </span>            : {
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :     time_to_stop = true;</span>
+<span class="lineNum">     463 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     464 </span>            : #endif
+<a name="465"><span class="lineNum">     465 </span>            : </a>
+<span class="lineNum">     466 </span>            : int
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 : main(int argc, char **argv)</span>
+<span class="lineNum">     468 </span>            : {
+<span class="lineNum">     469 </span>            :     static struct option long_options[] = {
+<span class="lineNum">     470 </span>            :         {&quot;help&quot;, no_argument, NULL, '?'},
+<span class="lineNum">     471 </span>            :         {&quot;version&quot;, no_argument, NULL, 'V'},
+<span class="lineNum">     472 </span>            :         {&quot;directory&quot;, required_argument, NULL, 'D'},
+<span class="lineNum">     473 </span>            :         {&quot;dbname&quot;, required_argument, NULL, 'd'},
+<span class="lineNum">     474 </span>            :         {&quot;endpos&quot;, required_argument, NULL, 'E'},
+<span class="lineNum">     475 </span>            :         {&quot;host&quot;, required_argument, NULL, 'h'},
+<span class="lineNum">     476 </span>            :         {&quot;port&quot;, required_argument, NULL, 'p'},
+<span class="lineNum">     477 </span>            :         {&quot;username&quot;, required_argument, NULL, 'U'},
+<span class="lineNum">     478 </span>            :         {&quot;no-loop&quot;, no_argument, NULL, 'n'},
+<span class="lineNum">     479 </span>            :         {&quot;no-password&quot;, no_argument, NULL, 'w'},
+<span class="lineNum">     480 </span>            :         {&quot;password&quot;, no_argument, NULL, 'W'},
+<span class="lineNum">     481 </span>            :         {&quot;status-interval&quot;, required_argument, NULL, 's'},
+<span class="lineNum">     482 </span>            :         {&quot;slot&quot;, required_argument, NULL, 'S'},
+<span class="lineNum">     483 </span>            :         {&quot;verbose&quot;, no_argument, NULL, 'v'},
+<span class="lineNum">     484 </span>            :         {&quot;compress&quot;, required_argument, NULL, 'Z'},
+<span class="lineNum">     485 </span>            : /* action */
+<span class="lineNum">     486 </span>            :         {&quot;create-slot&quot;, no_argument, NULL, 1},
+<span class="lineNum">     487 </span>            :         {&quot;drop-slot&quot;, no_argument, NULL, 2},
+<span class="lineNum">     488 </span>            :         {&quot;if-not-exists&quot;, no_argument, NULL, 3},
+<span class="lineNum">     489 </span>            :         {&quot;synchronous&quot;, no_argument, NULL, 4},
+<span class="lineNum">     490 </span>            :         {&quot;no-sync&quot;, no_argument, NULL, 5},
+<span class="lineNum">     491 </span>            :         {NULL, 0, NULL, 0}
+<span class="lineNum">     492 </span>            :     };
+<span class="lineNum">     493 </span>            : 
+<span class="lineNum">     494 </span>            :     int         c;
+<span class="lineNum">     495 </span>            :     int         option_index;
+<span class="lineNum">     496 </span>            :     char       *db_name;
+<span class="lineNum">     497 </span>            :     uint32      hi,
+<span class="lineNum">     498 </span>            :                 lo;
+<span class="lineNum">     499 </span>            : 
+<span class="lineNum">     500 </span><span class="lineNoCov">          0 :     pg_logging_init(argv[0]);</span>
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :     progname = get_progname(argv[0]);</span>
+<span class="lineNum">     502 </span><span class="lineNoCov">          0 :     set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN(&quot;pg_basebackup&quot;));</span>
+<span class="lineNum">     503 </span>            : 
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :     if (argc &gt; 1)</span>
+<span class="lineNum">     505 </span>            :     {
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :         if (strcmp(argv[1], &quot;--help&quot;) == 0 || strcmp(argv[1], &quot;-?&quot;) == 0)</span>
+<span class="lineNum">     507 </span>            :         {
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 :             usage();</span>
+<span class="lineNum">     509 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     510 </span>            :         }
+<span class="lineNum">     511 </span><span class="lineNoCov">          0 :         else if (strcmp(argv[1], &quot;-V&quot;) == 0 ||</span>
+<span class="lineNum">     512 </span><span class="lineNoCov">          0 :                  strcmp(argv[1], &quot;--version&quot;) == 0)</span>
+<span class="lineNum">     513 </span>            :         {
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :             puts(&quot;pg_receivewal (PostgreSQL) &quot; PG_VERSION);</span>
+<span class="lineNum">     515 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     516 </span>            :         }
+<span class="lineNum">     517 </span>            :     }
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span><span class="lineNoCov">          0 :     while ((c = getopt_long(argc, argv, &quot;D:d:E:h:p:U:s:S:nwWvZ:&quot;,</span>
+<span class="lineNum">     520 </span>            :                             long_options, &amp;option_index)) != -1)
+<span class="lineNum">     521 </span>            :     {
+<span class="lineNum">     522 </span><span class="lineNoCov">          0 :         switch (c)</span>
+<span class="lineNum">     523 </span>            :         {
+<span class="lineNum">     524 </span>            :             case 'D':
+<span class="lineNum">     525 </span><span class="lineNoCov">          0 :                 basedir = pg_strdup(optarg);</span>
+<span class="lineNum">     526 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     527 </span>            :             case 'd':
+<span class="lineNum">     528 </span><span class="lineNoCov">          0 :                 connection_string = pg_strdup(optarg);</span>
+<span class="lineNum">     529 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     530 </span>            :             case 'h':
+<span class="lineNum">     531 </span><span class="lineNoCov">          0 :                 dbhost = pg_strdup(optarg);</span>
+<span class="lineNum">     532 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     533 </span>            :             case 'p':
+<span class="lineNum">     534 </span><span class="lineNoCov">          0 :                 if (atoi(optarg) &lt;= 0)</span>
+<span class="lineNum">     535 </span>            :                 {
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid port number \&quot;%s\&quot;&quot;, optarg);</span>
+<span class="lineNum">     537 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     538 </span>            :                 }
+<span class="lineNum">     539 </span><span class="lineNoCov">          0 :                 dbport = pg_strdup(optarg);</span>
+<span class="lineNum">     540 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     541 </span>            :             case 'U':
+<span class="lineNum">     542 </span><span class="lineNoCov">          0 :                 dbuser = pg_strdup(optarg);</span>
+<span class="lineNum">     543 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     544 </span>            :             case 'w':
+<span class="lineNum">     545 </span><span class="lineNoCov">          0 :                 dbgetpassword = -1;</span>
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     547 </span>            :             case 'W':
+<span class="lineNum">     548 </span><span class="lineNoCov">          0 :                 dbgetpassword = 1;</span>
+<span class="lineNum">     549 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     550 </span>            :             case 's':
+<span class="lineNum">     551 </span><span class="lineNoCov">          0 :                 standby_message_timeout = atoi(optarg) * 1000;</span>
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :                 if (standby_message_timeout &lt; 0)</span>
+<span class="lineNum">     553 </span>            :                 {
+<span class="lineNum">     554 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid status interval \&quot;%s\&quot;&quot;, optarg);</span>
+<span class="lineNum">     555 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     556 </span>            :                 }
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     558 </span>            :             case 'S':
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :                 replication_slot = pg_strdup(optarg);</span>
+<span class="lineNum">     560 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     561 </span>            :             case 'E':
+<span class="lineNum">     562 </span><span class="lineNoCov">          0 :                 if (sscanf(optarg, &quot;%X/%X&quot;, &amp;hi, &amp;lo) != 2)</span>
+<span class="lineNum">     563 </span>            :                 {
+<span class="lineNum">     564 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;could not parse end position \&quot;%s\&quot;&quot;, optarg);</span>
+<span class="lineNum">     565 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     566 </span>            :                 }
+<span class="lineNum">     567 </span><span class="lineNoCov">          0 :                 endpos = ((uint64) hi) &lt;&lt; 32 | lo;</span>
+<span class="lineNum">     568 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     569 </span>            :             case 'n':
+<span class="lineNum">     570 </span><span class="lineNoCov">          0 :                 noloop = 1;</span>
+<span class="lineNum">     571 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     572 </span>            :             case 'v':
+<span class="lineNum">     573 </span><span class="lineNoCov">          0 :                 verbose++;</span>
+<span class="lineNum">     574 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     575 </span>            :             case 'Z':
+<span class="lineNum">     576 </span><span class="lineNoCov">          0 :                 compresslevel = atoi(optarg);</span>
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 :                 if (compresslevel &lt; 0 || compresslevel &gt; 9)</span>
+<span class="lineNum">     578 </span>            :                 {
+<span class="lineNum">     579 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid compression level \&quot;%s\&quot;&quot;, optarg);</span>
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     581 </span>            :                 }
+<span class="lineNum">     582 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     583 </span>            : /* action */
+<span class="lineNum">     584 </span>            :             case 1:
+<span class="lineNum">     585 </span><span class="lineNoCov">          0 :                 do_create_slot = true;</span>
+<span class="lineNum">     586 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     587 </span>            :             case 2:
+<span class="lineNum">     588 </span><span class="lineNoCov">          0 :                 do_drop_slot = true;</span>
+<span class="lineNum">     589 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     590 </span>            :             case 3:
+<span class="lineNum">     591 </span><span class="lineNoCov">          0 :                 slot_exists_ok = true;</span>
+<span class="lineNum">     592 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     593 </span>            :             case 4:
+<span class="lineNum">     594 </span><span class="lineNoCov">          0 :                 synchronous = true;</span>
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     596 </span>            :             case 5:
+<span class="lineNum">     597 </span><span class="lineNoCov">          0 :                 do_sync = false;</span>
+<span class="lineNum">     598 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     599 </span>            :             default:
+<span class="lineNum">     600 </span>            : 
+<span class="lineNum">     601 </span>            :                 /*
+<span class="lineNum">     602 </span>            :                  * getopt_long already emitted a complaint
+<span class="lineNum">     603 </span>            :                  */
+<span class="lineNum">     604 </span><span class="lineNoCov">          0 :                 fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     605 </span>            :                         progname);
+<span class="lineNum">     606 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">     607 </span>            :         }
+<span class="lineNum">     608 </span>            :     }
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span>            :     /*
+<span class="lineNum">     611 </span>            :      * Any non-option arguments?
+<span class="lineNum">     612 </span>            :      */
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :     if (optind &lt; argc)</span>
+<span class="lineNum">     614 </span>            :     {
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;too many command-line arguments (first is \&quot;%s\&quot;)&quot;,</span>
+<span class="lineNum">     616 </span>            :                      argv[optind]);
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     618 </span>            :                 progname);
+<span class="lineNum">     619 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     620 </span>            :     }
+<span class="lineNum">     621 </span>            : 
+<span class="lineNum">     622 </span><span class="lineNoCov">          0 :     if (do_drop_slot &amp;&amp; do_create_slot)</span>
+<span class="lineNum">     623 </span>            :     {
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;cannot use --create-slot together with --drop-slot&quot;);</span>
+<span class="lineNum">     625 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     626 </span>            :                 progname);
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     628 </span>            :     }
+<span class="lineNum">     629 </span>            : 
+<span class="lineNum">     630 </span><span class="lineNoCov">          0 :     if (replication_slot == NULL &amp;&amp; (do_drop_slot || do_create_slot))</span>
+<span class="lineNum">     631 </span>            :     {
+<span class="lineNum">     632 </span>            :         /* translator: second %s is an option name */
+<span class="lineNum">     633 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;%s needs a slot to be specified using --slot&quot;,</span>
+<span class="lineNum">     634 </span>            :                      do_drop_slot ? &quot;--drop-slot&quot; : &quot;--create-slot&quot;);
+<span class="lineNum">     635 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     636 </span>            :                 progname);
+<span class="lineNum">     637 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     638 </span>            :     }
+<span class="lineNum">     639 </span>            : 
+<span class="lineNum">     640 </span><span class="lineNoCov">          0 :     if (synchronous &amp;&amp; !do_sync)</span>
+<span class="lineNum">     641 </span>            :     {
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;cannot use --synchronous together with --no-sync&quot;);</span>
+<span class="lineNum">     643 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     644 </span>            :                 progname);
+<span class="lineNum">     645 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     646 </span>            :     }
+<span class="lineNum">     647 </span>            : 
+<span class="lineNum">     648 </span>            :     /*
+<span class="lineNum">     649 </span>            :      * Required arguments
+<span class="lineNum">     650 </span>            :      */
+<span class="lineNum">     651 </span><span class="lineNoCov">          0 :     if (basedir == NULL &amp;&amp; !do_drop_slot &amp;&amp; !do_create_slot)</span>
+<span class="lineNum">     652 </span>            :     {
+<span class="lineNum">     653 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;no target directory specified&quot;);</span>
+<span class="lineNum">     654 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     655 </span>            :                 progname);
+<span class="lineNum">     656 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     657 </span>            :     }
+<span class="lineNum">     658 </span>            : 
+<span class="lineNum">     659 </span>            : #ifndef HAVE_LIBZ
+<span class="lineNum">     660 </span>            :     if (compresslevel != 0)
+<span class="lineNum">     661 </span>            :     {
+<span class="lineNum">     662 </span>            :         pg_log_error(&quot;this build does not support compression&quot;);
+<span class="lineNum">     663 </span>            :         exit(1);
+<span class="lineNum">     664 </span>            :     }
+<span class="lineNum">     665 </span>            : #endif
+<span class="lineNum">     666 </span>            : 
+<span class="lineNum">     667 </span>            :     /*
+<span class="lineNum">     668 </span>            :      * Check existence of destination folder.
+<span class="lineNum">     669 </span>            :      */
+<span class="lineNum">     670 </span><span class="lineNoCov">          0 :     if (!do_drop_slot &amp;&amp; !do_create_slot)</span>
+<span class="lineNum">     671 </span>            :     {
+<span class="lineNum">     672 </span><span class="lineNoCov">          0 :         DIR        *dir = get_destination_dir(basedir);</span>
+<span class="lineNum">     673 </span>            : 
+<span class="lineNum">     674 </span><span class="lineNoCov">          0 :         close_destination_dir(dir, basedir);</span>
+<span class="lineNum">     675 </span>            :     }
+<span class="lineNum">     676 </span>            : 
+<span class="lineNum">     677 </span>            : #ifndef WIN32
+<span class="lineNum">     678 </span><span class="lineNoCov">          0 :     pqsignal(SIGINT, sigint_handler);</span>
+<span class="lineNum">     679 </span>            : #endif
+<span class="lineNum">     680 </span>            : 
+<span class="lineNum">     681 </span>            :     /*
+<span class="lineNum">     682 </span>            :      * Obtain a connection before doing anything.
+<span class="lineNum">     683 </span>            :      */
+<span class="lineNum">     684 </span><span class="lineNoCov">          0 :     conn = GetConnection();</span>
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 :     if (!conn)</span>
+<span class="lineNum">     686 </span>            :         /* error message already written in GetConnection() */
+<span class="lineNum">     687 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     688 </span><span class="lineNoCov">          0 :     atexit(disconnect_atexit);</span>
+<span class="lineNum">     689 </span>            : 
+<span class="lineNum">     690 </span>            :     /*
+<span class="lineNum">     691 </span>            :      * Run IDENTIFY_SYSTEM to make sure we've successfully have established a
+<span class="lineNum">     692 </span>            :      * replication connection and haven't connected using a database specific
+<span class="lineNum">     693 </span>            :      * connection.
+<span class="lineNum">     694 </span>            :      */
+<span class="lineNum">     695 </span><span class="lineNoCov">          0 :     if (!RunIdentifySystem(conn, NULL, NULL, NULL, &amp;db_name))</span>
+<span class="lineNum">     696 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     697 </span>            : 
+<span class="lineNum">     698 </span>            :     /*
+<span class="lineNum">     699 </span>            :      * Set umask so that directories/files are created with the same
+<span class="lineNum">     700 </span>            :      * permissions as directories/files in the source data directory.
+<span class="lineNum">     701 </span>            :      *
+<span class="lineNum">     702 </span>            :      * pg_mode_mask is set to owner-only by default and then updated in
+<span class="lineNum">     703 </span>            :      * GetConnection() where we get the mode from the server-side with
+<span class="lineNum">     704 </span>            :      * RetrieveDataDirCreatePerm() and then call SetDataDirectoryCreatePerm().
+<span class="lineNum">     705 </span>            :      */
+<span class="lineNum">     706 </span><span class="lineNoCov">          0 :     umask(pg_mode_mask);</span>
+<span class="lineNum">     707 </span>            : 
+<span class="lineNum">     708 </span>            :     /* determine remote server's xlog segment size */
+<span class="lineNum">     709 </span><span class="lineNoCov">          0 :     if (!RetrieveWalSegSize(conn))</span>
+<span class="lineNum">     710 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     711 </span>            : 
+<span class="lineNum">     712 </span>            :     /*
+<span class="lineNum">     713 </span>            :      * Check that there is a database associated with connection, none should
+<span class="lineNum">     714 </span>            :      * be defined in this context.
+<span class="lineNum">     715 </span>            :      */
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :     if (db_name)</span>
+<span class="lineNum">     717 </span>            :     {
+<span class="lineNum">     718 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;replication connection using slot \&quot;%s\&quot; is unexpectedly database specific&quot;,</span>
+<span class="lineNum">     719 </span>            :                      replication_slot);
+<span class="lineNum">     720 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     721 </span>            :     }
+<span class="lineNum">     722 </span>            : 
+<span class="lineNum">     723 </span>            :     /*
+<span class="lineNum">     724 </span>            :      * Drop a replication slot.
+<span class="lineNum">     725 </span>            :      */
+<span class="lineNum">     726 </span><span class="lineNoCov">          0 :     if (do_drop_slot)</span>
+<span class="lineNum">     727 </span>            :     {
+<span class="lineNum">     728 </span><span class="lineNoCov">          0 :         if (verbose)</span>
+<span class="lineNum">     729 </span><span class="lineNoCov">          0 :             pg_log_info(&quot;dropping replication slot \&quot;%s\&quot;&quot;, replication_slot);</span>
+<span class="lineNum">     730 </span>            : 
+<span class="lineNum">     731 </span><span class="lineNoCov">          0 :         if (!DropReplicationSlot(conn, replication_slot))</span>
+<span class="lineNum">     732 </span><span class="lineNoCov">          0 :             exit(1);</span>
+<span class="lineNum">     733 </span><span class="lineNoCov">          0 :         exit(0);</span>
+<span class="lineNum">     734 </span>            :     }
+<span class="lineNum">     735 </span>            : 
+<span class="lineNum">     736 </span>            :     /* Create a replication slot */
+<span class="lineNum">     737 </span><span class="lineNoCov">          0 :     if (do_create_slot)</span>
+<span class="lineNum">     738 </span>            :     {
+<span class="lineNum">     739 </span><span class="lineNoCov">          0 :         if (verbose)</span>
+<span class="lineNum">     740 </span><span class="lineNoCov">          0 :             pg_log_info(&quot;creating replication slot \&quot;%s\&quot;&quot;, replication_slot);</span>
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span><span class="lineNoCov">          0 :         if (!CreateReplicationSlot(conn, replication_slot, NULL, false, true, false,</span>
+<span class="lineNum">     743 </span>            :                                    slot_exists_ok))
+<span class="lineNum">     744 </span><span class="lineNoCov">          0 :             exit(1);</span>
+<span class="lineNum">     745 </span><span class="lineNoCov">          0 :         exit(0);</span>
+<span class="lineNum">     746 </span>            :     }
+<span class="lineNum">     747 </span>            : 
+<span class="lineNum">     748 </span>            :     /*
+<span class="lineNum">     749 </span>            :      * Don't close the connection here so that subsequent StreamLog() can
+<span class="lineNum">     750 </span>            :      * reuse it.
+<span class="lineNum">     751 </span>            :      */
+<span class="lineNum">     752 </span>            : 
+<span class="lineNum">     753 </span>            :     while (true)
+<span class="lineNum">     754 </span>            :     {
+<span class="lineNum">     755 </span><span class="lineNoCov">          0 :         StreamLog();</span>
+<span class="lineNum">     756 </span><span class="lineNoCov">          0 :         if (time_to_stop)</span>
+<span class="lineNum">     757 </span>            :         {
+<span class="lineNum">     758 </span>            :             /*
+<span class="lineNum">     759 </span>            :              * We've been Ctrl-C'ed or end of streaming position has been
+<span class="lineNum">     760 </span>            :              * willingly reached, so exit without an error code.
+<span class="lineNum">     761 </span>            :              */
+<span class="lineNum">     762 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     763 </span>            :         }
+<span class="lineNum">     764 </span><span class="lineNoCov">          0 :         else if (noloop)</span>
+<span class="lineNum">     765 </span>            :         {
+<span class="lineNum">     766 </span><span class="lineNoCov">          0 :             pg_log_error(&quot;disconnected&quot;);</span>
+<span class="lineNum">     767 </span><span class="lineNoCov">          0 :             exit(1);</span>
+<span class="lineNum">     768 </span>            :         }
+<span class="lineNum">     769 </span>            :         else
+<span class="lineNum">     770 </span>            :         {
+<span class="lineNum">     771 </span>            :             /* translator: check source for value for %d */
+<span class="lineNum">     772 </span><span class="lineNoCov">          0 :             pg_log_info(&quot;disconnected; waiting %d seconds to try again&quot;,</span>
+<span class="lineNum">     773 </span>            :                         RECONNECT_SLEEP_TIME);
+<span class="lineNum">     774 </span><span class="lineNoCov">          0 :             pg_usleep(RECONNECT_SLEEP_TIME * 1000000);</span>
+<span class="lineNum">     775 </span>            :         }
+<span class="lineNum">     776 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     777 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

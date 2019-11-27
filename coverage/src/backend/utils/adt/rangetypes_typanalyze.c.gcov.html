@@ -1,0 +1,443 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/rangetypes_typanalyze.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - rangetypes_typanalyze.c<span style="font-size: 80%;"> (source / <a href="rangetypes_typanalyze.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">113</td>
+            <td class="headerCovTableEntry">123</td>
+            <td class="headerCovTableEntryHi">91.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">4</td>
+            <td class="headerCovTableEntry">4</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * rangetypes_typanalyze.c
+<span class="lineNum">       4 </span>            :  *    Functions for gathering statistics from range columns
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * For a range type column, histograms of lower and upper bounds, and
+<span class="lineNum">       7 </span>            :  * the fraction of NULL and empty ranges are collected.
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  * Both histograms have the same length, and they are combined into a
+<span class="lineNum">      10 </span>            :  * single array of ranges. This has the same shape as the histogram that
+<span class="lineNum">      11 </span>            :  * std_typanalyze would collect, but the values are different. Each range
+<span class="lineNum">      12 </span>            :  * in the array is a valid range, even though the lower and upper bounds
+<span class="lineNum">      13 </span>            :  * come from different tuples. In theory, the standard scalar selectivity
+<span class="lineNum">      14 </span>            :  * functions could be used with the combined histogram.
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      17 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  *
+<span class="lineNum">      20 </span>            :  * IDENTIFICATION
+<span class="lineNum">      21 </span>            :  *    src/backend/utils/adt/rangetypes_typanalyze.c
+<span class="lineNum">      22 </span>            :  *
+<span class="lineNum">      23 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      24 </span>            :  */
+<span class="lineNum">      25 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : #include &quot;catalog/pg_operator.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;commands/vacuum.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/float.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;utils/fmgrprotos.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;utils/rangetypes.h&quot;
+<span class="lineNum">      33 </span>            : 
+<span class="lineNum">      34 </span>            : static int  float8_qsort_cmp(const void *a1, const void *a2);
+<span class="lineNum">      35 </span>            : static int  range_bound_qsort_cmp(const void *a1, const void *a2, void *arg);
+<span class="lineNum">      36 </span>            : static void compute_range_stats(VacAttrStats *stats,
+<span class="lineNum">      37 </span>            :                                 AnalyzeAttrFetchFunc fetchfunc, int samplerows, double totalrows);
+<span class="lineNum">      38 </span>            : 
+<span class="lineNum">      39 </span>            : /*
+<span class="lineNum">      40 </span>            :  * range_typanalyze -- typanalyze function for range columns
+<a name="41"><span class="lineNum">      41 </span>            :  */</a>
+<span class="lineNum">      42 </span>            : Datum
+<span class="lineNum">      43 </span><span class="lineCov">          6 : range_typanalyze(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      44 </span>            : {
+<span class="lineNum">      45 </span><span class="lineCov">          6 :     VacAttrStats *stats = (VacAttrStats *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">      46 </span>            :     TypeCacheEntry *typcache;
+<span class="lineNum">      47 </span><span class="lineCov">          6 :     Form_pg_attribute attr = stats-&gt;attr;</span>
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            :     /* Get information about range type; note column might be a domain */
+<span class="lineNum">      50 </span><span class="lineCov">          6 :     typcache = range_get_typcache(fcinfo, getBaseType(stats-&gt;attrtypid));</span>
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span><span class="lineCov">          6 :     if (attr-&gt;attstattarget &lt; 0)</span>
+<span class="lineNum">      53 </span><span class="lineCov">          6 :         attr-&gt;attstattarget = default_statistics_target;</span>
+<span class="lineNum">      54 </span>            : 
+<span class="lineNum">      55 </span><span class="lineCov">          6 :     stats-&gt;compute_stats = compute_range_stats;</span>
+<span class="lineNum">      56 </span><span class="lineCov">          6 :     stats-&gt;extra_data = typcache;</span>
+<span class="lineNum">      57 </span>            :     /* same as in std_typanalyze */
+<span class="lineNum">      58 </span><span class="lineCov">          6 :     stats-&gt;minrows = 300 * attr-&gt;attstattarget;</span>
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span><span class="lineCov">          6 :     PG_RETURN_BOOL(true);</span>
+<span class="lineNum">      61 </span>            : }
+<span class="lineNum">      62 </span>            : 
+<span class="lineNum">      63 </span>            : /*
+<span class="lineNum">      64 </span>            :  * Comparison function for sorting float8s, used for range lengths.
+<a name="65"><span class="lineNum">      65 </span>            :  */</a>
+<span class="lineNum">      66 </span>            : static int
+<span class="lineNum">      67 </span><span class="lineCov">      38552 : float8_qsort_cmp(const void *a1, const void *a2)</span>
+<span class="lineNum">      68 </span>            : {
+<span class="lineNum">      69 </span><span class="lineCov">      38552 :     const float8 *f1 = (const float8 *) a1;</span>
+<span class="lineNum">      70 </span><span class="lineCov">      38552 :     const float8 *f2 = (const float8 *) a2;</span>
+<span class="lineNum">      71 </span>            : 
+<span class="lineNum">      72 </span><span class="lineCov">      38552 :     if (*f1 &lt; *f2)</span>
+<span class="lineNum">      73 </span><span class="lineCov">         16 :         return -1;</span>
+<span class="lineNum">      74 </span><span class="lineCov">      38536 :     else if (*f1 == *f2)</span>
+<span class="lineNum">      75 </span><span class="lineCov">      33724 :         return 0;</span>
+<span class="lineNum">      76 </span>            :     else
+<span class="lineNum">      77 </span><span class="lineCov">       4812 :         return 1;</span>
+<span class="lineNum">      78 </span>            : }
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            : /*
+<span class="lineNum">      81 </span>            :  * Comparison function for sorting RangeBounds.
+<a name="82"><span class="lineNum">      82 </span>            :  */</a>
+<span class="lineNum">      83 </span>            : static int
+<span class="lineNum">      84 </span><span class="lineCov">     536344 : range_bound_qsort_cmp(const void *a1, const void *a2, void *arg)</span>
+<span class="lineNum">      85 </span>            : {
+<span class="lineNum">      86 </span><span class="lineCov">     536344 :     RangeBound *b1 = (RangeBound *) a1;</span>
+<span class="lineNum">      87 </span><span class="lineCov">     536344 :     RangeBound *b2 = (RangeBound *) a2;</span>
+<span class="lineNum">      88 </span><span class="lineCov">     536344 :     TypeCacheEntry *typcache = (TypeCacheEntry *) arg;</span>
+<span class="lineNum">      89 </span>            : 
+<span class="lineNum">      90 </span><span class="lineCov">     536344 :     return range_cmp_bounds(typcache, b1, b2);</span>
+<span class="lineNum">      91 </span>            : }
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            : /*
+<span class="lineNum">      94 </span>            :  * compute_range_stats() -- compute statistics for a range column
+<a name="95"><span class="lineNum">      95 </span>            :  */</a>
+<span class="lineNum">      96 </span>            : static void
+<span class="lineNum">      97 </span><span class="lineCov">          6 : compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,</span>
+<span class="lineNum">      98 </span>            :                     int samplerows, double totalrows)
+<span class="lineNum">      99 </span>            : {
+<span class="lineNum">     100 </span><span class="lineCov">          6 :     TypeCacheEntry *typcache = (TypeCacheEntry *) stats-&gt;extra_data;</span>
+<span class="lineNum">     101 </span><span class="lineCov">          6 :     bool        has_subdiff = OidIsValid(typcache-&gt;rng_subdiff_finfo.fn_oid);</span>
+<span class="lineNum">     102 </span><span class="lineCov">          6 :     int         null_cnt = 0;</span>
+<span class="lineNum">     103 </span><span class="lineCov">          6 :     int         non_null_cnt = 0;</span>
+<span class="lineNum">     104 </span><span class="lineCov">          6 :     int         non_empty_cnt = 0;</span>
+<span class="lineNum">     105 </span><span class="lineCov">          6 :     int         empty_cnt = 0;</span>
+<span class="lineNum">     106 </span>            :     int         range_no;
+<span class="lineNum">     107 </span>            :     int         slot_idx;
+<span class="lineNum">     108 </span><span class="lineCov">          6 :     int         num_bins = stats-&gt;attr-&gt;attstattarget;</span>
+<span class="lineNum">     109 </span>            :     int         num_hist;
+<span class="lineNum">     110 </span>            :     float8     *lengths;
+<span class="lineNum">     111 </span>            :     RangeBound *lowers,
+<span class="lineNum">     112 </span>            :                *uppers;
+<span class="lineNum">     113 </span><span class="lineCov">          6 :     double      total_width = 0;</span>
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span>            :     /* Allocate memory to hold range bounds and lengths of the sample ranges. */
+<span class="lineNum">     116 </span><span class="lineCov">          6 :     lowers = (RangeBound *) palloc(sizeof(RangeBound) * samplerows);</span>
+<span class="lineNum">     117 </span><span class="lineCov">          6 :     uppers = (RangeBound *) palloc(sizeof(RangeBound) * samplerows);</span>
+<span class="lineNum">     118 </span><span class="lineCov">          6 :     lengths = (float8 *) palloc(sizeof(float8) * samplerows);</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            :     /* Loop over the sample ranges. */
+<span class="lineNum">     121 </span><span class="lineCov">      25066 :     for (range_no = 0; range_no &lt; samplerows; range_no++)</span>
+<span class="lineNum">     122 </span>            :     {
+<span class="lineNum">     123 </span>            :         Datum       value;
+<span class="lineNum">     124 </span>            :         bool        isnull,
+<span class="lineNum">     125 </span>            :                     empty;
+<span class="lineNum">     126 </span>            :         RangeType  *range;
+<span class="lineNum">     127 </span>            :         RangeBound  lower,
+<span class="lineNum">     128 </span>            :                     upper;
+<span class="lineNum">     129 </span>            :         float8      length;
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span><span class="lineCov">      25060 :         vacuum_delay_point();</span>
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span><span class="lineCov">      25060 :         value = fetchfunc(stats, range_no, &amp;isnull);</span>
+<span class="lineNum">     134 </span><span class="lineCov">      25060 :         if (isnull)</span>
+<span class="lineNum">     135 </span>            :         {
+<span class="lineNum">     136 </span>            :             /* range is null, just count that */
+<span class="lineNum">     137 </span><span class="lineNoCov">          0 :             null_cnt++;</span>
+<span class="lineNum">     138 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     139 </span>            :         }
+<span class="lineNum">     140 </span>            : 
+<span class="lineNum">     141 </span>            :         /*
+<span class="lineNum">     142 </span>            :          * XXX: should we ignore wide values, like std_typanalyze does, to
+<span class="lineNum">     143 </span>            :          * avoid bloating the statistics table?
+<span class="lineNum">     144 </span>            :          */
+<span class="lineNum">     145 </span><span class="lineCov">      25060 :         total_width += VARSIZE_ANY(DatumGetPointer(value));</span>
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            :         /* Get range and deserialize it for further analysis. */
+<span class="lineNum">     148 </span><span class="lineCov">      25060 :         range = DatumGetRangeTypeP(value);</span>
+<span class="lineNum">     149 </span><span class="lineCov">      25060 :         range_deserialize(typcache, range, &amp;lower, &amp;upper, &amp;empty);</span>
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span><span class="lineCov">      25060 :         if (!empty)</span>
+<span class="lineNum">     152 </span>            :         {
+<span class="lineNum">     153 </span>            :             /* Remember bounds and length for further usage in histograms */
+<span class="lineNum">     154 </span><span class="lineCov">      20910 :             lowers[non_empty_cnt] = lower;</span>
+<span class="lineNum">     155 </span><span class="lineCov">      20910 :             uppers[non_empty_cnt] = upper;</span>
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span><span class="lineCov">      20910 :             if (lower.infinite || upper.infinite)</span>
+<span class="lineNum">     158 </span>            :             {
+<span class="lineNum">     159 </span>            :                 /* Length of any kind of an infinite range is infinite */
+<span class="lineNum">     160 </span><span class="lineCov">        800 :                 length = get_float8_infinity();</span>
+<span class="lineNum">     161 </span>            :             }
+<span class="lineNum">     162 </span><span class="lineCov">      20110 :             else if (has_subdiff)</span>
+<span class="lineNum">     163 </span>            :             {
+<span class="lineNum">     164 </span>            :                 /*
+<span class="lineNum">     165 </span>            :                  * For an ordinary range, use subdiff function between upper
+<span class="lineNum">     166 </span>            :                  * and lower bound values.
+<span class="lineNum">     167 </span>            :                  */
+<span class="lineNum">     168 </span><span class="lineCov">      20110 :                 length = DatumGetFloat8(FunctionCall2Coll(</span>
+<span class="lineNum">     169 </span>            :                                                           &amp;typcache-&gt;rng_subdiff_finfo,
+<span class="lineNum">     170 </span>            :                                                           typcache-&gt;rng_collation,
+<span class="lineNum">     171 </span>            :                                                           upper.val, lower.val));
+<span class="lineNum">     172 </span>            :             }
+<span class="lineNum">     173 </span>            :             else
+<span class="lineNum">     174 </span>            :             {
+<span class="lineNum">     175 </span>            :                 /* Use default value of 1.0 if no subdiff is available. */
+<span class="lineNum">     176 </span><span class="lineNoCov">          0 :                 length = 1.0;</span>
+<span class="lineNum">     177 </span>            :             }
+<span class="lineNum">     178 </span><span class="lineCov">      20910 :             lengths[non_empty_cnt] = length;</span>
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span><span class="lineCov">      20910 :             non_empty_cnt++;</span>
+<span class="lineNum">     181 </span>            :         }
+<span class="lineNum">     182 </span>            :         else
+<span class="lineNum">     183 </span><span class="lineCov">       4150 :             empty_cnt++;</span>
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span><span class="lineCov">      25060 :         non_null_cnt++;</span>
+<span class="lineNum">     186 </span>            :     }
+<span class="lineNum">     187 </span>            : 
+<span class="lineNum">     188 </span><span class="lineCov">          6 :     slot_idx = 0;</span>
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span>            :     /* We can only compute real stats if we found some non-null values. */
+<span class="lineNum">     191 </span><span class="lineCov">          6 :     if (non_null_cnt &gt; 0)</span>
+<span class="lineNum">     192 </span>            :     {
+<span class="lineNum">     193 </span>            :         Datum      *bound_hist_values;
+<span class="lineNum">     194 </span>            :         Datum      *length_hist_values;
+<span class="lineNum">     195 </span>            :         int         pos,
+<span class="lineNum">     196 </span>            :                     posfrac,
+<span class="lineNum">     197 </span>            :                     delta,
+<span class="lineNum">     198 </span>            :                     deltafrac,
+<span class="lineNum">     199 </span>            :                     i;
+<span class="lineNum">     200 </span>            :         MemoryContext old_cxt;
+<span class="lineNum">     201 </span>            :         float4     *emptyfrac;
+<span class="lineNum">     202 </span>            : 
+<span class="lineNum">     203 </span><span class="lineCov">          6 :         stats-&gt;stats_valid = true;</span>
+<span class="lineNum">     204 </span>            :         /* Do the simple null-frac and width stats */
+<span class="lineNum">     205 </span><span class="lineCov">          6 :         stats-&gt;stanullfrac = (double) null_cnt / (double) samplerows;</span>
+<span class="lineNum">     206 </span><span class="lineCov">          6 :         stats-&gt;stawidth = total_width / (double) non_null_cnt;</span>
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span>            :         /* Estimate that non-null values are unique */
+<span class="lineNum">     209 </span><span class="lineCov">          6 :         stats-&gt;stadistinct = -1.0 * (1.0 - stats-&gt;stanullfrac);</span>
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span>            :         /* Must copy the target values into anl_context */
+<span class="lineNum">     212 </span><span class="lineCov">          6 :         old_cxt = MemoryContextSwitchTo(stats-&gt;anl_context);</span>
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span>            :         /*
+<span class="lineNum">     215 </span>            :          * Generate a bounds histogram slot entry if there are at least two
+<span class="lineNum">     216 </span>            :          * values.
+<span class="lineNum">     217 </span>            :          */
+<span class="lineNum">     218 </span><span class="lineCov">          6 :         if (non_empty_cnt &gt;= 2)</span>
+<span class="lineNum">     219 </span>            :         {
+<span class="lineNum">     220 </span>            :             /* Sort bound values */
+<span class="lineNum">     221 </span><span class="lineCov">          6 :             qsort_arg(lowers, non_empty_cnt, sizeof(RangeBound),</span>
+<span class="lineNum">     222 </span>            :                       range_bound_qsort_cmp, typcache);
+<span class="lineNum">     223 </span><span class="lineCov">          6 :             qsort_arg(uppers, non_empty_cnt, sizeof(RangeBound),</span>
+<span class="lineNum">     224 </span>            :                       range_bound_qsort_cmp, typcache);
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineCov">          6 :             num_hist = non_empty_cnt;</span>
+<span class="lineNum">     227 </span><span class="lineCov">          6 :             if (num_hist &gt; num_bins)</span>
+<span class="lineNum">     228 </span><span class="lineCov">          4 :                 num_hist = num_bins + 1;</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span><span class="lineCov">          6 :             bound_hist_values = (Datum *) palloc(num_hist * sizeof(Datum));</span>
+<span class="lineNum">     231 </span>            : 
+<span class="lineNum">     232 </span>            :             /*
+<span class="lineNum">     233 </span>            :              * The object of this loop is to construct ranges from first and
+<span class="lineNum">     234 </span>            :              * last entries in lowers[] and uppers[] along with evenly-spaced
+<span class="lineNum">     235 </span>            :              * values in between. So the i'th value is a range of lowers[(i *
+<span class="lineNum">     236 </span>            :              * (nvals - 1)) / (num_hist - 1)] and uppers[(i * (nvals - 1)) /
+<span class="lineNum">     237 </span>            :              * (num_hist - 1)]. But computing that subscript directly risks
+<span class="lineNum">     238 </span>            :              * integer overflow when the stats target is more than a couple
+<span class="lineNum">     239 </span>            :              * thousand.  Instead we add (nvals - 1) / (num_hist - 1) to pos
+<span class="lineNum">     240 </span>            :              * at each step, tracking the integral and fractional parts of the
+<span class="lineNum">     241 </span>            :              * sum separately.
+<span class="lineNum">     242 </span>            :              */
+<span class="lineNum">     243 </span><span class="lineCov">          6 :             delta = (non_empty_cnt - 1) / (num_hist - 1);</span>
+<span class="lineNum">     244 </span><span class="lineCov">          6 :             deltafrac = (non_empty_cnt - 1) % (num_hist - 1);</span>
+<span class="lineNum">     245 </span><span class="lineCov">          6 :             pos = posfrac = 0;</span>
+<span class="lineNum">     246 </span>            : 
+<span class="lineNum">     247 </span><span class="lineCov">        520 :             for (i = 0; i &lt; num_hist; i++)</span>
+<span class="lineNum">     248 </span>            :             {
+<span class="lineNum">     249 </span><span class="lineCov">        514 :                 bound_hist_values[i] = PointerGetDatum(range_serialize(</span>
+<span class="lineNum">     250 </span>            :                                                                        typcache, &amp;lowers[pos], &amp;uppers[pos], false));
+<span class="lineNum">     251 </span><span class="lineCov">        514 :                 pos += delta;</span>
+<span class="lineNum">     252 </span><span class="lineCov">        514 :                 posfrac += deltafrac;</span>
+<span class="lineNum">     253 </span><span class="lineCov">        514 :                 if (posfrac &gt;= (num_hist - 1))</span>
+<span class="lineNum">     254 </span>            :                 {
+<span class="lineNum">     255 </span>            :                     /* fractional part exceeds 1, carry to integer part */
+<span class="lineNum">     256 </span><span class="lineCov">        396 :                     pos++;</span>
+<span class="lineNum">     257 </span><span class="lineCov">        396 :                     posfrac -= (num_hist - 1);</span>
+<span class="lineNum">     258 </span>            :                 }
+<span class="lineNum">     259 </span>            :             }
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span><span class="lineCov">          6 :             stats-&gt;stakind[slot_idx] = STATISTIC_KIND_BOUNDS_HISTOGRAM;</span>
+<span class="lineNum">     262 </span><span class="lineCov">          6 :             stats-&gt;stavalues[slot_idx] = bound_hist_values;</span>
+<span class="lineNum">     263 </span><span class="lineCov">          6 :             stats-&gt;numvalues[slot_idx] = num_hist;</span>
+<span class="lineNum">     264 </span><span class="lineCov">          6 :             slot_idx++;</span>
+<span class="lineNum">     265 </span>            :         }
+<span class="lineNum">     266 </span>            : 
+<span class="lineNum">     267 </span>            :         /*
+<span class="lineNum">     268 </span>            :          * Generate a length histogram slot entry if there are at least two
+<span class="lineNum">     269 </span>            :          * values.
+<span class="lineNum">     270 </span>            :          */
+<span class="lineNum">     271 </span><span class="lineCov">          6 :         if (non_empty_cnt &gt;= 2)</span>
+<span class="lineNum">     272 </span>            :         {
+<span class="lineNum">     273 </span>            :             /*
+<span class="lineNum">     274 </span>            :              * Ascending sort of range lengths for further filling of
+<span class="lineNum">     275 </span>            :              * histogram
+<span class="lineNum">     276 </span>            :              */
+<span class="lineNum">     277 </span><span class="lineCov">          6 :             qsort(lengths, non_empty_cnt, sizeof(float8), float8_qsort_cmp);</span>
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span><span class="lineCov">          6 :             num_hist = non_empty_cnt;</span>
+<span class="lineNum">     280 </span><span class="lineCov">          6 :             if (num_hist &gt; num_bins)</span>
+<span class="lineNum">     281 </span><span class="lineCov">          4 :                 num_hist = num_bins + 1;</span>
+<span class="lineNum">     282 </span>            : 
+<span class="lineNum">     283 </span><span class="lineCov">          6 :             length_hist_values = (Datum *) palloc(num_hist * sizeof(Datum));</span>
+<span class="lineNum">     284 </span>            : 
+<span class="lineNum">     285 </span>            :             /*
+<span class="lineNum">     286 </span>            :              * The object of this loop is to copy the first and last lengths[]
+<span class="lineNum">     287 </span>            :              * entries along with evenly-spaced values in between. So the i'th
+<span class="lineNum">     288 </span>            :              * value is lengths[(i * (nvals - 1)) / (num_hist - 1)]. But
+<span class="lineNum">     289 </span>            :              * computing that subscript directly risks integer overflow when
+<span class="lineNum">     290 </span>            :              * the stats target is more than a couple thousand.  Instead we
+<span class="lineNum">     291 </span>            :              * add (nvals - 1) / (num_hist - 1) to pos at each step, tracking
+<span class="lineNum">     292 </span>            :              * the integral and fractional parts of the sum separately.
+<span class="lineNum">     293 </span>            :              */
+<span class="lineNum">     294 </span><span class="lineCov">          6 :             delta = (non_empty_cnt - 1) / (num_hist - 1);</span>
+<span class="lineNum">     295 </span><span class="lineCov">          6 :             deltafrac = (non_empty_cnt - 1) % (num_hist - 1);</span>
+<span class="lineNum">     296 </span><span class="lineCov">          6 :             pos = posfrac = 0;</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span><span class="lineCov">        520 :             for (i = 0; i &lt; num_hist; i++)</span>
+<span class="lineNum">     299 </span>            :             {
+<span class="lineNum">     300 </span><span class="lineCov">        514 :                 length_hist_values[i] = Float8GetDatum(lengths[pos]);</span>
+<span class="lineNum">     301 </span><span class="lineCov">        514 :                 pos += delta;</span>
+<span class="lineNum">     302 </span><span class="lineCov">        514 :                 posfrac += deltafrac;</span>
+<span class="lineNum">     303 </span><span class="lineCov">        514 :                 if (posfrac &gt;= (num_hist - 1))</span>
+<span class="lineNum">     304 </span>            :                 {
+<span class="lineNum">     305 </span>            :                     /* fractional part exceeds 1, carry to integer part */
+<span class="lineNum">     306 </span><span class="lineCov">        396 :                     pos++;</span>
+<span class="lineNum">     307 </span><span class="lineCov">        396 :                     posfrac -= (num_hist - 1);</span>
+<span class="lineNum">     308 </span>            :                 }
+<span class="lineNum">     309 </span>            :             }
+<span class="lineNum">     310 </span>            :         }
+<span class="lineNum">     311 </span>            :         else
+<span class="lineNum">     312 </span>            :         {
+<span class="lineNum">     313 </span>            :             /*
+<span class="lineNum">     314 </span>            :              * Even when we don't create the histogram, store an empty array
+<span class="lineNum">     315 </span>            :              * to mean &quot;no histogram&quot;. We can't just leave stavalues NULL,
+<span class="lineNum">     316 </span>            :              * because get_attstatsslot() errors if you ask for stavalues, and
+<span class="lineNum">     317 </span>            :              * it's NULL. We'll still store the empty fraction in stanumbers.
+<span class="lineNum">     318 </span>            :              */
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :             length_hist_values = palloc(0);</span>
+<span class="lineNum">     320 </span><span class="lineNoCov">          0 :             num_hist = 0;</span>
+<span class="lineNum">     321 </span>            :         }
+<span class="lineNum">     322 </span><span class="lineCov">          6 :         stats-&gt;staop[slot_idx] = Float8LessOperator;</span>
+<span class="lineNum">     323 </span><span class="lineCov">          6 :         stats-&gt;stacoll[slot_idx] = InvalidOid;</span>
+<span class="lineNum">     324 </span><span class="lineCov">          6 :         stats-&gt;stavalues[slot_idx] = length_hist_values;</span>
+<span class="lineNum">     325 </span><span class="lineCov">          6 :         stats-&gt;numvalues[slot_idx] = num_hist;</span>
+<span class="lineNum">     326 </span><span class="lineCov">          6 :         stats-&gt;statypid[slot_idx] = FLOAT8OID;</span>
+<span class="lineNum">     327 </span><span class="lineCov">          6 :         stats-&gt;statyplen[slot_idx] = sizeof(float8);</span>
+<span class="lineNum">     328 </span>            : #ifdef USE_FLOAT8_BYVAL
+<span class="lineNum">     329 </span><span class="lineCov">          6 :         stats-&gt;statypbyval[slot_idx] = true;</span>
+<span class="lineNum">     330 </span>            : #else
+<span class="lineNum">     331 </span>            :         stats-&gt;statypbyval[slot_idx] = false;
+<span class="lineNum">     332 </span>            : #endif
+<span class="lineNum">     333 </span><span class="lineCov">          6 :         stats-&gt;statypalign[slot_idx] = 'd';</span>
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span>            :         /* Store the fraction of empty ranges */
+<span class="lineNum">     336 </span><span class="lineCov">          6 :         emptyfrac = (float4 *) palloc(sizeof(float4));</span>
+<span class="lineNum">     337 </span><span class="lineCov">          6 :         *emptyfrac = ((double) empty_cnt) / ((double) non_null_cnt);</span>
+<span class="lineNum">     338 </span><span class="lineCov">          6 :         stats-&gt;stanumbers[slot_idx] = emptyfrac;</span>
+<span class="lineNum">     339 </span><span class="lineCov">          6 :         stats-&gt;numnumbers[slot_idx] = 1;</span>
+<span class="lineNum">     340 </span>            : 
+<span class="lineNum">     341 </span><span class="lineCov">          6 :         stats-&gt;stakind[slot_idx] = STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM;</span>
+<span class="lineNum">     342 </span><span class="lineCov">          6 :         slot_idx++;</span>
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span><span class="lineCov">          6 :         MemoryContextSwitchTo(old_cxt);</span>
+<span class="lineNum">     345 </span>            :     }
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :     else if (null_cnt &gt; 0)</span>
+<span class="lineNum">     347 </span>            :     {
+<span class="lineNum">     348 </span>            :         /* We found only nulls; assume the column is entirely null */
+<span class="lineNum">     349 </span><span class="lineNoCov">          0 :         stats-&gt;stats_valid = true;</span>
+<span class="lineNum">     350 </span><span class="lineNoCov">          0 :         stats-&gt;stanullfrac = 1.0;</span>
+<span class="lineNum">     351 </span><span class="lineNoCov">          0 :         stats-&gt;stawidth = 0; /* &quot;unknown&quot; */</span>
+<span class="lineNum">     352 </span><span class="lineNoCov">          0 :         stats-&gt;stadistinct = 0.0;    /* &quot;unknown&quot; */</span>
+<span class="lineNum">     353 </span>            :     }
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span>            :     /*
+<span class="lineNum">     356 </span>            :      * We don't need to bother cleaning up any of our temporary palloc's. The
+<span class="lineNum">     357 </span>            :      * hashtable should also go away, as it used a child memory context.
+<span class="lineNum">     358 </span>            :      */
+<span class="lineNum">     359 </span><span class="lineCov">          6 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

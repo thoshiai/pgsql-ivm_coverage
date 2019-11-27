@@ -1,0 +1,1166 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/replication/logical/logical.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/replication/logical</a> - logical.c<span style="font-size: 80%;"> (source / <a href="logical.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">372</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">23</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  * logical.c
+<span class="lineNum">       3 </span>            :  *     PostgreSQL logical decoding coordination
+<span class="lineNum">       4 </span>            :  *
+<span class="lineNum">       5 </span>            :  * Copyright (c) 2012-2019, PostgreSQL Global Development Group
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * IDENTIFICATION
+<span class="lineNum">       8 </span>            :  *    src/backend/replication/logical/logical.c
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * NOTES
+<span class="lineNum">      11 </span>            :  *    This file coordinates interaction between the various modules that
+<span class="lineNum">      12 </span>            :  *    together provide logical decoding, primarily by providing so
+<span class="lineNum">      13 </span>            :  *    called LogicalDecodingContexts. The goal is to encapsulate most of the
+<span class="lineNum">      14 </span>            :  *    internal complexity for consumers of logical decoding, so they can
+<span class="lineNum">      15 </span>            :  *    create and consume a changestream with a low amount of code. Builtin
+<span class="lineNum">      16 </span>            :  *    consumers are the walsender and SQL SRF interface, but it's possible to
+<span class="lineNum">      17 </span>            :  *    add further ones without changing core code, e.g. to consume changes in
+<span class="lineNum">      18 </span>            :  *    a bgworker.
+<span class="lineNum">      19 </span>            :  *
+<span class="lineNum">      20 </span>            :  *    The idea is that a consumer provides three callbacks, one to read WAL,
+<span class="lineNum">      21 </span>            :  *    one to prepare a data write, and a final one for actually writing since
+<span class="lineNum">      22 </span>            :  *    their implementation depends on the type of consumer.  Check
+<span class="lineNum">      23 </span>            :  *    logicalfuncs.c for an example implementation of a fairly simple consumer
+<span class="lineNum">      24 </span>            :  *    and an implementation of a WAL reading callback that's suitable for
+<span class="lineNum">      25 </span>            :  *    simple consumers.
+<span class="lineNum">      26 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      27 </span>            :  */
+<span class="lineNum">      28 </span>            : 
+<span class="lineNum">      29 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : #include &quot;access/xact.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;access/xlog_internal.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;fmgr.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;replication/decode.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;replication/logical.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;replication/origin.h&quot;
+<span class="lineNum">      38 </span>            : #include &quot;replication/reorderbuffer.h&quot;
+<span class="lineNum">      39 </span>            : #include &quot;replication/snapbuild.h&quot;
+<span class="lineNum">      40 </span>            : #include &quot;storage/proc.h&quot;
+<span class="lineNum">      41 </span>            : #include &quot;storage/procarray.h&quot;
+<span class="lineNum">      42 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      43 </span>            : 
+<span class="lineNum">      44 </span>            : /* data for errcontext callback */
+<span class="lineNum">      45 </span>            : typedef struct LogicalErrorCallbackState
+<span class="lineNum">      46 </span>            : {
+<span class="lineNum">      47 </span>            :     LogicalDecodingContext *ctx;
+<span class="lineNum">      48 </span>            :     const char *callback_name;
+<span class="lineNum">      49 </span>            :     XLogRecPtr  report_location;
+<span class="lineNum">      50 </span>            : } LogicalErrorCallbackState;
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            : /* wrappers around output plugin callbacks */
+<span class="lineNum">      53 </span>            : static void output_plugin_error_callback(void *arg);
+<span class="lineNum">      54 </span>            : static void startup_cb_wrapper(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
+<span class="lineNum">      55 </span>            :                                bool is_init);
+<span class="lineNum">      56 </span>            : static void shutdown_cb_wrapper(LogicalDecodingContext *ctx);
+<span class="lineNum">      57 </span>            : static void begin_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn);
+<span class="lineNum">      58 </span>            : static void commit_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,
+<span class="lineNum">      59 </span>            :                               XLogRecPtr commit_lsn);
+<span class="lineNum">      60 </span>            : static void change_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,
+<span class="lineNum">      61 </span>            :                               Relation relation, ReorderBufferChange *change);
+<span class="lineNum">      62 </span>            : static void truncate_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,
+<span class="lineNum">      63 </span>            :                                 int nrelations, Relation relations[], ReorderBufferChange *change);
+<span class="lineNum">      64 </span>            : static void message_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,
+<span class="lineNum">      65 </span>            :                                XLogRecPtr message_lsn, bool transactional,
+<span class="lineNum">      66 </span>            :                                const char *prefix, Size message_size, const char *message);
+<span class="lineNum">      67 </span>            : 
+<span class="lineNum">      68 </span>            : static void LoadOutputPlugin(OutputPluginCallbacks *callbacks, char *plugin);
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span>            : /*
+<span class="lineNum">      71 </span>            :  * Make sure the current settings &amp; environment are capable of doing logical
+<span class="lineNum">      72 </span>            :  * decoding.
+<a name="73"><span class="lineNum">      73 </span>            :  */</a>
+<span class="lineNum">      74 </span>            : void
+<span class="lineNum">      75 </span><span class="lineNoCov">          0 : CheckLogicalDecodingRequirements(void)</span>
+<span class="lineNum">      76 </span>            : {
+<span class="lineNum">      77 </span><span class="lineNoCov">          0 :     CheckSlotRequirements();</span>
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            :     /*
+<span class="lineNum">      80 </span>            :      * NB: Adding a new requirement likely means that RestoreSlotFromDisk()
+<span class="lineNum">      81 </span>            :      * needs the same check.
+<span class="lineNum">      82 </span>            :      */
+<span class="lineNum">      83 </span>            : 
+<span class="lineNum">      84 </span><span class="lineNoCov">          0 :     if (wal_level &lt; WAL_LEVEL_LOGICAL)</span>
+<span class="lineNum">      85 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">      86 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">      87 </span>            :                  errmsg(&quot;logical decoding requires wal_level &gt;= logical&quot;)));
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span><span class="lineNoCov">          0 :     if (MyDatabaseId == InvalidOid)</span>
+<span class="lineNum">      90 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">      91 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">      92 </span>            :                  errmsg(&quot;logical decoding requires a database connection&quot;)));
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span>            :     /* ----
+<span class="lineNum">      95 </span>            :      * TODO: We got to change that someday soon...
+<span class="lineNum">      96 </span>            :      *
+<span class="lineNum">      97 </span>            :      * There's basically three things missing to allow this:
+<span class="lineNum">      98 </span>            :      * 1) We need to be able to correctly and quickly identify the timeline a
+<span class="lineNum">      99 </span>            :      *    LSN belongs to
+<span class="lineNum">     100 </span>            :      * 2) We need to force hot_standby_feedback to be enabled at all times so
+<span class="lineNum">     101 </span>            :      *    the primary cannot remove rows we need.
+<span class="lineNum">     102 </span>            :      * 3) support dropping replication slots referring to a database, in
+<span class="lineNum">     103 </span>            :      *    dbase_redo. There can't be any active ones due to HS recovery
+<span class="lineNum">     104 </span>            :      *    conflicts, so that should be relatively easy.
+<span class="lineNum">     105 </span>            :      * ----
+<span class="lineNum">     106 </span>            :      */
+<span class="lineNum">     107 </span><span class="lineNoCov">          0 :     if (RecoveryInProgress())</span>
+<span class="lineNum">     108 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     109 </span>            :                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     110 </span>            :                  errmsg(&quot;logical decoding cannot be used while in recovery&quot;)));
+<span class="lineNum">     111 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span>            : /*
+<span class="lineNum">     114 </span>            :  * Helper function for CreateInitDecodingContext() and
+<span class="lineNum">     115 </span>            :  * CreateDecodingContext() performing common tasks.
+<a name="116"><span class="lineNum">     116 </span>            :  */</a>
+<span class="lineNum">     117 </span>            : static LogicalDecodingContext *
+<span class="lineNum">     118 </span><span class="lineNoCov">          0 : StartupDecodingContext(List *output_plugin_options,</span>
+<span class="lineNum">     119 </span>            :                        XLogRecPtr start_lsn,
+<span class="lineNum">     120 </span>            :                        TransactionId xmin_horizon,
+<span class="lineNum">     121 </span>            :                        bool need_full_snapshot,
+<span class="lineNum">     122 </span>            :                        bool fast_forward,
+<span class="lineNum">     123 </span>            :                        XLogPageReadCB read_page,
+<span class="lineNum">     124 </span>            :                        LogicalOutputPluginWriterPrepareWrite prepare_write,
+<span class="lineNum">     125 </span>            :                        LogicalOutputPluginWriterWrite do_write,
+<span class="lineNum">     126 </span>            :                        LogicalOutputPluginWriterUpdateProgress update_progress)
+<span class="lineNum">     127 </span>            : {
+<span class="lineNum">     128 </span>            :     ReplicationSlot *slot;
+<span class="lineNum">     129 </span>            :     MemoryContext context,
+<span class="lineNum">     130 </span>            :                 old_context;
+<span class="lineNum">     131 </span>            :     LogicalDecodingContext *ctx;
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span>            :     /* shorter lines... */
+<span class="lineNum">     134 </span><span class="lineNoCov">          0 :     slot = MyReplicationSlot;</span>
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span><span class="lineNoCov">          0 :     context = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     137 </span>            :                                     &quot;Logical decoding context&quot;,
+<span class="lineNum">     138 </span>            :                                     ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     139 </span><span class="lineNoCov">          0 :     old_context = MemoryContextSwitchTo(context);</span>
+<span class="lineNum">     140 </span><span class="lineNoCov">          0 :     ctx = palloc0(sizeof(LogicalDecodingContext));</span>
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span><span class="lineNoCov">          0 :     ctx-&gt;context = context;</span>
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span>            :     /*
+<span class="lineNum">     145 </span>            :      * (re-)load output plugins, so we detect a bad (removed) output plugin
+<span class="lineNum">     146 </span>            :      * now.
+<span class="lineNum">     147 </span>            :      */
+<span class="lineNum">     148 </span><span class="lineNoCov">          0 :     if (!fast_forward)</span>
+<span class="lineNum">     149 </span><span class="lineNoCov">          0 :         LoadOutputPlugin(&amp;ctx-&gt;callbacks, NameStr(slot-&gt;data.plugin));</span>
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span>            :     /*
+<span class="lineNum">     152 </span>            :      * Now that the slot's xmin has been set, we can announce ourselves as a
+<span class="lineNum">     153 </span>            :      * logical decoding backend which doesn't need to be checked individually
+<span class="lineNum">     154 </span>            :      * when computing the xmin horizon because the xmin is enforced via
+<span class="lineNum">     155 </span>            :      * replication slots.
+<span class="lineNum">     156 </span>            :      *
+<span class="lineNum">     157 </span>            :      * We can only do so if we're outside of a transaction (i.e. the case when
+<span class="lineNum">     158 </span>            :      * streaming changes via walsender), otherwise an already setup
+<span class="lineNum">     159 </span>            :      * snapshot/xid would end up being ignored. That's not a particularly
+<span class="lineNum">     160 </span>            :      * bothersome restriction since the SQL interface can't be used for
+<span class="lineNum">     161 </span>            :      * streaming anyway.
+<span class="lineNum">     162 </span>            :      */
+<span class="lineNum">     163 </span><span class="lineNoCov">          0 :     if (!IsTransactionOrTransactionBlock())</span>
+<span class="lineNum">     164 </span>            :     {
+<span class="lineNum">     165 </span><span class="lineNoCov">          0 :         LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);</span>
+<span class="lineNum">     166 </span><span class="lineNoCov">          0 :         MyPgXact-&gt;vacuumFlags |= PROC_IN_LOGICAL_DECODING;</span>
+<span class="lineNum">     167 </span><span class="lineNoCov">          0 :         LWLockRelease(ProcArrayLock);</span>
+<span class="lineNum">     168 </span>            :     }
+<span class="lineNum">     169 </span>            : 
+<span class="lineNum">     170 </span><span class="lineNoCov">          0 :     ctx-&gt;slot = slot;</span>
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span><span class="lineNoCov">          0 :     ctx-&gt;reader = XLogReaderAllocate(wal_segment_size, NULL, read_page, ctx);</span>
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :     if (!ctx-&gt;reader)</span>
+<span class="lineNum">     174 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     175 </span>            :                 (errcode(ERRCODE_OUT_OF_MEMORY),
+<span class="lineNum">     176 </span>            :                  errmsg(&quot;out of memory&quot;)));
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder = ReorderBufferAllocate();</span>
+<span class="lineNum">     179 </span><span class="lineNoCov">          0 :     ctx-&gt;snapshot_builder =</span>
+<span class="lineNum">     180 </span><span class="lineNoCov">          0 :         AllocateSnapshotBuilder(ctx-&gt;reorder, xmin_horizon, start_lsn,</span>
+<span class="lineNum">     181 </span>            :                                 need_full_snapshot);
+<span class="lineNum">     182 </span>            : 
+<span class="lineNum">     183 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;private_data = ctx;</span>
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span>            :     /* wrap output plugin callbacks, so we can add error context information */
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;begin = begin_cb_wrapper;</span>
+<span class="lineNum">     187 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;apply_change = change_cb_wrapper;</span>
+<span class="lineNum">     188 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;apply_truncate = truncate_cb_wrapper;</span>
+<span class="lineNum">     189 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;commit = commit_cb_wrapper;</span>
+<span class="lineNum">     190 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;message = message_cb_wrapper;</span>
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span><span class="lineNoCov">          0 :     ctx-&gt;out = makeStringInfo();</span>
+<span class="lineNum">     193 </span><span class="lineNoCov">          0 :     ctx-&gt;prepare_write = prepare_write;</span>
+<span class="lineNum">     194 </span><span class="lineNoCov">          0 :     ctx-&gt;write = do_write;</span>
+<span class="lineNum">     195 </span><span class="lineNoCov">          0 :     ctx-&gt;update_progress = update_progress;</span>
+<span class="lineNum">     196 </span>            : 
+<span class="lineNum">     197 </span><span class="lineNoCov">          0 :     ctx-&gt;output_plugin_options = output_plugin_options;</span>
+<span class="lineNum">     198 </span>            : 
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 :     ctx-&gt;fast_forward = fast_forward;</span>
+<span class="lineNum">     200 </span>            : 
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">     202 </span>            : 
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :     return ctx;</span>
+<span class="lineNum">     204 </span>            : }
+<span class="lineNum">     205 </span>            : 
+<span class="lineNum">     206 </span>            : /*
+<span class="lineNum">     207 </span>            :  * Create a new decoding context, for a new logical slot.
+<span class="lineNum">     208 </span>            :  *
+<span class="lineNum">     209 </span>            :  * plugin -- contains the name of the output plugin
+<span class="lineNum">     210 </span>            :  * output_plugin_options -- contains options passed to the output plugin
+<span class="lineNum">     211 </span>            :  * restart_lsn -- if given as invalid, it's this routine's responsibility to
+<span class="lineNum">     212 </span>            :  *      mark WAL as reserved by setting a convenient restart_lsn for the slot.
+<span class="lineNum">     213 </span>            :  *      Otherwise, we set for decoding to start from the given LSN without
+<span class="lineNum">     214 </span>            :  *      marking WAL reserved beforehand.  In that scenario, it's up to the
+<span class="lineNum">     215 </span>            :  *      caller to guarantee that WAL remains available.
+<span class="lineNum">     216 </span>            :  * read_page, prepare_write, do_write, update_progress --
+<span class="lineNum">     217 </span>            :  *      callbacks that perform the use-case dependent, actual, work.
+<span class="lineNum">     218 </span>            :  *
+<span class="lineNum">     219 </span>            :  * Needs to be called while in a memory context that's at least as long lived
+<span class="lineNum">     220 </span>            :  * as the decoding context because further memory contexts will be created
+<span class="lineNum">     221 </span>            :  * inside it.
+<span class="lineNum">     222 </span>            :  *
+<span class="lineNum">     223 </span>            :  * Returns an initialized decoding context after calling the output plugin's
+<span class="lineNum">     224 </span>            :  * startup function.
+<a name="225"><span class="lineNum">     225 </span>            :  */</a>
+<span class="lineNum">     226 </span>            : LogicalDecodingContext *
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 : CreateInitDecodingContext(char *plugin,</span>
+<span class="lineNum">     228 </span>            :                           List *output_plugin_options,
+<span class="lineNum">     229 </span>            :                           bool need_full_snapshot,
+<span class="lineNum">     230 </span>            :                           XLogRecPtr restart_lsn,
+<span class="lineNum">     231 </span>            :                           XLogPageReadCB read_page,
+<span class="lineNum">     232 </span>            :                           LogicalOutputPluginWriterPrepareWrite prepare_write,
+<span class="lineNum">     233 </span>            :                           LogicalOutputPluginWriterWrite do_write,
+<span class="lineNum">     234 </span>            :                           LogicalOutputPluginWriterUpdateProgress update_progress)
+<span class="lineNum">     235 </span>            : {
+<span class="lineNum">     236 </span><span class="lineNoCov">          0 :     TransactionId xmin_horizon = InvalidTransactionId;</span>
+<span class="lineNum">     237 </span>            :     ReplicationSlot *slot;
+<span class="lineNum">     238 </span>            :     LogicalDecodingContext *ctx;
+<span class="lineNum">     239 </span>            :     MemoryContext old_context;
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span>            :     /* shorter lines... */
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 :     slot = MyReplicationSlot;</span>
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            :     /* first some sanity checks that are unlikely to be violated */
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :     if (slot == NULL)</span>
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot perform logical decoding without an acquired slot&quot;);</span>
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span><span class="lineNoCov">          0 :     if (plugin == NULL)</span>
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot initialize logical decoding without a specified plugin&quot;);</span>
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span>            :     /* Make sure the passed slot is suitable. These are user facing errors. */
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :     if (SlotIsPhysical(slot))</span>
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     254 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">     255 </span>            :                  errmsg(&quot;cannot use physical replication slot for logical decoding&quot;)));
+<span class="lineNum">     256 </span>            : 
+<span class="lineNum">     257 </span><span class="lineNoCov">          0 :     if (slot-&gt;data.database != MyDatabaseId)</span>
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     259 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">     260 </span>            :                  errmsg(&quot;replication slot \&quot;%s\&quot; was not created in this database&quot;,
+<span class="lineNum">     261 </span>            :                         NameStr(slot-&gt;data.name))));
+<span class="lineNum">     262 </span>            : 
+<span class="lineNum">     263 </span><span class="lineNoCov">          0 :     if (IsTransactionState() &amp;&amp;</span>
+<span class="lineNum">     264 </span><span class="lineNoCov">          0 :         GetTopTransactionIdIfAny() != InvalidTransactionId)</span>
+<span class="lineNum">     265 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     266 </span>            :                 (errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+<span class="lineNum">     267 </span>            :                  errmsg(&quot;cannot create logical replication slot in transaction that has performed writes&quot;)));
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span>            :     /* register output plugin name with slot */
+<span class="lineNum">     270 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     271 </span><span class="lineNoCov">          0 :     StrNCpy(NameStr(slot-&gt;data.plugin), plugin, NAMEDATALEN);</span>
+<span class="lineNum">     272 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     273 </span>            : 
+<span class="lineNum">     274 </span><span class="lineNoCov">          0 :     if (XLogRecPtrIsInvalid(restart_lsn))</span>
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :         ReplicationSlotReserveWal();</span>
+<span class="lineNum">     276 </span>            :     else
+<span class="lineNum">     277 </span>            :     {
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :         SpinLockAcquire(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     279 </span><span class="lineNoCov">          0 :         slot-&gt;data.restart_lsn = restart_lsn;</span>
+<span class="lineNum">     280 </span><span class="lineNoCov">          0 :         SpinLockRelease(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     281 </span>            :     }
+<span class="lineNum">     282 </span>            : 
+<span class="lineNum">     283 </span>            :     /* ----
+<span class="lineNum">     284 </span>            :      * This is a bit tricky: We need to determine a safe xmin horizon to start
+<span class="lineNum">     285 </span>            :      * decoding from, to avoid starting from a running xacts record referring
+<span class="lineNum">     286 </span>            :      * to xids whose rows have been vacuumed or pruned
+<span class="lineNum">     287 </span>            :      * already. GetOldestSafeDecodingTransactionId() returns such a value, but
+<span class="lineNum">     288 </span>            :      * without further interlock its return value might immediately be out of
+<span class="lineNum">     289 </span>            :      * date.
+<span class="lineNum">     290 </span>            :      *
+<span class="lineNum">     291 </span>            :      * So we have to acquire the ProcArrayLock to prevent computation of new
+<span class="lineNum">     292 </span>            :      * xmin horizons by other backends, get the safe decoding xid, and inform
+<span class="lineNum">     293 </span>            :      * the slot machinery about the new limit. Once that's done the
+<span class="lineNum">     294 </span>            :      * ProcArrayLock can be released as the slot machinery now is
+<span class="lineNum">     295 </span>            :      * protecting against vacuum.
+<span class="lineNum">     296 </span>            :      *
+<span class="lineNum">     297 </span>            :      * Note that, temporarily, the data, not just the catalog, xmin has to be
+<span class="lineNum">     298 </span>            :      * reserved if a data snapshot is to be exported.  Otherwise the initial
+<span class="lineNum">     299 </span>            :      * data snapshot created here is not guaranteed to be valid. After that
+<span class="lineNum">     300 </span>            :      * the data xmin doesn't need to be managed anymore and the global xmin
+<span class="lineNum">     301 </span>            :      * should be recomputed. As we are fine with losing the pegged data xmin
+<span class="lineNum">     302 </span>            :      * after crash - no chance a snapshot would get exported anymore - we can
+<span class="lineNum">     303 </span>            :      * get away with just setting the slot's
+<span class="lineNum">     304 </span>            :      * effective_xmin. ReplicationSlotRelease will reset it again.
+<span class="lineNum">     305 </span>            :      *
+<span class="lineNum">     306 </span>            :      * ----
+<span class="lineNum">     307 </span>            :      */
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :     LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);</span>
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span><span class="lineNoCov">          0 :     xmin_horizon = GetOldestSafeDecodingTransactionId(!need_full_snapshot);</span>
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :     slot-&gt;effective_catalog_xmin = xmin_horizon;</span>
+<span class="lineNum">     314 </span><span class="lineNoCov">          0 :     slot-&gt;data.catalog_xmin = xmin_horizon;</span>
+<span class="lineNum">     315 </span><span class="lineNoCov">          0 :     if (need_full_snapshot)</span>
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :         slot-&gt;effective_xmin = xmin_horizon;</span>
+<span class="lineNum">     317 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     318 </span>            : 
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :     ReplicationSlotsComputeRequiredXmin(true);</span>
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span><span class="lineNoCov">          0 :     LWLockRelease(ProcArrayLock);</span>
+<span class="lineNum">     322 </span>            : 
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :     ReplicationSlotMarkDirty();</span>
+<span class="lineNum">     324 </span><span class="lineNoCov">          0 :     ReplicationSlotSave();</span>
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :     ctx = StartupDecodingContext(NIL, restart_lsn, xmin_horizon,</span>
+<span class="lineNum">     327 </span>            :                                  need_full_snapshot, false,
+<span class="lineNum">     328 </span>            :                                  read_page, prepare_write, do_write,
+<span class="lineNum">     329 </span>            :                                  update_progress);
+<span class="lineNum">     330 </span>            : 
+<span class="lineNum">     331 </span>            :     /* call output plugin initialization callback */
+<span class="lineNum">     332 </span><span class="lineNoCov">          0 :     old_context = MemoryContextSwitchTo(ctx-&gt;context);</span>
+<span class="lineNum">     333 </span><span class="lineNoCov">          0 :     if (ctx-&gt;callbacks.startup_cb != NULL)</span>
+<span class="lineNum">     334 </span><span class="lineNoCov">          0 :         startup_cb_wrapper(ctx, &amp;ctx-&gt;options, true);</span>
+<span class="lineNum">     335 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;output_rewrites = ctx-&gt;options.receive_rewrites;</span>
+<span class="lineNum">     338 </span>            : 
+<span class="lineNum">     339 </span><span class="lineNoCov">          0 :     return ctx;</span>
+<span class="lineNum">     340 </span>            : }
+<span class="lineNum">     341 </span>            : 
+<span class="lineNum">     342 </span>            : /*
+<span class="lineNum">     343 </span>            :  * Create a new decoding context, for a logical slot that has previously been
+<span class="lineNum">     344 </span>            :  * used already.
+<span class="lineNum">     345 </span>            :  *
+<span class="lineNum">     346 </span>            :  * start_lsn
+<span class="lineNum">     347 </span>            :  *      The LSN at which to start decoding.  If InvalidXLogRecPtr, restart
+<span class="lineNum">     348 </span>            :  *      from the slot's confirmed_flush; otherwise, start from the specified
+<span class="lineNum">     349 </span>            :  *      location (but move it forwards to confirmed_flush if it's older than
+<span class="lineNum">     350 </span>            :  *      that, see below).
+<span class="lineNum">     351 </span>            :  *
+<span class="lineNum">     352 </span>            :  * output_plugin_options
+<span class="lineNum">     353 </span>            :  *      options passed to the output plugin.
+<span class="lineNum">     354 </span>            :  *
+<span class="lineNum">     355 </span>            :  * fast_forward
+<span class="lineNum">     356 </span>            :  *      bypass the generation of logical changes.
+<span class="lineNum">     357 </span>            :  *
+<span class="lineNum">     358 </span>            :  * read_page, prepare_write, do_write, update_progress
+<span class="lineNum">     359 </span>            :  *      callbacks that have to be filled to perform the use-case dependent,
+<span class="lineNum">     360 </span>            :  *      actual work.
+<span class="lineNum">     361 </span>            :  *
+<span class="lineNum">     362 </span>            :  * Needs to be called while in a memory context that's at least as long lived
+<span class="lineNum">     363 </span>            :  * as the decoding context because further memory contexts will be created
+<span class="lineNum">     364 </span>            :  * inside it.
+<span class="lineNum">     365 </span>            :  *
+<span class="lineNum">     366 </span>            :  * Returns an initialized decoding context after calling the output plugin's
+<span class="lineNum">     367 </span>            :  * startup function.
+<a name="368"><span class="lineNum">     368 </span>            :  */</a>
+<span class="lineNum">     369 </span>            : LogicalDecodingContext *
+<span class="lineNum">     370 </span><span class="lineNoCov">          0 : CreateDecodingContext(XLogRecPtr start_lsn,</span>
+<span class="lineNum">     371 </span>            :                       List *output_plugin_options,
+<span class="lineNum">     372 </span>            :                       bool fast_forward,
+<span class="lineNum">     373 </span>            :                       XLogPageReadCB read_page,
+<span class="lineNum">     374 </span>            :                       LogicalOutputPluginWriterPrepareWrite prepare_write,
+<span class="lineNum">     375 </span>            :                       LogicalOutputPluginWriterWrite do_write,
+<span class="lineNum">     376 </span>            :                       LogicalOutputPluginWriterUpdateProgress update_progress)
+<span class="lineNum">     377 </span>            : {
+<span class="lineNum">     378 </span>            :     LogicalDecodingContext *ctx;
+<span class="lineNum">     379 </span>            :     ReplicationSlot *slot;
+<span class="lineNum">     380 </span>            :     MemoryContext old_context;
+<span class="lineNum">     381 </span>            : 
+<span class="lineNum">     382 </span>            :     /* shorter lines... */
+<span class="lineNum">     383 </span><span class="lineNoCov">          0 :     slot = MyReplicationSlot;</span>
+<span class="lineNum">     384 </span>            : 
+<span class="lineNum">     385 </span>            :     /* first some sanity checks that are unlikely to be violated */
+<span class="lineNum">     386 </span><span class="lineNoCov">          0 :     if (slot == NULL)</span>
+<span class="lineNum">     387 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot perform logical decoding without an acquired slot&quot;);</span>
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span>            :     /* make sure the passed slot is suitable, these are user facing errors */
+<span class="lineNum">     390 </span><span class="lineNoCov">          0 :     if (SlotIsPhysical(slot))</span>
+<span class="lineNum">     391 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     392 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">     393 </span>            :                  (errmsg(&quot;cannot use physical replication slot for logical decoding&quot;))));
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span><span class="lineNoCov">          0 :     if (slot-&gt;data.database != MyDatabaseId)</span>
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     397 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">     398 </span>            :                  (errmsg(&quot;replication slot \&quot;%s\&quot; was not created in this database&quot;,
+<span class="lineNum">     399 </span>            :                          NameStr(slot-&gt;data.name)))));
+<span class="lineNum">     400 </span>            : 
+<span class="lineNum">     401 </span><span class="lineNoCov">          0 :     if (start_lsn == InvalidXLogRecPtr)</span>
+<span class="lineNum">     402 </span>            :     {
+<span class="lineNum">     403 </span>            :         /* continue from last position */
+<span class="lineNum">     404 </span><span class="lineNoCov">          0 :         start_lsn = slot-&gt;data.confirmed_flush;</span>
+<span class="lineNum">     405 </span>            :     }
+<span class="lineNum">     406 </span><span class="lineNoCov">          0 :     else if (start_lsn &lt; slot-&gt;data.confirmed_flush)</span>
+<span class="lineNum">     407 </span>            :     {
+<span class="lineNum">     408 </span>            :         /*
+<span class="lineNum">     409 </span>            :          * It might seem like we should error out in this case, but it's
+<span class="lineNum">     410 </span>            :          * pretty common for a client to acknowledge a LSN it doesn't have to
+<span class="lineNum">     411 </span>            :          * do anything for, and thus didn't store persistently, because the
+<span class="lineNum">     412 </span>            :          * xlog records didn't result in anything relevant for logical
+<span class="lineNum">     413 </span>            :          * decoding. Clients have to be able to do that to support synchronous
+<span class="lineNum">     414 </span>            :          * replication.
+<span class="lineNum">     415 </span>            :          */
+<span class="lineNum">     416 </span><span class="lineNoCov">          0 :         elog(DEBUG1, &quot;cannot stream from %X/%X, minimum is %X/%X, forwarding&quot;,</span>
+<span class="lineNum">     417 </span>            :              (uint32) (start_lsn &gt;&gt; 32), (uint32) start_lsn,
+<span class="lineNum">     418 </span>            :              (uint32) (slot-&gt;data.confirmed_flush &gt;&gt; 32),
+<span class="lineNum">     419 </span>            :              (uint32) slot-&gt;data.confirmed_flush);
+<span class="lineNum">     420 </span>            : 
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :         start_lsn = slot-&gt;data.confirmed_flush;</span>
+<span class="lineNum">     422 </span>            :     }
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineNoCov">          0 :     ctx = StartupDecodingContext(output_plugin_options,</span>
+<span class="lineNum">     425 </span>            :                                  start_lsn, InvalidTransactionId, false,
+<span class="lineNum">     426 </span>            :                                  fast_forward, read_page, prepare_write,
+<span class="lineNum">     427 </span>            :                                  do_write, update_progress);
+<span class="lineNum">     428 </span>            : 
+<span class="lineNum">     429 </span>            :     /* call output plugin initialization callback */
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :     old_context = MemoryContextSwitchTo(ctx-&gt;context);</span>
+<span class="lineNum">     431 </span><span class="lineNoCov">          0 :     if (ctx-&gt;callbacks.startup_cb != NULL)</span>
+<span class="lineNum">     432 </span><span class="lineNoCov">          0 :         startup_cb_wrapper(ctx, &amp;ctx-&gt;options, false);</span>
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">     434 </span>            : 
+<span class="lineNum">     435 </span><span class="lineNoCov">          0 :     ctx-&gt;reorder-&gt;output_rewrites = ctx-&gt;options.receive_rewrites;</span>
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span><span class="lineNoCov">          0 :     ereport(LOG,</span>
+<span class="lineNum">     438 </span>            :             (errmsg(&quot;starting logical decoding for slot \&quot;%s\&quot;&quot;,
+<span class="lineNum">     439 </span>            :                     NameStr(slot-&gt;data.name)),
+<span class="lineNum">     440 </span>            :              errdetail(&quot;Streaming transactions committing after %X/%X, reading WAL from %X/%X.&quot;,
+<span class="lineNum">     441 </span>            :                        (uint32) (slot-&gt;data.confirmed_flush &gt;&gt; 32),
+<span class="lineNum">     442 </span>            :                        (uint32) slot-&gt;data.confirmed_flush,
+<span class="lineNum">     443 </span>            :                        (uint32) (slot-&gt;data.restart_lsn &gt;&gt; 32),
+<span class="lineNum">     444 </span>            :                        (uint32) slot-&gt;data.restart_lsn)));
+<span class="lineNum">     445 </span>            : 
+<span class="lineNum">     446 </span><span class="lineNoCov">          0 :     return ctx;</span>
+<span class="lineNum">     447 </span>            : }
+<span class="lineNum">     448 </span>            : 
+<span class="lineNum">     449 </span>            : /*
+<span class="lineNum">     450 </span>            :  * Returns true if a consistent initial decoding snapshot has been built.
+<a name="451"><span class="lineNum">     451 </span>            :  */</a>
+<span class="lineNum">     452 </span>            : bool
+<span class="lineNum">     453 </span><span class="lineNoCov">          0 : DecodingContextReady(LogicalDecodingContext *ctx)</span>
+<span class="lineNum">     454 </span>            : {
+<span class="lineNum">     455 </span><span class="lineNoCov">          0 :     return SnapBuildCurrentState(ctx-&gt;snapshot_builder) == SNAPBUILD_CONSISTENT;</span>
+<span class="lineNum">     456 </span>            : }
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span>            : /*
+<span class="lineNum">     459 </span>            :  * Read from the decoding slot, until it is ready to start extracting changes.
+<a name="460"><span class="lineNum">     460 </span>            :  */</a>
+<span class="lineNum">     461 </span>            : void
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 : DecodingContextFindStartpoint(LogicalDecodingContext *ctx)</span>
+<span class="lineNum">     463 </span>            : {
+<span class="lineNum">     464 </span>            :     XLogRecPtr  startptr;
+<span class="lineNum">     465 </span><span class="lineNoCov">          0 :     ReplicationSlot *slot = ctx-&gt;slot;</span>
+<span class="lineNum">     466 </span>            : 
+<span class="lineNum">     467 </span>            :     /* Initialize from where to start reading WAL. */
+<span class="lineNum">     468 </span><span class="lineNoCov">          0 :     startptr = slot-&gt;data.restart_lsn;</span>
+<span class="lineNum">     469 </span>            : 
+<span class="lineNum">     470 </span><span class="lineNoCov">          0 :     elog(DEBUG1, &quot;searching for logical decoding starting point, starting at %X/%X&quot;,</span>
+<span class="lineNum">     471 </span>            :          (uint32) (slot-&gt;data.restart_lsn &gt;&gt; 32),
+<span class="lineNum">     472 </span>            :          (uint32) slot-&gt;data.restart_lsn);
+<span class="lineNum">     473 </span>            : 
+<span class="lineNum">     474 </span>            :     /* Wait for a consistent starting point */
+<span class="lineNum">     475 </span>            :     for (;;)
+<span class="lineNum">     476 </span>            :     {
+<span class="lineNum">     477 </span>            :         XLogRecord *record;
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :         char       *err = NULL;</span>
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span>            :         /* the read_page callback waits for new WAL */
+<span class="lineNum">     481 </span><span class="lineNoCov">          0 :         record = XLogReadRecord(ctx-&gt;reader, startptr, &amp;err);</span>
+<span class="lineNum">     482 </span><span class="lineNoCov">          0 :         if (err)</span>
+<span class="lineNum">     483 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;%s&quot;, err);</span>
+<span class="lineNum">     484 </span><span class="lineNoCov">          0 :         if (!record)</span>
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;no record found&quot;); /* shouldn't happen */</span>
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span><span class="lineNoCov">          0 :         startptr = InvalidXLogRecPtr;</span>
+<span class="lineNum">     488 </span>            : 
+<span class="lineNum">     489 </span><span class="lineNoCov">          0 :         LogicalDecodingProcessRecord(ctx, ctx-&gt;reader);</span>
+<span class="lineNum">     490 </span>            : 
+<span class="lineNum">     491 </span>            :         /* only continue till we found a consistent spot */
+<span class="lineNum">     492 </span><span class="lineNoCov">          0 :         if (DecodingContextReady(ctx))</span>
+<span class="lineNum">     493 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span><span class="lineNoCov">          0 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     499 </span><span class="lineNoCov">          0 :     slot-&gt;data.confirmed_flush = ctx-&gt;reader-&gt;EndRecPtr;</span>
+<span class="lineNum">     500 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span>            : /*
+<span class="lineNum">     504 </span>            :  * Free a previously allocated decoding context, invoking the shutdown
+<span class="lineNum">     505 </span>            :  * callback if necessary.
+<a name="506"><span class="lineNum">     506 </span>            :  */</a>
+<span class="lineNum">     507 </span>            : void
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 : FreeDecodingContext(LogicalDecodingContext *ctx)</span>
+<span class="lineNum">     509 </span>            : {
+<span class="lineNum">     510 </span><span class="lineNoCov">          0 :     if (ctx-&gt;callbacks.shutdown_cb != NULL)</span>
+<span class="lineNum">     511 </span><span class="lineNoCov">          0 :         shutdown_cb_wrapper(ctx);</span>
+<span class="lineNum">     512 </span>            : 
+<span class="lineNum">     513 </span><span class="lineNoCov">          0 :     ReorderBufferFree(ctx-&gt;reorder);</span>
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :     FreeSnapshotBuilder(ctx-&gt;snapshot_builder);</span>
+<span class="lineNum">     515 </span><span class="lineNoCov">          0 :     XLogReaderFree(ctx-&gt;reader);</span>
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :     MemoryContextDelete(ctx-&gt;context);</span>
+<span class="lineNum">     517 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span>            : /*
+<span class="lineNum">     520 </span>            :  * Prepare a write using the context's output routine.
+<a name="521"><span class="lineNum">     521 </span>            :  */</a>
+<span class="lineNum">     522 </span>            : void
+<span class="lineNum">     523 </span><span class="lineNoCov">          0 : OutputPluginPrepareWrite(struct LogicalDecodingContext *ctx, bool last_write)</span>
+<span class="lineNum">     524 </span>            : {
+<span class="lineNum">     525 </span><span class="lineNoCov">          0 :     if (!ctx-&gt;accept_writes)</span>
+<span class="lineNum">     526 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;writes are only accepted in commit, begin and change callbacks&quot;);</span>
+<span class="lineNum">     527 </span>            : 
+<span class="lineNum">     528 </span><span class="lineNoCov">          0 :     ctx-&gt;prepare_write(ctx, ctx-&gt;write_location, ctx-&gt;write_xid, last_write);</span>
+<span class="lineNum">     529 </span><span class="lineNoCov">          0 :     ctx-&gt;prepared_write = true;</span>
+<span class="lineNum">     530 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     531 </span>            : 
+<span class="lineNum">     532 </span>            : /*
+<span class="lineNum">     533 </span>            :  * Perform a write using the context's output routine.
+<a name="534"><span class="lineNum">     534 </span>            :  */</a>
+<span class="lineNum">     535 </span>            : void
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 : OutputPluginWrite(struct LogicalDecodingContext *ctx, bool last_write)</span>
+<span class="lineNum">     537 </span>            : {
+<span class="lineNum">     538 </span><span class="lineNoCov">          0 :     if (!ctx-&gt;prepared_write)</span>
+<span class="lineNum">     539 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;OutputPluginPrepareWrite needs to be called before OutputPluginWrite&quot;);</span>
+<span class="lineNum">     540 </span>            : 
+<span class="lineNum">     541 </span><span class="lineNoCov">          0 :     ctx-&gt;write(ctx, ctx-&gt;write_location, ctx-&gt;write_xid, last_write);</span>
+<span class="lineNum">     542 </span><span class="lineNoCov">          0 :     ctx-&gt;prepared_write = false;</span>
+<span class="lineNum">     543 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     544 </span>            : 
+<span class="lineNum">     545 </span>            : /*
+<span class="lineNum">     546 </span>            :  * Update progress tracking (if supported).
+<a name="547"><span class="lineNum">     547 </span>            :  */</a>
+<span class="lineNum">     548 </span>            : void
+<span class="lineNum">     549 </span><span class="lineNoCov">          0 : OutputPluginUpdateProgress(struct LogicalDecodingContext *ctx)</span>
+<span class="lineNum">     550 </span>            : {
+<span class="lineNum">     551 </span><span class="lineNoCov">          0 :     if (!ctx-&gt;update_progress)</span>
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     553 </span>            : 
+<span class="lineNum">     554 </span><span class="lineNoCov">          0 :     ctx-&gt;update_progress(ctx, ctx-&gt;write_location, ctx-&gt;write_xid);</span>
+<span class="lineNum">     555 </span>            : }
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span>            : /*
+<span class="lineNum">     558 </span>            :  * Load the output plugin, lookup its output plugin init function, and check
+<span class="lineNum">     559 </span>            :  * that it provides the required callbacks.
+<a name="560"><span class="lineNum">     560 </span>            :  */</a>
+<span class="lineNum">     561 </span>            : static void
+<span class="lineNum">     562 </span><span class="lineNoCov">          0 : LoadOutputPlugin(OutputPluginCallbacks *callbacks, char *plugin)</span>
+<span class="lineNum">     563 </span>            : {
+<span class="lineNum">     564 </span>            :     LogicalOutputPluginInit plugin_init;
+<span class="lineNum">     565 </span>            : 
+<span class="lineNum">     566 </span><span class="lineNoCov">          0 :     plugin_init = (LogicalOutputPluginInit)</span>
+<span class="lineNum">     567 </span>            :         load_external_function(plugin, &quot;_PG_output_plugin_init&quot;, false, NULL);
+<span class="lineNum">     568 </span>            : 
+<span class="lineNum">     569 </span><span class="lineNoCov">          0 :     if (plugin_init == NULL)</span>
+<span class="lineNum">     570 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;output plugins have to declare the _PG_output_plugin_init symbol&quot;);</span>
+<span class="lineNum">     571 </span>            : 
+<span class="lineNum">     572 </span>            :     /* ask the output plugin to fill the callback struct */
+<span class="lineNum">     573 </span><span class="lineNoCov">          0 :     plugin_init(callbacks);</span>
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span><span class="lineNoCov">          0 :     if (callbacks-&gt;begin_cb == NULL)</span>
+<span class="lineNum">     576 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;output plugins have to register a begin callback&quot;);</span>
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 :     if (callbacks-&gt;change_cb == NULL)</span>
+<span class="lineNum">     578 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;output plugins have to register a change callback&quot;);</span>
+<span class="lineNum">     579 </span><span class="lineNoCov">          0 :     if (callbacks-&gt;commit_cb == NULL)</span>
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;output plugins have to register a commit callback&quot;);</span>
+<span class="lineNum">     581 </span><span class="lineNoCov">          0 : }</span>
+<a name="582"><span class="lineNum">     582 </span>            : </a>
+<span class="lineNum">     583 </span>            : static void
+<span class="lineNum">     584 </span><span class="lineNoCov">          0 : output_plugin_error_callback(void *arg)</span>
+<span class="lineNum">     585 </span>            : {
+<span class="lineNum">     586 </span><span class="lineNoCov">          0 :     LogicalErrorCallbackState *state = (LogicalErrorCallbackState *) arg;</span>
+<span class="lineNum">     587 </span>            : 
+<span class="lineNum">     588 </span>            :     /* not all callbacks have an associated LSN  */
+<span class="lineNum">     589 </span><span class="lineNoCov">          0 :     if (state-&gt;report_location != InvalidXLogRecPtr)</span>
+<span class="lineNum">     590 </span><span class="lineNoCov">          0 :         errcontext(&quot;slot \&quot;%s\&quot;, output plugin \&quot;%s\&quot;, in the %s callback, associated LSN %X/%X&quot;,</span>
+<span class="lineNum">     591 </span><span class="lineNoCov">          0 :                    NameStr(state-&gt;ctx-&gt;slot-&gt;data.name),</span>
+<span class="lineNum">     592 </span><span class="lineNoCov">          0 :                    NameStr(state-&gt;ctx-&gt;slot-&gt;data.plugin),</span>
+<span class="lineNum">     593 </span>            :                    state-&gt;callback_name,
+<span class="lineNum">     594 </span><span class="lineNoCov">          0 :                    (uint32) (state-&gt;report_location &gt;&gt; 32),</span>
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :                    (uint32) state-&gt;report_location);</span>
+<span class="lineNum">     596 </span>            :     else
+<span class="lineNum">     597 </span><span class="lineNoCov">          0 :         errcontext(&quot;slot \&quot;%s\&quot;, output plugin \&quot;%s\&quot;, in the %s callback&quot;,</span>
+<span class="lineNum">     598 </span><span class="lineNoCov">          0 :                    NameStr(state-&gt;ctx-&gt;slot-&gt;data.name),</span>
+<span class="lineNum">     599 </span><span class="lineNoCov">          0 :                    NameStr(state-&gt;ctx-&gt;slot-&gt;data.plugin),</span>
+<span class="lineNum">     600 </span>            :                    state-&gt;callback_name);
+<span class="lineNum">     601 </span><span class="lineNoCov">          0 : }</span>
+<a name="602"><span class="lineNum">     602 </span>            : </a>
+<span class="lineNum">     603 </span>            : static void
+<span class="lineNum">     604 </span><span class="lineNoCov">          0 : startup_cb_wrapper(LogicalDecodingContext *ctx, OutputPluginOptions *opt, bool is_init)</span>
+<span class="lineNum">     605 </span>            : {
+<span class="lineNum">     606 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     607 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     608 </span>            : 
+<span class="lineNum">     609 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     610 </span>            : 
+<span class="lineNum">     611 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;startup&quot;;</span>
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :     state.report_location = InvalidXLogRecPtr;</span>
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     616 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     618 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span>            :     /* set output state */
+<span class="lineNum">     621 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = false;</span>
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span>            :     /* do the actual work: call callback */
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :     ctx-&gt;callbacks.startup_cb(ctx, opt, is_init);</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     628 </span><span class="lineNoCov">          0 : }</span>
+<a name="629"><span class="lineNum">     629 </span>            : </a>
+<span class="lineNum">     630 </span>            : static void
+<span class="lineNum">     631 </span><span class="lineNoCov">          0 : shutdown_cb_wrapper(LogicalDecodingContext *ctx)</span>
+<span class="lineNum">     632 </span>            : {
+<span class="lineNum">     633 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     634 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     635 </span>            : 
+<span class="lineNum">     636 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     637 </span>            : 
+<span class="lineNum">     638 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     639 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     640 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;shutdown&quot;;</span>
+<span class="lineNum">     641 </span><span class="lineNoCov">          0 :     state.report_location = InvalidXLogRecPtr;</span>
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     643 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     644 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     645 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span>            :     /* set output state */
+<span class="lineNum">     648 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = false;</span>
+<span class="lineNum">     649 </span>            : 
+<span class="lineNum">     650 </span>            :     /* do the actual work: call callback */
+<span class="lineNum">     651 </span><span class="lineNoCov">          0 :     ctx-&gt;callbacks.shutdown_cb(ctx);</span>
+<span class="lineNum">     652 </span>            : 
+<span class="lineNum">     653 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     654 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     655 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     656 </span>            : 
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span>            : /*
+<span class="lineNum">     659 </span>            :  * Callbacks for ReorderBuffer which add in some more information and then call
+<span class="lineNum">     660 </span>            :  * output_plugin.h plugins.
+<a name="661"><span class="lineNum">     661 </span>            :  */</a>
+<span class="lineNum">     662 </span>            : static void
+<span class="lineNum">     663 </span><span class="lineNoCov">          0 : begin_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn)</span>
+<span class="lineNum">     664 </span>            : {
+<span class="lineNum">     665 </span><span class="lineNoCov">          0 :     LogicalDecodingContext *ctx = cache-&gt;private_data;</span>
+<span class="lineNum">     666 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     667 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     668 </span>            : 
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     670 </span>            : 
+<span class="lineNum">     671 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     672 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     673 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;begin&quot;;</span>
+<span class="lineNum">     674 </span><span class="lineNoCov">          0 :     state.report_location = txn-&gt;first_lsn;</span>
+<span class="lineNum">     675 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     676 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     677 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     678 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     679 </span>            : 
+<span class="lineNum">     680 </span>            :     /* set output state */
+<span class="lineNum">     681 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = true;</span>
+<span class="lineNum">     682 </span><span class="lineNoCov">          0 :     ctx-&gt;write_xid = txn-&gt;xid;</span>
+<span class="lineNum">     683 </span><span class="lineNoCov">          0 :     ctx-&gt;write_location = txn-&gt;first_lsn;</span>
+<span class="lineNum">     684 </span>            : 
+<span class="lineNum">     685 </span>            :     /* do the actual work: call callback */
+<span class="lineNum">     686 </span><span class="lineNoCov">          0 :     ctx-&gt;callbacks.begin_cb(ctx, txn);</span>
+<span class="lineNum">     687 </span>            : 
+<span class="lineNum">     688 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     689 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     690 </span><span class="lineNoCov">          0 : }</span>
+<a name="691"><span class="lineNum">     691 </span>            : </a>
+<span class="lineNum">     692 </span>            : static void
+<span class="lineNum">     693 </span><span class="lineNoCov">          0 : commit_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,</span>
+<span class="lineNum">     694 </span>            :                   XLogRecPtr commit_lsn)
+<span class="lineNum">     695 </span>            : {
+<span class="lineNum">     696 </span><span class="lineNoCov">          0 :     LogicalDecodingContext *ctx = cache-&gt;private_data;</span>
+<span class="lineNum">     697 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     698 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     699 </span>            : 
+<span class="lineNum">     700 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     701 </span>            : 
+<span class="lineNum">     702 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     703 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     704 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;commit&quot;;</span>
+<span class="lineNum">     705 </span><span class="lineNoCov">          0 :     state.report_location = txn-&gt;final_lsn; /* beginning of commit record */</span>
+<span class="lineNum">     706 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     707 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     708 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     709 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     710 </span>            : 
+<span class="lineNum">     711 </span>            :     /* set output state */
+<span class="lineNum">     712 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = true;</span>
+<span class="lineNum">     713 </span><span class="lineNoCov">          0 :     ctx-&gt;write_xid = txn-&gt;xid;</span>
+<span class="lineNum">     714 </span><span class="lineNoCov">          0 :     ctx-&gt;write_location = txn-&gt;end_lsn; /* points to the end of the record */</span>
+<span class="lineNum">     715 </span>            : 
+<span class="lineNum">     716 </span>            :     /* do the actual work: call callback */
+<span class="lineNum">     717 </span><span class="lineNoCov">          0 :     ctx-&gt;callbacks.commit_cb(ctx, txn, commit_lsn);</span>
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     720 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     721 </span><span class="lineNoCov">          0 : }</span>
+<a name="722"><span class="lineNum">     722 </span>            : </a>
+<span class="lineNum">     723 </span>            : static void
+<span class="lineNum">     724 </span><span class="lineNoCov">          0 : change_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,</span>
+<span class="lineNum">     725 </span>            :                   Relation relation, ReorderBufferChange *change)
+<span class="lineNum">     726 </span>            : {
+<span class="lineNum">     727 </span><span class="lineNoCov">          0 :     LogicalDecodingContext *ctx = cache-&gt;private_data;</span>
+<span class="lineNum">     728 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     729 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     730 </span>            : 
+<span class="lineNum">     731 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     732 </span>            : 
+<span class="lineNum">     733 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     734 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     735 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;change&quot;;</span>
+<span class="lineNum">     736 </span><span class="lineNoCov">          0 :     state.report_location = change-&gt;lsn;</span>
+<span class="lineNum">     737 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     738 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     739 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     740 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span>            :     /* set output state */
+<span class="lineNum">     743 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = true;</span>
+<span class="lineNum">     744 </span><span class="lineNoCov">          0 :     ctx-&gt;write_xid = txn-&gt;xid;</span>
+<span class="lineNum">     745 </span>            : 
+<span class="lineNum">     746 </span>            :     /*
+<span class="lineNum">     747 </span>            :      * report this change's lsn so replies from clients can give an up2date
+<span class="lineNum">     748 </span>            :      * answer. This won't ever be enough (and shouldn't be!) to confirm
+<span class="lineNum">     749 </span>            :      * receipt of this transaction, but it might allow another transaction's
+<span class="lineNum">     750 </span>            :      * commit to be confirmed with one message.
+<span class="lineNum">     751 </span>            :      */
+<span class="lineNum">     752 </span><span class="lineNoCov">          0 :     ctx-&gt;write_location = change-&gt;lsn;</span>
+<span class="lineNum">     753 </span>            : 
+<span class="lineNum">     754 </span><span class="lineNoCov">          0 :     ctx-&gt;callbacks.change_cb(ctx, txn, relation, change);</span>
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     757 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     758 </span><span class="lineNoCov">          0 : }</span>
+<a name="759"><span class="lineNum">     759 </span>            : </a>
+<span class="lineNum">     760 </span>            : static void
+<span class="lineNum">     761 </span><span class="lineNoCov">          0 : truncate_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,</span>
+<span class="lineNum">     762 </span>            :                     int nrelations, Relation relations[], ReorderBufferChange *change)
+<span class="lineNum">     763 </span>            : {
+<span class="lineNum">     764 </span><span class="lineNoCov">          0 :     LogicalDecodingContext *ctx = cache-&gt;private_data;</span>
+<span class="lineNum">     765 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     766 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     767 </span>            : 
+<span class="lineNum">     768 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     769 </span>            : 
+<span class="lineNum">     770 </span><span class="lineNoCov">          0 :     if (!ctx-&gt;callbacks.truncate_cb)</span>
+<span class="lineNum">     771 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     772 </span>            : 
+<span class="lineNum">     773 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     774 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     775 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;truncate&quot;;</span>
+<span class="lineNum">     776 </span><span class="lineNoCov">          0 :     state.report_location = change-&gt;lsn;</span>
+<span class="lineNum">     777 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     778 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     779 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     780 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     781 </span>            : 
+<span class="lineNum">     782 </span>            :     /* set output state */
+<span class="lineNum">     783 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = true;</span>
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :     ctx-&gt;write_xid = txn-&gt;xid;</span>
+<span class="lineNum">     785 </span>            : 
+<span class="lineNum">     786 </span>            :     /*
+<span class="lineNum">     787 </span>            :      * report this change's lsn so replies from clients can give an up2date
+<span class="lineNum">     788 </span>            :      * answer. This won't ever be enough (and shouldn't be!) to confirm
+<span class="lineNum">     789 </span>            :      * receipt of this transaction, but it might allow another transaction's
+<span class="lineNum">     790 </span>            :      * commit to be confirmed with one message.
+<span class="lineNum">     791 </span>            :      */
+<span class="lineNum">     792 </span><span class="lineNoCov">          0 :     ctx-&gt;write_location = change-&gt;lsn;</span>
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span><span class="lineNoCov">          0 :     ctx-&gt;callbacks.truncate_cb(ctx, txn, nrelations, relations, change);</span>
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     797 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     798 </span>            : }
+<a name="799"><span class="lineNum">     799 </span>            : </a>
+<span class="lineNum">     800 </span>            : bool
+<span class="lineNum">     801 </span><span class="lineNoCov">          0 : filter_by_origin_cb_wrapper(LogicalDecodingContext *ctx, RepOriginId origin_id)</span>
+<span class="lineNum">     802 </span>            : {
+<span class="lineNum">     803 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     804 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     805 </span>            :     bool        ret;
+<span class="lineNum">     806 </span>            : 
+<span class="lineNum">     807 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     808 </span>            : 
+<span class="lineNum">     809 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     810 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     811 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;filter_by_origin&quot;;</span>
+<span class="lineNum">     812 </span><span class="lineNoCov">          0 :     state.report_location = InvalidXLogRecPtr;</span>
+<span class="lineNum">     813 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     814 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     815 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     816 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     817 </span>            : 
+<span class="lineNum">     818 </span>            :     /* set output state */
+<span class="lineNum">     819 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = false;</span>
+<span class="lineNum">     820 </span>            : 
+<span class="lineNum">     821 </span>            :     /* do the actual work: call callback */
+<span class="lineNum">     822 </span><span class="lineNoCov">          0 :     ret = ctx-&gt;callbacks.filter_by_origin_cb(ctx, origin_id);</span>
+<span class="lineNum">     823 </span>            : 
+<span class="lineNum">     824 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     825 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     826 </span>            : 
+<span class="lineNum">     827 </span><span class="lineNoCov">          0 :     return ret;</span>
+<span class="lineNum">     828 </span>            : }
+<a name="829"><span class="lineNum">     829 </span>            : </a>
+<span class="lineNum">     830 </span>            : static void
+<span class="lineNum">     831 </span><span class="lineNoCov">          0 : message_cb_wrapper(ReorderBuffer *cache, ReorderBufferTXN *txn,</span>
+<span class="lineNum">     832 </span>            :                    XLogRecPtr message_lsn, bool transactional,
+<span class="lineNum">     833 </span>            :                    const char *prefix, Size message_size, const char *message)
+<span class="lineNum">     834 </span>            : {
+<span class="lineNum">     835 </span><span class="lineNoCov">          0 :     LogicalDecodingContext *ctx = cache-&gt;private_data;</span>
+<span class="lineNum">     836 </span>            :     LogicalErrorCallbackState state;
+<span class="lineNum">     837 </span>            :     ErrorContextCallback errcallback;
+<span class="lineNum">     838 </span>            : 
+<span class="lineNum">     839 </span><span class="lineNoCov">          0 :     Assert(!ctx-&gt;fast_forward);</span>
+<span class="lineNum">     840 </span>            : 
+<span class="lineNum">     841 </span><span class="lineNoCov">          0 :     if (ctx-&gt;callbacks.message_cb == NULL)</span>
+<span class="lineNum">     842 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     843 </span>            : 
+<span class="lineNum">     844 </span>            :     /* Push callback + info on the error context stack */
+<span class="lineNum">     845 </span><span class="lineNoCov">          0 :     state.ctx = ctx;</span>
+<span class="lineNum">     846 </span><span class="lineNoCov">          0 :     state.callback_name = &quot;message&quot;;</span>
+<span class="lineNum">     847 </span><span class="lineNoCov">          0 :     state.report_location = message_lsn;</span>
+<span class="lineNum">     848 </span><span class="lineNoCov">          0 :     errcallback.callback = output_plugin_error_callback;</span>
+<span class="lineNum">     849 </span><span class="lineNoCov">          0 :     errcallback.arg = (void *) &amp;state;</span>
+<span class="lineNum">     850 </span><span class="lineNoCov">          0 :     errcallback.previous = error_context_stack;</span>
+<span class="lineNum">     851 </span><span class="lineNoCov">          0 :     error_context_stack = &amp;errcallback;</span>
+<span class="lineNum">     852 </span>            : 
+<span class="lineNum">     853 </span>            :     /* set output state */
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :     ctx-&gt;accept_writes = true;</span>
+<span class="lineNum">     855 </span><span class="lineNoCov">          0 :     ctx-&gt;write_xid = txn != NULL ? txn-&gt;xid : InvalidTransactionId;</span>
+<span class="lineNum">     856 </span><span class="lineNoCov">          0 :     ctx-&gt;write_location = message_lsn;</span>
+<span class="lineNum">     857 </span>            : 
+<span class="lineNum">     858 </span>            :     /* do the actual work: call callback */
+<span class="lineNum">     859 </span><span class="lineNoCov">          0 :     ctx-&gt;callbacks.message_cb(ctx, txn, message_lsn, transactional, prefix,</span>
+<span class="lineNum">     860 </span>            :                               message_size, message);
+<span class="lineNum">     861 </span>            : 
+<span class="lineNum">     862 </span>            :     /* Pop the error context stack */
+<span class="lineNum">     863 </span><span class="lineNoCov">          0 :     error_context_stack = errcallback.previous;</span>
+<span class="lineNum">     864 </span>            : }
+<span class="lineNum">     865 </span>            : 
+<span class="lineNum">     866 </span>            : /*
+<span class="lineNum">     867 </span>            :  * Set the required catalog xmin horizon for historic snapshots in the current
+<span class="lineNum">     868 </span>            :  * replication slot.
+<span class="lineNum">     869 </span>            :  *
+<span class="lineNum">     870 </span>            :  * Note that in the most cases, we won't be able to immediately use the xmin
+<span class="lineNum">     871 </span>            :  * to increase the xmin horizon: we need to wait till the client has confirmed
+<span class="lineNum">     872 </span>            :  * receiving current_lsn with LogicalConfirmReceivedLocation().
+<a name="873"><span class="lineNum">     873 </span>            :  */</a>
+<span class="lineNum">     874 </span>            : void
+<span class="lineNum">     875 </span><span class="lineNoCov">          0 : LogicalIncreaseXminForSlot(XLogRecPtr current_lsn, TransactionId xmin)</span>
+<span class="lineNum">     876 </span>            : {
+<span class="lineNum">     877 </span><span class="lineNoCov">          0 :     bool        updated_xmin = false;</span>
+<span class="lineNum">     878 </span>            :     ReplicationSlot *slot;
+<span class="lineNum">     879 </span>            : 
+<span class="lineNum">     880 </span><span class="lineNoCov">          0 :     slot = MyReplicationSlot;</span>
+<span class="lineNum">     881 </span>            : 
+<span class="lineNum">     882 </span><span class="lineNoCov">          0 :     Assert(slot != NULL);</span>
+<span class="lineNum">     883 </span>            : 
+<span class="lineNum">     884 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     885 </span>            : 
+<span class="lineNum">     886 </span>            :     /*
+<span class="lineNum">     887 </span>            :      * don't overwrite if we already have a newer xmin. This can happen if we
+<span class="lineNum">     888 </span>            :      * restart decoding in a slot.
+<span class="lineNum">     889 </span>            :      */
+<span class="lineNum">     890 </span><span class="lineNoCov">          0 :     if (TransactionIdPrecedesOrEquals(xmin, slot-&gt;data.catalog_xmin))</span>
+<span class="lineNum">     891 </span>            :     {
+<span class="lineNum">     892 </span>            :     }
+<span class="lineNum">     893 </span>            : 
+<span class="lineNum">     894 </span>            :     /*
+<span class="lineNum">     895 </span>            :      * If the client has already confirmed up to this lsn, we directly can
+<span class="lineNum">     896 </span>            :      * mark this as accepted. This can happen if we restart decoding in a
+<span class="lineNum">     897 </span>            :      * slot.
+<span class="lineNum">     898 </span>            :      */
+<span class="lineNum">     899 </span><span class="lineNoCov">          0 :     else if (current_lsn &lt;= slot-&gt;data.confirmed_flush)</span>
+<span class="lineNum">     900 </span>            :     {
+<span class="lineNum">     901 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_catalog_xmin = xmin;</span>
+<span class="lineNum">     902 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_xmin_lsn = current_lsn;</span>
+<span class="lineNum">     903 </span>            : 
+<span class="lineNum">     904 </span>            :         /* our candidate can directly be used */
+<span class="lineNum">     905 </span><span class="lineNoCov">          0 :         updated_xmin = true;</span>
+<span class="lineNum">     906 </span>            :     }
+<span class="lineNum">     907 </span>            : 
+<span class="lineNum">     908 </span>            :     /*
+<span class="lineNum">     909 </span>            :      * Only increase if the previous values have been applied, otherwise we
+<span class="lineNum">     910 </span>            :      * might never end up updating if the receiver acks too slowly.
+<span class="lineNum">     911 </span>            :      */
+<span class="lineNum">     912 </span><span class="lineNoCov">          0 :     else if (slot-&gt;candidate_xmin_lsn == InvalidXLogRecPtr)</span>
+<span class="lineNum">     913 </span>            :     {
+<span class="lineNum">     914 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_catalog_xmin = xmin;</span>
+<span class="lineNum">     915 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_xmin_lsn = current_lsn;</span>
+<span class="lineNum">     916 </span>            :     }
+<span class="lineNum">     917 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     918 </span>            : 
+<span class="lineNum">     919 </span>            :     /* candidate already valid with the current flush position, apply */
+<span class="lineNum">     920 </span><span class="lineNoCov">          0 :     if (updated_xmin)</span>
+<span class="lineNum">     921 </span><span class="lineNoCov">          0 :         LogicalConfirmReceivedLocation(slot-&gt;data.confirmed_flush);</span>
+<span class="lineNum">     922 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     923 </span>            : 
+<span class="lineNum">     924 </span>            : /*
+<span class="lineNum">     925 </span>            :  * Mark the minimal LSN (restart_lsn) we need to read to replay all
+<span class="lineNum">     926 </span>            :  * transactions that have not yet committed at current_lsn.
+<span class="lineNum">     927 </span>            :  *
+<span class="lineNum">     928 </span>            :  * Just like LogicalIncreaseXminForSlot this only takes effect when the
+<span class="lineNum">     929 </span>            :  * client has confirmed to have received current_lsn.
+<a name="930"><span class="lineNum">     930 </span>            :  */</a>
+<span class="lineNum">     931 </span>            : void
+<span class="lineNum">     932 </span><span class="lineNoCov">          0 : LogicalIncreaseRestartDecodingForSlot(XLogRecPtr current_lsn, XLogRecPtr restart_lsn)</span>
+<span class="lineNum">     933 </span>            : {
+<span class="lineNum">     934 </span><span class="lineNoCov">          0 :     bool        updated_lsn = false;</span>
+<span class="lineNum">     935 </span>            :     ReplicationSlot *slot;
+<span class="lineNum">     936 </span>            : 
+<span class="lineNum">     937 </span><span class="lineNoCov">          0 :     slot = MyReplicationSlot;</span>
+<span class="lineNum">     938 </span>            : 
+<span class="lineNum">     939 </span><span class="lineNoCov">          0 :     Assert(slot != NULL);</span>
+<span class="lineNum">     940 </span><span class="lineNoCov">          0 :     Assert(restart_lsn != InvalidXLogRecPtr);</span>
+<span class="lineNum">     941 </span><span class="lineNoCov">          0 :     Assert(current_lsn != InvalidXLogRecPtr);</span>
+<span class="lineNum">     942 </span>            : 
+<span class="lineNum">     943 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     944 </span>            : 
+<span class="lineNum">     945 </span>            :     /* don't overwrite if have a newer restart lsn */
+<span class="lineNum">     946 </span><span class="lineNoCov">          0 :     if (restart_lsn &lt;= slot-&gt;data.restart_lsn)</span>
+<span class="lineNum">     947 </span>            :     {
+<span class="lineNum">     948 </span>            :     }
+<span class="lineNum">     949 </span>            : 
+<span class="lineNum">     950 </span>            :     /*
+<span class="lineNum">     951 </span>            :      * We might have already flushed far enough to directly accept this lsn,
+<span class="lineNum">     952 </span>            :      * in this case there is no need to check for existing candidate LSNs
+<span class="lineNum">     953 </span>            :      */
+<span class="lineNum">     954 </span><span class="lineNoCov">          0 :     else if (current_lsn &lt;= slot-&gt;data.confirmed_flush)</span>
+<span class="lineNum">     955 </span>            :     {
+<span class="lineNum">     956 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_restart_valid = current_lsn;</span>
+<span class="lineNum">     957 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_restart_lsn = restart_lsn;</span>
+<span class="lineNum">     958 </span>            : 
+<span class="lineNum">     959 </span>            :         /* our candidate can directly be used */
+<span class="lineNum">     960 </span><span class="lineNoCov">          0 :         updated_lsn = true;</span>
+<span class="lineNum">     961 </span>            :     }
+<span class="lineNum">     962 </span>            : 
+<span class="lineNum">     963 </span>            :     /*
+<span class="lineNum">     964 </span>            :      * Only increase if the previous values have been applied, otherwise we
+<span class="lineNum">     965 </span>            :      * might never end up updating if the receiver acks too slowly. A missed
+<span class="lineNum">     966 </span>            :      * value here will just cause some extra effort after reconnecting.
+<span class="lineNum">     967 </span>            :      */
+<span class="lineNum">     968 </span><span class="lineNoCov">          0 :     if (slot-&gt;candidate_restart_valid == InvalidXLogRecPtr)</span>
+<span class="lineNum">     969 </span>            :     {
+<span class="lineNum">     970 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_restart_valid = current_lsn;</span>
+<span class="lineNum">     971 </span><span class="lineNoCov">          0 :         slot-&gt;candidate_restart_lsn = restart_lsn;</span>
+<span class="lineNum">     972 </span>            : 
+<span class="lineNum">     973 </span><span class="lineNoCov">          0 :         elog(DEBUG1, &quot;got new restart lsn %X/%X at %X/%X&quot;,</span>
+<span class="lineNum">     974 </span>            :              (uint32) (restart_lsn &gt;&gt; 32), (uint32) restart_lsn,
+<span class="lineNum">     975 </span>            :              (uint32) (current_lsn &gt;&gt; 32), (uint32) current_lsn);
+<span class="lineNum">     976 </span>            :     }
+<span class="lineNum">     977 </span>            :     else
+<span class="lineNum">     978 </span>            :     {
+<span class="lineNum">     979 </span><span class="lineNoCov">          0 :         elog(DEBUG1, &quot;failed to increase restart lsn: proposed %X/%X, after %X/%X, current candidate %X/%X, current after %X/%X, flushed up to %X/%X&quot;,</span>
+<span class="lineNum">     980 </span>            :              (uint32) (restart_lsn &gt;&gt; 32), (uint32) restart_lsn,
+<span class="lineNum">     981 </span>            :              (uint32) (current_lsn &gt;&gt; 32), (uint32) current_lsn,
+<span class="lineNum">     982 </span>            :              (uint32) (slot-&gt;candidate_restart_lsn &gt;&gt; 32),
+<span class="lineNum">     983 </span>            :              (uint32) slot-&gt;candidate_restart_lsn,
+<span class="lineNum">     984 </span>            :              (uint32) (slot-&gt;candidate_restart_valid &gt;&gt; 32),
+<span class="lineNum">     985 </span>            :              (uint32) slot-&gt;candidate_restart_valid,
+<span class="lineNum">     986 </span>            :              (uint32) (slot-&gt;data.confirmed_flush &gt;&gt; 32),
+<span class="lineNum">     987 </span>            :              (uint32) slot-&gt;data.confirmed_flush
+<span class="lineNum">     988 </span>            :             );
+<span class="lineNum">     989 </span>            :     }
+<span class="lineNum">     990 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;slot-&gt;mutex);</span>
+<span class="lineNum">     991 </span>            : 
+<span class="lineNum">     992 </span>            :     /* candidates are already valid with the current flush position, apply */
+<span class="lineNum">     993 </span><span class="lineNoCov">          0 :     if (updated_lsn)</span>
+<span class="lineNum">     994 </span><span class="lineNoCov">          0 :         LogicalConfirmReceivedLocation(slot-&gt;data.confirmed_flush);</span>
+<span class="lineNum">     995 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     996 </span>            : 
+<span class="lineNum">     997 </span>            : /*
+<span class="lineNum">     998 </span>            :  * Handle a consumer's confirmation having received all changes up to lsn.
+<a name="999"><span class="lineNum">     999 </span>            :  */</a>
+<span class="lineNum">    1000 </span>            : void
+<span class="lineNum">    1001 </span><span class="lineNoCov">          0 : LogicalConfirmReceivedLocation(XLogRecPtr lsn)</span>
+<span class="lineNum">    1002 </span>            : {
+<span class="lineNum">    1003 </span><span class="lineNoCov">          0 :     Assert(lsn != InvalidXLogRecPtr);</span>
+<span class="lineNum">    1004 </span>            : 
+<span class="lineNum">    1005 </span>            :     /* Do an unlocked check for candidate_lsn first. */
+<span class="lineNum">    1006 </span><span class="lineNoCov">          0 :     if (MyReplicationSlot-&gt;candidate_xmin_lsn != InvalidXLogRecPtr ||</span>
+<span class="lineNum">    1007 </span><span class="lineNoCov">          0 :         MyReplicationSlot-&gt;candidate_restart_valid != InvalidXLogRecPtr)</span>
+<span class="lineNum">    1008 </span><span class="lineNoCov">          0 :     {</span>
+<span class="lineNum">    1009 </span><span class="lineNoCov">          0 :         bool        updated_xmin = false;</span>
+<span class="lineNum">    1010 </span><span class="lineNoCov">          0 :         bool        updated_restart = false;</span>
+<span class="lineNum">    1011 </span>            : 
+<span class="lineNum">    1012 </span><span class="lineNoCov">          0 :         SpinLockAcquire(&amp;MyReplicationSlot-&gt;mutex);</span>
+<span class="lineNum">    1013 </span>            : 
+<span class="lineNum">    1014 </span><span class="lineNoCov">          0 :         MyReplicationSlot-&gt;data.confirmed_flush = lsn;</span>
+<span class="lineNum">    1015 </span>            : 
+<span class="lineNum">    1016 </span>            :         /* if we're past the location required for bumping xmin, do so */
+<span class="lineNum">    1017 </span><span class="lineNoCov">          0 :         if (MyReplicationSlot-&gt;candidate_xmin_lsn != InvalidXLogRecPtr &amp;&amp;</span>
+<span class="lineNum">    1018 </span><span class="lineNoCov">          0 :             MyReplicationSlot-&gt;candidate_xmin_lsn &lt;= lsn)</span>
+<span class="lineNum">    1019 </span>            :         {
+<span class="lineNum">    1020 </span>            :             /*
+<span class="lineNum">    1021 </span>            :              * We have to write the changed xmin to disk *before* we change
+<span class="lineNum">    1022 </span>            :              * the in-memory value, otherwise after a crash we wouldn't know
+<span class="lineNum">    1023 </span>            :              * that some catalog tuples might have been removed already.
+<span class="lineNum">    1024 </span>            :              *
+<span class="lineNum">    1025 </span>            :              * Ensure that by first writing to -&gt;xmin and only update
+<span class="lineNum">    1026 </span>            :              * -&gt;effective_xmin once the new state is synced to disk. After a
+<span class="lineNum">    1027 </span>            :              * crash -&gt;effective_xmin is set to -&gt;xmin.
+<span class="lineNum">    1028 </span>            :              */
+<span class="lineNum">    1029 </span><span class="lineNoCov">          0 :             if (TransactionIdIsValid(MyReplicationSlot-&gt;candidate_catalog_xmin) &amp;&amp;</span>
+<span class="lineNum">    1030 </span><span class="lineNoCov">          0 :                 MyReplicationSlot-&gt;data.catalog_xmin != MyReplicationSlot-&gt;candidate_catalog_xmin)</span>
+<span class="lineNum">    1031 </span>            :             {
+<span class="lineNum">    1032 </span><span class="lineNoCov">          0 :                 MyReplicationSlot-&gt;data.catalog_xmin = MyReplicationSlot-&gt;candidate_catalog_xmin;</span>
+<span class="lineNum">    1033 </span><span class="lineNoCov">          0 :                 MyReplicationSlot-&gt;candidate_catalog_xmin = InvalidTransactionId;</span>
+<span class="lineNum">    1034 </span><span class="lineNoCov">          0 :                 MyReplicationSlot-&gt;candidate_xmin_lsn = InvalidXLogRecPtr;</span>
+<span class="lineNum">    1035 </span><span class="lineNoCov">          0 :                 updated_xmin = true;</span>
+<span class="lineNum">    1036 </span>            :             }
+<span class="lineNum">    1037 </span>            :         }
+<span class="lineNum">    1038 </span>            : 
+<span class="lineNum">    1039 </span><span class="lineNoCov">          0 :         if (MyReplicationSlot-&gt;candidate_restart_valid != InvalidXLogRecPtr &amp;&amp;</span>
+<span class="lineNum">    1040 </span><span class="lineNoCov">          0 :             MyReplicationSlot-&gt;candidate_restart_valid &lt;= lsn)</span>
+<span class="lineNum">    1041 </span>            :         {
+<span class="lineNum">    1042 </span><span class="lineNoCov">          0 :             Assert(MyReplicationSlot-&gt;candidate_restart_lsn != InvalidXLogRecPtr);</span>
+<span class="lineNum">    1043 </span>            : 
+<span class="lineNum">    1044 </span><span class="lineNoCov">          0 :             MyReplicationSlot-&gt;data.restart_lsn = MyReplicationSlot-&gt;candidate_restart_lsn;</span>
+<span class="lineNum">    1045 </span><span class="lineNoCov">          0 :             MyReplicationSlot-&gt;candidate_restart_lsn = InvalidXLogRecPtr;</span>
+<span class="lineNum">    1046 </span><span class="lineNoCov">          0 :             MyReplicationSlot-&gt;candidate_restart_valid = InvalidXLogRecPtr;</span>
+<span class="lineNum">    1047 </span><span class="lineNoCov">          0 :             updated_restart = true;</span>
+<span class="lineNum">    1048 </span>            :         }
+<span class="lineNum">    1049 </span>            : 
+<span class="lineNum">    1050 </span><span class="lineNoCov">          0 :         SpinLockRelease(&amp;MyReplicationSlot-&gt;mutex);</span>
+<span class="lineNum">    1051 </span>            : 
+<span class="lineNum">    1052 </span>            :         /* first write new xmin to disk, so we know what's up after a crash */
+<span class="lineNum">    1053 </span><span class="lineNoCov">          0 :         if (updated_xmin || updated_restart)</span>
+<span class="lineNum">    1054 </span>            :         {
+<span class="lineNum">    1055 </span><span class="lineNoCov">          0 :             ReplicationSlotMarkDirty();</span>
+<span class="lineNum">    1056 </span><span class="lineNoCov">          0 :             ReplicationSlotSave();</span>
+<span class="lineNum">    1057 </span><span class="lineNoCov">          0 :             elog(DEBUG1, &quot;updated xmin: %u restart: %u&quot;, updated_xmin, updated_restart);</span>
+<span class="lineNum">    1058 </span>            :         }
+<span class="lineNum">    1059 </span>            : 
+<span class="lineNum">    1060 </span>            :         /*
+<span class="lineNum">    1061 </span>            :          * Now the new xmin is safely on disk, we can let the global value
+<span class="lineNum">    1062 </span>            :          * advance. We do not take ProcArrayLock or similar since we only
+<span class="lineNum">    1063 </span>            :          * advance xmin here and there's not much harm done by a concurrent
+<span class="lineNum">    1064 </span>            :          * computation missing that.
+<span class="lineNum">    1065 </span>            :          */
+<span class="lineNum">    1066 </span><span class="lineNoCov">          0 :         if (updated_xmin)</span>
+<span class="lineNum">    1067 </span>            :         {
+<span class="lineNum">    1068 </span><span class="lineNoCov">          0 :             SpinLockAcquire(&amp;MyReplicationSlot-&gt;mutex);</span>
+<span class="lineNum">    1069 </span><span class="lineNoCov">          0 :             MyReplicationSlot-&gt;effective_catalog_xmin = MyReplicationSlot-&gt;data.catalog_xmin;</span>
+<span class="lineNum">    1070 </span><span class="lineNoCov">          0 :             SpinLockRelease(&amp;MyReplicationSlot-&gt;mutex);</span>
+<span class="lineNum">    1071 </span>            : 
+<span class="lineNum">    1072 </span><span class="lineNoCov">          0 :             ReplicationSlotsComputeRequiredXmin(false);</span>
+<span class="lineNum">    1073 </span><span class="lineNoCov">          0 :             ReplicationSlotsComputeRequiredLSN();</span>
+<span class="lineNum">    1074 </span>            :         }
+<span class="lineNum">    1075 </span>            :     }
+<span class="lineNum">    1076 </span>            :     else
+<span class="lineNum">    1077 </span>            :     {
+<span class="lineNum">    1078 </span><span class="lineNoCov">          0 :         SpinLockAcquire(&amp;MyReplicationSlot-&gt;mutex);</span>
+<span class="lineNum">    1079 </span><span class="lineNoCov">          0 :         MyReplicationSlot-&gt;data.confirmed_flush = lsn;</span>
+<span class="lineNum">    1080 </span><span class="lineNoCov">          0 :         SpinLockRelease(&amp;MyReplicationSlot-&gt;mutex);</span>
+<span class="lineNum">    1081 </span>            :     }
+<span class="lineNum">    1082 </span><span class="lineNoCov">          0 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

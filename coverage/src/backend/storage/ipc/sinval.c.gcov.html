@@ -1,0 +1,289 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/ipc/sinval.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/ipc</a> - sinval.c<span style="font-size: 80%;"> (source / <a href="sinval.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">37</td>
+            <td class="headerCovTableEntry">40</td>
+            <td class="headerCovTableEntryHi">92.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">4</td>
+            <td class="headerCovTableEntry">4</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * sinval.c
+<span class="lineNum">       4 </span>            :  *    POSTGRES shared cache invalidation communication code.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/storage/ipc/sinval.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/xact.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;commands/async.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;storage/ipc.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;storage/proc.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;storage/sinvaladt.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;utils/inval.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : uint64      SharedInvalidMessageCounter;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : 
+<span class="lineNum">      29 </span>            : /*
+<span class="lineNum">      30 </span>            :  * Because backends sitting idle will not be reading sinval events, we
+<span class="lineNum">      31 </span>            :  * need a way to give an idle backend a swift kick in the rear and make
+<span class="lineNum">      32 </span>            :  * it catch up before the sinval queue overflows and forces it to go
+<span class="lineNum">      33 </span>            :  * through a cache reset exercise.  This is done by sending
+<span class="lineNum">      34 </span>            :  * PROCSIG_CATCHUP_INTERRUPT to any backend that gets too far behind.
+<span class="lineNum">      35 </span>            :  *
+<span class="lineNum">      36 </span>            :  * The signal handler will set an interrupt pending flag and will set the
+<span class="lineNum">      37 </span>            :  * processes latch. Whenever starting to read from the client, or when
+<span class="lineNum">      38 </span>            :  * interrupted while doing so, ProcessClientReadInterrupt() will call
+<span class="lineNum">      39 </span>            :  * ProcessCatchupEvent().
+<span class="lineNum">      40 </span>            :  */
+<span class="lineNum">      41 </span>            : volatile sig_atomic_t catchupInterruptPending = false;
+<span class="lineNum">      42 </span>            : 
+<span class="lineNum">      43 </span>            : 
+<span class="lineNum">      44 </span>            : /*
+<span class="lineNum">      45 </span>            :  * SendSharedInvalidMessages
+<span class="lineNum">      46 </span>            :  *  Add shared-cache-invalidation message(s) to the global SI message queue.
+<a name="47"><span class="lineNum">      47 </span>            :  */</a>
+<span class="lineNum">      48 </span>            : void
+<span class="lineNum">      49 </span><span class="lineCov">     143154 : SendSharedInvalidMessages(const SharedInvalidationMessage *msgs, int n)</span>
+<span class="lineNum">      50 </span>            : {
+<span class="lineNum">      51 </span><span class="lineCov">     143154 :     SIInsertDataEntries(msgs, n);</span>
+<span class="lineNum">      52 </span><span class="lineCov">     143154 : }</span>
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            : /*
+<span class="lineNum">      55 </span>            :  * ReceiveSharedInvalidMessages
+<span class="lineNum">      56 </span>            :  *      Process shared-cache-invalidation messages waiting for this backend
+<span class="lineNum">      57 </span>            :  *
+<span class="lineNum">      58 </span>            :  * We guarantee to process all messages that had been queued before the
+<span class="lineNum">      59 </span>            :  * routine was entered.  It is of course possible for more messages to get
+<span class="lineNum">      60 </span>            :  * queued right after our last SIGetDataEntries call.
+<span class="lineNum">      61 </span>            :  *
+<span class="lineNum">      62 </span>            :  * NOTE: it is entirely possible for this routine to be invoked recursively
+<span class="lineNum">      63 </span>            :  * as a consequence of processing inside the invalFunction or resetFunction.
+<span class="lineNum">      64 </span>            :  * Furthermore, such a recursive call must guarantee that all outstanding
+<span class="lineNum">      65 </span>            :  * inval messages have been processed before it exits.  This is the reason
+<span class="lineNum">      66 </span>            :  * for the strange-looking choice to use a statically allocated buffer array
+<span class="lineNum">      67 </span>            :  * and counters; it's so that a recursive call can process messages already
+<span class="lineNum">      68 </span>            :  * sucked out of sinvaladt.c.
+<a name="69"><span class="lineNum">      69 </span>            :  */</a>
+<span class="lineNum">      70 </span>            : void
+<span class="lineNum">      71 </span><span class="lineCov">    3239028 : ReceiveSharedInvalidMessages(void (*invalFunction) (SharedInvalidationMessage *msg),</span>
+<span class="lineNum">      72 </span>            :                              void (*resetFunction) (void))
+<span class="lineNum">      73 </span>            : {
+<span class="lineNum">      74 </span>            : #define MAXINVALMSGS 32
+<span class="lineNum">      75 </span>            :     static SharedInvalidationMessage messages[MAXINVALMSGS];
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span>            :     /*
+<span class="lineNum">      78 </span>            :      * We use volatile here to prevent bugs if a compiler doesn't realize that
+<span class="lineNum">      79 </span>            :      * recursion is a possibility ...
+<span class="lineNum">      80 </span>            :      */
+<span class="lineNum">      81 </span>            :     static volatile int nextmsg = 0;
+<span class="lineNum">      82 </span>            :     static volatile int nummsgs = 0;
+<span class="lineNum">      83 </span>            : 
+<span class="lineNum">      84 </span>            :     /* Deal with any messages still pending from an outer recursion */
+<span class="lineNum">      85 </span><span class="lineCov">    6478056 :     while (nextmsg &lt; nummsgs)</span>
+<span class="lineNum">      86 </span>            :     {
+<span class="lineNum">      87 </span><span class="lineNoCov">          0 :         SharedInvalidationMessage msg = messages[nextmsg++];</span>
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span><span class="lineNoCov">          0 :         SharedInvalidMessageCounter++;</span>
+<span class="lineNum">      90 </span><span class="lineNoCov">          0 :         invalFunction(&amp;msg);</span>
+<span class="lineNum">      91 </span>            :     }
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            :     do
+<span class="lineNum">      94 </span>            :     {
+<span class="lineNum">      95 </span>            :         int         getResult;
+<span class="lineNum">      96 </span>            : 
+<span class="lineNum">      97 </span><span class="lineCov">    3343128 :         nextmsg = nummsgs = 0;</span>
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            :         /* Try to get some more messages */
+<span class="lineNum">     100 </span><span class="lineCov">    3343128 :         getResult = SIGetDataEntries(messages, MAXINVALMSGS);</span>
+<span class="lineNum">     101 </span>            : 
+<span class="lineNum">     102 </span><span class="lineCov">    3343128 :         if (getResult &lt; 0)</span>
+<span class="lineNum">     103 </span>            :         {
+<span class="lineNum">     104 </span>            :             /* got a reset message */
+<span class="lineNum">     105 </span><span class="lineCov">         34 :             elog(DEBUG4, &quot;cache state reset&quot;);</span>
+<span class="lineNum">     106 </span><span class="lineCov">         34 :             SharedInvalidMessageCounter++;</span>
+<span class="lineNum">     107 </span><span class="lineCov">         34 :             resetFunction();</span>
+<span class="lineNum">     108 </span><span class="lineCov">         34 :             break;              /* nothing more to do */</span>
+<span class="lineNum">     109 </span>            :         }
+<span class="lineNum">     110 </span>            : 
+<span class="lineNum">     111 </span>            :         /* Process them, being wary that a recursive call might eat some */
+<span class="lineNum">     112 </span><span class="lineCov">    3343094 :         nextmsg = 0;</span>
+<span class="lineNum">     113 </span><span class="lineCov">    3343094 :         nummsgs = getResult;</span>
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span><span class="lineCov">   10512174 :         while (nextmsg &lt; nummsgs)</span>
+<span class="lineNum">     116 </span>            :         {
+<span class="lineNum">     117 </span><span class="lineCov">    3825986 :             SharedInvalidationMessage msg = messages[nextmsg++];</span>
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span><span class="lineCov">    3825986 :             SharedInvalidMessageCounter++;</span>
+<span class="lineNum">     120 </span><span class="lineCov">    3825986 :             invalFunction(&amp;msg);</span>
+<span class="lineNum">     121 </span>            :         }
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span>            :         /*
+<span class="lineNum">     124 </span>            :          * We only need to loop if the last SIGetDataEntries call (which might
+<span class="lineNum">     125 </span>            :          * have been within a recursive call) returned a full buffer.
+<span class="lineNum">     126 </span>            :          */
+<span class="lineNum">     127 </span><span class="lineCov">    3343094 :     } while (nummsgs == MAXINVALMSGS);</span>
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span>            :     /*
+<span class="lineNum">     130 </span>            :      * We are now caught up.  If we received a catchup signal, reset that
+<span class="lineNum">     131 </span>            :      * flag, and call SICleanupQueue().  This is not so much because we need
+<span class="lineNum">     132 </span>            :      * to flush dead messages right now, as that we want to pass on the
+<span class="lineNum">     133 </span>            :      * catchup signal to the next slowest backend.  &quot;Daisy chaining&quot; the
+<span class="lineNum">     134 </span>            :      * catchup signal this way avoids creating spikes in system load for what
+<span class="lineNum">     135 </span>            :      * should be just a background maintenance activity.
+<span class="lineNum">     136 </span>            :      */
+<span class="lineNum">     137 </span><span class="lineCov">    3239028 :     if (catchupInterruptPending)</span>
+<span class="lineNum">     138 </span>            :     {
+<span class="lineNum">     139 </span><span class="lineCov">        588 :         catchupInterruptPending = false;</span>
+<span class="lineNum">     140 </span><span class="lineCov">        588 :         elog(DEBUG4, &quot;sinval catchup complete, cleaning queue&quot;);</span>
+<span class="lineNum">     141 </span><span class="lineCov">        588 :         SICleanupQueue(false, 0);</span>
+<span class="lineNum">     142 </span>            :     }
+<span class="lineNum">     143 </span><span class="lineCov">    3239028 : }</span>
+<span class="lineNum">     144 </span>            : 
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span>            : /*
+<span class="lineNum">     147 </span>            :  * HandleCatchupInterrupt
+<span class="lineNum">     148 </span>            :  *
+<span class="lineNum">     149 </span>            :  * This is called when PROCSIG_CATCHUP_INTERRUPT is received.
+<span class="lineNum">     150 </span>            :  *
+<span class="lineNum">     151 </span>            :  * We used to directly call ProcessCatchupEvent directly when idle. These days
+<span class="lineNum">     152 </span>            :  * we just set a flag to do it later and notify the process of that fact by
+<span class="lineNum">     153 </span>            :  * setting the process's latch.
+<a name="154"><span class="lineNum">     154 </span>            :  */</a>
+<span class="lineNum">     155 </span>            : void
+<span class="lineNum">     156 </span><span class="lineCov">        588 : HandleCatchupInterrupt(void)</span>
+<span class="lineNum">     157 </span>            : {
+<span class="lineNum">     158 </span>            :     /*
+<span class="lineNum">     159 </span>            :      * Note: this is called by a SIGNAL HANDLER. You must be very wary what
+<span class="lineNum">     160 </span>            :      * you do here.
+<span class="lineNum">     161 </span>            :      */
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span><span class="lineCov">        588 :     catchupInterruptPending = true;</span>
+<span class="lineNum">     164 </span>            : 
+<span class="lineNum">     165 </span>            :     /* make sure the event is processed in due course */
+<span class="lineNum">     166 </span><span class="lineCov">        588 :     SetLatch(MyLatch);</span>
+<span class="lineNum">     167 </span><span class="lineCov">        588 : }</span>
+<span class="lineNum">     168 </span>            : 
+<span class="lineNum">     169 </span>            : /*
+<span class="lineNum">     170 </span>            :  * ProcessCatchupInterrupt
+<span class="lineNum">     171 </span>            :  *
+<span class="lineNum">     172 </span>            :  * The portion of catchup interrupt handling that runs outside of the signal
+<span class="lineNum">     173 </span>            :  * handler, which allows it to actually process pending invalidations.
+<a name="174"><span class="lineNum">     174 </span>            :  */</a>
+<span class="lineNum">     175 </span>            : void
+<span class="lineNum">     176 </span><span class="lineCov">        332 : ProcessCatchupInterrupt(void)</span>
+<span class="lineNum">     177 </span>            : {
+<span class="lineNum">     178 </span><span class="lineCov">        982 :     while (catchupInterruptPending)</span>
+<span class="lineNum">     179 </span>            :     {
+<span class="lineNum">     180 </span>            :         /*
+<span class="lineNum">     181 </span>            :          * What we need to do here is cause ReceiveSharedInvalidMessages() to
+<span class="lineNum">     182 </span>            :          * run, which will do the necessary work and also reset the
+<span class="lineNum">     183 </span>            :          * catchupInterruptPending flag.  If we are inside a transaction we
+<span class="lineNum">     184 </span>            :          * can just call AcceptInvalidationMessages() to do this.  If we
+<span class="lineNum">     185 </span>            :          * aren't, we start and immediately end a transaction; the call to
+<span class="lineNum">     186 </span>            :          * AcceptInvalidationMessages() happens down inside transaction start.
+<span class="lineNum">     187 </span>            :          *
+<span class="lineNum">     188 </span>            :          * It is awfully tempting to just call AcceptInvalidationMessages()
+<span class="lineNum">     189 </span>            :          * without the rest of the xact start/stop overhead, and I think that
+<span class="lineNum">     190 </span>            :          * would actually work in the normal case; but I am not sure that
+<span class="lineNum">     191 </span>            :          * things would clean up nicely if we got an error partway through.
+<span class="lineNum">     192 </span>            :          */
+<span class="lineNum">     193 </span><span class="lineCov">        318 :         if (IsTransactionOrTransactionBlock())</span>
+<span class="lineNum">     194 </span>            :         {
+<span class="lineNum">     195 </span><span class="lineCov">         10 :             elog(DEBUG4, &quot;ProcessCatchupEvent inside transaction&quot;);</span>
+<span class="lineNum">     196 </span><span class="lineCov">         10 :             AcceptInvalidationMessages();</span>
+<span class="lineNum">     197 </span>            :         }
+<span class="lineNum">     198 </span>            :         else
+<span class="lineNum">     199 </span>            :         {
+<span class="lineNum">     200 </span><span class="lineCov">        308 :             elog(DEBUG4, &quot;ProcessCatchupEvent outside transaction&quot;);</span>
+<span class="lineNum">     201 </span><span class="lineCov">        308 :             StartTransactionCommand();</span>
+<span class="lineNum">     202 </span><span class="lineCov">        308 :             CommitTransactionCommand();</span>
+<span class="lineNum">     203 </span>            :         }
+<span class="lineNum">     204 </span>            :     }
+<span class="lineNum">     205 </span><span class="lineCov">        332 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

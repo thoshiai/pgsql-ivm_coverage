@@ -1,0 +1,479 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/ipc/pmsignal.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/ipc</a> - pmsignal.c<span style="font-size: 80%;"> (source / <a href="pmsignal.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">61</td>
+            <td class="headerCovTableEntry">86</td>
+            <td class="headerCovTableEntryLo">70.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">10</td>
+            <td class="headerCovTableEntry">13</td>
+            <td class="headerCovTableEntryMed">76.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * pmsignal.c
+<span class="lineNum">       4 </span>            :  *    routines for signaling the postmaster from its child processes
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/storage/ipc/pmsignal.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      18 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      19 </span>            : 
+<span class="lineNum">      20 </span>            : #ifdef HAVE_SYS_PRCTL_H
+<span class="lineNum">      21 </span>            : #include &lt;sys/prctl.h&gt;
+<span class="lineNum">      22 </span>            : #endif
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;postmaster/postmaster.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;replication/walsender.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;storage/pmsignal.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;storage/shmem.h&quot;
+<span class="lineNum">      29 </span>            : 
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : /*
+<span class="lineNum">      32 </span>            :  * The postmaster is signaled by its children by sending SIGUSR1.  The
+<span class="lineNum">      33 </span>            :  * specific reason is communicated via flags in shared memory.  We keep
+<span class="lineNum">      34 </span>            :  * a boolean flag for each possible &quot;reason&quot;, so that different reasons
+<span class="lineNum">      35 </span>            :  * can be signaled by different backends at the same time.  (However,
+<span class="lineNum">      36 </span>            :  * if the same reason is signaled more than once simultaneously, the
+<span class="lineNum">      37 </span>            :  * postmaster will observe it only once.)
+<span class="lineNum">      38 </span>            :  *
+<span class="lineNum">      39 </span>            :  * The flags are actually declared as &quot;volatile sig_atomic_t&quot; for maximum
+<span class="lineNum">      40 </span>            :  * portability.  This should ensure that loads and stores of the flag
+<span class="lineNum">      41 </span>            :  * values are atomic, allowing us to dispense with any explicit locking.
+<span class="lineNum">      42 </span>            :  *
+<span class="lineNum">      43 </span>            :  * In addition to the per-reason flags, we store a set of per-child-process
+<span class="lineNum">      44 </span>            :  * flags that are currently used only for detecting whether a backend has
+<span class="lineNum">      45 </span>            :  * exited without performing proper shutdown.  The per-child-process flags
+<span class="lineNum">      46 </span>            :  * have three possible states: UNUSED, ASSIGNED, ACTIVE.  An UNUSED slot is
+<span class="lineNum">      47 </span>            :  * available for assignment.  An ASSIGNED slot is associated with a postmaster
+<span class="lineNum">      48 </span>            :  * child process, but either the process has not touched shared memory yet,
+<span class="lineNum">      49 </span>            :  * or it has successfully cleaned up after itself.  A ACTIVE slot means the
+<span class="lineNum">      50 </span>            :  * process is actively using shared memory.  The slots are assigned to
+<span class="lineNum">      51 </span>            :  * child processes at random, and postmaster.c is responsible for tracking
+<span class="lineNum">      52 </span>            :  * which one goes with which PID.
+<span class="lineNum">      53 </span>            :  *
+<span class="lineNum">      54 </span>            :  * Actually there is a fourth state, WALSENDER.  This is just like ACTIVE,
+<span class="lineNum">      55 </span>            :  * but carries the extra information that the child is a WAL sender.
+<span class="lineNum">      56 </span>            :  * WAL senders too start in ACTIVE state, but switch to WALSENDER once they
+<span class="lineNum">      57 </span>            :  * start streaming the WAL (and they never go back to ACTIVE after that).
+<span class="lineNum">      58 </span>            :  */
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            : #define PM_CHILD_UNUSED     0   /* these values must fit in sig_atomic_t */
+<span class="lineNum">      61 </span>            : #define PM_CHILD_ASSIGNED   1
+<span class="lineNum">      62 </span>            : #define PM_CHILD_ACTIVE     2
+<span class="lineNum">      63 </span>            : #define PM_CHILD_WALSENDER  3
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            : /* &quot;typedef struct PMSignalData PMSignalData&quot; appears in pmsignal.h */
+<span class="lineNum">      66 </span>            : struct PMSignalData
+<span class="lineNum">      67 </span>            : {
+<span class="lineNum">      68 </span>            :     /* per-reason flags */
+<span class="lineNum">      69 </span>            :     sig_atomic_t PMSignalFlags[NUM_PMSIGNALS];
+<span class="lineNum">      70 </span>            :     /* per-child-process flags */
+<span class="lineNum">      71 </span>            :     int         num_child_flags;    /* # of entries in PMChildFlags[] */
+<span class="lineNum">      72 </span>            :     int         next_child_flag;    /* next slot to try to assign */
+<span class="lineNum">      73 </span>            :     sig_atomic_t PMChildFlags[FLEXIBLE_ARRAY_MEMBER];
+<span class="lineNum">      74 </span>            : };
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            : NON_EXEC_STATIC volatile PMSignalData *PMSignalState = NULL;
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            : /*
+<span class="lineNum">      79 </span>            :  * Signal handler to be notified if postmaster dies.
+<span class="lineNum">      80 </span>            :  */
+<span class="lineNum">      81 </span>            : #ifdef USE_POSTMASTER_DEATH_SIGNAL
+<span class="lineNum">      82 </span>            : volatile sig_atomic_t postmaster_possibly_dead = false;
+<a name="83"><span class="lineNum">      83 </span>            : </a>
+<span class="lineNum">      84 </span>            : static void
+<span class="lineNum">      85 </span><span class="lineNoCov">          0 : postmaster_death_handler(int signo)</span>
+<span class="lineNum">      86 </span>            : {
+<span class="lineNum">      87 </span><span class="lineNoCov">          0 :     postmaster_possibly_dead = true;</span>
+<span class="lineNum">      88 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">      89 </span>            : 
+<span class="lineNum">      90 </span>            : /*
+<span class="lineNum">      91 </span>            :  * The available signals depend on the OS.  SIGUSR1 and SIGUSR2 are already
+<span class="lineNum">      92 </span>            :  * used for other things, so choose another one.
+<span class="lineNum">      93 </span>            :  *
+<span class="lineNum">      94 </span>            :  * Currently, we assume that we can always find a signal to use.  That
+<span class="lineNum">      95 </span>            :  * seems like a reasonable assumption for all platforms that are modern
+<span class="lineNum">      96 </span>            :  * enough to have a parent-death signaling mechanism.
+<span class="lineNum">      97 </span>            :  */
+<span class="lineNum">      98 </span>            : #if defined(SIGINFO)
+<span class="lineNum">      99 </span>            : #define POSTMASTER_DEATH_SIGNAL SIGINFO
+<span class="lineNum">     100 </span>            : #elif defined(SIGPWR)
+<span class="lineNum">     101 </span>            : #define POSTMASTER_DEATH_SIGNAL SIGPWR
+<span class="lineNum">     102 </span>            : #else
+<span class="lineNum">     103 </span>            : #error &quot;cannot find a signal to use for postmaster death&quot;
+<span class="lineNum">     104 </span>            : #endif
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span>            : #endif                          /* USE_POSTMASTER_DEATH_SIGNAL */
+<span class="lineNum">     107 </span>            : 
+<span class="lineNum">     108 </span>            : /*
+<span class="lineNum">     109 </span>            :  * PMSignalShmemSize
+<span class="lineNum">     110 </span>            :  *      Compute space needed for pmsignal.c's shared memory
+<a name="111"><span class="lineNum">     111 </span>            :  */</a>
+<span class="lineNum">     112 </span>            : Size
+<span class="lineNum">     113 </span><span class="lineCov">       3684 : PMSignalShmemSize(void)</span>
+<span class="lineNum">     114 </span>            : {
+<span class="lineNum">     115 </span>            :     Size        size;
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span><span class="lineCov">       3684 :     size = offsetof(PMSignalData, PMChildFlags);</span>
+<span class="lineNum">     118 </span><span class="lineCov">       3684 :     size = add_size(size, mul_size(MaxLivePostmasterChildren(),</span>
+<span class="lineNum">     119 </span>            :                                    sizeof(sig_atomic_t)));
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span><span class="lineCov">       3684 :     return size;</span>
+<span class="lineNum">     122 </span>            : }
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span>            : /*
+<span class="lineNum">     125 </span>            :  * PMSignalShmemInit - initialize during shared-memory creation
+<a name="126"><span class="lineNum">     126 </span>            :  */</a>
+<span class="lineNum">     127 </span>            : void
+<span class="lineNum">     128 </span><span class="lineCov">       1228 : PMSignalShmemInit(void)</span>
+<span class="lineNum">     129 </span>            : {
+<span class="lineNum">     130 </span>            :     bool        found;
+<span class="lineNum">     131 </span>            : 
+<span class="lineNum">     132 </span><span class="lineCov">       1228 :     PMSignalState = (PMSignalData *)</span>
+<span class="lineNum">     133 </span><span class="lineCov">       1228 :         ShmemInitStruct(&quot;PMSignalState&quot;, PMSignalShmemSize(), &amp;found);</span>
+<span class="lineNum">     134 </span>            : 
+<span class="lineNum">     135 </span><span class="lineCov">       1228 :     if (!found)</span>
+<span class="lineNum">     136 </span>            :     {
+<span class="lineNum">     137 </span><span class="lineCov">       1228 :         MemSet(unvolatize(PMSignalData *, PMSignalState), 0, PMSignalShmemSize());</span>
+<span class="lineNum">     138 </span><span class="lineCov">       1228 :         PMSignalState-&gt;num_child_flags = MaxLivePostmasterChildren();</span>
+<span class="lineNum">     139 </span>            :     }
+<span class="lineNum">     140 </span><span class="lineCov">       1228 : }</span>
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span>            : /*
+<span class="lineNum">     143 </span>            :  * SendPostmasterSignal - signal the postmaster from a child process
+<a name="144"><span class="lineNum">     144 </span>            :  */</a>
+<span class="lineNum">     145 </span>            : void
+<span class="lineNum">     146 </span><span class="lineCov">        752 : SendPostmasterSignal(PMSignalReason reason)</span>
+<span class="lineNum">     147 </span>            : {
+<span class="lineNum">     148 </span>            :     /* If called in a standalone backend, do nothing */
+<span class="lineNum">     149 </span><span class="lineCov">        752 :     if (!IsUnderPostmaster)</span>
+<span class="lineNum">     150 </span><span class="lineCov">        752 :         return;</span>
+<span class="lineNum">     151 </span>            :     /* Atomically set the proper flag */
+<span class="lineNum">     152 </span><span class="lineCov">        752 :     PMSignalState-&gt;PMSignalFlags[reason] = true;</span>
+<span class="lineNum">     153 </span>            :     /* Send signal to postmaster */
+<span class="lineNum">     154 </span><span class="lineCov">        752 :     kill(PostmasterPid, SIGUSR1);</span>
+<span class="lineNum">     155 </span>            : }
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span>            : /*
+<span class="lineNum">     158 </span>            :  * CheckPostmasterSignal - check to see if a particular reason has been
+<span class="lineNum">     159 </span>            :  * signaled, and clear the signal flag.  Should be called by postmaster
+<span class="lineNum">     160 </span>            :  * after receiving SIGUSR1.
+<a name="161"><span class="lineNum">     161 </span>            :  */</a>
+<span class="lineNum">     162 </span>            : bool
+<span class="lineNum">     163 </span><span class="lineCov">     595974 : CheckPostmasterSignal(PMSignalReason reason)</span>
+<span class="lineNum">     164 </span>            : {
+<span class="lineNum">     165 </span>            :     /* Careful here --- don't clear flag if we haven't seen it set */
+<span class="lineNum">     166 </span><span class="lineCov">     595974 :     if (PMSignalState-&gt;PMSignalFlags[reason])</span>
+<span class="lineNum">     167 </span>            :     {
+<span class="lineNum">     168 </span><span class="lineCov">      74394 :         PMSignalState-&gt;PMSignalFlags[reason] = false;</span>
+<span class="lineNum">     169 </span><span class="lineCov">      74394 :         return true;</span>
+<span class="lineNum">     170 </span>            :     }
+<span class="lineNum">     171 </span><span class="lineCov">     521580 :     return false;</span>
+<span class="lineNum">     172 </span>            : }
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span>            : /*
+<span class="lineNum">     176 </span>            :  * AssignPostmasterChildSlot - select an unused slot for a new postmaster
+<span class="lineNum">     177 </span>            :  * child process, and set its state to ASSIGNED.  Returns a slot number
+<span class="lineNum">     178 </span>            :  * (one to N).
+<span class="lineNum">     179 </span>            :  *
+<span class="lineNum">     180 </span>            :  * Only the postmaster is allowed to execute this routine, so we need no
+<span class="lineNum">     181 </span>            :  * special locking.
+<a name="182"><span class="lineNum">     182 </span>            :  */</a>
+<span class="lineNum">     183 </span>            : int
+<span class="lineNum">     184 </span><span class="lineCov">     365418 : AssignPostmasterChildSlot(void)</span>
+<span class="lineNum">     185 </span>            : {
+<span class="lineNum">     186 </span><span class="lineCov">     365418 :     int         slot = PMSignalState-&gt;next_child_flag;</span>
+<span class="lineNum">     187 </span>            :     int         n;
+<span class="lineNum">     188 </span>            : 
+<span class="lineNum">     189 </span>            :     /*
+<span class="lineNum">     190 </span>            :      * Scan for a free slot.  We track the last slot assigned so as not to
+<span class="lineNum">     191 </span>            :      * waste time repeatedly rescanning low-numbered slots.
+<span class="lineNum">     192 </span>            :      */
+<span class="lineNum">     193 </span><span class="lineCov">     366372 :     for (n = PMSignalState-&gt;num_child_flags; n &gt; 0; n--)</span>
+<span class="lineNum">     194 </span>            :     {
+<span class="lineNum">     195 </span><span class="lineCov">     366372 :         if (--slot &lt; 0)</span>
+<span class="lineNum">     196 </span><span class="lineCov">       2162 :             slot = PMSignalState-&gt;num_child_flags - 1;</span>
+<span class="lineNum">     197 </span><span class="lineCov">     366372 :         if (PMSignalState-&gt;PMChildFlags[slot] == PM_CHILD_UNUSED)</span>
+<span class="lineNum">     198 </span>            :         {
+<span class="lineNum">     199 </span><span class="lineCov">     365418 :             PMSignalState-&gt;PMChildFlags[slot] = PM_CHILD_ASSIGNED;</span>
+<span class="lineNum">     200 </span><span class="lineCov">     365418 :             PMSignalState-&gt;next_child_flag = slot;</span>
+<span class="lineNum">     201 </span><span class="lineCov">     365418 :             return slot + 1;</span>
+<span class="lineNum">     202 </span>            :         }
+<span class="lineNum">     203 </span>            :     }
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span>            :     /* Out of slots ... should never happen, else postmaster.c messed up */
+<span class="lineNum">     206 </span><span class="lineNoCov">          0 :     elog(FATAL, &quot;no free slots in PMChildFlags array&quot;);</span>
+<span class="lineNum">     207 </span>            :     return 0;                   /* keep compiler quiet */
+<span class="lineNum">     208 </span>            : }
+<span class="lineNum">     209 </span>            : 
+<span class="lineNum">     210 </span>            : /*
+<span class="lineNum">     211 </span>            :  * ReleasePostmasterChildSlot - release a slot after death of a postmaster
+<span class="lineNum">     212 </span>            :  * child process.  This must be called in the postmaster process.
+<span class="lineNum">     213 </span>            :  *
+<span class="lineNum">     214 </span>            :  * Returns true if the slot had been in ASSIGNED state (the expected case),
+<span class="lineNum">     215 </span>            :  * false otherwise (implying that the child failed to clean itself up).
+<a name="216"><span class="lineNum">     216 </span>            :  */</a>
+<span class="lineNum">     217 </span>            : bool
+<span class="lineNum">     218 </span><span class="lineCov">     357102 : ReleasePostmasterChildSlot(int slot)</span>
+<span class="lineNum">     219 </span>            : {
+<span class="lineNum">     220 </span>            :     bool        result;
+<span class="lineNum">     221 </span>            : 
+<span class="lineNum">     222 </span><span class="lineCov">     357102 :     Assert(slot &gt; 0 &amp;&amp; slot &lt;= PMSignalState-&gt;num_child_flags);</span>
+<span class="lineNum">     223 </span><span class="lineCov">     357102 :     slot--;</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span>            :     /*
+<span class="lineNum">     226 </span>            :      * Note: the slot state might already be unused, because the logic in
+<span class="lineNum">     227 </span>            :      * postmaster.c is such that this might get called twice when a child
+<span class="lineNum">     228 </span>            :      * crashes.  So we don't try to Assert anything about the state.
+<span class="lineNum">     229 </span>            :      */
+<span class="lineNum">     230 </span><span class="lineCov">     357102 :     result = (PMSignalState-&gt;PMChildFlags[slot] == PM_CHILD_ASSIGNED);</span>
+<span class="lineNum">     231 </span><span class="lineCov">     357102 :     PMSignalState-&gt;PMChildFlags[slot] = PM_CHILD_UNUSED;</span>
+<span class="lineNum">     232 </span><span class="lineCov">     357102 :     return result;</span>
+<span class="lineNum">     233 </span>            : }
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span>            : /*
+<span class="lineNum">     236 </span>            :  * IsPostmasterChildWalSender - check if given slot is in use by a
+<span class="lineNum">     237 </span>            :  * walsender process.
+<a name="238"><span class="lineNum">     238 </span>            :  */</a>
+<span class="lineNum">     239 </span>            : bool
+<span class="lineNum">     240 </span><span class="lineCov">          4 : IsPostmasterChildWalSender(int slot)</span>
+<span class="lineNum">     241 </span>            : {
+<span class="lineNum">     242 </span><span class="lineCov">          4 :     Assert(slot &gt; 0 &amp;&amp; slot &lt;= PMSignalState-&gt;num_child_flags);</span>
+<span class="lineNum">     243 </span><span class="lineCov">          4 :     slot--;</span>
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span><span class="lineCov">          4 :     if (PMSignalState-&gt;PMChildFlags[slot] == PM_CHILD_WALSENDER)</span>
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">     247 </span>            :     else
+<span class="lineNum">     248 </span><span class="lineCov">          4 :         return false;</span>
+<span class="lineNum">     249 </span>            : }
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span>            : /*
+<span class="lineNum">     252 </span>            :  * MarkPostmasterChildActive - mark a postmaster child as about to begin
+<span class="lineNum">     253 </span>            :  * actively using shared memory.  This is called in the child process.
+<a name="254"><span class="lineNum">     254 </span>            :  */</a>
+<span class="lineNum">     255 </span>            : void
+<span class="lineNum">     256 </span><span class="lineCov">       1206 : MarkPostmasterChildActive(void)</span>
+<span class="lineNum">     257 </span>            : {
+<span class="lineNum">     258 </span><span class="lineCov">       1206 :     int         slot = MyPMChildSlot;</span>
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span><span class="lineCov">       1206 :     Assert(slot &gt; 0 &amp;&amp; slot &lt;= PMSignalState-&gt;num_child_flags);</span>
+<span class="lineNum">     261 </span><span class="lineCov">       1206 :     slot--;</span>
+<span class="lineNum">     262 </span><span class="lineCov">       1206 :     Assert(PMSignalState-&gt;PMChildFlags[slot] == PM_CHILD_ASSIGNED);</span>
+<span class="lineNum">     263 </span><span class="lineCov">       1206 :     PMSignalState-&gt;PMChildFlags[slot] = PM_CHILD_ACTIVE;</span>
+<span class="lineNum">     264 </span><span class="lineCov">       1206 : }</span>
+<span class="lineNum">     265 </span>            : 
+<span class="lineNum">     266 </span>            : /*
+<span class="lineNum">     267 </span>            :  * MarkPostmasterChildWalSender - mark a postmaster child as a WAL sender
+<span class="lineNum">     268 </span>            :  * process.  This is called in the child process, sometime after marking the
+<span class="lineNum">     269 </span>            :  * child as active.
+<a name="270"><span class="lineNum">     270 </span>            :  */</a>
+<span class="lineNum">     271 </span>            : void
+<span class="lineNum">     272 </span><span class="lineNoCov">          0 : MarkPostmasterChildWalSender(void)</span>
+<span class="lineNum">     273 </span>            : {
+<span class="lineNum">     274 </span><span class="lineNoCov">          0 :     int         slot = MyPMChildSlot;</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span><span class="lineNoCov">          0 :     Assert(am_walsender);</span>
+<span class="lineNum">     277 </span>            : 
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :     Assert(slot &gt; 0 &amp;&amp; slot &lt;= PMSignalState-&gt;num_child_flags);</span>
+<span class="lineNum">     279 </span><span class="lineNoCov">          0 :     slot--;</span>
+<span class="lineNum">     280 </span><span class="lineNoCov">          0 :     Assert(PMSignalState-&gt;PMChildFlags[slot] == PM_CHILD_ACTIVE);</span>
+<span class="lineNum">     281 </span><span class="lineNoCov">          0 :     PMSignalState-&gt;PMChildFlags[slot] = PM_CHILD_WALSENDER;</span>
+<span class="lineNum">     282 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     283 </span>            : 
+<span class="lineNum">     284 </span>            : /*
+<span class="lineNum">     285 </span>            :  * MarkPostmasterChildInactive - mark a postmaster child as done using
+<span class="lineNum">     286 </span>            :  * shared memory.  This is called in the child process.
+<a name="287"><span class="lineNum">     287 </span>            :  */</a>
+<span class="lineNum">     288 </span>            : void
+<span class="lineNum">     289 </span><span class="lineCov">       1206 : MarkPostmasterChildInactive(void)</span>
+<span class="lineNum">     290 </span>            : {
+<span class="lineNum">     291 </span><span class="lineCov">       1206 :     int         slot = MyPMChildSlot;</span>
+<span class="lineNum">     292 </span>            : 
+<span class="lineNum">     293 </span><span class="lineCov">       1206 :     Assert(slot &gt; 0 &amp;&amp; slot &lt;= PMSignalState-&gt;num_child_flags);</span>
+<span class="lineNum">     294 </span><span class="lineCov">       1206 :     slot--;</span>
+<span class="lineNum">     295 </span><span class="lineCov">       1206 :     Assert(PMSignalState-&gt;PMChildFlags[slot] == PM_CHILD_ACTIVE ||</span>
+<span class="lineNum">     296 </span>            :            PMSignalState-&gt;PMChildFlags[slot] == PM_CHILD_WALSENDER);
+<span class="lineNum">     297 </span><span class="lineCov">       1206 :     PMSignalState-&gt;PMChildFlags[slot] = PM_CHILD_ASSIGNED;</span>
+<span class="lineNum">     298 </span><span class="lineCov">       1206 : }</span>
+<span class="lineNum">     299 </span>            : 
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            : /*
+<span class="lineNum">     302 </span>            :  * PostmasterIsAliveInternal - check whether postmaster process is still alive
+<span class="lineNum">     303 </span>            :  *
+<span class="lineNum">     304 </span>            :  * This is the slow path of PostmasterIsAlive(), where the caller has already
+<span class="lineNum">     305 </span>            :  * checked 'postmaster_possibly_dead'.  (On platforms that don't support
+<span class="lineNum">     306 </span>            :  * a signal for parent death, PostmasterIsAlive() is just an alias for this.)
+<a name="307"><span class="lineNum">     307 </span>            :  */</a>
+<span class="lineNum">     308 </span>            : bool
+<span class="lineNum">     309 </span><span class="lineNoCov">          0 : PostmasterIsAliveInternal(void)</span>
+<span class="lineNum">     310 </span>            : {
+<span class="lineNum">     311 </span>            : #ifdef USE_POSTMASTER_DEATH_SIGNAL
+<span class="lineNum">     312 </span>            :     /*
+<span class="lineNum">     313 </span>            :      * Reset the flag before checking, so that we don't miss a signal if
+<span class="lineNum">     314 </span>            :      * postmaster dies right after the check.  If postmaster was indeed dead,
+<span class="lineNum">     315 </span>            :      * we'll re-arm it before returning to caller.
+<span class="lineNum">     316 </span>            :      */
+<span class="lineNum">     317 </span><span class="lineNoCov">          0 :     postmaster_possibly_dead = false;</span>
+<span class="lineNum">     318 </span>            : #endif
+<span class="lineNum">     319 </span>            : 
+<span class="lineNum">     320 </span>            : #ifndef WIN32
+<span class="lineNum">     321 </span>            :     {
+<span class="lineNum">     322 </span>            :         char        c;
+<span class="lineNum">     323 </span>            :         ssize_t     rc;
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span><span class="lineNoCov">          0 :         rc = read(postmaster_alive_fds[POSTMASTER_FD_WATCH], &amp;c, 1);</span>
+<span class="lineNum">     326 </span>            : 
+<span class="lineNum">     327 </span>            :         /*
+<span class="lineNum">     328 </span>            :          * In the usual case, the postmaster is still alive, and there is no
+<span class="lineNum">     329 </span>            :          * data in the pipe.
+<span class="lineNum">     330 </span>            :          */
+<span class="lineNum">     331 </span><span class="lineNoCov">          0 :         if (rc &lt; 0 &amp;&amp; (errno == EAGAIN || errno == EWOULDBLOCK))</span>
+<span class="lineNum">     332 </span><span class="lineNoCov">          0 :             return true;</span>
+<span class="lineNum">     333 </span>            :         else
+<span class="lineNum">     334 </span>            :         {
+<span class="lineNum">     335 </span>            :             /*
+<span class="lineNum">     336 </span>            :              * Postmaster is dead, or something went wrong with the read()
+<span class="lineNum">     337 </span>            :              * call.
+<span class="lineNum">     338 </span>            :              */
+<span class="lineNum">     339 </span>            : 
+<span class="lineNum">     340 </span>            : #ifdef USE_POSTMASTER_DEATH_SIGNAL
+<span class="lineNum">     341 </span><span class="lineNoCov">          0 :             postmaster_possibly_dead = true;</span>
+<span class="lineNum">     342 </span>            : #endif
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :             if (rc &lt; 0)</span>
+<span class="lineNum">     345 </span><span class="lineNoCov">          0 :                 elog(FATAL, &quot;read on postmaster death monitoring pipe failed: %m&quot;);</span>
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :             else if (rc &gt; 0)</span>
+<span class="lineNum">     347 </span><span class="lineNoCov">          0 :                 elog(FATAL, &quot;unexpected data in postmaster death monitoring pipe&quot;);</span>
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     350 </span>            :         }
+<span class="lineNum">     351 </span>            :     }
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span>            : #else                           /* WIN32 */
+<span class="lineNum">     354 </span>            :     if (WaitForSingleObject(PostmasterHandle, 0) == WAIT_TIMEOUT)
+<span class="lineNum">     355 </span>            :         return true;
+<span class="lineNum">     356 </span>            :     else
+<span class="lineNum">     357 </span>            :     {
+<span class="lineNum">     358 </span>            : #ifdef USE_POSTMASTER_DEATH_SIGNAL
+<span class="lineNum">     359 </span>            :         postmaster_possibly_dead = true;
+<span class="lineNum">     360 </span>            : #endif
+<span class="lineNum">     361 </span>            :         return false;
+<span class="lineNum">     362 </span>            :     }
+<span class="lineNum">     363 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     364 </span>            : }
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span>            : /*
+<span class="lineNum">     367 </span>            :  * PostmasterDeathSignalInit - request signal on postmaster death if possible
+<a name="368"><span class="lineNum">     368 </span>            :  */</a>
+<span class="lineNum">     369 </span>            : void
+<span class="lineNum">     370 </span><span class="lineCov">       1218 : PostmasterDeathSignalInit(void)</span>
+<span class="lineNum">     371 </span>            : {
+<span class="lineNum">     372 </span>            : #ifdef USE_POSTMASTER_DEATH_SIGNAL
+<span class="lineNum">     373 </span><span class="lineCov">       1218 :     int         signum = POSTMASTER_DEATH_SIGNAL;</span>
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span>            :     /* Register our signal handler. */
+<span class="lineNum">     376 </span><span class="lineCov">       1218 :     pqsignal(signum, postmaster_death_handler);</span>
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span>            :     /* Request a signal on parent exit. */
+<span class="lineNum">     379 </span>            : #if defined(PR_SET_PDEATHSIG)
+<span class="lineNum">     380 </span><span class="lineCov">       1218 :     if (prctl(PR_SET_PDEATHSIG, signum) &lt; 0)</span>
+<span class="lineNum">     381 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;could not request parent death signal: %m&quot;);</span>
+<span class="lineNum">     382 </span>            : #elif defined(PROC_PDEATHSIG_CTL)
+<span class="lineNum">     383 </span>            :     if (procctl(P_PID, 0, PROC_PDEATHSIG_CTL, &amp;signum) &lt; 0)
+<span class="lineNum">     384 </span>            :         elog(ERROR, &quot;could not request parent death signal: %m&quot;);
+<span class="lineNum">     385 </span>            : #else
+<span class="lineNum">     386 </span>            : #error &quot;USE_POSTMASTER_DEATH_SIGNAL set, but there is no mechanism to request the signal&quot;
+<span class="lineNum">     387 </span>            : #endif
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span>            :     /*
+<span class="lineNum">     390 </span>            :      * Just in case the parent was gone already and we missed it, we'd better
+<span class="lineNum">     391 </span>            :      * check the slow way on the first call.
+<span class="lineNum">     392 </span>            :      */
+<span class="lineNum">     393 </span><span class="lineCov">       1218 :     postmaster_possibly_dead = true;</span>
+<span class="lineNum">     394 </span>            : #endif                          /* USE_POSTMASTER_DEATH_SIGNAL */
+<span class="lineNum">     395 </span><span class="lineCov">       1218 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

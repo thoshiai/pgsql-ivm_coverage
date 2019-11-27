@@ -1,0 +1,1311 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/bin/pg_resetwal/pg_resetwal.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/bin/pg_resetwal</a> - pg_resetwal.c<span style="font-size: 80%;"> (source / <a href="pg_resetwal.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">506</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * pg_resetwal.c
+<span class="lineNum">       4 </span>            :  *    A utility to &quot;zero out&quot; the xlog when it's corrupt beyond recovery.
+<span class="lineNum">       5 </span>            :  *    Can also rebuild pg_control if needed.
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * The theory of operation is fairly simple:
+<span class="lineNum">       8 </span>            :  *    1. Read the existing pg_control (which will include the last
+<span class="lineNum">       9 </span>            :  *       checkpoint record).  If it is an old format then update to
+<span class="lineNum">      10 </span>            :  *       current format.
+<span class="lineNum">      11 </span>            :  *    2. If pg_control is corrupt, attempt to intuit reasonable values,
+<span class="lineNum">      12 </span>            :  *       by scanning the old xlog if necessary.
+<span class="lineNum">      13 </span>            :  *    3. Modify pg_control to reflect a &quot;shutdown&quot; state with a checkpoint
+<span class="lineNum">      14 </span>            :  *       record at the start of xlog.
+<span class="lineNum">      15 </span>            :  *    4. Flush the existing xlog files and write a new segment with
+<span class="lineNum">      16 </span>            :  *       just a checkpoint record in it.  The new segment is positioned
+<span class="lineNum">      17 </span>            :  *       just past the end of the old xlog, so that existing LSNs in
+<span class="lineNum">      18 </span>            :  *       data pages will appear to be &quot;in the past&quot;.
+<span class="lineNum">      19 </span>            :  * This is all pretty straightforward except for the intuition part of
+<span class="lineNum">      20 </span>            :  * step 2 ...
+<span class="lineNum">      21 </span>            :  *
+<span class="lineNum">      22 </span>            :  *
+<span class="lineNum">      23 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      24 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      25 </span>            :  *
+<span class="lineNum">      26 </span>            :  * src/bin/pg_resetwal/pg_resetwal.c
+<span class="lineNum">      27 </span>            :  *
+<span class="lineNum">      28 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      29 </span>            :  */
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : /*
+<span class="lineNum">      32 </span>            :  * We have to use postgres.h not postgres_fe.h here, because there's so much
+<span class="lineNum">      33 </span>            :  * backend-only stuff in the XLOG include files we need.  But we need a
+<span class="lineNum">      34 </span>            :  * frontend-ish environment otherwise.  Hence this ugly hack.
+<span class="lineNum">      35 </span>            :  */
+<span class="lineNum">      36 </span>            : #define FRONTEND 1
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      39 </span>            : 
+<span class="lineNum">      40 </span>            : #include &lt;dirent.h&gt;
+<span class="lineNum">      41 </span>            : #include &lt;fcntl.h&gt;
+<span class="lineNum">      42 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      43 </span>            : #include &lt;sys/time.h&gt;
+<span class="lineNum">      44 </span>            : #include &lt;time.h&gt;
+<span class="lineNum">      45 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      46 </span>            : 
+<span class="lineNum">      47 </span>            : #include &quot;access/heaptoast.h&quot;
+<span class="lineNum">      48 </span>            : #include &quot;access/multixact.h&quot;
+<span class="lineNum">      49 </span>            : #include &quot;access/transam.h&quot;
+<span class="lineNum">      50 </span>            : #include &quot;access/xlog.h&quot;
+<span class="lineNum">      51 </span>            : #include &quot;access/xlog_internal.h&quot;
+<span class="lineNum">      52 </span>            : #include &quot;common/controldata_utils.h&quot;
+<span class="lineNum">      53 </span>            : #include &quot;common/fe_memutils.h&quot;
+<span class="lineNum">      54 </span>            : #include &quot;common/file_perm.h&quot;
+<span class="lineNum">      55 </span>            : #include &quot;common/logging.h&quot;
+<span class="lineNum">      56 </span>            : #include &quot;common/restricted_token.h&quot;
+<span class="lineNum">      57 </span>            : #include &quot;common/string.h&quot;
+<span class="lineNum">      58 </span>            : #include &quot;getopt_long.h&quot;
+<span class="lineNum">      59 </span>            : #include &quot;pg_getopt.h&quot;
+<span class="lineNum">      60 </span>            : #include &quot;storage/large_object.h&quot;
+<span class="lineNum">      61 </span>            : 
+<span class="lineNum">      62 </span>            : static ControlFileData ControlFile; /* pg_control values */
+<span class="lineNum">      63 </span>            : static XLogSegNo newXlogSegNo;  /* new XLOG segment # */
+<span class="lineNum">      64 </span>            : static bool guessed = false;    /* T if we had to guess at any values */
+<span class="lineNum">      65 </span>            : static const char *progname;
+<span class="lineNum">      66 </span>            : static uint32 set_xid_epoch = (uint32) -1;
+<span class="lineNum">      67 </span>            : static TransactionId set_xid = 0;
+<span class="lineNum">      68 </span>            : static TransactionId set_oldest_commit_ts_xid = 0;
+<span class="lineNum">      69 </span>            : static TransactionId set_newest_commit_ts_xid = 0;
+<span class="lineNum">      70 </span>            : static Oid  set_oid = 0;
+<span class="lineNum">      71 </span>            : static MultiXactId set_mxid = 0;
+<span class="lineNum">      72 </span>            : static MultiXactOffset set_mxoff = (MultiXactOffset) -1;
+<span class="lineNum">      73 </span>            : static uint32 minXlogTli = 0;
+<span class="lineNum">      74 </span>            : static XLogSegNo minXlogSegNo = 0;
+<span class="lineNum">      75 </span>            : static int  WalSegSz;
+<span class="lineNum">      76 </span>            : static int  set_wal_segsize;
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            : static void CheckDataVersion(void);
+<span class="lineNum">      79 </span>            : static bool ReadControlFile(void);
+<span class="lineNum">      80 </span>            : static void GuessControlValues(void);
+<span class="lineNum">      81 </span>            : static void PrintControlValues(bool guessed);
+<span class="lineNum">      82 </span>            : static void PrintNewControlValues(void);
+<span class="lineNum">      83 </span>            : static void RewriteControlFile(void);
+<span class="lineNum">      84 </span>            : static void FindEndOfXLOG(void);
+<span class="lineNum">      85 </span>            : static void KillExistingXLOG(void);
+<span class="lineNum">      86 </span>            : static void KillExistingArchiveStatus(void);
+<span class="lineNum">      87 </span>            : static void WriteEmptyXLOG(void);
+<span class="lineNum">      88 </span>            : static void usage(void);
+<span class="lineNum">      89 </span>            : 
+<a name="90"><span class="lineNum">      90 </span>            : </a>
+<span class="lineNum">      91 </span>            : int
+<span class="lineNum">      92 </span><span class="lineNoCov">          0 : main(int argc, char *argv[])</span>
+<span class="lineNum">      93 </span>            : {
+<span class="lineNum">      94 </span>            :     static struct option long_options[] = {
+<span class="lineNum">      95 </span>            :         {&quot;commit-timestamp-ids&quot;, required_argument, NULL, 'c'},
+<span class="lineNum">      96 </span>            :         {&quot;pgdata&quot;, required_argument, NULL, 'D'},
+<span class="lineNum">      97 </span>            :         {&quot;epoch&quot;, required_argument, NULL, 'e'},
+<span class="lineNum">      98 </span>            :         {&quot;force&quot;, no_argument, NULL, 'f'},
+<span class="lineNum">      99 </span>            :         {&quot;next-wal-file&quot;, required_argument, NULL, 'l'},
+<span class="lineNum">     100 </span>            :         {&quot;multixact-ids&quot;, required_argument, NULL, 'm'},
+<span class="lineNum">     101 </span>            :         {&quot;dry-run&quot;, no_argument, NULL, 'n'},
+<span class="lineNum">     102 </span>            :         {&quot;next-oid&quot;, required_argument, NULL, 'o'},
+<span class="lineNum">     103 </span>            :         {&quot;multixact-offset&quot;, required_argument, NULL, 'O'},
+<span class="lineNum">     104 </span>            :         {&quot;next-transaction-id&quot;, required_argument, NULL, 'x'},
+<span class="lineNum">     105 </span>            :         {&quot;wal-segsize&quot;, required_argument, NULL, 1},
+<span class="lineNum">     106 </span>            :         {NULL, 0, NULL, 0}
+<span class="lineNum">     107 </span>            :     };
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            :     int         c;
+<span class="lineNum">     110 </span><span class="lineNoCov">          0 :     bool        force = false;</span>
+<span class="lineNum">     111 </span><span class="lineNoCov">          0 :     bool        noupdate = false;</span>
+<span class="lineNum">     112 </span><span class="lineNoCov">          0 :     MultiXactId set_oldestmxid = 0;</span>
+<span class="lineNum">     113 </span>            :     char       *endptr;
+<span class="lineNum">     114 </span>            :     char       *endptr2;
+<span class="lineNum">     115 </span><span class="lineNoCov">          0 :     char       *DataDir = NULL;</span>
+<span class="lineNum">     116 </span><span class="lineNoCov">          0 :     char       *log_fname = NULL;</span>
+<span class="lineNum">     117 </span>            :     int         fd;
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span><span class="lineNoCov">          0 :     pg_logging_init(argv[0]);</span>
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :     set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN(&quot;pg_resetwal&quot;));</span>
+<span class="lineNum">     121 </span><span class="lineNoCov">          0 :     progname = get_progname(argv[0]);</span>
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span><span class="lineNoCov">          0 :     if (argc &gt; 1)</span>
+<span class="lineNum">     124 </span>            :     {
+<span class="lineNum">     125 </span><span class="lineNoCov">          0 :         if (strcmp(argv[1], &quot;--help&quot;) == 0 || strcmp(argv[1], &quot;-?&quot;) == 0)</span>
+<span class="lineNum">     126 </span>            :         {
+<span class="lineNum">     127 </span><span class="lineNoCov">          0 :             usage();</span>
+<span class="lineNum">     128 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     129 </span>            :         }
+<span class="lineNum">     130 </span><span class="lineNoCov">          0 :         if (strcmp(argv[1], &quot;--version&quot;) == 0 || strcmp(argv[1], &quot;-V&quot;) == 0)</span>
+<span class="lineNum">     131 </span>            :         {
+<span class="lineNum">     132 </span><span class="lineNoCov">          0 :             puts(&quot;pg_resetwal (PostgreSQL) &quot; PG_VERSION);</span>
+<span class="lineNum">     133 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     134 </span>            :         }
+<span class="lineNum">     135 </span>            :     }
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span>            : 
+<span class="lineNum">     138 </span><span class="lineNoCov">          0 :     while ((c = getopt_long(argc, argv, &quot;c:D:e:fl:m:no:O:x:&quot;, long_options, NULL)) != -1)</span>
+<span class="lineNum">     139 </span>            :     {
+<span class="lineNum">     140 </span><span class="lineNoCov">          0 :         switch (c)</span>
+<span class="lineNum">     141 </span>            :         {
+<span class="lineNum">     142 </span>            :             case 'D':
+<span class="lineNum">     143 </span><span class="lineNoCov">          0 :                 DataDir = optarg;</span>
+<span class="lineNum">     144 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span>            :             case 'f':
+<span class="lineNum">     147 </span><span class="lineNoCov">          0 :                 force = true;</span>
+<span class="lineNum">     148 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     149 </span>            : 
+<span class="lineNum">     150 </span>            :             case 'n':
+<span class="lineNum">     151 </span><span class="lineNoCov">          0 :                 noupdate = true;</span>
+<span class="lineNum">     152 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     153 </span>            : 
+<span class="lineNum">     154 </span>            :             case 'e':
+<span class="lineNum">     155 </span><span class="lineNoCov">          0 :                 set_xid_epoch = strtoul(optarg, &amp;endptr, 0);</span>
+<span class="lineNum">     156 </span><span class="lineNoCov">          0 :                 if (endptr == optarg || *endptr != '\0')</span>
+<span class="lineNum">     157 </span>            :                 {
+<span class="lineNum">     158 </span>            :                     /*------
+<span class="lineNum">     159 </span>            :                       translator: the second %s is a command line argument (-e, etc) */
+<span class="lineNum">     160 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-e&quot;);</span>
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     162 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     163 </span>            :                 }
+<span class="lineNum">     164 </span><span class="lineNoCov">          0 :                 if (set_xid_epoch == -1)</span>
+<span class="lineNum">     165 </span>            :                 {
+<span class="lineNum">     166 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;transaction ID epoch (-e) must not be -1&quot;);</span>
+<span class="lineNum">     167 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     168 </span>            :                 }
+<span class="lineNum">     169 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span>            :             case 'x':
+<span class="lineNum">     172 </span><span class="lineNoCov">          0 :                 set_xid = strtoul(optarg, &amp;endptr, 0);</span>
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :                 if (endptr == optarg || *endptr != '\0')</span>
+<span class="lineNum">     174 </span>            :                 {
+<span class="lineNum">     175 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-x&quot;);</span>
+<span class="lineNum">     176 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     177 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     178 </span>            :                 }
+<span class="lineNum">     179 </span><span class="lineNoCov">          0 :                 if (set_xid == 0)</span>
+<span class="lineNum">     180 </span>            :                 {
+<span class="lineNum">     181 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;transaction ID (-x) must not be 0&quot;);</span>
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     183 </span>            :                 }
+<span class="lineNum">     184 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     185 </span>            : 
+<span class="lineNum">     186 </span>            :             case 'c':
+<span class="lineNum">     187 </span><span class="lineNoCov">          0 :                 set_oldest_commit_ts_xid = strtoul(optarg, &amp;endptr, 0);</span>
+<span class="lineNum">     188 </span><span class="lineNoCov">          0 :                 if (endptr == optarg || *endptr != ',')</span>
+<span class="lineNum">     189 </span>            :                 {
+<span class="lineNum">     190 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-c&quot;);</span>
+<span class="lineNum">     191 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     192 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     193 </span>            :                 }
+<span class="lineNum">     194 </span><span class="lineNoCov">          0 :                 set_newest_commit_ts_xid = strtoul(endptr + 1, &amp;endptr2, 0);</span>
+<span class="lineNum">     195 </span><span class="lineNoCov">          0 :                 if (endptr2 == endptr + 1 || *endptr2 != '\0')</span>
+<span class="lineNum">     196 </span>            :                 {
+<span class="lineNum">     197 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-c&quot;);</span>
+<span class="lineNum">     198 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     200 </span>            :                 }
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span><span class="lineNoCov">          0 :                 if (set_oldest_commit_ts_xid &lt; 2 &amp;&amp;</span>
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :                     set_oldest_commit_ts_xid != 0)</span>
+<span class="lineNum">     204 </span>            :                 {
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;transaction ID (-c) must be either 0 or greater than or equal to 2&quot;);</span>
+<span class="lineNum">     206 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     207 </span>            :                 }
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :                 if (set_newest_commit_ts_xid &lt; 2 &amp;&amp;</span>
+<span class="lineNum">     210 </span><span class="lineNoCov">          0 :                     set_newest_commit_ts_xid != 0)</span>
+<span class="lineNum">     211 </span>            :                 {
+<span class="lineNum">     212 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;transaction ID (-c) must be either 0 or greater than or equal to 2&quot;);</span>
+<span class="lineNum">     213 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     214 </span>            :                 }
+<span class="lineNum">     215 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span>            :             case 'o':
+<span class="lineNum">     218 </span><span class="lineNoCov">          0 :                 set_oid = strtoul(optarg, &amp;endptr, 0);</span>
+<span class="lineNum">     219 </span><span class="lineNoCov">          0 :                 if (endptr == optarg || *endptr != '\0')</span>
+<span class="lineNum">     220 </span>            :                 {
+<span class="lineNum">     221 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-o&quot;);</span>
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     224 </span>            :                 }
+<span class="lineNum">     225 </span><span class="lineNoCov">          0 :                 if (set_oid == 0)</span>
+<span class="lineNum">     226 </span>            :                 {
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;OID (-o) must not be 0&quot;);</span>
+<span class="lineNum">     228 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     229 </span>            :                 }
+<span class="lineNum">     230 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     231 </span>            : 
+<span class="lineNum">     232 </span>            :             case 'm':
+<span class="lineNum">     233 </span><span class="lineNoCov">          0 :                 set_mxid = strtoul(optarg, &amp;endptr, 0);</span>
+<span class="lineNum">     234 </span><span class="lineNoCov">          0 :                 if (endptr == optarg || *endptr != ',')</span>
+<span class="lineNum">     235 </span>            :                 {
+<span class="lineNum">     236 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-m&quot;);</span>
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     238 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     239 </span>            :                 }
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :                 set_oldestmxid = strtoul(endptr + 1, &amp;endptr2, 0);</span>
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 :                 if (endptr2 == endptr + 1 || *endptr2 != '\0')</span>
+<span class="lineNum">     243 </span>            :                 {
+<span class="lineNum">     244 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-m&quot;);</span>
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     247 </span>            :                 }
+<span class="lineNum">     248 </span><span class="lineNoCov">          0 :                 if (set_mxid == 0)</span>
+<span class="lineNum">     249 </span>            :                 {
+<span class="lineNum">     250 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;multitransaction ID (-m) must not be 0&quot;);</span>
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     252 </span>            :                 }
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span>            :                 /*
+<span class="lineNum">     255 </span>            :                  * XXX It'd be nice to have more sanity checks here, e.g. so
+<span class="lineNum">     256 </span>            :                  * that oldest is not wrapped around w.r.t. nextMulti.
+<span class="lineNum">     257 </span>            :                  */
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :                 if (set_oldestmxid == 0)</span>
+<span class="lineNum">     259 </span>            :                 {
+<span class="lineNum">     260 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;oldest multitransaction ID (-m) must not be 0&quot;);</span>
+<span class="lineNum">     261 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     262 </span>            :                 }
+<span class="lineNum">     263 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     264 </span>            : 
+<span class="lineNum">     265 </span>            :             case 'O':
+<span class="lineNum">     266 </span><span class="lineNoCov">          0 :                 set_mxoff = strtoul(optarg, &amp;endptr, 0);</span>
+<span class="lineNum">     267 </span><span class="lineNoCov">          0 :                 if (endptr == optarg || *endptr != '\0')</span>
+<span class="lineNum">     268 </span>            :                 {
+<span class="lineNum">     269 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-O&quot;);</span>
+<span class="lineNum">     270 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     271 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     272 </span>            :                 }
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 :                 if (set_mxoff == -1)</span>
+<span class="lineNum">     274 </span>            :                 {
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;multitransaction offset (-O) must not be -1&quot;);</span>
+<span class="lineNum">     276 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     277 </span>            :                 }
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     279 </span>            : 
+<span class="lineNum">     280 </span>            :             case 'l':
+<span class="lineNum">     281 </span><span class="lineNoCov">          0 :                 if (strspn(optarg, &quot;01234567890ABCDEFabcdef&quot;) != XLOG_FNAME_LEN)</span>
+<span class="lineNum">     282 </span>            :                 {
+<span class="lineNum">     283 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;invalid argument for option %s&quot;, &quot;-l&quot;);</span>
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :                     fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     286 </span>            :                 }
+<span class="lineNum">     287 </span>            : 
+<span class="lineNum">     288 </span>            :                 /*
+<span class="lineNum">     289 </span>            :                  * XLogFromFileName requires wal segment size which is not yet
+<span class="lineNum">     290 </span>            :                  * set. Hence wal details are set later on.
+<span class="lineNum">     291 </span>            :                  */
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :                 log_fname = pg_strdup(optarg);</span>
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     294 </span>            : 
+<span class="lineNum">     295 </span>            :             case 1:
+<span class="lineNum">     296 </span><span class="lineNoCov">          0 :                 set_wal_segsize = strtol(optarg, &amp;endptr, 10) * 1024 * 1024;</span>
+<span class="lineNum">     297 </span><span class="lineNoCov">          0 :                 if (endptr == optarg || *endptr != '\0')</span>
+<span class="lineNum">     298 </span>            :                 {
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;argument of --wal-segsize must be a number&quot;);</span>
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     301 </span>            :                 }
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :                 if (!IsValidWalSegSize(set_wal_segsize))</span>
+<span class="lineNum">     303 </span>            :                 {
+<span class="lineNum">     304 </span><span class="lineNoCov">          0 :                     pg_log_error(&quot;argument of --wal-segsize must be a power of 2 between 1 and 1024&quot;);</span>
+<span class="lineNum">     305 </span><span class="lineNoCov">          0 :                     exit(1);</span>
+<span class="lineNum">     306 </span>            :                 }
+<span class="lineNum">     307 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span>            :             default:
+<span class="lineNum">     310 </span><span class="lineNoCov">          0 :                 fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">     312 </span>            :         }
+<span class="lineNum">     313 </span>            :     }
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span><span class="lineNoCov">          0 :     if (DataDir == NULL &amp;&amp; optind &lt; argc)</span>
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :         DataDir = argv[optind++];</span>
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span>            :     /* Complain if any arguments remain */
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :     if (optind &lt; argc)</span>
+<span class="lineNum">     320 </span>            :     {
+<span class="lineNum">     321 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;too many command-line arguments (first is \&quot;%s\&quot;)&quot;,</span>
+<span class="lineNum">     322 </span>            :                      argv[optind]);
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     324 </span>            :                 progname);
+<span class="lineNum">     325 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     326 </span>            :     }
+<span class="lineNum">     327 </span>            : 
+<span class="lineNum">     328 </span><span class="lineNoCov">          0 :     if (DataDir == NULL)</span>
+<span class="lineNum">     329 </span>            :     {
+<span class="lineNum">     330 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;no data directory specified&quot;);</span>
+<span class="lineNum">     331 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;), progname);</span>
+<span class="lineNum">     332 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     333 </span>            :     }
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span>            :     /*
+<span class="lineNum">     336 </span>            :      * Don't allow pg_resetwal to be run as root, to avoid overwriting the
+<span class="lineNum">     337 </span>            :      * ownership of files in the data directory. We need only check for root
+<span class="lineNum">     338 </span>            :      * -- any other user won't have sufficient permissions to modify files in
+<span class="lineNum">     339 </span>            :      * the data directory.
+<span class="lineNum">     340 </span>            :      */
+<span class="lineNum">     341 </span>            : #ifndef WIN32
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :     if (geteuid() == 0)</span>
+<span class="lineNum">     343 </span>            :     {
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;cannot be executed by \&quot;root\&quot;&quot;);</span>
+<span class="lineNum">     345 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;You must run %s as the PostgreSQL superuser.&quot;,</span>
+<span class="lineNum">     346 </span>            :                     progname);
+<span class="lineNum">     347 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     348 </span>            :     }
+<span class="lineNum">     349 </span>            : #endif
+<span class="lineNum">     350 </span>            : 
+<span class="lineNum">     351 </span><span class="lineNoCov">          0 :     get_restricted_token();</span>
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span>            :     /* Set mask based on PGDATA permissions */
+<span class="lineNum">     354 </span><span class="lineNoCov">          0 :     if (!GetDataDirectoryCreatePerm(DataDir))</span>
+<span class="lineNum">     355 </span>            :     {
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not read permissions of directory \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     357 </span>            :                      DataDir);
+<span class="lineNum">     358 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     359 </span>            :     }
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span><span class="lineNoCov">          0 :     umask(pg_mode_mask);</span>
+<span class="lineNum">     362 </span>            : 
+<span class="lineNum">     363 </span><span class="lineNoCov">          0 :     if (chdir(DataDir) &lt; 0)</span>
+<span class="lineNum">     364 </span>            :     {
+<span class="lineNum">     365 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not change directory to \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     366 </span>            :                      DataDir);
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     368 </span>            :     }
+<span class="lineNum">     369 </span>            : 
+<span class="lineNum">     370 </span>            :     /* Check that data directory matches our server version */
+<span class="lineNum">     371 </span><span class="lineNoCov">          0 :     CheckDataVersion();</span>
+<span class="lineNum">     372 </span>            : 
+<span class="lineNum">     373 </span>            :     /*
+<span class="lineNum">     374 </span>            :      * Check for a postmaster lock file --- if there is one, refuse to
+<span class="lineNum">     375 </span>            :      * proceed, on grounds we might be interfering with a live installation.
+<span class="lineNum">     376 </span>            :      */
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :     if ((fd = open(&quot;postmaster.pid&quot;, O_RDONLY, 0)) &lt; 0)</span>
+<span class="lineNum">     378 </span>            :     {
+<span class="lineNum">     379 </span><span class="lineNoCov">          0 :         if (errno != ENOENT)</span>
+<span class="lineNum">     380 </span>            :         {
+<span class="lineNum">     381 </span><span class="lineNoCov">          0 :             pg_log_error(&quot;could not open file \&quot;%s\&quot; for reading: %m&quot;,</span>
+<span class="lineNum">     382 </span>            :                          &quot;postmaster.pid&quot;);
+<span class="lineNum">     383 </span><span class="lineNoCov">          0 :             exit(1);</span>
+<span class="lineNum">     384 </span>            :         }
+<span class="lineNum">     385 </span>            :     }
+<span class="lineNum">     386 </span>            :     else
+<span class="lineNum">     387 </span>            :     {
+<span class="lineNum">     388 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;lock file \&quot;%s\&quot; exists&quot;, &quot;postmaster.pid&quot;);</span>
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;Is a server running?  If not, delete the lock file and try again.&quot;);</span>
+<span class="lineNum">     390 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     391 </span>            :     }
+<span class="lineNum">     392 </span>            : 
+<span class="lineNum">     393 </span>            :     /*
+<span class="lineNum">     394 </span>            :      * Attempt to read the existing pg_control file
+<span class="lineNum">     395 </span>            :      */
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :     if (!ReadControlFile())</span>
+<span class="lineNum">     397 </span><span class="lineNoCov">          0 :         GuessControlValues();</span>
+<span class="lineNum">     398 </span>            : 
+<span class="lineNum">     399 </span>            :     /*
+<span class="lineNum">     400 </span>            :      * If no new WAL segment size was specified, use the control file value.
+<span class="lineNum">     401 </span>            :      */
+<span class="lineNum">     402 </span><span class="lineNoCov">          0 :     if (set_wal_segsize != 0)</span>
+<span class="lineNum">     403 </span><span class="lineNoCov">          0 :         WalSegSz = set_wal_segsize;</span>
+<span class="lineNum">     404 </span>            :     else
+<span class="lineNum">     405 </span><span class="lineNoCov">          0 :         WalSegSz = ControlFile.xlog_seg_size;</span>
+<span class="lineNum">     406 </span>            : 
+<span class="lineNum">     407 </span><span class="lineNoCov">          0 :     if (log_fname != NULL)</span>
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :         XLogFromFileName(log_fname, &amp;minXlogTli, &amp;minXlogSegNo, WalSegSz);</span>
+<span class="lineNum">     409 </span>            : 
+<span class="lineNum">     410 </span>            :     /*
+<span class="lineNum">     411 </span>            :      * Also look at existing segment files to set up newXlogSegNo
+<span class="lineNum">     412 </span>            :      */
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :     FindEndOfXLOG();</span>
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span>            :     /*
+<span class="lineNum">     416 </span>            :      * If we're not going to proceed with the reset, print the current control
+<span class="lineNum">     417 </span>            :      * file parameters.
+<span class="lineNum">     418 </span>            :      */
+<span class="lineNum">     419 </span><span class="lineNoCov">          0 :     if ((guessed &amp;&amp; !force) || noupdate)</span>
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :         PrintControlValues(guessed);</span>
+<span class="lineNum">     421 </span>            : 
+<span class="lineNum">     422 </span>            :     /*
+<span class="lineNum">     423 </span>            :      * Adjust fields if required by switches.  (Do this now so that printout,
+<span class="lineNum">     424 </span>            :      * if any, includes these values.)
+<span class="lineNum">     425 </span>            :      */
+<span class="lineNum">     426 </span><span class="lineNoCov">          0 :     if (set_xid_epoch != -1)</span>
+<span class="lineNum">     427 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.nextFullXid =</span>
+<span class="lineNum">     428 </span><span class="lineNoCov">          0 :             FullTransactionIdFromEpochAndXid(set_xid_epoch,</span>
+<span class="lineNum">     429 </span><span class="lineNoCov">          0 :                                              XidFromFullTransactionId(ControlFile.checkPointCopy.nextFullXid));</span>
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span><span class="lineNoCov">          0 :     if (set_xid != 0)</span>
+<span class="lineNum">     432 </span>            :     {
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.nextFullXid =</span>
+<span class="lineNum">     434 </span><span class="lineNoCov">          0 :             FullTransactionIdFromEpochAndXid(EpochFromFullTransactionId(ControlFile.checkPointCopy.nextFullXid),</span>
+<span class="lineNum">     435 </span>            :                                              set_xid);
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span>            :         /*
+<span class="lineNum">     438 </span>            :          * For the moment, just set oldestXid to a value that will force
+<span class="lineNum">     439 </span>            :          * immediate autovacuum-for-wraparound.  It's not clear whether adding
+<span class="lineNum">     440 </span>            :          * user control of this is useful, so let's just do something that's
+<span class="lineNum">     441 </span>            :          * reasonably safe.  The magic constant here corresponds to the
+<span class="lineNum">     442 </span>            :          * maximum allowed value of autovacuum_freeze_max_age.
+<span class="lineNum">     443 </span>            :          */
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.oldestXid = set_xid - 2000000000;</span>
+<span class="lineNum">     445 </span><span class="lineNoCov">          0 :         if (ControlFile.checkPointCopy.oldestXid &lt; FirstNormalTransactionId)</span>
+<span class="lineNum">     446 </span><span class="lineNoCov">          0 :             ControlFile.checkPointCopy.oldestXid += FirstNormalTransactionId;</span>
+<span class="lineNum">     447 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.oldestXidDB = InvalidOid;</span>
+<span class="lineNum">     448 </span>            :     }
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span><span class="lineNoCov">          0 :     if (set_oldest_commit_ts_xid != 0)</span>
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.oldestCommitTsXid = set_oldest_commit_ts_xid;</span>
+<span class="lineNum">     452 </span><span class="lineNoCov">          0 :     if (set_newest_commit_ts_xid != 0)</span>
+<span class="lineNum">     453 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.newestCommitTsXid = set_newest_commit_ts_xid;</span>
+<span class="lineNum">     454 </span>            : 
+<span class="lineNum">     455 </span><span class="lineNoCov">          0 :     if (set_oid != 0)</span>
+<span class="lineNum">     456 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.nextOid = set_oid;</span>
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 :     if (set_mxid != 0)</span>
+<span class="lineNum">     459 </span>            :     {
+<span class="lineNum">     460 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.nextMulti = set_mxid;</span>
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.oldestMulti = set_oldestmxid;</span>
+<span class="lineNum">     463 </span><span class="lineNoCov">          0 :         if (ControlFile.checkPointCopy.oldestMulti &lt; FirstMultiXactId)</span>
+<span class="lineNum">     464 </span><span class="lineNoCov">          0 :             ControlFile.checkPointCopy.oldestMulti += FirstMultiXactId;</span>
+<span class="lineNum">     465 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.oldestMultiDB = InvalidOid;</span>
+<span class="lineNum">     466 </span>            :     }
+<span class="lineNum">     467 </span>            : 
+<span class="lineNum">     468 </span><span class="lineNoCov">          0 :     if (set_mxoff != -1)</span>
+<span class="lineNum">     469 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.nextMultiOffset = set_mxoff;</span>
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span><span class="lineNoCov">          0 :     if (minXlogTli &gt; ControlFile.checkPointCopy.ThisTimeLineID)</span>
+<span class="lineNum">     472 </span>            :     {
+<span class="lineNum">     473 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.ThisTimeLineID = minXlogTli;</span>
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :         ControlFile.checkPointCopy.PrevTimeLineID = minXlogTli;</span>
+<span class="lineNum">     475 </span>            :     }
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :     if (set_wal_segsize != 0)</span>
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :         ControlFile.xlog_seg_size = WalSegSz;</span>
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span><span class="lineNoCov">          0 :     if (minXlogSegNo &gt; newXlogSegNo)</span>
+<span class="lineNum">     481 </span><span class="lineNoCov">          0 :         newXlogSegNo = minXlogSegNo;</span>
+<span class="lineNum">     482 </span>            : 
+<span class="lineNum">     483 </span>            :     /*
+<span class="lineNum">     484 </span>            :      * If we had to guess anything, and -f was not given, just print the
+<span class="lineNum">     485 </span>            :      * guessed values and exit.  Also print if -n is given.
+<span class="lineNum">     486 </span>            :      */
+<span class="lineNum">     487 </span><span class="lineNoCov">          0 :     if ((guessed &amp;&amp; !force) || noupdate)</span>
+<span class="lineNum">     488 </span>            :     {
+<span class="lineNum">     489 </span><span class="lineNoCov">          0 :         PrintNewControlValues();</span>
+<span class="lineNum">     490 </span><span class="lineNoCov">          0 :         if (!noupdate)</span>
+<span class="lineNum">     491 </span>            :         {
+<span class="lineNum">     492 </span><span class="lineNoCov">          0 :             printf(_(&quot;\nIf these values seem acceptable, use -f to force reset.\n&quot;));</span>
+<span class="lineNum">     493 </span><span class="lineNoCov">          0 :             exit(1);</span>
+<span class="lineNum">     494 </span>            :         }
+<span class="lineNum">     495 </span>            :         else
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     497 </span>            :     }
+<span class="lineNum">     498 </span>            : 
+<span class="lineNum">     499 </span>            :     /*
+<span class="lineNum">     500 </span>            :      * Don't reset from a dirty pg_control without -f, either.
+<span class="lineNum">     501 </span>            :      */
+<span class="lineNum">     502 </span><span class="lineNoCov">          0 :     if (ControlFile.state != DB_SHUTDOWNED &amp;&amp; !force)</span>
+<span class="lineNum">     503 </span>            :     {
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :         printf(_(&quot;The database server was not shut down cleanly.\n&quot;</span>
+<span class="lineNum">     505 </span>            :                  &quot;Resetting the write-ahead log might cause data to be lost.\n&quot;
+<span class="lineNum">     506 </span>            :                  &quot;If you want to proceed anyway, use -f to force reset.\n&quot;));
+<span class="lineNum">     507 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     508 </span>            :     }
+<span class="lineNum">     509 </span>            : 
+<span class="lineNum">     510 </span>            :     /*
+<span class="lineNum">     511 </span>            :      * Else, do the dirty deed.
+<span class="lineNum">     512 </span>            :      */
+<span class="lineNum">     513 </span><span class="lineNoCov">          0 :     RewriteControlFile();</span>
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :     KillExistingXLOG();</span>
+<span class="lineNum">     515 </span><span class="lineNoCov">          0 :     KillExistingArchiveStatus();</span>
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :     WriteEmptyXLOG();</span>
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span><span class="lineNoCov">          0 :     printf(_(&quot;Write-ahead log reset\n&quot;));</span>
+<span class="lineNum">     519 </span><span class="lineNoCov">          0 :     return 0;</span>
+<span class="lineNum">     520 </span>            : }
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span>            : /*
+<span class="lineNum">     524 </span>            :  * Look at the version string stored in PG_VERSION and decide if this utility
+<span class="lineNum">     525 </span>            :  * can be run safely or not.
+<span class="lineNum">     526 </span>            :  *
+<span class="lineNum">     527 </span>            :  * We don't want to inject pg_control and WAL files that are for a different
+<span class="lineNum">     528 </span>            :  * major version; that can't do anything good.  Note that we don't treat
+<span class="lineNum">     529 </span>            :  * mismatching version info in pg_control as a reason to bail out, because
+<span class="lineNum">     530 </span>            :  * recovering from a corrupted pg_control is one of the main reasons for this
+<span class="lineNum">     531 </span>            :  * program to exist at all.  However, PG_VERSION is unlikely to get corrupted,
+<span class="lineNum">     532 </span>            :  * and if it were it would be easy to fix by hand.  So let's make this check
+<span class="lineNum">     533 </span>            :  * to prevent simple user errors.
+<a name="534"><span class="lineNum">     534 </span>            :  */</a>
+<span class="lineNum">     535 </span>            : static void
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 : CheckDataVersion(void)</span>
+<span class="lineNum">     537 </span>            : {
+<span class="lineNum">     538 </span><span class="lineNoCov">          0 :     const char *ver_file = &quot;PG_VERSION&quot;;</span>
+<span class="lineNum">     539 </span>            :     FILE       *ver_fd;
+<span class="lineNum">     540 </span>            :     char        rawline[64];
+<span class="lineNum">     541 </span>            : 
+<span class="lineNum">     542 </span><span class="lineNoCov">          0 :     if ((ver_fd = fopen(ver_file, &quot;r&quot;)) == NULL)</span>
+<span class="lineNum">     543 </span>            :     {
+<span class="lineNum">     544 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not open file \&quot;%s\&quot; for reading: %m&quot;,</span>
+<span class="lineNum">     545 </span>            :                      ver_file);
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     547 </span>            :     }
+<span class="lineNum">     548 </span>            : 
+<span class="lineNum">     549 </span>            :     /* version number has to be the first line read */
+<span class="lineNum">     550 </span><span class="lineNoCov">          0 :     if (!fgets(rawline, sizeof(rawline), ver_fd))</span>
+<span class="lineNum">     551 </span>            :     {
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :         if (!ferror(ver_fd))</span>
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :             pg_log_error(&quot;unexpected empty file \&quot;%s\&quot;&quot;, ver_file);</span>
+<span class="lineNum">     554 </span>            :         else
+<span class="lineNum">     555 </span><span class="lineNoCov">          0 :             pg_log_error(&quot;could not read file \&quot;%s\&quot;: %m&quot;, ver_file);</span>
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     557 </span>            :     }
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span>            :     /* strip trailing newline and carriage return */
+<span class="lineNum">     560 </span><span class="lineNoCov">          0 :     (void) pg_strip_crlf(rawline);</span>
+<span class="lineNum">     561 </span>            : 
+<span class="lineNum">     562 </span><span class="lineNoCov">          0 :     if (strcmp(rawline, PG_MAJORVERSION) != 0)</span>
+<span class="lineNum">     563 </span>            :     {
+<span class="lineNum">     564 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;data directory is of wrong version&quot;);</span>
+<span class="lineNum">     565 </span><span class="lineNoCov">          0 :         pg_log_info(&quot;File \&quot;%s\&quot; contains \&quot;%s\&quot;, which is not compatible with this program's version \&quot;%s\&quot;.&quot;,</span>
+<span class="lineNum">     566 </span>            :                     ver_file, rawline, PG_MAJORVERSION);
+<span class="lineNum">     567 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     568 </span>            :     }
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span><span class="lineNoCov">          0 :     fclose(ver_fd);</span>
+<span class="lineNum">     571 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     572 </span>            : 
+<span class="lineNum">     573 </span>            : 
+<span class="lineNum">     574 </span>            : /*
+<span class="lineNum">     575 </span>            :  * Try to read the existing pg_control file.
+<span class="lineNum">     576 </span>            :  *
+<span class="lineNum">     577 </span>            :  * This routine is also responsible for updating old pg_control versions
+<span class="lineNum">     578 </span>            :  * to the current format.  (Currently we don't do anything of the sort.)
+<a name="579"><span class="lineNum">     579 </span>            :  */</a>
+<span class="lineNum">     580 </span>            : static bool
+<span class="lineNum">     581 </span><span class="lineNoCov">          0 : ReadControlFile(void)</span>
+<span class="lineNum">     582 </span>            : {
+<span class="lineNum">     583 </span>            :     int         fd;
+<span class="lineNum">     584 </span>            :     int         len;
+<span class="lineNum">     585 </span>            :     char       *buffer;
+<span class="lineNum">     586 </span>            :     pg_crc32c   crc;
+<span class="lineNum">     587 </span>            : 
+<span class="lineNum">     588 </span><span class="lineNoCov">          0 :     if ((fd = open(XLOG_CONTROL_FILE, O_RDONLY | PG_BINARY, 0)) &lt; 0)</span>
+<span class="lineNum">     589 </span>            :     {
+<span class="lineNum">     590 </span>            :         /*
+<span class="lineNum">     591 </span>            :          * If pg_control is not there at all, or we can't read it, the odds
+<span class="lineNum">     592 </span>            :          * are we've been handed a bad DataDir path, so give up. User can do
+<span class="lineNum">     593 </span>            :          * &quot;touch pg_control&quot; to force us to proceed.
+<span class="lineNum">     594 </span>            :          */
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not open file \&quot;%s\&quot; for reading: %m&quot;,</span>
+<span class="lineNum">     596 </span>            :                      XLOG_CONTROL_FILE);
+<span class="lineNum">     597 </span><span class="lineNoCov">          0 :         if (errno == ENOENT)</span>
+<span class="lineNum">     598 </span><span class="lineNoCov">          0 :             pg_log_info(&quot;If you are sure the data directory path is correct, execute\n&quot;</span>
+<span class="lineNum">     599 </span>            :                         &quot;  touch %s\n&quot;
+<span class="lineNum">     600 </span>            :                         &quot;and try again.&quot;,
+<span class="lineNum">     601 </span>            :                         XLOG_CONTROL_FILE);
+<span class="lineNum">     602 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     603 </span>            :     }
+<span class="lineNum">     604 </span>            : 
+<span class="lineNum">     605 </span>            :     /* Use malloc to ensure we have a maxaligned buffer */
+<span class="lineNum">     606 </span><span class="lineNoCov">          0 :     buffer = (char *) pg_malloc(PG_CONTROL_FILE_SIZE);</span>
+<span class="lineNum">     607 </span>            : 
+<span class="lineNum">     608 </span><span class="lineNoCov">          0 :     len = read(fd, buffer, PG_CONTROL_FILE_SIZE);</span>
+<span class="lineNum">     609 </span><span class="lineNoCov">          0 :     if (len &lt; 0)</span>
+<span class="lineNum">     610 </span>            :     {
+<span class="lineNum">     611 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not read file \&quot;%s\&quot;: %m&quot;, XLOG_CONTROL_FILE);</span>
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     613 </span>            :     }
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :     close(fd);</span>
+<span class="lineNum">     615 </span>            : 
+<span class="lineNum">     616 </span><span class="lineNoCov">          0 :     if (len &gt;= sizeof(ControlFileData) &amp;&amp;</span>
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :         ((ControlFileData *) buffer)-&gt;pg_control_version == PG_CONTROL_VERSION)</span>
+<span class="lineNum">     618 </span>            :     {
+<span class="lineNum">     619 </span>            :         /* Check the CRC. */
+<span class="lineNum">     620 </span><span class="lineNoCov">          0 :         INIT_CRC32C(crc);</span>
+<span class="lineNum">     621 </span><span class="lineNoCov">          0 :         COMP_CRC32C(crc,</span>
+<span class="lineNum">     622 </span>            :                     buffer,
+<span class="lineNum">     623 </span>            :                     offsetof(ControlFileData, crc));
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :         FIN_CRC32C(crc);</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span><span class="lineNoCov">          0 :         if (!EQ_CRC32C(crc, ((ControlFileData *) buffer)-&gt;crc))</span>
+<span class="lineNum">     627 </span>            :         {
+<span class="lineNum">     628 </span>            :             /* We will use the data but treat it as guessed. */
+<span class="lineNum">     629 </span><span class="lineNoCov">          0 :             pg_log_warning(&quot;pg_control exists but has invalid CRC; proceed with caution&quot;);</span>
+<span class="lineNum">     630 </span><span class="lineNoCov">          0 :             guessed = true;</span>
+<span class="lineNum">     631 </span>            :         }
+<span class="lineNum">     632 </span>            : 
+<span class="lineNum">     633 </span><span class="lineNoCov">          0 :         memcpy(&amp;ControlFile, buffer, sizeof(ControlFile));</span>
+<span class="lineNum">     634 </span>            : 
+<span class="lineNum">     635 </span>            :         /* return false if WAL segment size is not valid */
+<span class="lineNum">     636 </span><span class="lineNoCov">          0 :         if (!IsValidWalSegSize(ControlFile.xlog_seg_size))</span>
+<span class="lineNum">     637 </span>            :         {
+<span class="lineNum">     638 </span><span class="lineNoCov">          0 :             pg_log_warning(ngettext(&quot;pg_control specifies invalid WAL segment size (%d byte); proceed with caution&quot;,</span>
+<span class="lineNum">     639 </span>            :                                     &quot;pg_control specifies invalid WAL segment size (%d bytes); proceed with caution&quot;,
+<span class="lineNum">     640 </span>            :                                     ControlFile.xlog_seg_size),
+<span class="lineNum">     641 </span>            :                            ControlFile.xlog_seg_size);
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     643 </span>            :         }
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">     646 </span>            :     }
+<span class="lineNum">     647 </span>            : 
+<span class="lineNum">     648 </span>            :     /* Looks like it's a mess. */
+<span class="lineNum">     649 </span><span class="lineNoCov">          0 :     pg_log_warning(&quot;pg_control exists but is broken or wrong version; ignoring it&quot;);</span>
+<span class="lineNum">     650 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">     651 </span>            : }
+<span class="lineNum">     652 </span>            : 
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span>            : /*
+<span class="lineNum">     655 </span>            :  * Guess at pg_control values when we can't read the old ones.
+<a name="656"><span class="lineNum">     656 </span>            :  */</a>
+<span class="lineNum">     657 </span>            : static void
+<span class="lineNum">     658 </span><span class="lineNoCov">          0 : GuessControlValues(void)</span>
+<span class="lineNum">     659 </span>            : {
+<span class="lineNum">     660 </span>            :     uint64      sysidentifier;
+<span class="lineNum">     661 </span>            :     struct timeval tv;
+<span class="lineNum">     662 </span>            : 
+<span class="lineNum">     663 </span>            :     /*
+<span class="lineNum">     664 </span>            :      * Set up a completely default set of pg_control values.
+<span class="lineNum">     665 </span>            :      */
+<span class="lineNum">     666 </span><span class="lineNoCov">          0 :     guessed = true;</span>
+<span class="lineNum">     667 </span><span class="lineNoCov">          0 :     memset(&amp;ControlFile, 0, sizeof(ControlFile));</span>
+<span class="lineNum">     668 </span>            : 
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :     ControlFile.pg_control_version = PG_CONTROL_VERSION;</span>
+<span class="lineNum">     670 </span><span class="lineNoCov">          0 :     ControlFile.catalog_version_no = CATALOG_VERSION_NO;</span>
+<span class="lineNum">     671 </span>            : 
+<span class="lineNum">     672 </span>            :     /*
+<span class="lineNum">     673 </span>            :      * Create a new unique installation identifier, since we can no longer use
+<span class="lineNum">     674 </span>            :      * any old XLOG records.  See notes in xlog.c about the algorithm.
+<span class="lineNum">     675 </span>            :      */
+<span class="lineNum">     676 </span><span class="lineNoCov">          0 :     gettimeofday(&amp;tv, NULL);</span>
+<span class="lineNum">     677 </span><span class="lineNoCov">          0 :     sysidentifier = ((uint64) tv.tv_sec) &lt;&lt; 32;</span>
+<span class="lineNum">     678 </span><span class="lineNoCov">          0 :     sysidentifier |= ((uint64) tv.tv_usec) &lt;&lt; 12;</span>
+<span class="lineNum">     679 </span><span class="lineNoCov">          0 :     sysidentifier |= getpid() &amp; 0xFFF;</span>
+<span class="lineNum">     680 </span>            : 
+<span class="lineNum">     681 </span><span class="lineNoCov">          0 :     ControlFile.system_identifier = sysidentifier;</span>
+<span class="lineNum">     682 </span>            : 
+<span class="lineNum">     683 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.redo = SizeOfXLogLongPHD;</span>
+<span class="lineNum">     684 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.ThisTimeLineID = 1;</span>
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.PrevTimeLineID = 1;</span>
+<span class="lineNum">     686 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.fullPageWrites = false;</span>
+<span class="lineNum">     687 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.nextFullXid =</span>
+<span class="lineNum">     688 </span>            :         FullTransactionIdFromEpochAndXid(0, FirstNormalTransactionId);
+<span class="lineNum">     689 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.nextOid = FirstBootstrapObjectId;</span>
+<span class="lineNum">     690 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.nextMulti = FirstMultiXactId;</span>
+<span class="lineNum">     691 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.nextMultiOffset = 0;</span>
+<span class="lineNum">     692 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.oldestXid = FirstNormalTransactionId;</span>
+<span class="lineNum">     693 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.oldestXidDB = InvalidOid;</span>
+<span class="lineNum">     694 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.oldestMulti = FirstMultiXactId;</span>
+<span class="lineNum">     695 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.oldestMultiDB = InvalidOid;</span>
+<span class="lineNum">     696 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.time = (pg_time_t) time(NULL);</span>
+<span class="lineNum">     697 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.oldestActiveXid = InvalidTransactionId;</span>
+<span class="lineNum">     698 </span>            : 
+<span class="lineNum">     699 </span><span class="lineNoCov">          0 :     ControlFile.state = DB_SHUTDOWNED;</span>
+<span class="lineNum">     700 </span><span class="lineNoCov">          0 :     ControlFile.time = (pg_time_t) time(NULL);</span>
+<span class="lineNum">     701 </span><span class="lineNoCov">          0 :     ControlFile.checkPoint = ControlFile.checkPointCopy.redo;</span>
+<span class="lineNum">     702 </span><span class="lineNoCov">          0 :     ControlFile.unloggedLSN = FirstNormalUnloggedLSN;</span>
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span>            :     /* minRecoveryPoint, backupStartPoint and backupEndPoint can be left zero */
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span><span class="lineNoCov">          0 :     ControlFile.wal_level = WAL_LEVEL_MINIMAL;</span>
+<span class="lineNum">     707 </span><span class="lineNoCov">          0 :     ControlFile.wal_log_hints = false;</span>
+<span class="lineNum">     708 </span><span class="lineNoCov">          0 :     ControlFile.track_commit_timestamp = false;</span>
+<span class="lineNum">     709 </span><span class="lineNoCov">          0 :     ControlFile.MaxConnections = 100;</span>
+<span class="lineNum">     710 </span><span class="lineNoCov">          0 :     ControlFile.max_wal_senders = 10;</span>
+<span class="lineNum">     711 </span><span class="lineNoCov">          0 :     ControlFile.max_worker_processes = 8;</span>
+<span class="lineNum">     712 </span><span class="lineNoCov">          0 :     ControlFile.max_prepared_xacts = 0;</span>
+<span class="lineNum">     713 </span><span class="lineNoCov">          0 :     ControlFile.max_locks_per_xact = 64;</span>
+<span class="lineNum">     714 </span>            : 
+<span class="lineNum">     715 </span><span class="lineNoCov">          0 :     ControlFile.maxAlign = MAXIMUM_ALIGNOF;</span>
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :     ControlFile.floatFormat = FLOATFORMAT_VALUE;</span>
+<span class="lineNum">     717 </span><span class="lineNoCov">          0 :     ControlFile.blcksz = BLCKSZ;</span>
+<span class="lineNum">     718 </span><span class="lineNoCov">          0 :     ControlFile.relseg_size = RELSEG_SIZE;</span>
+<span class="lineNum">     719 </span><span class="lineNoCov">          0 :     ControlFile.xlog_blcksz = XLOG_BLCKSZ;</span>
+<span class="lineNum">     720 </span><span class="lineNoCov">          0 :     ControlFile.xlog_seg_size = DEFAULT_XLOG_SEG_SIZE;</span>
+<span class="lineNum">     721 </span><span class="lineNoCov">          0 :     ControlFile.nameDataLen = NAMEDATALEN;</span>
+<span class="lineNum">     722 </span><span class="lineNoCov">          0 :     ControlFile.indexMaxKeys = INDEX_MAX_KEYS;</span>
+<span class="lineNum">     723 </span><span class="lineNoCov">          0 :     ControlFile.toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;</span>
+<span class="lineNum">     724 </span><span class="lineNoCov">          0 :     ControlFile.loblksize = LOBLKSIZE;</span>
+<span class="lineNum">     725 </span><span class="lineNoCov">          0 :     ControlFile.float8ByVal = FLOAT8PASSBYVAL;</span>
+<span class="lineNum">     726 </span>            : 
+<span class="lineNum">     727 </span>            :     /*
+<span class="lineNum">     728 </span>            :      * XXX eventually, should try to grovel through old XLOG to develop more
+<span class="lineNum">     729 </span>            :      * accurate values for TimeLineID, nextXID, etc.
+<span class="lineNum">     730 </span>            :      */
+<span class="lineNum">     731 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     732 </span>            : 
+<span class="lineNum">     733 </span>            : 
+<span class="lineNum">     734 </span>            : /*
+<span class="lineNum">     735 </span>            :  * Print the guessed pg_control values when we had to guess.
+<span class="lineNum">     736 </span>            :  *
+<span class="lineNum">     737 </span>            :  * NB: this display should be just those fields that will not be
+<span class="lineNum">     738 </span>            :  * reset by RewriteControlFile().
+<a name="739"><span class="lineNum">     739 </span>            :  */</a>
+<span class="lineNum">     740 </span>            : static void
+<span class="lineNum">     741 </span><span class="lineNoCov">          0 : PrintControlValues(bool guessed)</span>
+<span class="lineNum">     742 </span>            : {
+<span class="lineNum">     743 </span><span class="lineNoCov">          0 :     if (guessed)</span>
+<span class="lineNum">     744 </span><span class="lineNoCov">          0 :         printf(_(&quot;Guessed pg_control values:\n\n&quot;));</span>
+<span class="lineNum">     745 </span>            :     else
+<span class="lineNum">     746 </span><span class="lineNoCov">          0 :         printf(_(&quot;Current pg_control values:\n\n&quot;));</span>
+<span class="lineNum">     747 </span>            : 
+<span class="lineNum">     748 </span><span class="lineNoCov">          0 :     printf(_(&quot;pg_control version number:            %u\n&quot;),</span>
+<span class="lineNum">     749 </span>            :            ControlFile.pg_control_version);
+<span class="lineNum">     750 </span><span class="lineNoCov">          0 :     printf(_(&quot;Catalog version number:               %u\n&quot;),</span>
+<span class="lineNum">     751 </span>            :            ControlFile.catalog_version_no);
+<span class="lineNum">     752 </span><span class="lineNoCov">          0 :     printf(_(&quot;Database system identifier:           %llu\n&quot;),</span>
+<span class="lineNum">     753 </span>            :            (unsigned long long) ControlFile.system_identifier);
+<span class="lineNum">     754 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's TimeLineID:       %u\n&quot;),</span>
+<span class="lineNum">     755 </span>            :            ControlFile.checkPointCopy.ThisTimeLineID);
+<span class="lineNum">     756 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's full_page_writes: %s\n&quot;),</span>
+<span class="lineNum">     757 </span>            :            ControlFile.checkPointCopy.fullPageWrites ? _(&quot;on&quot;) : _(&quot;off&quot;));
+<span class="lineNum">     758 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's NextXID:          %u:%u\n&quot;),</span>
+<span class="lineNum">     759 </span>            :            EpochFromFullTransactionId(ControlFile.checkPointCopy.nextFullXid),
+<span class="lineNum">     760 </span>            :            XidFromFullTransactionId(ControlFile.checkPointCopy.nextFullXid));
+<span class="lineNum">     761 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's NextOID:          %u\n&quot;),</span>
+<span class="lineNum">     762 </span>            :            ControlFile.checkPointCopy.nextOid);
+<span class="lineNum">     763 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's NextMultiXactId:  %u\n&quot;),</span>
+<span class="lineNum">     764 </span>            :            ControlFile.checkPointCopy.nextMulti);
+<span class="lineNum">     765 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's NextMultiOffset:  %u\n&quot;),</span>
+<span class="lineNum">     766 </span>            :            ControlFile.checkPointCopy.nextMultiOffset);
+<span class="lineNum">     767 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's oldestXID:        %u\n&quot;),</span>
+<span class="lineNum">     768 </span>            :            ControlFile.checkPointCopy.oldestXid);
+<span class="lineNum">     769 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's oldestXID's DB:   %u\n&quot;),</span>
+<span class="lineNum">     770 </span>            :            ControlFile.checkPointCopy.oldestXidDB);
+<span class="lineNum">     771 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's oldestActiveXID:  %u\n&quot;),</span>
+<span class="lineNum">     772 </span>            :            ControlFile.checkPointCopy.oldestActiveXid);
+<span class="lineNum">     773 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's oldestMultiXid:   %u\n&quot;),</span>
+<span class="lineNum">     774 </span>            :            ControlFile.checkPointCopy.oldestMulti);
+<span class="lineNum">     775 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's oldestMulti's DB: %u\n&quot;),</span>
+<span class="lineNum">     776 </span>            :            ControlFile.checkPointCopy.oldestMultiDB);
+<span class="lineNum">     777 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's oldestCommitTsXid:%u\n&quot;),</span>
+<span class="lineNum">     778 </span>            :            ControlFile.checkPointCopy.oldestCommitTsXid);
+<span class="lineNum">     779 </span><span class="lineNoCov">          0 :     printf(_(&quot;Latest checkpoint's newestCommitTsXid:%u\n&quot;),</span>
+<span class="lineNum">     780 </span>            :            ControlFile.checkPointCopy.newestCommitTsXid);
+<span class="lineNum">     781 </span><span class="lineNoCov">          0 :     printf(_(&quot;Maximum data alignment:               %u\n&quot;),</span>
+<span class="lineNum">     782 </span>            :            ControlFile.maxAlign);
+<span class="lineNum">     783 </span>            :     /* we don't print floatFormat since can't say much useful about it */
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :     printf(_(&quot;Database block size:                  %u\n&quot;),</span>
+<span class="lineNum">     785 </span>            :            ControlFile.blcksz);
+<span class="lineNum">     786 </span><span class="lineNoCov">          0 :     printf(_(&quot;Blocks per segment of large relation: %u\n&quot;),</span>
+<span class="lineNum">     787 </span>            :            ControlFile.relseg_size);
+<span class="lineNum">     788 </span><span class="lineNoCov">          0 :     printf(_(&quot;WAL block size:                       %u\n&quot;),</span>
+<span class="lineNum">     789 </span>            :            ControlFile.xlog_blcksz);
+<span class="lineNum">     790 </span><span class="lineNoCov">          0 :     printf(_(&quot;Bytes per WAL segment:                %u\n&quot;),</span>
+<span class="lineNum">     791 </span>            :            ControlFile.xlog_seg_size);
+<span class="lineNum">     792 </span><span class="lineNoCov">          0 :     printf(_(&quot;Maximum length of identifiers:        %u\n&quot;),</span>
+<span class="lineNum">     793 </span>            :            ControlFile.nameDataLen);
+<span class="lineNum">     794 </span><span class="lineNoCov">          0 :     printf(_(&quot;Maximum columns in an index:          %u\n&quot;),</span>
+<span class="lineNum">     795 </span>            :            ControlFile.indexMaxKeys);
+<span class="lineNum">     796 </span><span class="lineNoCov">          0 :     printf(_(&quot;Maximum size of a TOAST chunk:        %u\n&quot;),</span>
+<span class="lineNum">     797 </span>            :            ControlFile.toast_max_chunk_size);
+<span class="lineNum">     798 </span><span class="lineNoCov">          0 :     printf(_(&quot;Size of a large-object chunk:         %u\n&quot;),</span>
+<span class="lineNum">     799 </span>            :            ControlFile.loblksize);
+<span class="lineNum">     800 </span>            :     /* This is no longer configurable, but users may still expect to see it: */
+<span class="lineNum">     801 </span><span class="lineNoCov">          0 :     printf(_(&quot;Date/time type storage:               %s\n&quot;),</span>
+<span class="lineNum">     802 </span>            :            _(&quot;64-bit integers&quot;));
+<span class="lineNum">     803 </span><span class="lineNoCov">          0 :     printf(_(&quot;Float8 argument passing:              %s\n&quot;),</span>
+<span class="lineNum">     804 </span>            :            (ControlFile.float8ByVal ? _(&quot;by value&quot;) : _(&quot;by reference&quot;)));
+<span class="lineNum">     805 </span><span class="lineNoCov">          0 :     printf(_(&quot;Data page checksum version:           %u\n&quot;),</span>
+<span class="lineNum">     806 </span>            :            ControlFile.data_checksum_version);
+<span class="lineNum">     807 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     808 </span>            : 
+<span class="lineNum">     809 </span>            : 
+<span class="lineNum">     810 </span>            : /*
+<span class="lineNum">     811 </span>            :  * Print the values to be changed.
+<a name="812"><span class="lineNum">     812 </span>            :  */</a>
+<span class="lineNum">     813 </span>            : static void
+<span class="lineNum">     814 </span><span class="lineNoCov">          0 : PrintNewControlValues(void)</span>
+<span class="lineNum">     815 </span>            : {
+<span class="lineNum">     816 </span>            :     char        fname[MAXFNAMELEN];
+<span class="lineNum">     817 </span>            : 
+<span class="lineNum">     818 </span>            :     /* This will be always printed in order to keep format same. */
+<span class="lineNum">     819 </span><span class="lineNoCov">          0 :     printf(_(&quot;\n\nValues to be changed:\n\n&quot;));</span>
+<span class="lineNum">     820 </span>            : 
+<span class="lineNum">     821 </span><span class="lineNoCov">          0 :     XLogFileName(fname, ControlFile.checkPointCopy.ThisTimeLineID,</span>
+<span class="lineNum">     822 </span>            :                  newXlogSegNo, WalSegSz);
+<span class="lineNum">     823 </span><span class="lineNoCov">          0 :     printf(_(&quot;First log segment after reset:        %s\n&quot;), fname);</span>
+<span class="lineNum">     824 </span>            : 
+<span class="lineNum">     825 </span><span class="lineNoCov">          0 :     if (set_mxid != 0)</span>
+<span class="lineNum">     826 </span>            :     {
+<span class="lineNum">     827 </span><span class="lineNoCov">          0 :         printf(_(&quot;NextMultiXactId:                      %u\n&quot;),</span>
+<span class="lineNum">     828 </span>            :                ControlFile.checkPointCopy.nextMulti);
+<span class="lineNum">     829 </span><span class="lineNoCov">          0 :         printf(_(&quot;OldestMultiXid:                       %u\n&quot;),</span>
+<span class="lineNum">     830 </span>            :                ControlFile.checkPointCopy.oldestMulti);
+<span class="lineNum">     831 </span><span class="lineNoCov">          0 :         printf(_(&quot;OldestMulti's DB:                     %u\n&quot;),</span>
+<span class="lineNum">     832 </span>            :                ControlFile.checkPointCopy.oldestMultiDB);
+<span class="lineNum">     833 </span>            :     }
+<span class="lineNum">     834 </span>            : 
+<span class="lineNum">     835 </span><span class="lineNoCov">          0 :     if (set_mxoff != -1)</span>
+<span class="lineNum">     836 </span>            :     {
+<span class="lineNum">     837 </span><span class="lineNoCov">          0 :         printf(_(&quot;NextMultiOffset:                      %u\n&quot;),</span>
+<span class="lineNum">     838 </span>            :                ControlFile.checkPointCopy.nextMultiOffset);
+<span class="lineNum">     839 </span>            :     }
+<span class="lineNum">     840 </span>            : 
+<span class="lineNum">     841 </span><span class="lineNoCov">          0 :     if (set_oid != 0)</span>
+<span class="lineNum">     842 </span>            :     {
+<span class="lineNum">     843 </span><span class="lineNoCov">          0 :         printf(_(&quot;NextOID:                              %u\n&quot;),</span>
+<span class="lineNum">     844 </span>            :                ControlFile.checkPointCopy.nextOid);
+<span class="lineNum">     845 </span>            :     }
+<span class="lineNum">     846 </span>            : 
+<span class="lineNum">     847 </span><span class="lineNoCov">          0 :     if (set_xid != 0)</span>
+<span class="lineNum">     848 </span>            :     {
+<span class="lineNum">     849 </span><span class="lineNoCov">          0 :         printf(_(&quot;NextXID:                              %u\n&quot;),</span>
+<span class="lineNum">     850 </span>            :                XidFromFullTransactionId(ControlFile.checkPointCopy.nextFullXid));
+<span class="lineNum">     851 </span><span class="lineNoCov">          0 :         printf(_(&quot;OldestXID:                            %u\n&quot;),</span>
+<span class="lineNum">     852 </span>            :                ControlFile.checkPointCopy.oldestXid);
+<span class="lineNum">     853 </span><span class="lineNoCov">          0 :         printf(_(&quot;OldestXID's DB:                       %u\n&quot;),</span>
+<span class="lineNum">     854 </span>            :                ControlFile.checkPointCopy.oldestXidDB);
+<span class="lineNum">     855 </span>            :     }
+<span class="lineNum">     856 </span>            : 
+<span class="lineNum">     857 </span><span class="lineNoCov">          0 :     if (set_xid_epoch != -1)</span>
+<span class="lineNum">     858 </span>            :     {
+<span class="lineNum">     859 </span><span class="lineNoCov">          0 :         printf(_(&quot;NextXID epoch:                        %u\n&quot;),</span>
+<span class="lineNum">     860 </span>            :                EpochFromFullTransactionId(ControlFile.checkPointCopy.nextFullXid));
+<span class="lineNum">     861 </span>            :     }
+<span class="lineNum">     862 </span>            : 
+<span class="lineNum">     863 </span><span class="lineNoCov">          0 :     if (set_oldest_commit_ts_xid != 0)</span>
+<span class="lineNum">     864 </span>            :     {
+<span class="lineNum">     865 </span><span class="lineNoCov">          0 :         printf(_(&quot;oldestCommitTsXid:                    %u\n&quot;),</span>
+<span class="lineNum">     866 </span>            :                ControlFile.checkPointCopy.oldestCommitTsXid);
+<span class="lineNum">     867 </span>            :     }
+<span class="lineNum">     868 </span><span class="lineNoCov">          0 :     if (set_newest_commit_ts_xid != 0)</span>
+<span class="lineNum">     869 </span>            :     {
+<span class="lineNum">     870 </span><span class="lineNoCov">          0 :         printf(_(&quot;newestCommitTsXid:                    %u\n&quot;),</span>
+<span class="lineNum">     871 </span>            :                ControlFile.checkPointCopy.newestCommitTsXid);
+<span class="lineNum">     872 </span>            :     }
+<span class="lineNum">     873 </span>            : 
+<span class="lineNum">     874 </span><span class="lineNoCov">          0 :     if (set_wal_segsize != 0)</span>
+<span class="lineNum">     875 </span>            :     {
+<span class="lineNum">     876 </span><span class="lineNoCov">          0 :         printf(_(&quot;Bytes per WAL segment:                %u\n&quot;),</span>
+<span class="lineNum">     877 </span>            :                ControlFile.xlog_seg_size);
+<span class="lineNum">     878 </span>            :     }
+<span class="lineNum">     879 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     880 </span>            : 
+<span class="lineNum">     881 </span>            : 
+<span class="lineNum">     882 </span>            : /*
+<span class="lineNum">     883 </span>            :  * Write out the new pg_control file.
+<a name="884"><span class="lineNum">     884 </span>            :  */</a>
+<span class="lineNum">     885 </span>            : static void
+<span class="lineNum">     886 </span><span class="lineNoCov">          0 : RewriteControlFile(void)</span>
+<span class="lineNum">     887 </span>            : {
+<span class="lineNum">     888 </span>            :     /*
+<span class="lineNum">     889 </span>            :      * Adjust fields as needed to force an empty XLOG starting at
+<span class="lineNum">     890 </span>            :      * newXlogSegNo.
+<span class="lineNum">     891 </span>            :      */
+<span class="lineNum">     892 </span><span class="lineNoCov">          0 :     XLogSegNoOffsetToRecPtr(newXlogSegNo, SizeOfXLogLongPHD, WalSegSz,</span>
+<span class="lineNum">     893 </span>            :                             ControlFile.checkPointCopy.redo);
+<span class="lineNum">     894 </span><span class="lineNoCov">          0 :     ControlFile.checkPointCopy.time = (pg_time_t) time(NULL);</span>
+<span class="lineNum">     895 </span>            : 
+<span class="lineNum">     896 </span><span class="lineNoCov">          0 :     ControlFile.state = DB_SHUTDOWNED;</span>
+<span class="lineNum">     897 </span><span class="lineNoCov">          0 :     ControlFile.time = (pg_time_t) time(NULL);</span>
+<span class="lineNum">     898 </span><span class="lineNoCov">          0 :     ControlFile.checkPoint = ControlFile.checkPointCopy.redo;</span>
+<span class="lineNum">     899 </span><span class="lineNoCov">          0 :     ControlFile.minRecoveryPoint = 0;</span>
+<span class="lineNum">     900 </span><span class="lineNoCov">          0 :     ControlFile.minRecoveryPointTLI = 0;</span>
+<span class="lineNum">     901 </span><span class="lineNoCov">          0 :     ControlFile.backupStartPoint = 0;</span>
+<span class="lineNum">     902 </span><span class="lineNoCov">          0 :     ControlFile.backupEndPoint = 0;</span>
+<span class="lineNum">     903 </span><span class="lineNoCov">          0 :     ControlFile.backupEndRequired = false;</span>
+<span class="lineNum">     904 </span>            : 
+<span class="lineNum">     905 </span>            :     /*
+<span class="lineNum">     906 </span>            :      * Force the defaults for max_* settings. The values don't really matter
+<span class="lineNum">     907 </span>            :      * as long as wal_level='minimal'; the postmaster will reset these fields
+<span class="lineNum">     908 </span>            :      * anyway at startup.
+<span class="lineNum">     909 </span>            :      */
+<span class="lineNum">     910 </span><span class="lineNoCov">          0 :     ControlFile.wal_level = WAL_LEVEL_MINIMAL;</span>
+<span class="lineNum">     911 </span><span class="lineNoCov">          0 :     ControlFile.wal_log_hints = false;</span>
+<span class="lineNum">     912 </span><span class="lineNoCov">          0 :     ControlFile.track_commit_timestamp = false;</span>
+<span class="lineNum">     913 </span><span class="lineNoCov">          0 :     ControlFile.MaxConnections = 100;</span>
+<span class="lineNum">     914 </span><span class="lineNoCov">          0 :     ControlFile.max_wal_senders = 10;</span>
+<span class="lineNum">     915 </span><span class="lineNoCov">          0 :     ControlFile.max_worker_processes = 8;</span>
+<span class="lineNum">     916 </span><span class="lineNoCov">          0 :     ControlFile.max_prepared_xacts = 0;</span>
+<span class="lineNum">     917 </span><span class="lineNoCov">          0 :     ControlFile.max_locks_per_xact = 64;</span>
+<span class="lineNum">     918 </span>            : 
+<span class="lineNum">     919 </span>            :     /* The control file gets flushed here. */
+<span class="lineNum">     920 </span><span class="lineNoCov">          0 :     update_controlfile(&quot;.&quot;, &amp;ControlFile, true);</span>
+<span class="lineNum">     921 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     922 </span>            : 
+<span class="lineNum">     923 </span>            : 
+<span class="lineNum">     924 </span>            : /*
+<span class="lineNum">     925 </span>            :  * Scan existing XLOG files and determine the highest existing WAL address
+<span class="lineNum">     926 </span>            :  *
+<span class="lineNum">     927 </span>            :  * On entry, ControlFile.checkPointCopy.redo and ControlFile.xlog_seg_size
+<span class="lineNum">     928 </span>            :  * are assumed valid (note that we allow the old xlog seg size to differ
+<span class="lineNum">     929 </span>            :  * from what we're using).  On exit, newXlogSegNo is set to suitable
+<span class="lineNum">     930 </span>            :  * value for the beginning of replacement WAL (in our seg size).
+<a name="931"><span class="lineNum">     931 </span>            :  */</a>
+<span class="lineNum">     932 </span>            : static void
+<span class="lineNum">     933 </span><span class="lineNoCov">          0 : FindEndOfXLOG(void)</span>
+<span class="lineNum">     934 </span>            : {
+<span class="lineNum">     935 </span>            :     DIR        *xldir;
+<span class="lineNum">     936 </span>            :     struct dirent *xlde;
+<span class="lineNum">     937 </span>            :     uint64      segs_per_xlogid;
+<span class="lineNum">     938 </span>            :     uint64      xlogbytepos;
+<span class="lineNum">     939 </span>            : 
+<span class="lineNum">     940 </span>            :     /*
+<span class="lineNum">     941 </span>            :      * Initialize the max() computation using the last checkpoint address from
+<span class="lineNum">     942 </span>            :      * old pg_control.  Note that for the moment we are working with segment
+<span class="lineNum">     943 </span>            :      * numbering according to the old xlog seg size.
+<span class="lineNum">     944 </span>            :      */
+<span class="lineNum">     945 </span><span class="lineNoCov">          0 :     segs_per_xlogid = (UINT64CONST(0x0000000100000000) / ControlFile.xlog_seg_size);</span>
+<span class="lineNum">     946 </span><span class="lineNoCov">          0 :     newXlogSegNo = ControlFile.checkPointCopy.redo / ControlFile.xlog_seg_size;</span>
+<span class="lineNum">     947 </span>            : 
+<span class="lineNum">     948 </span>            :     /*
+<span class="lineNum">     949 </span>            :      * Scan the pg_wal directory to find existing WAL segment files. We assume
+<span class="lineNum">     950 </span>            :      * any present have been used; in most scenarios this should be
+<span class="lineNum">     951 </span>            :      * conservative, because of xlog.c's attempts to pre-create files.
+<span class="lineNum">     952 </span>            :      */
+<span class="lineNum">     953 </span><span class="lineNoCov">          0 :     xldir = opendir(XLOGDIR);</span>
+<span class="lineNum">     954 </span><span class="lineNoCov">          0 :     if (xldir == NULL)</span>
+<span class="lineNum">     955 </span>            :     {
+<span class="lineNum">     956 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not open directory \&quot;%s\&quot;: %m&quot;, XLOGDIR);</span>
+<span class="lineNum">     957 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     958 </span>            :     }
+<span class="lineNum">     959 </span>            : 
+<span class="lineNum">     960 </span><span class="lineNoCov">          0 :     while (errno = 0, (xlde = readdir(xldir)) != NULL)</span>
+<span class="lineNum">     961 </span>            :     {
+<span class="lineNum">     962 </span><span class="lineNoCov">          0 :         if (IsXLogFileName(xlde-&gt;d_name) ||</span>
+<span class="lineNum">     963 </span><span class="lineNoCov">          0 :             IsPartialXLogFileName(xlde-&gt;d_name))</span>
+<span class="lineNum">     964 </span>            :         {
+<span class="lineNum">     965 </span>            :             unsigned int tli,
+<span class="lineNum">     966 </span>            :                         log,
+<span class="lineNum">     967 </span>            :                         seg;
+<span class="lineNum">     968 </span>            :             XLogSegNo   segno;
+<span class="lineNum">     969 </span>            : 
+<span class="lineNum">     970 </span>            :             /*
+<span class="lineNum">     971 </span>            :              * Note: We don't use XLogFromFileName here, because we want to
+<span class="lineNum">     972 </span>            :              * use the segment size from the control file, not the size the
+<span class="lineNum">     973 </span>            :              * pg_resetwal binary was compiled with
+<span class="lineNum">     974 </span>            :              */
+<span class="lineNum">     975 </span><span class="lineNoCov">          0 :             sscanf(xlde-&gt;d_name, &quot;%08X%08X%08X&quot;, &amp;tli, &amp;log, &amp;seg);</span>
+<span class="lineNum">     976 </span><span class="lineNoCov">          0 :             segno = ((uint64) log) * segs_per_xlogid + seg;</span>
+<span class="lineNum">     977 </span>            : 
+<span class="lineNum">     978 </span>            :             /*
+<span class="lineNum">     979 </span>            :              * Note: we take the max of all files found, regardless of their
+<span class="lineNum">     980 </span>            :              * timelines.  Another possibility would be to ignore files of
+<span class="lineNum">     981 </span>            :              * timelines other than the target TLI, but this seems safer.
+<span class="lineNum">     982 </span>            :              * Better too large a result than too small...
+<span class="lineNum">     983 </span>            :              */
+<span class="lineNum">     984 </span><span class="lineNoCov">          0 :             if (segno &gt; newXlogSegNo)</span>
+<span class="lineNum">     985 </span><span class="lineNoCov">          0 :                 newXlogSegNo = segno;</span>
+<span class="lineNum">     986 </span>            :         }
+<span class="lineNum">     987 </span>            :     }
+<span class="lineNum">     988 </span>            : 
+<span class="lineNum">     989 </span><span class="lineNoCov">          0 :     if (errno)</span>
+<span class="lineNum">     990 </span>            :     {
+<span class="lineNum">     991 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not read directory \&quot;%s\&quot;: %m&quot;, XLOGDIR);</span>
+<span class="lineNum">     992 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     993 </span>            :     }
+<span class="lineNum">     994 </span>            : 
+<span class="lineNum">     995 </span><span class="lineNoCov">          0 :     if (closedir(xldir))</span>
+<span class="lineNum">     996 </span>            :     {
+<span class="lineNum">     997 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not close directory \&quot;%s\&quot;: %m&quot;, XLOGDIR);</span>
+<span class="lineNum">     998 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     999 </span>            :     }
+<span class="lineNum">    1000 </span>            : 
+<span class="lineNum">    1001 </span>            :     /*
+<span class="lineNum">    1002 </span>            :      * Finally, convert to new xlog seg size, and advance by one to ensure we
+<span class="lineNum">    1003 </span>            :      * are in virgin territory.
+<span class="lineNum">    1004 </span>            :      */
+<span class="lineNum">    1005 </span><span class="lineNoCov">          0 :     xlogbytepos = newXlogSegNo * ControlFile.xlog_seg_size;</span>
+<span class="lineNum">    1006 </span><span class="lineNoCov">          0 :     newXlogSegNo = (xlogbytepos + ControlFile.xlog_seg_size - 1) / WalSegSz;</span>
+<span class="lineNum">    1007 </span><span class="lineNoCov">          0 :     newXlogSegNo++;</span>
+<span class="lineNum">    1008 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1009 </span>            : 
+<span class="lineNum">    1010 </span>            : 
+<span class="lineNum">    1011 </span>            : /*
+<span class="lineNum">    1012 </span>            :  * Remove existing XLOG files
+<a name="1013"><span class="lineNum">    1013 </span>            :  */</a>
+<span class="lineNum">    1014 </span>            : static void
+<span class="lineNum">    1015 </span><span class="lineNoCov">          0 : KillExistingXLOG(void)</span>
+<span class="lineNum">    1016 </span>            : {
+<span class="lineNum">    1017 </span>            :     DIR        *xldir;
+<span class="lineNum">    1018 </span>            :     struct dirent *xlde;
+<span class="lineNum">    1019 </span>            :     char        path[MAXPGPATH + sizeof(XLOGDIR)];
+<span class="lineNum">    1020 </span>            : 
+<span class="lineNum">    1021 </span><span class="lineNoCov">          0 :     xldir = opendir(XLOGDIR);</span>
+<span class="lineNum">    1022 </span><span class="lineNoCov">          0 :     if (xldir == NULL)</span>
+<span class="lineNum">    1023 </span>            :     {
+<span class="lineNum">    1024 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not open directory \&quot;%s\&quot;: %m&quot;, XLOGDIR);</span>
+<span class="lineNum">    1025 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1026 </span>            :     }
+<span class="lineNum">    1027 </span>            : 
+<span class="lineNum">    1028 </span><span class="lineNoCov">          0 :     while (errno = 0, (xlde = readdir(xldir)) != NULL)</span>
+<span class="lineNum">    1029 </span>            :     {
+<span class="lineNum">    1030 </span><span class="lineNoCov">          0 :         if (IsXLogFileName(xlde-&gt;d_name) ||</span>
+<span class="lineNum">    1031 </span><span class="lineNoCov">          0 :             IsPartialXLogFileName(xlde-&gt;d_name))</span>
+<span class="lineNum">    1032 </span>            :         {
+<span class="lineNum">    1033 </span><span class="lineNoCov">          0 :             snprintf(path, sizeof(path), &quot;%s/%s&quot;, XLOGDIR, xlde-&gt;d_name);</span>
+<span class="lineNum">    1034 </span><span class="lineNoCov">          0 :             if (unlink(path) &lt; 0)</span>
+<span class="lineNum">    1035 </span>            :             {
+<span class="lineNum">    1036 </span><span class="lineNoCov">          0 :                 pg_log_error(&quot;could not delete file \&quot;%s\&quot;: %m&quot;, path);</span>
+<span class="lineNum">    1037 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">    1038 </span>            :             }
+<span class="lineNum">    1039 </span>            :         }
+<span class="lineNum">    1040 </span>            :     }
+<span class="lineNum">    1041 </span>            : 
+<span class="lineNum">    1042 </span><span class="lineNoCov">          0 :     if (errno)</span>
+<span class="lineNum">    1043 </span>            :     {
+<span class="lineNum">    1044 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not read directory \&quot;%s\&quot;: %m&quot;, XLOGDIR);</span>
+<span class="lineNum">    1045 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1046 </span>            :     }
+<span class="lineNum">    1047 </span>            : 
+<span class="lineNum">    1048 </span><span class="lineNoCov">          0 :     if (closedir(xldir))</span>
+<span class="lineNum">    1049 </span>            :     {
+<span class="lineNum">    1050 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not close directory \&quot;%s\&quot;: %m&quot;, XLOGDIR);</span>
+<span class="lineNum">    1051 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1052 </span>            :     }
+<span class="lineNum">    1053 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1054 </span>            : 
+<span class="lineNum">    1055 </span>            : 
+<span class="lineNum">    1056 </span>            : /*
+<span class="lineNum">    1057 </span>            :  * Remove existing archive status files
+<a name="1058"><span class="lineNum">    1058 </span>            :  */</a>
+<span class="lineNum">    1059 </span>            : static void
+<span class="lineNum">    1060 </span><span class="lineNoCov">          0 : KillExistingArchiveStatus(void)</span>
+<span class="lineNum">    1061 </span>            : {
+<span class="lineNum">    1062 </span>            : #define ARCHSTATDIR XLOGDIR &quot;/archive_status&quot;
+<span class="lineNum">    1063 </span>            : 
+<span class="lineNum">    1064 </span>            :     DIR        *xldir;
+<span class="lineNum">    1065 </span>            :     struct dirent *xlde;
+<span class="lineNum">    1066 </span>            :     char        path[MAXPGPATH + sizeof(ARCHSTATDIR)];
+<span class="lineNum">    1067 </span>            : 
+<span class="lineNum">    1068 </span><span class="lineNoCov">          0 :     xldir = opendir(ARCHSTATDIR);</span>
+<span class="lineNum">    1069 </span><span class="lineNoCov">          0 :     if (xldir == NULL)</span>
+<span class="lineNum">    1070 </span>            :     {
+<span class="lineNum">    1071 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not open directory \&quot;%s\&quot;: %m&quot;, ARCHSTATDIR);</span>
+<span class="lineNum">    1072 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1073 </span>            :     }
+<span class="lineNum">    1074 </span>            : 
+<span class="lineNum">    1075 </span><span class="lineNoCov">          0 :     while (errno = 0, (xlde = readdir(xldir)) != NULL)</span>
+<span class="lineNum">    1076 </span>            :     {
+<span class="lineNum">    1077 </span><span class="lineNoCov">          0 :         if (strspn(xlde-&gt;d_name, &quot;0123456789ABCDEF&quot;) == XLOG_FNAME_LEN &amp;&amp;</span>
+<span class="lineNum">    1078 </span><span class="lineNoCov">          0 :             (strcmp(xlde-&gt;d_name + XLOG_FNAME_LEN, &quot;.ready&quot;) == 0 ||</span>
+<span class="lineNum">    1079 </span><span class="lineNoCov">          0 :              strcmp(xlde-&gt;d_name + XLOG_FNAME_LEN, &quot;.done&quot;) == 0 ||</span>
+<span class="lineNum">    1080 </span><span class="lineNoCov">          0 :              strcmp(xlde-&gt;d_name + XLOG_FNAME_LEN, &quot;.partial.ready&quot;) == 0 ||</span>
+<span class="lineNum">    1081 </span><span class="lineNoCov">          0 :              strcmp(xlde-&gt;d_name + XLOG_FNAME_LEN, &quot;.partial.done&quot;) == 0))</span>
+<span class="lineNum">    1082 </span>            :         {
+<span class="lineNum">    1083 </span><span class="lineNoCov">          0 :             snprintf(path, sizeof(path), &quot;%s/%s&quot;, ARCHSTATDIR, xlde-&gt;d_name);</span>
+<span class="lineNum">    1084 </span><span class="lineNoCov">          0 :             if (unlink(path) &lt; 0)</span>
+<span class="lineNum">    1085 </span>            :             {
+<span class="lineNum">    1086 </span><span class="lineNoCov">          0 :                 pg_log_error(&quot;could not delete file \&quot;%s\&quot;: %m&quot;, path);</span>
+<span class="lineNum">    1087 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">    1088 </span>            :             }
+<span class="lineNum">    1089 </span>            :         }
+<span class="lineNum">    1090 </span>            :     }
+<span class="lineNum">    1091 </span>            : 
+<span class="lineNum">    1092 </span><span class="lineNoCov">          0 :     if (errno)</span>
+<span class="lineNum">    1093 </span>            :     {
+<span class="lineNum">    1094 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not read directory \&quot;%s\&quot;: %m&quot;, ARCHSTATDIR);</span>
+<span class="lineNum">    1095 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1096 </span>            :     }
+<span class="lineNum">    1097 </span>            : 
+<span class="lineNum">    1098 </span><span class="lineNoCov">          0 :     if (closedir(xldir))</span>
+<span class="lineNum">    1099 </span>            :     {
+<span class="lineNum">    1100 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not close directory \&quot;%s\&quot;: %m&quot;, ARCHSTATDIR);</span>
+<span class="lineNum">    1101 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1102 </span>            :     }
+<span class="lineNum">    1103 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1104 </span>            : 
+<span class="lineNum">    1105 </span>            : 
+<span class="lineNum">    1106 </span>            : /*
+<span class="lineNum">    1107 </span>            :  * Write an empty XLOG file, containing only the checkpoint record
+<span class="lineNum">    1108 </span>            :  * already set up in ControlFile.
+<a name="1109"><span class="lineNum">    1109 </span>            :  */</a>
+<span class="lineNum">    1110 </span>            : static void
+<span class="lineNum">    1111 </span><span class="lineNoCov">          0 : WriteEmptyXLOG(void)</span>
+<span class="lineNum">    1112 </span>            : {
+<span class="lineNum">    1113 </span>            :     PGAlignedXLogBlock buffer;
+<span class="lineNum">    1114 </span>            :     XLogPageHeader page;
+<span class="lineNum">    1115 </span>            :     XLogLongPageHeader longpage;
+<span class="lineNum">    1116 </span>            :     XLogRecord *record;
+<span class="lineNum">    1117 </span>            :     pg_crc32c   crc;
+<span class="lineNum">    1118 </span>            :     char        path[MAXPGPATH];
+<span class="lineNum">    1119 </span>            :     int         fd;
+<span class="lineNum">    1120 </span>            :     int         nbytes;
+<span class="lineNum">    1121 </span>            :     char       *recptr;
+<span class="lineNum">    1122 </span>            : 
+<span class="lineNum">    1123 </span><span class="lineNoCov">          0 :     memset(buffer.data, 0, XLOG_BLCKSZ);</span>
+<span class="lineNum">    1124 </span>            : 
+<span class="lineNum">    1125 </span>            :     /* Set up the XLOG page header */
+<span class="lineNum">    1126 </span><span class="lineNoCov">          0 :     page = (XLogPageHeader) buffer.data;</span>
+<span class="lineNum">    1127 </span><span class="lineNoCov">          0 :     page-&gt;xlp_magic = XLOG_PAGE_MAGIC;</span>
+<span class="lineNum">    1128 </span><span class="lineNoCov">          0 :     page-&gt;xlp_info = XLP_LONG_HEADER;</span>
+<span class="lineNum">    1129 </span><span class="lineNoCov">          0 :     page-&gt;xlp_tli = ControlFile.checkPointCopy.ThisTimeLineID;</span>
+<span class="lineNum">    1130 </span><span class="lineNoCov">          0 :     page-&gt;xlp_pageaddr = ControlFile.checkPointCopy.redo - SizeOfXLogLongPHD;</span>
+<span class="lineNum">    1131 </span><span class="lineNoCov">          0 :     longpage = (XLogLongPageHeader) page;</span>
+<span class="lineNum">    1132 </span><span class="lineNoCov">          0 :     longpage-&gt;xlp_sysid = ControlFile.system_identifier;</span>
+<span class="lineNum">    1133 </span><span class="lineNoCov">          0 :     longpage-&gt;xlp_seg_size = WalSegSz;</span>
+<span class="lineNum">    1134 </span><span class="lineNoCov">          0 :     longpage-&gt;xlp_xlog_blcksz = XLOG_BLCKSZ;</span>
+<span class="lineNum">    1135 </span>            : 
+<span class="lineNum">    1136 </span>            :     /* Insert the initial checkpoint record */
+<span class="lineNum">    1137 </span><span class="lineNoCov">          0 :     recptr = (char *) page + SizeOfXLogLongPHD;</span>
+<span class="lineNum">    1138 </span><span class="lineNoCov">          0 :     record = (XLogRecord *) recptr;</span>
+<span class="lineNum">    1139 </span><span class="lineNoCov">          0 :     record-&gt;xl_prev = 0;</span>
+<span class="lineNum">    1140 </span><span class="lineNoCov">          0 :     record-&gt;xl_xid = InvalidTransactionId;</span>
+<span class="lineNum">    1141 </span><span class="lineNoCov">          0 :     record-&gt;xl_tot_len = SizeOfXLogRecord + SizeOfXLogRecordDataHeaderShort + sizeof(CheckPoint);</span>
+<span class="lineNum">    1142 </span><span class="lineNoCov">          0 :     record-&gt;xl_info = XLOG_CHECKPOINT_SHUTDOWN;</span>
+<span class="lineNum">    1143 </span><span class="lineNoCov">          0 :     record-&gt;xl_rmid = RM_XLOG_ID;</span>
+<span class="lineNum">    1144 </span>            : 
+<span class="lineNum">    1145 </span><span class="lineNoCov">          0 :     recptr += SizeOfXLogRecord;</span>
+<span class="lineNum">    1146 </span><span class="lineNoCov">          0 :     *(recptr++) = (char) XLR_BLOCK_ID_DATA_SHORT;</span>
+<span class="lineNum">    1147 </span><span class="lineNoCov">          0 :     *(recptr++) = sizeof(CheckPoint);</span>
+<span class="lineNum">    1148 </span><span class="lineNoCov">          0 :     memcpy(recptr, &amp;ControlFile.checkPointCopy,</span>
+<span class="lineNum">    1149 </span>            :            sizeof(CheckPoint));
+<span class="lineNum">    1150 </span>            : 
+<span class="lineNum">    1151 </span><span class="lineNoCov">          0 :     INIT_CRC32C(crc);</span>
+<span class="lineNum">    1152 </span><span class="lineNoCov">          0 :     COMP_CRC32C(crc, ((char *) record) + SizeOfXLogRecord, record-&gt;xl_tot_len - SizeOfXLogRecord);</span>
+<span class="lineNum">    1153 </span><span class="lineNoCov">          0 :     COMP_CRC32C(crc, (char *) record, offsetof(XLogRecord, xl_crc));</span>
+<span class="lineNum">    1154 </span><span class="lineNoCov">          0 :     FIN_CRC32C(crc);</span>
+<span class="lineNum">    1155 </span><span class="lineNoCov">          0 :     record-&gt;xl_crc = crc;</span>
+<span class="lineNum">    1156 </span>            : 
+<span class="lineNum">    1157 </span>            :     /* Write the first page */
+<span class="lineNum">    1158 </span><span class="lineNoCov">          0 :     XLogFilePath(path, ControlFile.checkPointCopy.ThisTimeLineID,</span>
+<span class="lineNum">    1159 </span>            :                  newXlogSegNo, WalSegSz);
+<span class="lineNum">    1160 </span>            : 
+<span class="lineNum">    1161 </span><span class="lineNoCov">          0 :     unlink(path);</span>
+<span class="lineNum">    1162 </span>            : 
+<span class="lineNum">    1163 </span><span class="lineNoCov">          0 :     fd = open(path, O_RDWR | O_CREAT | O_EXCL | PG_BINARY,</span>
+<span class="lineNum">    1164 </span>            :               pg_file_create_mode);
+<span class="lineNum">    1165 </span><span class="lineNoCov">          0 :     if (fd &lt; 0)</span>
+<span class="lineNum">    1166 </span>            :     {
+<span class="lineNum">    1167 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not open file \&quot;%s\&quot;: %m&quot;, path);</span>
+<span class="lineNum">    1168 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1169 </span>            :     }
+<span class="lineNum">    1170 </span>            : 
+<span class="lineNum">    1171 </span><span class="lineNoCov">          0 :     errno = 0;</span>
+<span class="lineNum">    1172 </span><span class="lineNoCov">          0 :     if (write(fd, buffer.data, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">    1173 </span>            :     {
+<span class="lineNum">    1174 </span>            :         /* if write didn't set errno, assume problem is no disk space */
+<span class="lineNum">    1175 </span><span class="lineNoCov">          0 :         if (errno == 0)</span>
+<span class="lineNum">    1176 </span><span class="lineNoCov">          0 :             errno = ENOSPC;</span>
+<span class="lineNum">    1177 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;could not write file \&quot;%s\&quot;: %m&quot;, path);</span>
+<span class="lineNum">    1178 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1179 </span>            :     }
+<span class="lineNum">    1180 </span>            : 
+<span class="lineNum">    1181 </span>            :     /* Fill the rest of the file with zeroes */
+<span class="lineNum">    1182 </span><span class="lineNoCov">          0 :     memset(buffer.data, 0, XLOG_BLCKSZ);</span>
+<span class="lineNum">    1183 </span><span class="lineNoCov">          0 :     for (nbytes = XLOG_BLCKSZ; nbytes &lt; WalSegSz; nbytes += XLOG_BLCKSZ)</span>
+<span class="lineNum">    1184 </span>            :     {
+<span class="lineNum">    1185 </span><span class="lineNoCov">          0 :         errno = 0;</span>
+<span class="lineNum">    1186 </span><span class="lineNoCov">          0 :         if (write(fd, buffer.data, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">    1187 </span>            :         {
+<span class="lineNum">    1188 </span><span class="lineNoCov">          0 :             if (errno == 0)</span>
+<span class="lineNum">    1189 </span><span class="lineNoCov">          0 :                 errno = ENOSPC;</span>
+<span class="lineNum">    1190 </span><span class="lineNoCov">          0 :             pg_log_error(&quot;could not write file \&quot;%s\&quot;: %m&quot;, path);</span>
+<span class="lineNum">    1191 </span><span class="lineNoCov">          0 :             exit(1);</span>
+<span class="lineNum">    1192 </span>            :         }
+<span class="lineNum">    1193 </span>            :     }
+<span class="lineNum">    1194 </span>            : 
+<span class="lineNum">    1195 </span><span class="lineNoCov">          0 :     if (fsync(fd) != 0)</span>
+<span class="lineNum">    1196 </span>            :     {
+<span class="lineNum">    1197 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;fsync error: %m&quot;);</span>
+<span class="lineNum">    1198 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">    1199 </span>            :     }
+<span class="lineNum">    1200 </span>            : 
+<span class="lineNum">    1201 </span><span class="lineNoCov">          0 :     close(fd);</span>
+<span class="lineNum">    1202 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1203 </span>            : 
+<a name="1204"><span class="lineNum">    1204 </span>            : </a>
+<span class="lineNum">    1205 </span>            : static void
+<span class="lineNum">    1206 </span><span class="lineNoCov">          0 : usage(void)</span>
+<span class="lineNum">    1207 </span>            : {
+<span class="lineNum">    1208 </span><span class="lineNoCov">          0 :     printf(_(&quot;%s resets the PostgreSQL write-ahead log.\n\n&quot;), progname);</span>
+<span class="lineNum">    1209 </span><span class="lineNoCov">          0 :     printf(_(&quot;Usage:\n  %s [OPTION]... DATADIR\n\n&quot;), progname);</span>
+<span class="lineNum">    1210 </span><span class="lineNoCov">          0 :     printf(_(&quot;Options:\n&quot;));</span>
+<span class="lineNum">    1211 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -c, --commit-timestamp-ids=XID,XID\n&quot;</span>
+<span class="lineNum">    1212 </span>            :              &quot;                                 set oldest and newest transactions bearing\n&quot;
+<span class="lineNum">    1213 </span>            :              &quot;                                 commit timestamp (zero means no change)\n&quot;));
+<span class="lineNum">    1214 </span><span class="lineNoCov">          0 :     printf(_(&quot; [-D, --pgdata=]DATADIR          data directory\n&quot;));</span>
+<span class="lineNum">    1215 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -e, --epoch=XIDEPOCH           set next transaction ID epoch\n&quot;));</span>
+<span class="lineNum">    1216 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -f, --force                    force update to be done\n&quot;));</span>
+<span class="lineNum">    1217 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -l, --next-wal-file=WALFILE    set minimum starting location for new WAL\n&quot;));</span>
+<span class="lineNum">    1218 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -m, --multixact-ids=MXID,MXID  set next and oldest multitransaction ID\n&quot;));</span>
+<span class="lineNum">    1219 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -n, --dry-run                  no update, just show what would be done\n&quot;));</span>
+<span class="lineNum">    1220 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -o, --next-oid=OID             set next OID\n&quot;));</span>
+<span class="lineNum">    1221 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -O, --multixact-offset=OFFSET  set next multitransaction offset\n&quot;));</span>
+<span class="lineNum">    1222 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -V, --version                  output version information, then exit\n&quot;));</span>
+<span class="lineNum">    1223 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -x, --next-transaction-id=XID  set next transaction ID\n&quot;));</span>
+<span class="lineNum">    1224 </span><span class="lineNoCov">          0 :     printf(_(&quot;      --wal-segsize=SIZE         size of WAL segments, in megabytes\n&quot;));</span>
+<span class="lineNum">    1225 </span><span class="lineNoCov">          0 :     printf(_(&quot;  -?, --help                     show this help, then exit\n&quot;));</span>
+<span class="lineNum">    1226 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nReport bugs to &lt;pgsql-bugs@lists.postgresql.org&gt;.\n&quot;));</span>
+<span class="lineNum">    1227 </span><span class="lineNoCov">          0 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

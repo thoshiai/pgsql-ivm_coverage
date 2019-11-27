@@ -1,0 +1,676 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/sync/sync.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/sync</a> - sync.c<span style="font-size: 80%;"> (source / <a href="sync.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">74</td>
+            <td class="headerCovTableEntry">128</td>
+            <td class="headerCovTableEntryLo">57.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">6</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntryMed">85.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * sync.c
+<span class="lineNum">       4 </span>            :  *    File synchronization management code.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/storage/sync/sync.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      18 </span>            : #include &lt;fcntl.h&gt;
+<span class="lineNum">      19 </span>            : #include &lt;sys/file.h&gt;
+<span class="lineNum">      20 </span>            : 
+<span class="lineNum">      21 </span>            : #include &quot;access/xlog.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;access/xlogutils.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;commands/tablespace.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;portability/instr_time.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;postmaster/bgwriter.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;storage/bufmgr.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;storage/ipc.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;storage/md.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;utils/hsearch.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;utils/inval.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : static MemoryContext pendingOpsCxt; /* context for the pending ops state  */
+<span class="lineNum">      36 </span>            : 
+<span class="lineNum">      37 </span>            : /*
+<span class="lineNum">      38 </span>            :  * In some contexts (currently, standalone backends and the checkpointer)
+<span class="lineNum">      39 </span>            :  * we keep track of pending fsync operations: we need to remember all relation
+<span class="lineNum">      40 </span>            :  * segments that have been written since the last checkpoint, so that we can
+<span class="lineNum">      41 </span>            :  * fsync them down to disk before completing the next checkpoint.  This hash
+<span class="lineNum">      42 </span>            :  * table remembers the pending operations.  We use a hash table mostly as
+<span class="lineNum">      43 </span>            :  * a convenient way of merging duplicate requests.
+<span class="lineNum">      44 </span>            :  *
+<span class="lineNum">      45 </span>            :  * We use a similar mechanism to remember no-longer-needed files that can
+<span class="lineNum">      46 </span>            :  * be deleted after the next checkpoint, but we use a linked list instead of
+<span class="lineNum">      47 </span>            :  * a hash table, because we don't expect there to be any duplicate requests.
+<span class="lineNum">      48 </span>            :  *
+<span class="lineNum">      49 </span>            :  * These mechanisms are only used for non-temp relations; we never fsync
+<span class="lineNum">      50 </span>            :  * temp rels, nor do we need to postpone their deletion (see comments in
+<span class="lineNum">      51 </span>            :  * mdunlink).
+<span class="lineNum">      52 </span>            :  *
+<span class="lineNum">      53 </span>            :  * (Regular backends do not track pending operations locally, but forward
+<span class="lineNum">      54 </span>            :  * them to the checkpointer.)
+<span class="lineNum">      55 </span>            :  */
+<span class="lineNum">      56 </span>            : typedef uint16 CycleCtr;        /* can be any convenient integer size */
+<span class="lineNum">      57 </span>            : 
+<span class="lineNum">      58 </span>            : typedef struct
+<span class="lineNum">      59 </span>            : {
+<span class="lineNum">      60 </span>            :     FileTag     tag;            /* identifies handler and file */
+<span class="lineNum">      61 </span>            :     CycleCtr    cycle_ctr;      /* sync_cycle_ctr of oldest request */
+<span class="lineNum">      62 </span>            :     bool        canceled;       /* canceled is true if we canceled &quot;recently&quot; */
+<span class="lineNum">      63 </span>            : } PendingFsyncEntry;
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            : typedef struct
+<span class="lineNum">      66 </span>            : {
+<span class="lineNum">      67 </span>            :     FileTag     tag;            /* identifies handler and file */
+<span class="lineNum">      68 </span>            :     CycleCtr    cycle_ctr;      /* checkpoint_cycle_ctr when request was made */
+<span class="lineNum">      69 </span>            : } PendingUnlinkEntry;
+<span class="lineNum">      70 </span>            : 
+<span class="lineNum">      71 </span>            : static HTAB *pendingOps = NULL;
+<span class="lineNum">      72 </span>            : static List *pendingUnlinks = NIL;
+<span class="lineNum">      73 </span>            : static MemoryContext pendingOpsCxt; /* context for the above  */
+<span class="lineNum">      74 </span>            : 
+<span class="lineNum">      75 </span>            : static CycleCtr sync_cycle_ctr = 0;
+<span class="lineNum">      76 </span>            : static CycleCtr checkpoint_cycle_ctr = 0;
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            : /* Intervals for calling AbsorbSyncRequests */
+<span class="lineNum">      79 </span>            : #define FSYNCS_PER_ABSORB       10
+<span class="lineNum">      80 </span>            : #define UNLINKS_PER_ABSORB      10
+<span class="lineNum">      81 </span>            : 
+<span class="lineNum">      82 </span>            : /*
+<span class="lineNum">      83 </span>            :  * Function pointers for handling sync and unlink requests.
+<span class="lineNum">      84 </span>            :  */
+<span class="lineNum">      85 </span>            : typedef struct SyncOps
+<span class="lineNum">      86 </span>            : {
+<span class="lineNum">      87 </span>            :     int         (*sync_syncfiletag) (const FileTag *ftag, char *path);
+<span class="lineNum">      88 </span>            :     int         (*sync_unlinkfiletag) (const FileTag *ftag, char *path);
+<span class="lineNum">      89 </span>            :     bool        (*sync_filetagmatches) (const FileTag *ftag,
+<span class="lineNum">      90 </span>            :                                         const FileTag *candidate);
+<span class="lineNum">      91 </span>            : } SyncOps;
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            : static const SyncOps syncsw[] = {
+<span class="lineNum">      94 </span>            :     /* magnetic disk */
+<span class="lineNum">      95 </span>            :     {
+<span class="lineNum">      96 </span>            :         .sync_syncfiletag = mdsyncfiletag,
+<span class="lineNum">      97 </span>            :         .sync_unlinkfiletag = mdunlinkfiletag,
+<span class="lineNum">      98 </span>            :         .sync_filetagmatches = mdfiletagmatches
+<span class="lineNum">      99 </span>            :     }
+<span class="lineNum">     100 </span>            : };
+<span class="lineNum">     101 </span>            : 
+<span class="lineNum">     102 </span>            : /*
+<span class="lineNum">     103 </span>            :  * Initialize data structures for the file sync tracking.
+<a name="104"><span class="lineNum">     104 </span>            :  */</a>
+<span class="lineNum">     105 </span>            : void
+<span class="lineNum">     106 </span><span class="lineCov">       1224 : InitSync(void)</span>
+<span class="lineNum">     107 </span>            : {
+<span class="lineNum">     108 </span>            :     /*
+<span class="lineNum">     109 </span>            :      * Create pending-operations hashtable if we need it.  Currently, we need
+<span class="lineNum">     110 </span>            :      * it if we are standalone (not under a postmaster) or if we are a startup
+<span class="lineNum">     111 </span>            :      * or checkpointer auxiliary process.
+<span class="lineNum">     112 </span>            :      */
+<span class="lineNum">     113 </span><span class="lineCov">       1224 :     if (!IsUnderPostmaster || AmStartupProcess() || AmCheckpointerProcess())</span>
+<span class="lineNum">     114 </span>            :     {
+<span class="lineNum">     115 </span>            :         HASHCTL     hash_ctl;
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span>            :         /*
+<span class="lineNum">     118 </span>            :          * XXX: The checkpointer needs to add entries to the pending ops table
+<span class="lineNum">     119 </span>            :          * when absorbing fsync requests.  That is done within a critical
+<span class="lineNum">     120 </span>            :          * section, which isn't usually allowed, but we make an exception. It
+<span class="lineNum">     121 </span>            :          * means that there's a theoretical possibility that you run out of
+<span class="lineNum">     122 </span>            :          * memory while absorbing fsync requests, which leads to a PANIC.
+<span class="lineNum">     123 </span>            :          * Fortunately the hash table is small so that's unlikely to happen in
+<span class="lineNum">     124 </span>            :          * practice.
+<span class="lineNum">     125 </span>            :          */
+<span class="lineNum">     126 </span><span class="lineCov">         12 :         pendingOpsCxt = AllocSetContextCreate(TopMemoryContext,</span>
+<span class="lineNum">     127 </span>            :                                               &quot;Pending ops context&quot;,
+<span class="lineNum">     128 </span>            :                                               ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     129 </span><span class="lineCov">         12 :         MemoryContextAllowInCriticalSection(pendingOpsCxt, true);</span>
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span><span class="lineCov">         12 :         MemSet(&amp;hash_ctl, 0, sizeof(hash_ctl));</span>
+<span class="lineNum">     132 </span><span class="lineCov">         12 :         hash_ctl.keysize = sizeof(FileTag);</span>
+<span class="lineNum">     133 </span><span class="lineCov">         12 :         hash_ctl.entrysize = sizeof(PendingFsyncEntry);</span>
+<span class="lineNum">     134 </span><span class="lineCov">         12 :         hash_ctl.hcxt = pendingOpsCxt;</span>
+<span class="lineNum">     135 </span><span class="lineCov">         12 :         pendingOps = hash_create(&quot;Pending Ops Table&quot;,</span>
+<span class="lineNum">     136 </span>            :                                  100L,
+<span class="lineNum">     137 </span>            :                                  &amp;hash_ctl,
+<span class="lineNum">     138 </span>            :                                  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+<span class="lineNum">     139 </span><span class="lineCov">         12 :         pendingUnlinks = NIL;</span>
+<span class="lineNum">     140 </span>            :     }
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span><span class="lineCov">       1224 : }</span>
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span>            : /*
+<span class="lineNum">     145 </span>            :  * SyncPreCheckpoint() -- Do pre-checkpoint work
+<span class="lineNum">     146 </span>            :  *
+<span class="lineNum">     147 </span>            :  * To distinguish unlink requests that arrived before this checkpoint
+<span class="lineNum">     148 </span>            :  * started from those that arrived during the checkpoint, we use a cycle
+<span class="lineNum">     149 </span>            :  * counter similar to the one we use for fsync requests. That cycle
+<span class="lineNum">     150 </span>            :  * counter is incremented here.
+<span class="lineNum">     151 </span>            :  *
+<span class="lineNum">     152 </span>            :  * This must be called *before* the checkpoint REDO point is determined.
+<span class="lineNum">     153 </span>            :  * That ensures that we won't delete files too soon.
+<span class="lineNum">     154 </span>            :  *
+<span class="lineNum">     155 </span>            :  * Note that we can't do anything here that depends on the assumption
+<span class="lineNum">     156 </span>            :  * that the checkpoint will be completed.
+<a name="157"><span class="lineNum">     157 </span>            :  */</a>
+<span class="lineNum">     158 </span>            : void
+<span class="lineNum">     159 </span><span class="lineCov">         22 : SyncPreCheckpoint(void)</span>
+<span class="lineNum">     160 </span>            : {
+<span class="lineNum">     161 </span>            :     /*
+<span class="lineNum">     162 </span>            :      * Any unlink requests arriving after this point will be assigned the next
+<span class="lineNum">     163 </span>            :      * cycle counter, and won't be unlinked until next checkpoint.
+<span class="lineNum">     164 </span>            :      */
+<span class="lineNum">     165 </span><span class="lineCov">         22 :     checkpoint_cycle_ctr++;</span>
+<span class="lineNum">     166 </span><span class="lineCov">         22 : }</span>
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            : /*
+<span class="lineNum">     169 </span>            :  * SyncPostCheckpoint() -- Do post-checkpoint work
+<span class="lineNum">     170 </span>            :  *
+<span class="lineNum">     171 </span>            :  * Remove any lingering files that can now be safely removed.
+<a name="172"><span class="lineNum">     172 </span>            :  */</a>
+<span class="lineNum">     173 </span>            : void
+<span class="lineNum">     174 </span><span class="lineCov">         22 : SyncPostCheckpoint(void)</span>
+<span class="lineNum">     175 </span>            : {
+<span class="lineNum">     176 </span>            :     int         absorb_counter;
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span><span class="lineCov">         22 :     absorb_counter = UNLINKS_PER_ABSORB;</span>
+<span class="lineNum">     179 </span><span class="lineCov">       9402 :     while (pendingUnlinks != NIL)</span>
+<span class="lineNum">     180 </span>            :     {
+<span class="lineNum">     181 </span><span class="lineCov">       9358 :         PendingUnlinkEntry *entry = (PendingUnlinkEntry *) linitial(pendingUnlinks);</span>
+<span class="lineNum">     182 </span>            :         char        path[MAXPGPATH];
+<span class="lineNum">     183 </span>            : 
+<span class="lineNum">     184 </span>            :         /*
+<span class="lineNum">     185 </span>            :          * New entries are appended to the end, so if the entry is new we've
+<span class="lineNum">     186 </span>            :          * reached the end of old entries.
+<span class="lineNum">     187 </span>            :          *
+<span class="lineNum">     188 </span>            :          * Note: if just the right number of consecutive checkpoints fail, we
+<span class="lineNum">     189 </span>            :          * could be fooled here by cycle_ctr wraparound.  However, the only
+<span class="lineNum">     190 </span>            :          * consequence is that we'd delay unlinking for one more checkpoint,
+<span class="lineNum">     191 </span>            :          * which is perfectly tolerable.
+<span class="lineNum">     192 </span>            :          */
+<span class="lineNum">     193 </span><span class="lineCov">       9358 :         if (entry-&gt;cycle_ctr == checkpoint_cycle_ctr)</span>
+<span class="lineNum">     194 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span>            :         /* Unlink the file */
+<span class="lineNum">     197 </span><span class="lineCov">       9358 :         if (syncsw[entry-&gt;tag.handler].sync_unlinkfiletag(&amp;entry-&gt;tag,</span>
+<span class="lineNum">     198 </span>            :                                                           path) &lt; 0)
+<span class="lineNum">     199 </span>            :         {
+<span class="lineNum">     200 </span>            :             /*
+<span class="lineNum">     201 </span>            :              * There's a race condition, when the database is dropped at the
+<span class="lineNum">     202 </span>            :              * same time that we process the pending unlink requests. If the
+<span class="lineNum">     203 </span>            :              * DROP DATABASE deletes the file before we do, we will get ENOENT
+<span class="lineNum">     204 </span>            :              * here. rmtree() also has to ignore ENOENT errors, to deal with
+<span class="lineNum">     205 </span>            :              * the possibility that we delete the file first.
+<span class="lineNum">     206 </span>            :              */
+<span class="lineNum">     207 </span><span class="lineNoCov">          0 :             if (errno != ENOENT)</span>
+<span class="lineNum">     208 </span><span class="lineNoCov">          0 :                 ereport(WARNING,</span>
+<span class="lineNum">     209 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     210 </span>            :                          errmsg(&quot;could not remove file \&quot;%s\&quot;: %m&quot;, path)));
+<span class="lineNum">     211 </span>            :         }
+<span class="lineNum">     212 </span>            : 
+<span class="lineNum">     213 </span>            :         /* And remove the list entry */
+<span class="lineNum">     214 </span><span class="lineCov">       9358 :         pendingUnlinks = list_delete_first(pendingUnlinks);</span>
+<span class="lineNum">     215 </span><span class="lineCov">       9358 :         pfree(entry);</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span>            :         /*
+<span class="lineNum">     218 </span>            :          * As in ProcessSyncRequests, we don't want to stop absorbing fsync
+<span class="lineNum">     219 </span>            :          * requests for along time when there are many deletions to be done.
+<span class="lineNum">     220 </span>            :          * We can safely call AbsorbSyncRequests() at this point in the loop
+<span class="lineNum">     221 </span>            :          * (note it might try to delete list entries).
+<span class="lineNum">     222 </span>            :          */
+<span class="lineNum">     223 </span><span class="lineCov">       9358 :         if (--absorb_counter &lt;= 0)</span>
+<span class="lineNum">     224 </span>            :         {
+<span class="lineNum">     225 </span><span class="lineCov">        934 :             AbsorbSyncRequests();</span>
+<span class="lineNum">     226 </span><span class="lineCov">        934 :             absorb_counter = UNLINKS_PER_ABSORB;</span>
+<span class="lineNum">     227 </span>            :         }
+<span class="lineNum">     228 </span>            :     }
+<span class="lineNum">     229 </span><span class="lineCov">         22 : }</span>
+<span class="lineNum">     230 </span>            : 
+<span class="lineNum">     231 </span>            : /*
+<span class="lineNum">     232 </span>            : 
+<span class="lineNum">     233 </span>            :  *  ProcessSyncRequests() -- Process queued fsync requests.
+<a name="234"><span class="lineNum">     234 </span>            :  */</a>
+<span class="lineNum">     235 </span>            : void
+<span class="lineNum">     236 </span><span class="lineCov">         22 : ProcessSyncRequests(void)</span>
+<span class="lineNum">     237 </span>            : {
+<span class="lineNum">     238 </span>            :     static bool sync_in_progress = false;
+<span class="lineNum">     239 </span>            : 
+<span class="lineNum">     240 </span>            :     HASH_SEQ_STATUS hstat;
+<span class="lineNum">     241 </span>            :     PendingFsyncEntry *entry;
+<span class="lineNum">     242 </span>            :     int         absorb_counter;
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            :     /* Statistics on sync times */
+<span class="lineNum">     245 </span><span class="lineCov">         22 :     int         processed = 0;</span>
+<span class="lineNum">     246 </span>            :     instr_time  sync_start,
+<span class="lineNum">     247 </span>            :                 sync_end,
+<span class="lineNum">     248 </span>            :                 sync_diff;
+<span class="lineNum">     249 </span>            :     uint64      elapsed;
+<span class="lineNum">     250 </span><span class="lineCov">         22 :     uint64      longest = 0;</span>
+<span class="lineNum">     251 </span><span class="lineCov">         22 :     uint64      total_elapsed = 0;</span>
+<span class="lineNum">     252 </span>            : 
+<span class="lineNum">     253 </span>            :     /*
+<span class="lineNum">     254 </span>            :      * This is only called during checkpoints, and checkpoints should only
+<span class="lineNum">     255 </span>            :      * occur in processes that have created a pendingOps.
+<span class="lineNum">     256 </span>            :      */
+<span class="lineNum">     257 </span><span class="lineCov">         22 :     if (!pendingOps)</span>
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot sync without a pendingOps table&quot;);</span>
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span>            :     /*
+<span class="lineNum">     261 </span>            :      * If we are in the checkpointer, the sync had better include all fsync
+<span class="lineNum">     262 </span>            :      * requests that were queued by backends up to this point.  The tightest
+<span class="lineNum">     263 </span>            :      * race condition that could occur is that a buffer that must be written
+<span class="lineNum">     264 </span>            :      * and fsync'd for the checkpoint could have been dumped by a backend just
+<span class="lineNum">     265 </span>            :      * before it was visited by BufferSync().  We know the backend will have
+<span class="lineNum">     266 </span>            :      * queued an fsync request before clearing the buffer's dirtybit, so we
+<span class="lineNum">     267 </span>            :      * are safe as long as we do an Absorb after completing BufferSync().
+<span class="lineNum">     268 </span>            :      */
+<span class="lineNum">     269 </span><span class="lineCov">         22 :     AbsorbSyncRequests();</span>
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span>            :     /*
+<span class="lineNum">     272 </span>            :      * To avoid excess fsync'ing (in the worst case, maybe a never-terminating
+<span class="lineNum">     273 </span>            :      * checkpoint), we want to ignore fsync requests that are entered into the
+<span class="lineNum">     274 </span>            :      * hashtable after this point --- they should be processed next time,
+<span class="lineNum">     275 </span>            :      * instead.  We use sync_cycle_ctr to tell old entries apart from new
+<span class="lineNum">     276 </span>            :      * ones: new ones will have cycle_ctr equal to the incremented value of
+<span class="lineNum">     277 </span>            :      * sync_cycle_ctr.
+<span class="lineNum">     278 </span>            :      *
+<span class="lineNum">     279 </span>            :      * In normal circumstances, all entries present in the table at this point
+<span class="lineNum">     280 </span>            :      * will have cycle_ctr exactly equal to the current (about to be old)
+<span class="lineNum">     281 </span>            :      * value of sync_cycle_ctr.  However, if we fail partway through the
+<span class="lineNum">     282 </span>            :      * fsync'ing loop, then older values of cycle_ctr might remain when we
+<span class="lineNum">     283 </span>            :      * come back here to try again.  Repeated checkpoint failures would
+<span class="lineNum">     284 </span>            :      * eventually wrap the counter around to the point where an old entry
+<span class="lineNum">     285 </span>            :      * might appear new, causing us to skip it, possibly allowing a checkpoint
+<span class="lineNum">     286 </span>            :      * to succeed that should not have.  To forestall wraparound, any time the
+<span class="lineNum">     287 </span>            :      * previous ProcessSyncRequests() failed to complete, run through the
+<span class="lineNum">     288 </span>            :      * table and forcibly set cycle_ctr = sync_cycle_ctr.
+<span class="lineNum">     289 </span>            :      *
+<span class="lineNum">     290 </span>            :      * Think not to merge this loop with the main loop, as the problem is
+<span class="lineNum">     291 </span>            :      * exactly that that loop may fail before having visited all the entries.
+<span class="lineNum">     292 </span>            :      * From a performance point of view it doesn't matter anyway, as this path
+<span class="lineNum">     293 </span>            :      * will never be taken in a system that's functioning normally.
+<span class="lineNum">     294 </span>            :      */
+<span class="lineNum">     295 </span><span class="lineCov">         22 :     if (sync_in_progress)</span>
+<span class="lineNum">     296 </span>            :     {
+<span class="lineNum">     297 </span>            :         /* prior try failed, so update any stale cycle_ctr values */
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :         hash_seq_init(&amp;hstat, pendingOps);</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :         while ((entry = (PendingFsyncEntry *) hash_seq_search(&amp;hstat)) != NULL)</span>
+<span class="lineNum">     300 </span>            :         {
+<span class="lineNum">     301 </span><span class="lineNoCov">          0 :             entry-&gt;cycle_ctr = sync_cycle_ctr;</span>
+<span class="lineNum">     302 </span>            :         }
+<span class="lineNum">     303 </span>            :     }
+<span class="lineNum">     304 </span>            : 
+<span class="lineNum">     305 </span>            :     /* Advance counter so that new hashtable entries are distinguishable */
+<span class="lineNum">     306 </span><span class="lineCov">         22 :     sync_cycle_ctr++;</span>
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span>            :     /* Set flag to detect failure if we don't reach the end of the loop */
+<span class="lineNum">     309 </span><span class="lineCov">         22 :     sync_in_progress = true;</span>
+<span class="lineNum">     310 </span>            : 
+<span class="lineNum">     311 </span>            :     /* Now scan the hashtable for fsync requests to process */
+<span class="lineNum">     312 </span><span class="lineCov">         22 :     absorb_counter = FSYNCS_PER_ABSORB;</span>
+<span class="lineNum">     313 </span><span class="lineCov">         22 :     hash_seq_init(&amp;hstat, pendingOps);</span>
+<span class="lineNum">     314 </span><span class="lineCov">         22 :     while ((entry = (PendingFsyncEntry *) hash_seq_search(&amp;hstat)) != NULL)</span>
+<span class="lineNum">     315 </span>            :     {
+<span class="lineNum">     316 </span>            :         int         failures;
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span>            :         /*
+<span class="lineNum">     319 </span>            :          * If fsync is off then we don't have to bother opening the file at
+<span class="lineNum">     320 </span>            :          * all.  (We delay checking until this point so that changing fsync on
+<span class="lineNum">     321 </span>            :          * the fly behaves sensibly.)
+<span class="lineNum">     322 </span>            :          */
+<span class="lineNum">     323 </span><span class="lineCov">       8618 :         if (!enableFsync)</span>
+<span class="lineNum">     324 </span><span class="lineCov">       8618 :             continue;</span>
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span>            :         /*
+<span class="lineNum">     327 </span>            :          * If the entry is new then don't process it this time; it is new.
+<span class="lineNum">     328 </span>            :          * Note &quot;continue&quot; bypasses the hash-remove call at the bottom of the
+<span class="lineNum">     329 </span>            :          * loop.
+<span class="lineNum">     330 </span>            :          */
+<span class="lineNum">     331 </span><span class="lineNoCov">          0 :         if (entry-&gt;cycle_ctr == sync_cycle_ctr)</span>
+<span class="lineNum">     332 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     333 </span>            : 
+<span class="lineNum">     334 </span>            :         /* Else assert we haven't missed it */
+<span class="lineNum">     335 </span><span class="lineNoCov">          0 :         Assert((CycleCtr) (entry-&gt;cycle_ctr + 1) == sync_cycle_ctr);</span>
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span>            :         /*
+<span class="lineNum">     338 </span>            :          * If in checkpointer, we want to absorb pending requests every so
+<span class="lineNum">     339 </span>            :          * often to prevent overflow of the fsync request queue.  It is
+<span class="lineNum">     340 </span>            :          * unspecified whether newly-added entries will be visited by
+<span class="lineNum">     341 </span>            :          * hash_seq_search, but we don't care since we don't need to process
+<span class="lineNum">     342 </span>            :          * them anyway.
+<span class="lineNum">     343 </span>            :          */
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :         if (--absorb_counter &lt;= 0)</span>
+<span class="lineNum">     345 </span>            :         {
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :             AbsorbSyncRequests();</span>
+<span class="lineNum">     347 </span><span class="lineNoCov">          0 :             absorb_counter = FSYNCS_PER_ABSORB;</span>
+<span class="lineNum">     348 </span>            :         }
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span>            :         /*
+<span class="lineNum">     351 </span>            :          * The fsync table could contain requests to fsync segments that have
+<span class="lineNum">     352 </span>            :          * been deleted (unlinked) by the time we get to them. Rather than
+<span class="lineNum">     353 </span>            :          * just hoping an ENOENT (or EACCES on Windows) error can be ignored,
+<span class="lineNum">     354 </span>            :          * what we do on error is absorb pending requests and then retry.
+<span class="lineNum">     355 </span>            :          * Since mdunlink() queues a &quot;cancel&quot; message before actually
+<span class="lineNum">     356 </span>            :          * unlinking, the fsync request is guaranteed to be marked canceled
+<span class="lineNum">     357 </span>            :          * after the absorb if it really was this case. DROP DATABASE likewise
+<span class="lineNum">     358 </span>            :          * has to tell us to forget fsync requests before it starts deletions.
+<span class="lineNum">     359 </span>            :          */
+<span class="lineNum">     360 </span><span class="lineNoCov">          0 :         for (failures = 0; !entry-&gt;canceled; failures++)</span>
+<span class="lineNum">     361 </span>            :         {
+<span class="lineNum">     362 </span>            :             char        path[MAXPGPATH];
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span><span class="lineNoCov">          0 :             INSTR_TIME_SET_CURRENT(sync_start);</span>
+<span class="lineNum">     365 </span><span class="lineNoCov">          0 :             if (syncsw[entry-&gt;tag.handler].sync_syncfiletag(&amp;entry-&gt;tag,</span>
+<span class="lineNum">     366 </span>            :                                                             path) == 0)
+<span class="lineNum">     367 </span>            :             {
+<span class="lineNum">     368 </span>            :                 /* Success; update statistics about sync timing */
+<span class="lineNum">     369 </span><span class="lineNoCov">          0 :                 INSTR_TIME_SET_CURRENT(sync_end);</span>
+<span class="lineNum">     370 </span><span class="lineNoCov">          0 :                 sync_diff = sync_end;</span>
+<span class="lineNum">     371 </span><span class="lineNoCov">          0 :                 INSTR_TIME_SUBTRACT(sync_diff, sync_start);</span>
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :                 elapsed = INSTR_TIME_GET_MICROSEC(sync_diff);</span>
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 :                 if (elapsed &gt; longest)</span>
+<span class="lineNum">     374 </span><span class="lineNoCov">          0 :                     longest = elapsed;</span>
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :                 total_elapsed += elapsed;</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :                 processed++;</span>
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span><span class="lineNoCov">          0 :                 if (log_checkpoints)</span>
+<span class="lineNum">     379 </span><span class="lineNoCov">          0 :                     elog(DEBUG1, &quot;checkpoint sync: number=%d file=%s time=%.3f msec&quot;,</span>
+<span class="lineNum">     380 </span>            :                          processed,
+<span class="lineNum">     381 </span>            :                          path,
+<span class="lineNum">     382 </span>            :                          (double) elapsed / 1000);
+<span class="lineNum">     383 </span>            : 
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :                 break;          /* out of retry loop */</span>
+<span class="lineNum">     385 </span>            :             }
+<span class="lineNum">     386 </span>            : 
+<span class="lineNum">     387 </span>            :             /*
+<span class="lineNum">     388 </span>            :              * It is possible that the relation has been dropped or truncated
+<span class="lineNum">     389 </span>            :              * since the fsync request was entered. Therefore, allow ENOENT,
+<span class="lineNum">     390 </span>            :              * but only if we didn't fail already on this file.
+<span class="lineNum">     391 </span>            :              */
+<span class="lineNum">     392 </span><span class="lineNoCov">          0 :             if (!FILE_POSSIBLY_DELETED(errno) || failures &gt; 0)</span>
+<span class="lineNum">     393 </span><span class="lineNoCov">          0 :                 ereport(data_sync_elevel(ERROR),</span>
+<span class="lineNum">     394 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     395 </span>            :                          errmsg(&quot;could not fsync file \&quot;%s\&quot;: %m&quot;,
+<span class="lineNum">     396 </span>            :                                 path)));
+<span class="lineNum">     397 </span>            :             else
+<span class="lineNum">     398 </span><span class="lineNoCov">          0 :                 ereport(DEBUG1,</span>
+<span class="lineNum">     399 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     400 </span>            :                          errmsg(&quot;could not fsync file \&quot;%s\&quot; but retrying: %m&quot;,
+<span class="lineNum">     401 </span>            :                                 path)));
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span>            :             /*
+<span class="lineNum">     404 </span>            :              * Absorb incoming requests and check to see if a cancel arrived
+<span class="lineNum">     405 </span>            :              * for this relation fork.
+<span class="lineNum">     406 </span>            :              */
+<span class="lineNum">     407 </span><span class="lineNoCov">          0 :             AbsorbSyncRequests();</span>
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :             absorb_counter = FSYNCS_PER_ABSORB; /* might as well... */</span>
+<span class="lineNum">     409 </span>            :         }                       /* end retry loop */
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span>            :         /* We are done with this entry, remove it */
+<span class="lineNum">     412 </span><span class="lineNoCov">          0 :         if (hash_search(pendingOps, &amp;entry-&gt;tag, HASH_REMOVE, NULL) == NULL)</span>
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;pendingOps corrupted&quot;);</span>
+<span class="lineNum">     414 </span>            :     }                           /* end loop over hashtable entries */
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span>            :     /* Return sync performance metrics for report at checkpoint end */
+<span class="lineNum">     417 </span><span class="lineCov">         22 :     CheckpointStats.ckpt_sync_rels = processed;</span>
+<span class="lineNum">     418 </span><span class="lineCov">         22 :     CheckpointStats.ckpt_longest_sync = longest;</span>
+<span class="lineNum">     419 </span><span class="lineCov">         22 :     CheckpointStats.ckpt_agg_sync_time = total_elapsed;</span>
+<span class="lineNum">     420 </span>            : 
+<span class="lineNum">     421 </span>            :     /* Flag successful completion of ProcessSyncRequests */
+<span class="lineNum">     422 </span><span class="lineCov">         22 :     sync_in_progress = false;</span>
+<span class="lineNum">     423 </span><span class="lineCov">         22 : }</span>
+<span class="lineNum">     424 </span>            : 
+<span class="lineNum">     425 </span>            : /*
+<span class="lineNum">     426 </span>            :  * RememberSyncRequest() -- callback from checkpointer side of sync request
+<span class="lineNum">     427 </span>            :  *
+<span class="lineNum">     428 </span>            :  * We stuff fsync requests into the local hash table for execution
+<span class="lineNum">     429 </span>            :  * during the checkpointer's next checkpoint.  UNLINK requests go into a
+<span class="lineNum">     430 </span>            :  * separate linked list, however, because they get processed separately.
+<span class="lineNum">     431 </span>            :  *
+<span class="lineNum">     432 </span>            :  * See sync.h for more information on the types of sync requests supported.
+<a name="433"><span class="lineNum">     433 </span>            :  */</a>
+<span class="lineNum">     434 </span>            : void
+<span class="lineNum">     435 </span><span class="lineCov">     109232 : RememberSyncRequest(const FileTag *ftag, SyncRequestType type)</span>
+<span class="lineNum">     436 </span>            : {
+<span class="lineNum">     437 </span><span class="lineCov">     109232 :     Assert(pendingOps);</span>
+<span class="lineNum">     438 </span>            : 
+<span class="lineNum">     439 </span><span class="lineCov">     109232 :     if (type == SYNC_FORGET_REQUEST)</span>
+<span class="lineNum">     440 </span>            :     {
+<span class="lineNum">     441 </span>            :         PendingFsyncEntry *entry;
+<span class="lineNum">     442 </span>            : 
+<span class="lineNum">     443 </span>            :         /* Cancel previously entered request */
+<span class="lineNum">     444 </span><span class="lineCov">      37636 :         entry = (PendingFsyncEntry *) hash_search(pendingOps,</span>
+<span class="lineNum">     445 </span>            :                                                   (void *) ftag,
+<span class="lineNum">     446 </span>            :                                                   HASH_FIND,
+<span class="lineNum">     447 </span>            :                                                   NULL);
+<span class="lineNum">     448 </span><span class="lineCov">      37636 :         if (entry != NULL)</span>
+<span class="lineNum">     449 </span><span class="lineCov">        150 :             entry-&gt;canceled = true;</span>
+<span class="lineNum">     450 </span>            :     }
+<span class="lineNum">     451 </span><span class="lineCov">      71596 :     else if (type == SYNC_FILTER_REQUEST)</span>
+<span class="lineNum">     452 </span>            :     {
+<span class="lineNum">     453 </span>            :         HASH_SEQ_STATUS hstat;
+<span class="lineNum">     454 </span>            :         PendingFsyncEntry *entry;
+<span class="lineNum">     455 </span>            :         ListCell   *cell;
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span>            :         /* Cancel matching fsync requests */
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 :         hash_seq_init(&amp;hstat, pendingOps);</span>
+<span class="lineNum">     459 </span><span class="lineNoCov">          0 :         while ((entry = (PendingFsyncEntry *) hash_seq_search(&amp;hstat)) != NULL)</span>
+<span class="lineNum">     460 </span>            :         {
+<span class="lineNum">     461 </span><span class="lineNoCov">          0 :             if (entry-&gt;tag.handler == ftag-&gt;handler &amp;&amp;</span>
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :                 syncsw[ftag-&gt;handler].sync_filetagmatches(ftag, &amp;entry-&gt;tag))</span>
+<span class="lineNum">     463 </span><span class="lineNoCov">          0 :                 entry-&gt;canceled = true;</span>
+<span class="lineNum">     464 </span>            :         }
+<span class="lineNum">     465 </span>            : 
+<span class="lineNum">     466 </span>            :         /* Remove matching unlink requests */
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 :         foreach(cell, pendingUnlinks)</span>
+<span class="lineNum">     468 </span>            :         {
+<span class="lineNum">     469 </span><span class="lineNoCov">          0 :             PendingUnlinkEntry *entry = (PendingUnlinkEntry *) lfirst(cell);</span>
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span><span class="lineNoCov">          0 :             if (entry-&gt;tag.handler == ftag-&gt;handler &amp;&amp;</span>
+<span class="lineNum">     472 </span><span class="lineNoCov">          0 :                 syncsw[ftag-&gt;handler].sync_filetagmatches(ftag, &amp;entry-&gt;tag))</span>
+<span class="lineNum">     473 </span>            :             {
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :                 pendingUnlinks = foreach_delete_current(pendingUnlinks, cell);</span>
+<span class="lineNum">     475 </span><span class="lineNoCov">          0 :                 pfree(entry);</span>
+<span class="lineNum">     476 </span>            :             }
+<span class="lineNum">     477 </span>            :         }
+<span class="lineNum">     478 </span>            :     }
+<span class="lineNum">     479 </span><span class="lineCov">      71596 :     else if (type == SYNC_UNLINK_REQUEST)</span>
+<span class="lineNum">     480 </span>            :     {
+<span class="lineNum">     481 </span>            :         /* Unlink request: put it in the linked list */
+<span class="lineNum">     482 </span><span class="lineCov">       9358 :         MemoryContext oldcxt = MemoryContextSwitchTo(pendingOpsCxt);</span>
+<span class="lineNum">     483 </span>            :         PendingUnlinkEntry *entry;
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span><span class="lineCov">       9358 :         entry = palloc(sizeof(PendingUnlinkEntry));</span>
+<span class="lineNum">     486 </span><span class="lineCov">       9358 :         entry-&gt;tag = *ftag;</span>
+<span class="lineNum">     487 </span><span class="lineCov">       9358 :         entry-&gt;cycle_ctr = checkpoint_cycle_ctr;</span>
+<span class="lineNum">     488 </span>            : 
+<span class="lineNum">     489 </span><span class="lineCov">       9358 :         pendingUnlinks = lappend(pendingUnlinks, entry);</span>
+<span class="lineNum">     490 </span>            : 
+<span class="lineNum">     491 </span><span class="lineCov">       9358 :         MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     492 </span>            :     }
+<span class="lineNum">     493 </span>            :     else
+<span class="lineNum">     494 </span>            :     {
+<span class="lineNum">     495 </span>            :         /* Normal case: enter a request to fsync this segment */
+<span class="lineNum">     496 </span><span class="lineCov">      62238 :         MemoryContext oldcxt = MemoryContextSwitchTo(pendingOpsCxt);</span>
+<span class="lineNum">     497 </span>            :         PendingFsyncEntry *entry;
+<span class="lineNum">     498 </span>            :         bool        found;
+<span class="lineNum">     499 </span>            : 
+<span class="lineNum">     500 </span><span class="lineCov">      62238 :         Assert(type == SYNC_REQUEST);</span>
+<span class="lineNum">     501 </span>            : 
+<span class="lineNum">     502 </span><span class="lineCov">      62238 :         entry = (PendingFsyncEntry *) hash_search(pendingOps,</span>
+<span class="lineNum">     503 </span>            :                                                   (void *) ftag,
+<span class="lineNum">     504 </span>            :                                                   HASH_ENTER,
+<span class="lineNum">     505 </span>            :                                                   &amp;found);
+<span class="lineNum">     506 </span>            :         /* if new entry, initialize it */
+<span class="lineNum">     507 </span><span class="lineCov">      62238 :         if (!found)</span>
+<span class="lineNum">     508 </span>            :         {
+<span class="lineNum">     509 </span><span class="lineCov">       6062 :             entry-&gt;cycle_ctr = sync_cycle_ctr;</span>
+<span class="lineNum">     510 </span><span class="lineCov">       6062 :             entry-&gt;canceled = false;</span>
+<span class="lineNum">     511 </span>            :         }
+<span class="lineNum">     512 </span>            : 
+<span class="lineNum">     513 </span>            :         /*
+<span class="lineNum">     514 </span>            :          * NB: it's intentional that we don't change cycle_ctr if the entry
+<span class="lineNum">     515 </span>            :          * already exists.  The cycle_ctr must represent the oldest fsync
+<span class="lineNum">     516 </span>            :          * request that could be in the entry.
+<span class="lineNum">     517 </span>            :          */
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span><span class="lineCov">      62238 :         MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     520 </span>            :     }
+<span class="lineNum">     521 </span><span class="lineCov">     109232 : }</span>
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span>            : /*
+<span class="lineNum">     524 </span>            :  * Register the sync request locally, or forward it to the checkpointer.
+<span class="lineNum">     525 </span>            :  *
+<span class="lineNum">     526 </span>            :  * If retryOnError is true, we'll keep trying if there is no space in the
+<span class="lineNum">     527 </span>            :  * queue.  Return true if we succeeded, or false if there wasn't space.
+<a name="528"><span class="lineNum">     528 </span>            :  */</a>
+<span class="lineNum">     529 </span>            : bool
+<span class="lineNum">     530 </span><span class="lineCov">     109232 : RegisterSyncRequest(const FileTag *ftag, SyncRequestType type,</span>
+<span class="lineNum">     531 </span>            :                     bool retryOnError)
+<span class="lineNum">     532 </span>            : {
+<span class="lineNum">     533 </span>            :     bool        ret;
+<span class="lineNum">     534 </span>            : 
+<span class="lineNum">     535 </span><span class="lineCov">     109232 :     if (pendingOps != NULL)</span>
+<span class="lineNum">     536 </span>            :     {
+<span class="lineNum">     537 </span>            :         /* standalone backend or startup process: fsync state is local */
+<span class="lineNum">     538 </span><span class="lineCov">      24992 :         RememberSyncRequest(ftag, type);</span>
+<span class="lineNum">     539 </span><span class="lineCov">      24992 :         return true;</span>
+<span class="lineNum">     540 </span>            :     }
+<span class="lineNum">     541 </span>            : 
+<span class="lineNum">     542 </span>            :     for (;;)
+<span class="lineNum">     543 </span>            :     {
+<span class="lineNum">     544 </span>            :         /*
+<span class="lineNum">     545 </span>            :          * Notify the checkpointer about it.  If we fail to queue a message in
+<span class="lineNum">     546 </span>            :          * retryOnError mode, we have to sleep and try again ... ugly, but
+<span class="lineNum">     547 </span>            :          * hopefully won't happen often.
+<span class="lineNum">     548 </span>            :          *
+<span class="lineNum">     549 </span>            :          * XXX should we CHECK_FOR_INTERRUPTS in this loop?  Escaping with an
+<span class="lineNum">     550 </span>            :          * error in the case of SYNC_UNLINK_REQUEST would leave the
+<span class="lineNum">     551 </span>            :          * no-longer-used file still present on disk, which would be bad, so
+<span class="lineNum">     552 </span>            :          * I'm inclined to assume that the checkpointer will always empty the
+<span class="lineNum">     553 </span>            :          * queue soon.
+<span class="lineNum">     554 </span>            :          */
+<span class="lineNum">     555 </span><span class="lineCov">      84240 :         ret = ForwardSyncRequest(ftag, type);</span>
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span>            :         /*
+<span class="lineNum">     558 </span>            :          * If we are successful in queueing the request, or we failed and were
+<span class="lineNum">     559 </span>            :          * instructed not to retry on error, break.
+<span class="lineNum">     560 </span>            :          */
+<span class="lineNum">     561 </span><span class="lineCov">      84240 :         if (ret || (!ret &amp;&amp; !retryOnError))</span>
+<span class="lineNum">     562 </span>            :             break;
+<span class="lineNum">     563 </span>            : 
+<span class="lineNum">     564 </span><span class="lineNoCov">          0 :         pg_usleep(10000L);</span>
+<span class="lineNum">     565 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     566 </span>            : 
+<span class="lineNum">     567 </span><span class="lineCov">      84240 :     return ret;</span>
+<span class="lineNum">     568 </span>            : }
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span>            : /*
+<span class="lineNum">     571 </span>            :  * In archive recovery, we rely on checkpointer to do fsyncs, but we will have
+<span class="lineNum">     572 </span>            :  * already created the pendingOps during initialization of the startup
+<span class="lineNum">     573 </span>            :  * process.  Calling this function drops the local pendingOps so that
+<span class="lineNum">     574 </span>            :  * subsequent requests will be forwarded to checkpointer.
+<a name="575"><span class="lineNum">     575 </span>            :  */</a>
+<span class="lineNum">     576 </span>            : void
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 : EnableSyncRequestForwarding(void)</span>
+<span class="lineNum">     578 </span>            : {
+<span class="lineNum">     579 </span>            :     /* Perform any pending fsyncs we may have queued up, then drop table */
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :     if (pendingOps)</span>
+<span class="lineNum">     581 </span>            :     {
+<span class="lineNum">     582 </span><span class="lineNoCov">          0 :         ProcessSyncRequests();</span>
+<span class="lineNum">     583 </span><span class="lineNoCov">          0 :         hash_destroy(pendingOps);</span>
+<span class="lineNum">     584 </span>            :     }
+<span class="lineNum">     585 </span><span class="lineNoCov">          0 :     pendingOps = NULL;</span>
+<span class="lineNum">     586 </span>            : 
+<span class="lineNum">     587 </span>            :     /*
+<span class="lineNum">     588 </span>            :      * We should not have any pending unlink requests, since mdunlink doesn't
+<span class="lineNum">     589 </span>            :      * queue unlink requests when isRedo.
+<span class="lineNum">     590 </span>            :      */
+<span class="lineNum">     591 </span><span class="lineNoCov">          0 :     Assert(pendingUnlinks == NIL);</span>
+<span class="lineNum">     592 </span><span class="lineNoCov">          0 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

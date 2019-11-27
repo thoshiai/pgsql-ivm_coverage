@@ -1,0 +1,748 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/brin/brin_revmap.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/brin</a> - brin_revmap.c<span style="font-size: 80%;"> (source / <a href="brin_revmap.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">187</td>
+            <td class="headerCovTableEntry">217</td>
+            <td class="headerCovTableEntryMed">86.2 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">11</td>
+            <td class="headerCovTableEntry">11</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*</a>
+<span class="lineNum">       2 </span>            :  * brin_revmap.c
+<span class="lineNum">       3 </span>            :  *      Range map for BRIN indexes
+<span class="lineNum">       4 </span>            :  *
+<span class="lineNum">       5 </span>            :  * The range map (revmap) is a translation structure for BRIN indexes: for each
+<span class="lineNum">       6 </span>            :  * page range there is one summary tuple, and its location is tracked by the
+<span class="lineNum">       7 </span>            :  * revmap.  Whenever a new tuple is inserted into a table that violates the
+<span class="lineNum">       8 </span>            :  * previously recorded summary values, a new tuple is inserted into the index
+<span class="lineNum">       9 </span>            :  * and the revmap is updated to point to it.
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * The revmap is stored in the first pages of the index, immediately following
+<span class="lineNum">      12 </span>            :  * the metapage.  When the revmap needs to be expanded, all tuples on the
+<span class="lineNum">      13 </span>            :  * regular BRIN page at that block (if any) are moved out of the way.
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      16 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      17 </span>            :  *
+<span class="lineNum">      18 </span>            :  * IDENTIFICATION
+<span class="lineNum">      19 </span>            :  *    src/backend/access/brin/brin_revmap.c
+<span class="lineNum">      20 </span>            :  */
+<span class="lineNum">      21 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : #include &quot;access/brin_page.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;access/brin_pageops.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;access/brin_revmap.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;access/brin_tuple.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;access/brin_xlog.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;access/rmgr.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;access/xloginsert.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;storage/bufmgr.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;storage/lmgr.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : 
+<span class="lineNum">      36 </span>            : /*
+<span class="lineNum">      37 </span>            :  * In revmap pages, each item stores an ItemPointerData.  These defines let one
+<span class="lineNum">      38 </span>            :  * find the logical revmap page number and index number of the revmap item for
+<span class="lineNum">      39 </span>            :  * the given heap block number.
+<span class="lineNum">      40 </span>            :  */
+<span class="lineNum">      41 </span>            : #define HEAPBLK_TO_REVMAP_BLK(pagesPerRange, heapBlk) \
+<span class="lineNum">      42 </span>            :     ((heapBlk / pagesPerRange) / REVMAP_PAGE_MAXITEMS)
+<span class="lineNum">      43 </span>            : #define HEAPBLK_TO_REVMAP_INDEX(pagesPerRange, heapBlk) \
+<span class="lineNum">      44 </span>            :     ((heapBlk / pagesPerRange) % REVMAP_PAGE_MAXITEMS)
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span>            : 
+<span class="lineNum">      47 </span>            : struct BrinRevmap
+<span class="lineNum">      48 </span>            : {
+<span class="lineNum">      49 </span>            :     Relation    rm_irel;
+<span class="lineNum">      50 </span>            :     BlockNumber rm_pagesPerRange;
+<span class="lineNum">      51 </span>            :     BlockNumber rm_lastRevmapPage;  /* cached from the metapage */
+<span class="lineNum">      52 </span>            :     Buffer      rm_metaBuf;
+<span class="lineNum">      53 </span>            :     Buffer      rm_currBuf;
+<span class="lineNum">      54 </span>            : };
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : /* typedef appears in brin_revmap.h */
+<span class="lineNum">      57 </span>            : 
+<span class="lineNum">      58 </span>            : 
+<span class="lineNum">      59 </span>            : static BlockNumber revmap_get_blkno(BrinRevmap *revmap,
+<span class="lineNum">      60 </span>            :                                     BlockNumber heapBlk);
+<span class="lineNum">      61 </span>            : static Buffer revmap_get_buffer(BrinRevmap *revmap, BlockNumber heapBlk);
+<span class="lineNum">      62 </span>            : static BlockNumber revmap_extend_and_get_blkno(BrinRevmap *revmap,
+<span class="lineNum">      63 </span>            :                                                BlockNumber heapBlk);
+<span class="lineNum">      64 </span>            : static void revmap_physical_extend(BrinRevmap *revmap);
+<span class="lineNum">      65 </span>            : 
+<span class="lineNum">      66 </span>            : /*
+<span class="lineNum">      67 </span>            :  * Initialize an access object for a range map.  This must be freed by
+<span class="lineNum">      68 </span>            :  * brinRevmapTerminate when caller is done with it.
+<a name="69"><span class="lineNum">      69 </span>            :  */</a>
+<span class="lineNum">      70 </span>            : BrinRevmap *
+<span class="lineNum">      71 </span><span class="lineCov">       1050 : brinRevmapInitialize(Relation idxrel, BlockNumber *pagesPerRange,</span>
+<span class="lineNum">      72 </span>            :                      Snapshot snapshot)
+<span class="lineNum">      73 </span>            : {
+<span class="lineNum">      74 </span>            :     BrinRevmap *revmap;
+<span class="lineNum">      75 </span>            :     Buffer      meta;
+<span class="lineNum">      76 </span>            :     BrinMetaPageData *metadata;
+<span class="lineNum">      77 </span>            :     Page        page;
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span><span class="lineCov">       1050 :     meta = ReadBuffer(idxrel, BRIN_METAPAGE_BLKNO);</span>
+<span class="lineNum">      80 </span><span class="lineCov">       1050 :     LockBuffer(meta, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">      81 </span><span class="lineCov">       1050 :     page = BufferGetPage(meta);</span>
+<span class="lineNum">      82 </span><span class="lineCov">       1050 :     TestForOldSnapshot(snapshot, idxrel, page);</span>
+<span class="lineNum">      83 </span><span class="lineCov">       1050 :     metadata = (BrinMetaPageData *) PageGetContents(page);</span>
+<span class="lineNum">      84 </span>            : 
+<span class="lineNum">      85 </span><span class="lineCov">       1050 :     revmap = palloc(sizeof(BrinRevmap));</span>
+<span class="lineNum">      86 </span><span class="lineCov">       1050 :     revmap-&gt;rm_irel = idxrel;</span>
+<span class="lineNum">      87 </span><span class="lineCov">       1050 :     revmap-&gt;rm_pagesPerRange = metadata-&gt;pagesPerRange;</span>
+<span class="lineNum">      88 </span><span class="lineCov">       1050 :     revmap-&gt;rm_lastRevmapPage = metadata-&gt;lastRevmapPage;</span>
+<span class="lineNum">      89 </span><span class="lineCov">       1050 :     revmap-&gt;rm_metaBuf = meta;</span>
+<span class="lineNum">      90 </span><span class="lineCov">       1050 :     revmap-&gt;rm_currBuf = InvalidBuffer;</span>
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span><span class="lineCov">       1050 :     *pagesPerRange = metadata-&gt;pagesPerRange;</span>
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span><span class="lineCov">       1050 :     LockBuffer(meta, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span><span class="lineCov">       1050 :     return revmap;</span>
+<span class="lineNum">      97 </span>            : }
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            : /*
+<span class="lineNum">     100 </span>            :  * Release resources associated with a revmap access object.
+<a name="101"><span class="lineNum">     101 </span>            :  */</a>
+<span class="lineNum">     102 </span>            : void
+<span class="lineNum">     103 </span><span class="lineCov">       1050 : brinRevmapTerminate(BrinRevmap *revmap)</span>
+<span class="lineNum">     104 </span>            : {
+<span class="lineNum">     105 </span><span class="lineCov">       1050 :     ReleaseBuffer(revmap-&gt;rm_metaBuf);</span>
+<span class="lineNum">     106 </span><span class="lineCov">       1050 :     if (revmap-&gt;rm_currBuf != InvalidBuffer)</span>
+<span class="lineNum">     107 </span><span class="lineCov">       1048 :         ReleaseBuffer(revmap-&gt;rm_currBuf);</span>
+<span class="lineNum">     108 </span><span class="lineCov">       1050 :     pfree(revmap);</span>
+<span class="lineNum">     109 </span><span class="lineCov">       1050 : }</span>
+<span class="lineNum">     110 </span>            : 
+<span class="lineNum">     111 </span>            : /*
+<span class="lineNum">     112 </span>            :  * Extend the revmap to cover the given heap block number.
+<a name="113"><span class="lineNum">     113 </span>            :  */</a>
+<span class="lineNum">     114 </span>            : void
+<span class="lineNum">     115 </span><span class="lineCov">        748 : brinRevmapExtend(BrinRevmap *revmap, BlockNumber heapBlk)</span>
+<span class="lineNum">     116 </span>            : {
+<span class="lineNum">     117 </span>            :     BlockNumber mapBlk PG_USED_FOR_ASSERTS_ONLY;
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span><span class="lineCov">        748 :     mapBlk = revmap_extend_and_get_blkno(revmap, heapBlk);</span>
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span>            :     /* Ensure the buffer we got is in the expected range */
+<span class="lineNum">     122 </span><span class="lineCov">        748 :     Assert(mapBlk != InvalidBlockNumber &amp;&amp;</span>
+<span class="lineNum">     123 </span>            :            mapBlk != BRIN_METAPAGE_BLKNO &amp;&amp;
+<span class="lineNum">     124 </span>            :            mapBlk &lt;= revmap-&gt;rm_lastRevmapPage);
+<span class="lineNum">     125 </span><span class="lineCov">        748 : }</span>
+<span class="lineNum">     126 </span>            : 
+<span class="lineNum">     127 </span>            : /*
+<span class="lineNum">     128 </span>            :  * Prepare to insert an entry into the revmap; the revmap buffer in which the
+<span class="lineNum">     129 </span>            :  * entry is to reside is locked and returned.  Most callers should call
+<span class="lineNum">     130 </span>            :  * brinRevmapExtend beforehand, as this routine does not extend the revmap if
+<span class="lineNum">     131 </span>            :  * it's not long enough.
+<span class="lineNum">     132 </span>            :  *
+<span class="lineNum">     133 </span>            :  * The returned buffer is also recorded in the revmap struct; finishing that
+<span class="lineNum">     134 </span>            :  * releases the buffer, therefore the caller needn't do it explicitly.
+<a name="135"><span class="lineNum">     135 </span>            :  */</a>
+<span class="lineNum">     136 </span>            : Buffer
+<span class="lineNum">     137 </span><span class="lineCov">        318 : brinLockRevmapPageForUpdate(BrinRevmap *revmap, BlockNumber heapBlk)</span>
+<span class="lineNum">     138 </span>            : {
+<span class="lineNum">     139 </span>            :     Buffer      rmBuf;
+<span class="lineNum">     140 </span>            : 
+<span class="lineNum">     141 </span><span class="lineCov">        318 :     rmBuf = revmap_get_buffer(revmap, heapBlk);</span>
+<span class="lineNum">     142 </span><span class="lineCov">        318 :     LockBuffer(rmBuf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span><span class="lineCov">        318 :     return rmBuf;</span>
+<span class="lineNum">     145 </span>            : }
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            : /*
+<span class="lineNum">     148 </span>            :  * In the given revmap buffer (locked appropriately by caller), which is used
+<span class="lineNum">     149 </span>            :  * in a BRIN index of pagesPerRange pages per range, set the element
+<span class="lineNum">     150 </span>            :  * corresponding to heap block number heapBlk to the given TID.
+<span class="lineNum">     151 </span>            :  *
+<span class="lineNum">     152 </span>            :  * Once the operation is complete, the caller must update the LSN on the
+<span class="lineNum">     153 </span>            :  * returned buffer.
+<span class="lineNum">     154 </span>            :  *
+<span class="lineNum">     155 </span>            :  * This is used both in regular operation and during WAL replay.
+<a name="156"><span class="lineNum">     156 </span>            :  */</a>
+<span class="lineNum">     157 </span>            : void
+<span class="lineNum">     158 </span><span class="lineCov">        316 : brinSetHeapBlockItemptr(Buffer buf, BlockNumber pagesPerRange,</span>
+<span class="lineNum">     159 </span>            :                         BlockNumber heapBlk, ItemPointerData tid)
+<span class="lineNum">     160 </span>            : {
+<span class="lineNum">     161 </span>            :     RevmapContents *contents;
+<span class="lineNum">     162 </span>            :     ItemPointerData *iptr;
+<span class="lineNum">     163 </span>            :     Page        page;
+<span class="lineNum">     164 </span>            : 
+<span class="lineNum">     165 </span>            :     /* The correct page should already be pinned and locked */
+<span class="lineNum">     166 </span><span class="lineCov">        316 :     page = BufferGetPage(buf);</span>
+<span class="lineNum">     167 </span><span class="lineCov">        316 :     contents = (RevmapContents *) PageGetContents(page);</span>
+<span class="lineNum">     168 </span><span class="lineCov">        316 :     iptr = (ItemPointerData *) contents-&gt;rm_tids;</span>
+<span class="lineNum">     169 </span><span class="lineCov">        316 :     iptr += HEAPBLK_TO_REVMAP_INDEX(pagesPerRange, heapBlk);</span>
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span><span class="lineCov">        316 :     if (ItemPointerIsValid(&amp;tid))</span>
+<span class="lineNum">     172 </span><span class="lineCov">        312 :         ItemPointerSet(iptr,</span>
+<span class="lineNum">     173 </span>            :                        ItemPointerGetBlockNumber(&amp;tid),
+<span class="lineNum">     174 </span>            :                        ItemPointerGetOffsetNumber(&amp;tid));
+<span class="lineNum">     175 </span>            :     else
+<span class="lineNum">     176 </span><span class="lineCov">          4 :         ItemPointerSetInvalid(iptr);</span>
+<span class="lineNum">     177 </span><span class="lineCov">        316 : }</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span>            : /*
+<span class="lineNum">     180 </span>            :  * Fetch the BrinTuple for a given heap block.
+<span class="lineNum">     181 </span>            :  *
+<span class="lineNum">     182 </span>            :  * The buffer containing the tuple is locked, and returned in *buf.  The
+<span class="lineNum">     183 </span>            :  * returned tuple points to the shared buffer and must not be freed; if caller
+<span class="lineNum">     184 </span>            :  * wants to use it after releasing the buffer lock, it must create its own
+<span class="lineNum">     185 </span>            :  * palloc'ed copy.  As an optimization, the caller can pass a pinned buffer
+<span class="lineNum">     186 </span>            :  * *buf on entry, which will avoid a pin-unpin cycle when the next tuple is on
+<span class="lineNum">     187 </span>            :  * the same page as a previous one.
+<span class="lineNum">     188 </span>            :  *
+<span class="lineNum">     189 </span>            :  * If no tuple is found for the given heap range, returns NULL. In that case,
+<span class="lineNum">     190 </span>            :  * *buf might still be updated (and pin must be released by caller), but it's
+<span class="lineNum">     191 </span>            :  * not locked.
+<span class="lineNum">     192 </span>            :  *
+<span class="lineNum">     193 </span>            :  * The output tuple offset within the buffer is returned in *off, and its size
+<span class="lineNum">     194 </span>            :  * is returned in *size.
+<a name="195"><span class="lineNum">     195 </span>            :  */</a>
+<span class="lineNum">     196 </span>            : BrinTuple *
+<span class="lineNum">     197 </span><span class="lineCov">      50848 : brinGetTupleForHeapBlock(BrinRevmap *revmap, BlockNumber heapBlk,</span>
+<span class="lineNum">     198 </span>            :                          Buffer *buf, OffsetNumber *off, Size *size, int mode,
+<span class="lineNum">     199 </span>            :                          Snapshot snapshot)
+<span class="lineNum">     200 </span>            : {
+<span class="lineNum">     201 </span><span class="lineCov">      50848 :     Relation    idxRel = revmap-&gt;rm_irel;</span>
+<span class="lineNum">     202 </span>            :     BlockNumber mapBlk;
+<span class="lineNum">     203 </span>            :     RevmapContents *contents;
+<span class="lineNum">     204 </span>            :     ItemPointerData *iptr;
+<span class="lineNum">     205 </span>            :     BlockNumber blk;
+<span class="lineNum">     206 </span>            :     Page        page;
+<span class="lineNum">     207 </span>            :     ItemId      lp;
+<span class="lineNum">     208 </span>            :     BrinTuple  *tup;
+<span class="lineNum">     209 </span>            :     ItemPointerData previptr;
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span>            :     /* normalize the heap block number to be the first page in the range */
+<span class="lineNum">     212 </span><span class="lineCov">      50848 :     heapBlk = (heapBlk / revmap-&gt;rm_pagesPerRange) * revmap-&gt;rm_pagesPerRange;</span>
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span>            :     /*
+<span class="lineNum">     215 </span>            :      * Compute the revmap page number we need.  If Invalid is returned (i.e.,
+<span class="lineNum">     216 </span>            :      * the revmap page hasn't been created yet), the requested page range is
+<span class="lineNum">     217 </span>            :      * not summarized.
+<span class="lineNum">     218 </span>            :      */
+<span class="lineNum">     219 </span><span class="lineCov">      50848 :     mapBlk = revmap_get_blkno(revmap, heapBlk);</span>
+<span class="lineNum">     220 </span><span class="lineCov">      50848 :     if (mapBlk == InvalidBlockNumber)</span>
+<span class="lineNum">     221 </span>            :     {
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :         *off = InvalidOffsetNumber;</span>
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     224 </span>            :     }
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineCov">      50848 :     ItemPointerSetInvalid(&amp;previptr);</span>
+<span class="lineNum">     227 </span>            :     for (;;)
+<span class="lineNum">     228 </span>            :     {
+<span class="lineNum">     229 </span><span class="lineCov">      50848 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     230 </span>            : 
+<span class="lineNum">     231 </span><span class="lineCov">     100662 :         if (revmap-&gt;rm_currBuf == InvalidBuffer ||</span>
+<span class="lineNum">     232 </span><span class="lineCov">      49814 :             BufferGetBlockNumber(revmap-&gt;rm_currBuf) != mapBlk)</span>
+<span class="lineNum">     233 </span>            :         {
+<span class="lineNum">     234 </span><span class="lineCov">       1034 :             if (revmap-&gt;rm_currBuf != InvalidBuffer)</span>
+<span class="lineNum">     235 </span><span class="lineNoCov">          0 :                 ReleaseBuffer(revmap-&gt;rm_currBuf);</span>
+<span class="lineNum">     236 </span>            : 
+<span class="lineNum">     237 </span><span class="lineCov">       1034 :             Assert(mapBlk != InvalidBlockNumber);</span>
+<span class="lineNum">     238 </span><span class="lineCov">       1034 :             revmap-&gt;rm_currBuf = ReadBuffer(revmap-&gt;rm_irel, mapBlk);</span>
+<span class="lineNum">     239 </span>            :         }
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span><span class="lineCov">      50848 :         LockBuffer(revmap-&gt;rm_currBuf, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span><span class="lineCov">      50848 :         contents = (RevmapContents *)</span>
+<span class="lineNum">     244 </span><span class="lineCov">      50848 :             PageGetContents(BufferGetPage(revmap-&gt;rm_currBuf));</span>
+<span class="lineNum">     245 </span><span class="lineCov">      50848 :         iptr = contents-&gt;rm_tids;</span>
+<span class="lineNum">     246 </span><span class="lineCov">      50848 :         iptr += HEAPBLK_TO_REVMAP_INDEX(revmap-&gt;rm_pagesPerRange, heapBlk);</span>
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span><span class="lineCov">      50848 :         if (!ItemPointerIsValid(iptr))</span>
+<span class="lineNum">     249 </span>            :         {
+<span class="lineNum">     250 </span><span class="lineCov">         28 :             LockBuffer(revmap-&gt;rm_currBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     251 </span><span class="lineCov">         28 :             return NULL;</span>
+<span class="lineNum">     252 </span>            :         }
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span>            :         /*
+<span class="lineNum">     255 </span>            :          * Check the TID we got in a previous iteration, if any, and save the
+<span class="lineNum">     256 </span>            :          * current TID we got from the revmap; if we loop, we can sanity-check
+<span class="lineNum">     257 </span>            :          * that the next one we get is different.  Otherwise we might be stuck
+<span class="lineNum">     258 </span>            :          * looping forever if the revmap is somehow badly broken.
+<span class="lineNum">     259 </span>            :          */
+<span class="lineNum">     260 </span><span class="lineCov">      50820 :         if (ItemPointerIsValid(&amp;previptr) &amp;&amp; ItemPointerEquals(&amp;previptr, iptr))</span>
+<span class="lineNum">     261 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     262 </span>            :                     (errcode(ERRCODE_INDEX_CORRUPTED),
+<span class="lineNum">     263 </span>            :                      errmsg_internal(&quot;corrupted BRIN index: inconsistent range map&quot;)));
+<span class="lineNum">     264 </span><span class="lineCov">      50820 :         previptr = *iptr;</span>
+<span class="lineNum">     265 </span>            : 
+<span class="lineNum">     266 </span><span class="lineCov">      50820 :         blk = ItemPointerGetBlockNumber(iptr);</span>
+<span class="lineNum">     267 </span><span class="lineCov">      50820 :         *off = ItemPointerGetOffsetNumber(iptr);</span>
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span><span class="lineCov">      50820 :         LockBuffer(revmap-&gt;rm_currBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span>            :         /* Ok, got a pointer to where the BrinTuple should be. Fetch it. */
+<span class="lineNum">     272 </span><span class="lineCov">      50820 :         if (!BufferIsValid(*buf) || BufferGetBlockNumber(*buf) != blk)</span>
+<span class="lineNum">     273 </span>            :         {
+<span class="lineNum">     274 </span><span class="lineCov">       5542 :             if (BufferIsValid(*buf))</span>
+<span class="lineNum">     275 </span><span class="lineCov">       4522 :                 ReleaseBuffer(*buf);</span>
+<span class="lineNum">     276 </span><span class="lineCov">       5542 :             *buf = ReadBuffer(idxRel, blk);</span>
+<span class="lineNum">     277 </span>            :         }
+<span class="lineNum">     278 </span><span class="lineCov">      50820 :         LockBuffer(*buf, mode);</span>
+<span class="lineNum">     279 </span><span class="lineCov">      50820 :         page = BufferGetPage(*buf);</span>
+<span class="lineNum">     280 </span><span class="lineCov">      50820 :         TestForOldSnapshot(snapshot, idxRel, page);</span>
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span>            :         /* If we land on a revmap page, start over */
+<span class="lineNum">     283 </span><span class="lineCov">      50820 :         if (BRIN_IS_REGULAR_PAGE(page))</span>
+<span class="lineNum">     284 </span>            :         {
+<span class="lineNum">     285 </span><span class="lineCov">      50820 :             if (*off &gt; PageGetMaxOffsetNumber(page))</span>
+<span class="lineNum">     286 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     287 </span>            :                         (errcode(ERRCODE_INDEX_CORRUPTED),
+<span class="lineNum">     288 </span>            :                          errmsg_internal(&quot;corrupted BRIN index: inconsistent range map&quot;)));
+<span class="lineNum">     289 </span><span class="lineCov">      50820 :             lp = PageGetItemId(page, *off);</span>
+<span class="lineNum">     290 </span><span class="lineCov">      50820 :             if (ItemIdIsUsed(lp))</span>
+<span class="lineNum">     291 </span>            :             {
+<span class="lineNum">     292 </span><span class="lineCov">      50820 :                 tup = (BrinTuple *) PageGetItem(page, lp);</span>
+<span class="lineNum">     293 </span>            : 
+<span class="lineNum">     294 </span><span class="lineCov">      50820 :                 if (tup-&gt;bt_blkno == heapBlk)</span>
+<span class="lineNum">     295 </span>            :                 {
+<span class="lineNum">     296 </span><span class="lineCov">      50820 :                     if (size)</span>
+<span class="lineNum">     297 </span><span class="lineCov">      49600 :                         *size = ItemIdGetLength(lp);</span>
+<span class="lineNum">     298 </span>            :                     /* found it! */
+<span class="lineNum">     299 </span><span class="lineCov">      50820 :                     return tup;</span>
+<span class="lineNum">     300 </span>            :                 }
+<span class="lineNum">     301 </span>            :             }
+<span class="lineNum">     302 </span>            :         }
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span>            :         /*
+<span class="lineNum">     305 </span>            :          * No luck. Assume that the revmap was updated concurrently.
+<span class="lineNum">     306 </span>            :          */
+<span class="lineNum">     307 </span><span class="lineNoCov">          0 :         LockBuffer(*buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     309 </span>            :     /* not reached, but keep compiler quiet */
+<span class="lineNum">     310 </span>            :     return NULL;
+<span class="lineNum">     311 </span>            : }
+<span class="lineNum">     312 </span>            : 
+<span class="lineNum">     313 </span>            : /*
+<span class="lineNum">     314 </span>            :  * Delete an index tuple, marking a page range as unsummarized.
+<span class="lineNum">     315 </span>            :  *
+<span class="lineNum">     316 </span>            :  * Index must be locked in ShareUpdateExclusiveLock mode.
+<span class="lineNum">     317 </span>            :  *
+<span class="lineNum">     318 </span>            :  * Return false if caller should retry.
+<a name="319"><span class="lineNum">     319 </span>            :  */</a>
+<span class="lineNum">     320 </span>            : bool
+<span class="lineNum">     321 </span><span class="lineCov">          8 : brinRevmapDesummarizeRange(Relation idxrel, BlockNumber heapBlk)</span>
+<span class="lineNum">     322 </span>            : {
+<span class="lineNum">     323 </span>            :     BrinRevmap *revmap;
+<span class="lineNum">     324 </span>            :     BlockNumber pagesPerRange;
+<span class="lineNum">     325 </span>            :     RevmapContents *contents;
+<span class="lineNum">     326 </span>            :     ItemPointerData *iptr;
+<span class="lineNum">     327 </span>            :     ItemPointerData invalidIptr;
+<span class="lineNum">     328 </span>            :     BlockNumber revmapBlk;
+<span class="lineNum">     329 </span>            :     Buffer      revmapBuf;
+<span class="lineNum">     330 </span>            :     Buffer      regBuf;
+<span class="lineNum">     331 </span>            :     Page        revmapPg;
+<span class="lineNum">     332 </span>            :     Page        regPg;
+<span class="lineNum">     333 </span>            :     OffsetNumber revmapOffset;
+<span class="lineNum">     334 </span>            :     OffsetNumber regOffset;
+<span class="lineNum">     335 </span>            :     ItemId      lp;
+<span class="lineNum">     336 </span>            :     BrinTuple  *tup;
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span><span class="lineCov">          8 :     revmap = brinRevmapInitialize(idxrel, &amp;pagesPerRange, NULL);</span>
+<span class="lineNum">     339 </span>            : 
+<span class="lineNum">     340 </span><span class="lineCov">          8 :     revmapBlk = revmap_get_blkno(revmap, heapBlk);</span>
+<span class="lineNum">     341 </span><span class="lineCov">          8 :     if (!BlockNumberIsValid(revmapBlk))</span>
+<span class="lineNum">     342 </span>            :     {
+<span class="lineNum">     343 </span>            :         /* revmap page doesn't exist: range not summarized, we're done */
+<span class="lineNum">     344 </span><span class="lineCov">          2 :         brinRevmapTerminate(revmap);</span>
+<span class="lineNum">     345 </span><span class="lineCov">          2 :         return true;</span>
+<span class="lineNum">     346 </span>            :     }
+<span class="lineNum">     347 </span>            : 
+<span class="lineNum">     348 </span>            :     /* Lock the revmap page, obtain the index tuple pointer from it */
+<span class="lineNum">     349 </span><span class="lineCov">          6 :     revmapBuf = brinLockRevmapPageForUpdate(revmap, heapBlk);</span>
+<span class="lineNum">     350 </span><span class="lineCov">          6 :     revmapPg = BufferGetPage(revmapBuf);</span>
+<span class="lineNum">     351 </span><span class="lineCov">          6 :     revmapOffset = HEAPBLK_TO_REVMAP_INDEX(revmap-&gt;rm_pagesPerRange, heapBlk);</span>
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span><span class="lineCov">          6 :     contents = (RevmapContents *) PageGetContents(revmapPg);</span>
+<span class="lineNum">     354 </span><span class="lineCov">          6 :     iptr = contents-&gt;rm_tids;</span>
+<span class="lineNum">     355 </span><span class="lineCov">          6 :     iptr += revmapOffset;</span>
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span><span class="lineCov">          6 :     if (!ItemPointerIsValid(iptr))</span>
+<span class="lineNum">     358 </span>            :     {
+<span class="lineNum">     359 </span>            :         /* no index tuple: range not summarized, we're done */
+<span class="lineNum">     360 </span><span class="lineCov">          2 :         LockBuffer(revmapBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     361 </span><span class="lineCov">          2 :         brinRevmapTerminate(revmap);</span>
+<span class="lineNum">     362 </span><span class="lineCov">          2 :         return true;</span>
+<span class="lineNum">     363 </span>            :     }
+<span class="lineNum">     364 </span>            : 
+<span class="lineNum">     365 </span><span class="lineCov">          4 :     regBuf = ReadBuffer(idxrel, ItemPointerGetBlockNumber(iptr));</span>
+<span class="lineNum">     366 </span><span class="lineCov">          4 :     LockBuffer(regBuf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     367 </span><span class="lineCov">          4 :     regPg = BufferGetPage(regBuf);</span>
+<span class="lineNum">     368 </span>            : 
+<span class="lineNum">     369 </span>            :     /* if this is no longer a regular page, tell caller to start over */
+<span class="lineNum">     370 </span><span class="lineCov">          4 :     if (!BRIN_IS_REGULAR_PAGE(regPg))</span>
+<span class="lineNum">     371 </span>            :     {
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :         LockBuffer(revmapBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 :         LockBuffer(regBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     374 </span><span class="lineNoCov">          0 :         brinRevmapTerminate(revmap);</span>
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     376 </span>            :     }
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span><span class="lineCov">          4 :     regOffset = ItemPointerGetOffsetNumber(iptr);</span>
+<span class="lineNum">     379 </span><span class="lineCov">          4 :     if (regOffset &gt; PageGetMaxOffsetNumber(regPg))</span>
+<span class="lineNum">     380 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     381 </span>            :                 (errcode(ERRCODE_INDEX_CORRUPTED),
+<span class="lineNum">     382 </span>            :                  errmsg(&quot;corrupted BRIN index: inconsistent range map&quot;)));
+<span class="lineNum">     383 </span>            : 
+<span class="lineNum">     384 </span><span class="lineCov">          4 :     lp = PageGetItemId(regPg, regOffset);</span>
+<span class="lineNum">     385 </span><span class="lineCov">          4 :     if (!ItemIdIsUsed(lp))</span>
+<span class="lineNum">     386 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     387 </span>            :                 (errcode(ERRCODE_INDEX_CORRUPTED),
+<span class="lineNum">     388 </span>            :                  errmsg(&quot;corrupted BRIN index: inconsistent range map&quot;)));
+<span class="lineNum">     389 </span><span class="lineCov">          4 :     tup = (BrinTuple *) PageGetItem(regPg, lp);</span>
+<span class="lineNum">     390 </span>            :     /* XXX apply sanity checks?  Might as well delete a bogus tuple ... */
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span>            :     /*
+<span class="lineNum">     393 </span>            :      * We're only removing data, not reading it, so there's no need to
+<span class="lineNum">     394 </span>            :      * TestForOldSnapshot here.
+<span class="lineNum">     395 </span>            :      */
+<span class="lineNum">     396 </span>            : 
+<span class="lineNum">     397 </span>            :     /*
+<span class="lineNum">     398 </span>            :      * Because of ShareUpdateExclusive lock, this function shouldn't run
+<span class="lineNum">     399 </span>            :      * concurrently with summarization.  Placeholder tuples can only exist as
+<span class="lineNum">     400 </span>            :      * leftovers from crashed summarization, so if we detect any, we complain
+<span class="lineNum">     401 </span>            :      * but proceed.
+<span class="lineNum">     402 </span>            :      */
+<span class="lineNum">     403 </span><span class="lineCov">          4 :     if (BrinTupleIsPlaceholder(tup))</span>
+<span class="lineNum">     404 </span><span class="lineNoCov">          0 :         ereport(WARNING,</span>
+<span class="lineNum">     405 </span>            :                 (errmsg(&quot;leftover placeholder tuple detected in BRIN index \&quot;%s\&quot;, deleting&quot;,
+<span class="lineNum">     406 </span>            :                         RelationGetRelationName(idxrel))));
+<span class="lineNum">     407 </span>            : 
+<span class="lineNum">     408 </span><span class="lineCov">          4 :     START_CRIT_SECTION();</span>
+<span class="lineNum">     409 </span>            : 
+<span class="lineNum">     410 </span><span class="lineCov">          4 :     ItemPointerSetInvalid(&amp;invalidIptr);</span>
+<span class="lineNum">     411 </span><span class="lineCov">          4 :     brinSetHeapBlockItemptr(revmapBuf, revmap-&gt;rm_pagesPerRange, heapBlk,</span>
+<span class="lineNum">     412 </span>            :                             invalidIptr);
+<span class="lineNum">     413 </span><span class="lineCov">          4 :     PageIndexTupleDeleteNoCompact(regPg, regOffset);</span>
+<span class="lineNum">     414 </span>            :     /* XXX record free space in FSM? */
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span><span class="lineCov">          4 :     MarkBufferDirty(regBuf);</span>
+<span class="lineNum">     417 </span><span class="lineCov">          4 :     MarkBufferDirty(revmapBuf);</span>
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span><span class="lineCov">          4 :     if (RelationNeedsWAL(idxrel))</span>
+<span class="lineNum">     420 </span>            :     {
+<span class="lineNum">     421 </span>            :         xl_brin_desummarize xlrec;
+<span class="lineNum">     422 </span>            :         XLogRecPtr  recptr;
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineCov">          4 :         xlrec.pagesPerRange = revmap-&gt;rm_pagesPerRange;</span>
+<span class="lineNum">     425 </span><span class="lineCov">          4 :         xlrec.heapBlk = heapBlk;</span>
+<span class="lineNum">     426 </span><span class="lineCov">          4 :         xlrec.regOffset = regOffset;</span>
+<span class="lineNum">     427 </span>            : 
+<span class="lineNum">     428 </span><span class="lineCov">          4 :         XLogBeginInsert();</span>
+<span class="lineNum">     429 </span><span class="lineCov">          4 :         XLogRegisterData((char *) &amp;xlrec, SizeOfBrinDesummarize);</span>
+<span class="lineNum">     430 </span><span class="lineCov">          4 :         XLogRegisterBuffer(0, revmapBuf, 0);</span>
+<span class="lineNum">     431 </span><span class="lineCov">          4 :         XLogRegisterBuffer(1, regBuf, REGBUF_STANDARD);</span>
+<span class="lineNum">     432 </span><span class="lineCov">          4 :         recptr = XLogInsert(RM_BRIN_ID, XLOG_BRIN_DESUMMARIZE);</span>
+<span class="lineNum">     433 </span><span class="lineCov">          4 :         PageSetLSN(revmapPg, recptr);</span>
+<span class="lineNum">     434 </span><span class="lineCov">          4 :         PageSetLSN(regPg, recptr);</span>
+<span class="lineNum">     435 </span>            :     }
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span><span class="lineCov">          4 :     END_CRIT_SECTION();</span>
+<span class="lineNum">     438 </span>            : 
+<span class="lineNum">     439 </span><span class="lineCov">          4 :     UnlockReleaseBuffer(regBuf);</span>
+<span class="lineNum">     440 </span><span class="lineCov">          4 :     LockBuffer(revmapBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     441 </span><span class="lineCov">          4 :     brinRevmapTerminate(revmap);</span>
+<span class="lineNum">     442 </span>            : 
+<span class="lineNum">     443 </span><span class="lineCov">          4 :     return true;</span>
+<span class="lineNum">     444 </span>            : }
+<span class="lineNum">     445 </span>            : 
+<span class="lineNum">     446 </span>            : /*
+<span class="lineNum">     447 </span>            :  * Given a heap block number, find the corresponding physical revmap block
+<span class="lineNum">     448 </span>            :  * number and return it.  If the revmap page hasn't been allocated yet, return
+<span class="lineNum">     449 </span>            :  * InvalidBlockNumber.
+<a name="450"><span class="lineNum">     450 </span>            :  */</a>
+<span class="lineNum">     451 </span>            : static BlockNumber
+<span class="lineNum">     452 </span><span class="lineCov">      51174 : revmap_get_blkno(BrinRevmap *revmap, BlockNumber heapBlk)</span>
+<span class="lineNum">     453 </span>            : {
+<span class="lineNum">     454 </span>            :     BlockNumber targetblk;
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span>            :     /* obtain revmap block number, skip 1 for metapage block */
+<span class="lineNum">     457 </span><span class="lineCov">      51174 :     targetblk = HEAPBLK_TO_REVMAP_BLK(revmap-&gt;rm_pagesPerRange, heapBlk) + 1;</span>
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span>            :     /* Normal case: the revmap page is already allocated */
+<span class="lineNum">     460 </span><span class="lineCov">      51174 :     if (targetblk &lt;= revmap-&gt;rm_lastRevmapPage)</span>
+<span class="lineNum">     461 </span><span class="lineCov">      51172 :         return targetblk;</span>
+<span class="lineNum">     462 </span>            : 
+<span class="lineNum">     463 </span><span class="lineCov">          2 :     return InvalidBlockNumber;</span>
+<span class="lineNum">     464 </span>            : }
+<span class="lineNum">     465 </span>            : 
+<span class="lineNum">     466 </span>            : /*
+<span class="lineNum">     467 </span>            :  * Obtain and return a buffer containing the revmap page for the given heap
+<span class="lineNum">     468 </span>            :  * page.  The revmap must have been previously extended to cover that page.
+<span class="lineNum">     469 </span>            :  * The returned buffer is also recorded in the revmap struct; finishing that
+<span class="lineNum">     470 </span>            :  * releases the buffer, therefore the caller needn't do it explicitly.
+<a name="471"><span class="lineNum">     471 </span>            :  */</a>
+<span class="lineNum">     472 </span>            : static Buffer
+<span class="lineNum">     473 </span><span class="lineCov">        318 : revmap_get_buffer(BrinRevmap *revmap, BlockNumber heapBlk)</span>
+<span class="lineNum">     474 </span>            : {
+<span class="lineNum">     475 </span>            :     BlockNumber mapBlk;
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span>            :     /* Translate the heap block number to physical index location. */
+<span class="lineNum">     478 </span><span class="lineCov">        318 :     mapBlk = revmap_get_blkno(revmap, heapBlk);</span>
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span><span class="lineCov">        318 :     if (mapBlk == InvalidBlockNumber)</span>
+<span class="lineNum">     481 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;revmap does not cover heap block %u&quot;, heapBlk);</span>
+<span class="lineNum">     482 </span>            : 
+<span class="lineNum">     483 </span>            :     /* Ensure the buffer we got is in the expected range */
+<span class="lineNum">     484 </span><span class="lineCov">        318 :     Assert(mapBlk != BRIN_METAPAGE_BLKNO &amp;&amp;</span>
+<span class="lineNum">     485 </span>            :            mapBlk &lt;= revmap-&gt;rm_lastRevmapPage);
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            :     /*
+<span class="lineNum">     488 </span>            :      * Obtain the buffer from which we need to read.  If we already have the
+<span class="lineNum">     489 </span>            :      * correct buffer in our access struct, use that; otherwise, release that,
+<span class="lineNum">     490 </span>            :      * (if valid) and read the one we need.
+<span class="lineNum">     491 </span>            :      */
+<span class="lineNum">     492 </span><span class="lineCov">        622 :     if (revmap-&gt;rm_currBuf == InvalidBuffer ||</span>
+<span class="lineNum">     493 </span><span class="lineCov">        304 :         mapBlk != BufferGetBlockNumber(revmap-&gt;rm_currBuf))</span>
+<span class="lineNum">     494 </span>            :     {
+<span class="lineNum">     495 </span><span class="lineCov">         14 :         if (revmap-&gt;rm_currBuf != InvalidBuffer)</span>
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :             ReleaseBuffer(revmap-&gt;rm_currBuf);</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span><span class="lineCov">         14 :         revmap-&gt;rm_currBuf = ReadBuffer(revmap-&gt;rm_irel, mapBlk);</span>
+<span class="lineNum">     499 </span>            :     }
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span><span class="lineCov">        318 :     return revmap-&gt;rm_currBuf;</span>
+<span class="lineNum">     502 </span>            : }
+<span class="lineNum">     503 </span>            : 
+<span class="lineNum">     504 </span>            : /*
+<span class="lineNum">     505 </span>            :  * Given a heap block number, find the corresponding physical revmap block
+<span class="lineNum">     506 </span>            :  * number and return it. If the revmap page hasn't been allocated yet, extend
+<span class="lineNum">     507 </span>            :  * the revmap until it is.
+<a name="508"><span class="lineNum">     508 </span>            :  */</a>
+<span class="lineNum">     509 </span>            : static BlockNumber
+<span class="lineNum">     510 </span><span class="lineCov">        748 : revmap_extend_and_get_blkno(BrinRevmap *revmap, BlockNumber heapBlk)</span>
+<span class="lineNum">     511 </span>            : {
+<span class="lineNum">     512 </span>            :     BlockNumber targetblk;
+<span class="lineNum">     513 </span>            : 
+<span class="lineNum">     514 </span>            :     /* obtain revmap block number, skip 1 for metapage block */
+<span class="lineNum">     515 </span><span class="lineCov">        748 :     targetblk = HEAPBLK_TO_REVMAP_BLK(revmap-&gt;rm_pagesPerRange, heapBlk) + 1;</span>
+<span class="lineNum">     516 </span>            : 
+<span class="lineNum">     517 </span>            :     /* Extend the revmap, if necessary */
+<span class="lineNum">     518 </span><span class="lineCov">       1512 :     while (targetblk &gt; revmap-&gt;rm_lastRevmapPage)</span>
+<span class="lineNum">     519 </span>            :     {
+<span class="lineNum">     520 </span><span class="lineCov">         16 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     521 </span><span class="lineCov">         16 :         revmap_physical_extend(revmap);</span>
+<span class="lineNum">     522 </span>            :     }
+<span class="lineNum">     523 </span>            : 
+<span class="lineNum">     524 </span><span class="lineCov">        748 :     return targetblk;</span>
+<span class="lineNum">     525 </span>            : }
+<span class="lineNum">     526 </span>            : 
+<span class="lineNum">     527 </span>            : /*
+<span class="lineNum">     528 </span>            :  * Try to extend the revmap by one page.  This might not happen for a number of
+<span class="lineNum">     529 </span>            :  * reasons; caller is expected to retry until the expected outcome is obtained.
+<a name="530"><span class="lineNum">     530 </span>            :  */</a>
+<span class="lineNum">     531 </span>            : static void
+<span class="lineNum">     532 </span><span class="lineCov">         16 : revmap_physical_extend(BrinRevmap *revmap)</span>
+<span class="lineNum">     533 </span>            : {
+<span class="lineNum">     534 </span>            :     Buffer      buf;
+<span class="lineNum">     535 </span>            :     Page        page;
+<span class="lineNum">     536 </span>            :     Page        metapage;
+<span class="lineNum">     537 </span>            :     BrinMetaPageData *metadata;
+<span class="lineNum">     538 </span>            :     BlockNumber mapBlk;
+<span class="lineNum">     539 </span>            :     BlockNumber nblocks;
+<span class="lineNum">     540 </span><span class="lineCov">         16 :     Relation    irel = revmap-&gt;rm_irel;</span>
+<span class="lineNum">     541 </span><span class="lineCov">         16 :     bool        needLock = !RELATION_IS_LOCAL(irel);</span>
+<span class="lineNum">     542 </span>            : 
+<span class="lineNum">     543 </span>            :     /*
+<span class="lineNum">     544 </span>            :      * Lock the metapage. This locks out concurrent extensions of the revmap,
+<span class="lineNum">     545 </span>            :      * but note that we still need to grab the relation extension lock because
+<span class="lineNum">     546 </span>            :      * another backend can extend the index with regular BRIN pages.
+<span class="lineNum">     547 </span>            :      */
+<span class="lineNum">     548 </span><span class="lineCov">         16 :     LockBuffer(revmap-&gt;rm_metaBuf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     549 </span><span class="lineCov">         16 :     metapage = BufferGetPage(revmap-&gt;rm_metaBuf);</span>
+<span class="lineNum">     550 </span><span class="lineCov">         16 :     metadata = (BrinMetaPageData *) PageGetContents(metapage);</span>
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span>            :     /*
+<span class="lineNum">     553 </span>            :      * Check that our cached lastRevmapPage value was up-to-date; if it
+<span class="lineNum">     554 </span>            :      * wasn't, update the cached copy and have caller start over.
+<span class="lineNum">     555 </span>            :      */
+<span class="lineNum">     556 </span><span class="lineCov">         16 :     if (metadata-&gt;lastRevmapPage != revmap-&gt;rm_lastRevmapPage)</span>
+<span class="lineNum">     557 </span>            :     {
+<span class="lineNum">     558 </span><span class="lineCov">          8 :         revmap-&gt;rm_lastRevmapPage = metadata-&gt;lastRevmapPage;</span>
+<span class="lineNum">     559 </span><span class="lineCov">          8 :         LockBuffer(revmap-&gt;rm_metaBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     560 </span><span class="lineCov">          8 :         return;</span>
+<span class="lineNum">     561 </span>            :     }
+<span class="lineNum">     562 </span><span class="lineCov">          8 :     mapBlk = metadata-&gt;lastRevmapPage + 1;</span>
+<span class="lineNum">     563 </span>            : 
+<span class="lineNum">     564 </span><span class="lineCov">          8 :     nblocks = RelationGetNumberOfBlocks(irel);</span>
+<span class="lineNum">     565 </span><span class="lineCov">          8 :     if (mapBlk &lt; nblocks)</span>
+<span class="lineNum">     566 </span>            :     {
+<span class="lineNum">     567 </span><span class="lineNoCov">          0 :         buf = ReadBuffer(irel, mapBlk);</span>
+<span class="lineNum">     568 </span><span class="lineNoCov">          0 :         LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     569 </span><span class="lineNoCov">          0 :         page = BufferGetPage(buf);</span>
+<span class="lineNum">     570 </span>            :     }
+<span class="lineNum">     571 </span>            :     else
+<span class="lineNum">     572 </span>            :     {
+<span class="lineNum">     573 </span><span class="lineCov">          8 :         if (needLock)</span>
+<span class="lineNum">     574 </span><span class="lineNoCov">          0 :             LockRelationForExtension(irel, ExclusiveLock);</span>
+<span class="lineNum">     575 </span>            : 
+<span class="lineNum">     576 </span><span class="lineCov">          8 :         buf = ReadBuffer(irel, P_NEW);</span>
+<span class="lineNum">     577 </span><span class="lineCov">          8 :         if (BufferGetBlockNumber(buf) != mapBlk)</span>
+<span class="lineNum">     578 </span>            :         {
+<span class="lineNum">     579 </span>            :             /*
+<span class="lineNum">     580 </span>            :              * Very rare corner case: somebody extended the relation
+<span class="lineNum">     581 </span>            :              * concurrently after we read its length.  If this happens, give
+<span class="lineNum">     582 </span>            :              * up and have caller start over.  We will have to evacuate that
+<span class="lineNum">     583 </span>            :              * page from under whoever is using it.
+<span class="lineNum">     584 </span>            :              */
+<span class="lineNum">     585 </span><span class="lineNoCov">          0 :             if (needLock)</span>
+<span class="lineNum">     586 </span><span class="lineNoCov">          0 :                 UnlockRelationForExtension(irel, ExclusiveLock);</span>
+<span class="lineNum">     587 </span><span class="lineNoCov">          0 :             LockBuffer(revmap-&gt;rm_metaBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     588 </span><span class="lineNoCov">          0 :             ReleaseBuffer(buf);</span>
+<span class="lineNum">     589 </span><span class="lineNoCov">          0 :             return;</span>
+<span class="lineNum">     590 </span>            :         }
+<span class="lineNum">     591 </span><span class="lineCov">          8 :         LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     592 </span><span class="lineCov">          8 :         page = BufferGetPage(buf);</span>
+<span class="lineNum">     593 </span>            : 
+<span class="lineNum">     594 </span><span class="lineCov">          8 :         if (needLock)</span>
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :             UnlockRelationForExtension(irel, ExclusiveLock);</span>
+<span class="lineNum">     596 </span>            :     }
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span>            :     /* Check that it's a regular block (or an empty page) */
+<span class="lineNum">     599 </span><span class="lineCov">          8 :     if (!PageIsNew(page) &amp;&amp; !BRIN_IS_REGULAR_PAGE(page))</span>
+<span class="lineNum">     600 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     601 </span>            :                 (errcode(ERRCODE_INDEX_CORRUPTED),
+<span class="lineNum">     602 </span>            :                  errmsg(&quot;unexpected page type 0x%04X in BRIN index \&quot;%s\&quot; block %u&quot;,
+<span class="lineNum">     603 </span>            :                         BrinPageType(page),
+<span class="lineNum">     604 </span>            :                         RelationGetRelationName(irel),
+<span class="lineNum">     605 </span>            :                         BufferGetBlockNumber(buf))));
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span>            :     /* If the page is in use, evacuate it and restart */
+<span class="lineNum">     608 </span><span class="lineCov">          8 :     if (brin_start_evacuating_page(irel, buf))</span>
+<span class="lineNum">     609 </span>            :     {
+<span class="lineNum">     610 </span><span class="lineNoCov">          0 :         LockBuffer(revmap-&gt;rm_metaBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     611 </span><span class="lineNoCov">          0 :         brin_evacuate_page(irel, revmap-&gt;rm_pagesPerRange, revmap, buf);</span>
+<span class="lineNum">     612 </span>            : 
+<span class="lineNum">     613 </span>            :         /* have caller start over */
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     615 </span>            :     }
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span>            :     /*
+<span class="lineNum">     618 </span>            :      * Ok, we have now locked the metapage and the target block. Re-initialize
+<span class="lineNum">     619 </span>            :      * the target block as a revmap page, and update the metapage.
+<span class="lineNum">     620 </span>            :      */
+<span class="lineNum">     621 </span><span class="lineCov">          8 :     START_CRIT_SECTION();</span>
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span>            :     /* the rm_tids array is initialized to all invalid by PageInit */
+<span class="lineNum">     624 </span><span class="lineCov">          8 :     brin_page_init(page, BRIN_PAGETYPE_REVMAP);</span>
+<span class="lineNum">     625 </span><span class="lineCov">          8 :     MarkBufferDirty(buf);</span>
+<span class="lineNum">     626 </span>            : 
+<span class="lineNum">     627 </span><span class="lineCov">          8 :     metadata-&gt;lastRevmapPage = mapBlk;</span>
+<span class="lineNum">     628 </span>            : 
+<span class="lineNum">     629 </span>            :     /*
+<span class="lineNum">     630 </span>            :      * Set pd_lower just past the end of the metadata.  This is essential,
+<span class="lineNum">     631 </span>            :      * because without doing so, metadata will be lost if xlog.c compresses
+<span class="lineNum">     632 </span>            :      * the page.  (We must do this here because pre-v11 versions of PG did not
+<span class="lineNum">     633 </span>            :      * set the metapage's pd_lower correctly, so a pg_upgraded index might
+<span class="lineNum">     634 </span>            :      * contain the wrong value.)
+<span class="lineNum">     635 </span>            :      */
+<span class="lineNum">     636 </span><span class="lineCov">          8 :     ((PageHeader) metapage)-&gt;pd_lower =</span>
+<span class="lineNum">     637 </span><span class="lineCov">          8 :         ((char *) metadata + sizeof(BrinMetaPageData)) - (char *) metapage;</span>
+<span class="lineNum">     638 </span>            : 
+<span class="lineNum">     639 </span><span class="lineCov">          8 :     MarkBufferDirty(revmap-&gt;rm_metaBuf);</span>
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span><span class="lineCov">          8 :     if (RelationNeedsWAL(revmap-&gt;rm_irel))</span>
+<span class="lineNum">     642 </span>            :     {
+<span class="lineNum">     643 </span>            :         xl_brin_revmap_extend xlrec;
+<span class="lineNum">     644 </span>            :         XLogRecPtr  recptr;
+<span class="lineNum">     645 </span>            : 
+<span class="lineNum">     646 </span><span class="lineCov">          8 :         xlrec.targetBlk = mapBlk;</span>
+<span class="lineNum">     647 </span>            : 
+<span class="lineNum">     648 </span><span class="lineCov">          8 :         XLogBeginInsert();</span>
+<span class="lineNum">     649 </span><span class="lineCov">          8 :         XLogRegisterData((char *) &amp;xlrec, SizeOfBrinRevmapExtend);</span>
+<span class="lineNum">     650 </span><span class="lineCov">          8 :         XLogRegisterBuffer(0, revmap-&gt;rm_metaBuf, REGBUF_STANDARD);</span>
+<span class="lineNum">     651 </span>            : 
+<span class="lineNum">     652 </span><span class="lineCov">          8 :         XLogRegisterBuffer(1, buf, REGBUF_WILL_INIT);</span>
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span><span class="lineCov">          8 :         recptr = XLogInsert(RM_BRIN_ID, XLOG_BRIN_REVMAP_EXTEND);</span>
+<span class="lineNum">     655 </span><span class="lineCov">          8 :         PageSetLSN(metapage, recptr);</span>
+<span class="lineNum">     656 </span><span class="lineCov">          8 :         PageSetLSN(page, recptr);</span>
+<span class="lineNum">     657 </span>            :     }
+<span class="lineNum">     658 </span>            : 
+<span class="lineNum">     659 </span><span class="lineCov">          8 :     END_CRIT_SECTION();</span>
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span><span class="lineCov">          8 :     LockBuffer(revmap-&gt;rm_metaBuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     662 </span>            : 
+<span class="lineNum">     663 </span><span class="lineCov">          8 :     UnlockReleaseBuffer(buf);</span>
+<span class="lineNum">     664 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

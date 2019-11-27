@@ -1,0 +1,1469 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/nodeSubplan.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - nodeSubplan.c<span style="font-size: 80%;"> (source / <a href="nodeSubplan.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">422</td>
+            <td class="headerCovTableEntry">452</td>
+            <td class="headerCovTableEntryHi">93.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * nodeSubplan.c
+<span class="lineNum">       4 </span>            :  *    routines to support sub-selects appearing in expressions
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * This module is concerned with executing SubPlan expression nodes, which
+<span class="lineNum">       7 </span>            :  * should not be confused with sub-SELECTs appearing in FROM.  SubPlans are
+<span class="lineNum">       8 </span>            :  * divided into &quot;initplans&quot;, which are those that need only one evaluation per
+<span class="lineNum">       9 </span>            :  * query (among other restrictions, this requires that they don't use any
+<span class="lineNum">      10 </span>            :  * direct correlation variables from the parent plan level), and &quot;regular&quot;
+<span class="lineNum">      11 </span>            :  * subplans, which are re-evaluated every time their result is required.
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      15 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  * IDENTIFICATION
+<span class="lineNum">      18 </span>            :  *    src/backend/executor/nodeSubplan.c
+<span class="lineNum">      19 </span>            :  *
+<span class="lineNum">      20 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      21 </span>            :  */
+<span class="lineNum">      22 </span>            : /*
+<span class="lineNum">      23 </span>            :  *   INTERFACE ROUTINES
+<span class="lineNum">      24 </span>            :  *      ExecSubPlan  - process a subselect
+<span class="lineNum">      25 </span>            :  *      ExecInitSubPlan - initialize a subselect
+<span class="lineNum">      26 </span>            :  */
+<span class="lineNum">      27 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      28 </span>            : 
+<span class="lineNum">      29 </span>            : #include &lt;limits.h&gt;
+<span class="lineNum">      30 </span>            : #include &lt;math.h&gt;
+<span class="lineNum">      31 </span>            : 
+<span class="lineNum">      32 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;executor/executor.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;executor/nodeSubplan.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;nodes/makefuncs.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      38 </span>            : #include &quot;utils/array.h&quot;
+<span class="lineNum">      39 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      40 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      41 </span>            : 
+<span class="lineNum">      42 </span>            : static Datum ExecHashSubPlan(SubPlanState *node,
+<span class="lineNum">      43 </span>            :                              ExprContext *econtext,
+<span class="lineNum">      44 </span>            :                              bool *isNull);
+<span class="lineNum">      45 </span>            : static Datum ExecScanSubPlan(SubPlanState *node,
+<span class="lineNum">      46 </span>            :                              ExprContext *econtext,
+<span class="lineNum">      47 </span>            :                              bool *isNull);
+<span class="lineNum">      48 </span>            : static void buildSubPlanHash(SubPlanState *node, ExprContext *econtext);
+<span class="lineNum">      49 </span>            : static bool findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot,
+<span class="lineNum">      50 </span>            :                              FmgrInfo *eqfunctions);
+<span class="lineNum">      51 </span>            : static bool slotAllNulls(TupleTableSlot *slot);
+<span class="lineNum">      52 </span>            : static bool slotNoNulls(TupleTableSlot *slot);
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            : 
+<span class="lineNum">      55 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">      56 </span>            :  *      ExecSubPlan
+<span class="lineNum">      57 </span>            :  *
+<span class="lineNum">      58 </span>            :  * This is the main entry point for execution of a regular SubPlan.
+<span class="lineNum">      59 </span>            :  * ----------------------------------------------------------------
+<a name="60"><span class="lineNum">      60 </span>            :  */</a>
+<span class="lineNum">      61 </span>            : Datum
+<span class="lineNum">      62 </span><span class="lineCov">     147568 : ExecSubPlan(SubPlanState *node,</span>
+<span class="lineNum">      63 </span>            :             ExprContext *econtext,
+<span class="lineNum">      64 </span>            :             bool *isNull)
+<span class="lineNum">      65 </span>            : {
+<span class="lineNum">      66 </span><span class="lineCov">     147568 :     SubPlan    *subplan = node-&gt;subplan;</span>
+<span class="lineNum">      67 </span><span class="lineCov">     147568 :     EState     *estate = node-&gt;planstate-&gt;state;</span>
+<span class="lineNum">      68 </span><span class="lineCov">     147568 :     ScanDirection dir = estate-&gt;es_direction;</span>
+<span class="lineNum">      69 </span>            :     Datum       retval;
+<span class="lineNum">      70 </span>            : 
+<span class="lineNum">      71 </span><span class="lineCov">     147568 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            :     /* Set non-null as default */
+<span class="lineNum">      74 </span><span class="lineCov">     147568 :     *isNull = false;</span>
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            :     /* Sanity checks */
+<span class="lineNum">      77 </span><span class="lineCov">     147568 :     if (subplan-&gt;subLinkType == CTE_SUBLINK)</span>
+<span class="lineNum">      78 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;CTE subplans should not be executed via ExecSubPlan&quot;);</span>
+<span class="lineNum">      79 </span><span class="lineCov">     147568 :     if (subplan-&gt;setParam != NIL &amp;&amp; subplan-&gt;subLinkType != MULTIEXPR_SUBLINK)</span>
+<span class="lineNum">      80 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot set parent params from subquery&quot;);</span>
+<span class="lineNum">      81 </span>            : 
+<span class="lineNum">      82 </span>            :     /* Force forward-scan mode for evaluation */
+<span class="lineNum">      83 </span><span class="lineCov">     147568 :     estate-&gt;es_direction = ForwardScanDirection;</span>
+<span class="lineNum">      84 </span>            : 
+<span class="lineNum">      85 </span>            :     /* Select appropriate evaluation strategy */
+<span class="lineNum">      86 </span><span class="lineCov">     147568 :     if (subplan-&gt;useHashTable)</span>
+<span class="lineNum">      87 </span><span class="lineCov">     120768 :         retval = ExecHashSubPlan(node, econtext, isNull);</span>
+<span class="lineNum">      88 </span>            :     else
+<span class="lineNum">      89 </span><span class="lineCov">      26800 :         retval = ExecScanSubPlan(node, econtext, isNull);</span>
+<span class="lineNum">      90 </span>            : 
+<span class="lineNum">      91 </span>            :     /* restore scan direction */
+<span class="lineNum">      92 </span><span class="lineCov">     147566 :     estate-&gt;es_direction = dir;</span>
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span><span class="lineCov">     147566 :     return retval;</span>
+<span class="lineNum">      95 </span>            : }
+<span class="lineNum">      96 </span>            : 
+<span class="lineNum">      97 </span>            : /*
+<span class="lineNum">      98 </span>            :  * ExecHashSubPlan: store subselect result in an in-memory hash table
+<a name="99"><span class="lineNum">      99 </span>            :  */</a>
+<span class="lineNum">     100 </span>            : static Datum
+<span class="lineNum">     101 </span><span class="lineCov">     120768 : ExecHashSubPlan(SubPlanState *node,</span>
+<span class="lineNum">     102 </span>            :                 ExprContext *econtext,
+<span class="lineNum">     103 </span>            :                 bool *isNull)
+<span class="lineNum">     104 </span>            : {
+<span class="lineNum">     105 </span><span class="lineCov">     120768 :     SubPlan    *subplan = node-&gt;subplan;</span>
+<span class="lineNum">     106 </span><span class="lineCov">     120768 :     PlanState  *planstate = node-&gt;planstate;</span>
+<span class="lineNum">     107 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            :     /* Shouldn't have any direct correlation Vars */
+<span class="lineNum">     110 </span><span class="lineCov">     120768 :     if (subplan-&gt;parParam != NIL || node-&gt;args != NIL)</span>
+<span class="lineNum">     111 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;hashed subplan with direct correlation not supported&quot;);</span>
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span>            :     /*
+<span class="lineNum">     114 </span>            :      * If first time through or we need to rescan the subplan, build the hash
+<span class="lineNum">     115 </span>            :      * table.
+<span class="lineNum">     116 </span>            :      */
+<span class="lineNum">     117 </span><span class="lineCov">     120768 :     if (node-&gt;hashtable == NULL || planstate-&gt;chgParam != NULL)</span>
+<span class="lineNum">     118 </span><span class="lineCov">        370 :         buildSubPlanHash(node, econtext);</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            :     /*
+<span class="lineNum">     121 </span>            :      * The result for an empty subplan is always FALSE; no need to evaluate
+<span class="lineNum">     122 </span>            :      * lefthand side.
+<span class="lineNum">     123 </span>            :      */
+<span class="lineNum">     124 </span><span class="lineCov">     120766 :     *isNull = false;</span>
+<span class="lineNum">     125 </span><span class="lineCov">     120766 :     if (!node-&gt;havehashrows &amp;&amp; !node-&gt;havenullrows)</span>
+<span class="lineNum">     126 </span><span class="lineCov">        216 :         return BoolGetDatum(false);</span>
+<span class="lineNum">     127 </span>            : 
+<span class="lineNum">     128 </span>            :     /*
+<span class="lineNum">     129 </span>            :      * Evaluate lefthand expressions and form a projection tuple. First we
+<span class="lineNum">     130 </span>            :      * have to set the econtext to use (hack alert!).
+<span class="lineNum">     131 </span>            :      */
+<span class="lineNum">     132 </span><span class="lineCov">     120550 :     node-&gt;projLeft-&gt;pi_exprContext = econtext;</span>
+<span class="lineNum">     133 </span><span class="lineCov">     120550 :     slot = ExecProject(node-&gt;projLeft);</span>
+<span class="lineNum">     134 </span>            : 
+<span class="lineNum">     135 </span>            :     /*
+<span class="lineNum">     136 </span>            :      * Note: because we are typically called in a per-tuple context, we have
+<span class="lineNum">     137 </span>            :      * to explicitly clear the projected tuple before returning. Otherwise,
+<span class="lineNum">     138 </span>            :      * we'll have a double-free situation: the per-tuple context will probably
+<span class="lineNum">     139 </span>            :      * be reset before we're called again, and then the tuple slot will think
+<span class="lineNum">     140 </span>            :      * it still needs to free the tuple.
+<span class="lineNum">     141 </span>            :      */
+<span class="lineNum">     142 </span>            : 
+<span class="lineNum">     143 </span>            :     /*
+<span class="lineNum">     144 </span>            :      * If the LHS is all non-null, probe for an exact match in the main hash
+<span class="lineNum">     145 </span>            :      * table.  If we find one, the result is TRUE. Otherwise, scan the
+<span class="lineNum">     146 </span>            :      * partly-null table to see if there are any rows that aren't provably
+<span class="lineNum">     147 </span>            :      * unequal to the LHS; if so, the result is UNKNOWN.  (We skip that part
+<span class="lineNum">     148 </span>            :      * if we don't care about UNKNOWN.) Otherwise, the result is FALSE.
+<span class="lineNum">     149 </span>            :      *
+<span class="lineNum">     150 </span>            :      * Note: the reason we can avoid a full scan of the main hash table is
+<span class="lineNum">     151 </span>            :      * that the combining operators are assumed never to yield NULL when both
+<span class="lineNum">     152 </span>            :      * inputs are non-null.  If they were to do so, we might need to produce
+<span class="lineNum">     153 </span>            :      * UNKNOWN instead of FALSE because of an UNKNOWN result in comparing the
+<span class="lineNum">     154 </span>            :      * LHS to some main-table entry --- which is a comparison we will not even
+<span class="lineNum">     155 </span>            :      * make, unless there's a chance match of hash keys.
+<span class="lineNum">     156 </span>            :      */
+<span class="lineNum">     157 </span><span class="lineCov">     120550 :     if (slotNoNulls(slot))</span>
+<span class="lineNum">     158 </span>            :     {
+<span class="lineNum">     159 </span><span class="lineCov">     240860 :         if (node-&gt;havehashrows &amp;&amp;</span>
+<span class="lineNum">     160 </span><span class="lineCov">     120426 :             FindTupleHashEntry(node-&gt;hashtable,</span>
+<span class="lineNum">     161 </span>            :                                slot,
+<span class="lineNum">     162 </span>            :                                node-&gt;cur_eq_comp,
+<span class="lineNum">     163 </span>            :                                node-&gt;lhs_hash_funcs) != NULL)
+<span class="lineNum">     164 </span>            :         {
+<span class="lineNum">     165 </span><span class="lineCov">        426 :             ExecClearTuple(slot);</span>
+<span class="lineNum">     166 </span><span class="lineCov">        426 :             return BoolGetDatum(true);</span>
+<span class="lineNum">     167 </span>            :         }
+<span class="lineNum">     168 </span><span class="lineCov">     120052 :         if (node-&gt;havenullrows &amp;&amp;</span>
+<span class="lineNum">     169 </span><span class="lineCov">         44 :             findPartialMatch(node-&gt;hashnulls, slot, node-&gt;cur_eq_funcs))</span>
+<span class="lineNum">     170 </span>            :         {
+<span class="lineNum">     171 </span><span class="lineCov">          4 :             ExecClearTuple(slot);</span>
+<span class="lineNum">     172 </span><span class="lineCov">          4 :             *isNull = true;</span>
+<span class="lineNum">     173 </span><span class="lineCov">          4 :             return BoolGetDatum(false);</span>
+<span class="lineNum">     174 </span>            :         }
+<span class="lineNum">     175 </span><span class="lineCov">     120004 :         ExecClearTuple(slot);</span>
+<span class="lineNum">     176 </span><span class="lineCov">     120004 :         return BoolGetDatum(false);</span>
+<span class="lineNum">     177 </span>            :     }
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span>            :     /*
+<span class="lineNum">     180 </span>            :      * When the LHS is partly or wholly NULL, we can never return TRUE. If we
+<span class="lineNum">     181 </span>            :      * don't care about UNKNOWN, just return FALSE.  Otherwise, if the LHS is
+<span class="lineNum">     182 </span>            :      * wholly NULL, immediately return UNKNOWN.  (Since the combining
+<span class="lineNum">     183 </span>            :      * operators are strict, the result could only be FALSE if the sub-select
+<span class="lineNum">     184 </span>            :      * were empty, but we already handled that case.) Otherwise, we must scan
+<span class="lineNum">     185 </span>            :      * both the main and partly-null tables to see if there are any rows that
+<span class="lineNum">     186 </span>            :      * aren't provably unequal to the LHS; if so, the result is UNKNOWN.
+<span class="lineNum">     187 </span>            :      * Otherwise, the result is FALSE.
+<span class="lineNum">     188 </span>            :      */
+<span class="lineNum">     189 </span><span class="lineCov">        116 :     if (node-&gt;hashnulls == NULL)</span>
+<span class="lineNum">     190 </span>            :     {
+<span class="lineNum">     191 </span><span class="lineNoCov">          0 :         ExecClearTuple(slot);</span>
+<span class="lineNum">     192 </span><span class="lineNoCov">          0 :         return BoolGetDatum(false);</span>
+<span class="lineNum">     193 </span>            :     }
+<span class="lineNum">     194 </span><span class="lineCov">        116 :     if (slotAllNulls(slot))</span>
+<span class="lineNum">     195 </span>            :     {
+<span class="lineNum">     196 </span><span class="lineNoCov">          0 :         ExecClearTuple(slot);</span>
+<span class="lineNum">     197 </span><span class="lineNoCov">          0 :         *isNull = true;</span>
+<span class="lineNum">     198 </span><span class="lineNoCov">          0 :         return BoolGetDatum(false);</span>
+<span class="lineNum">     199 </span>            :     }
+<span class="lineNum">     200 </span>            :     /* Scan partly-null table first, since more likely to get a match */
+<span class="lineNum">     201 </span><span class="lineCov">        232 :     if (node-&gt;havenullrows &amp;&amp;</span>
+<span class="lineNum">     202 </span><span class="lineCov">        116 :         findPartialMatch(node-&gt;hashnulls, slot, node-&gt;cur_eq_funcs))</span>
+<span class="lineNum">     203 </span>            :     {
+<span class="lineNum">     204 </span><span class="lineCov">         78 :         ExecClearTuple(slot);</span>
+<span class="lineNum">     205 </span><span class="lineCov">         78 :         *isNull = true;</span>
+<span class="lineNum">     206 </span><span class="lineCov">         78 :         return BoolGetDatum(false);</span>
+<span class="lineNum">     207 </span>            :     }
+<span class="lineNum">     208 </span><span class="lineCov">         56 :     if (node-&gt;havehashrows &amp;&amp;</span>
+<span class="lineNum">     209 </span><span class="lineCov">         18 :         findPartialMatch(node-&gt;hashtable, slot, node-&gt;cur_eq_funcs))</span>
+<span class="lineNum">     210 </span>            :     {
+<span class="lineNum">     211 </span><span class="lineNoCov">          0 :         ExecClearTuple(slot);</span>
+<span class="lineNum">     212 </span><span class="lineNoCov">          0 :         *isNull = true;</span>
+<span class="lineNum">     213 </span><span class="lineNoCov">          0 :         return BoolGetDatum(false);</span>
+<span class="lineNum">     214 </span>            :     }
+<span class="lineNum">     215 </span><span class="lineCov">         38 :     ExecClearTuple(slot);</span>
+<span class="lineNum">     216 </span><span class="lineCov">         38 :     return BoolGetDatum(false);</span>
+<span class="lineNum">     217 </span>            : }
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span>            : /*
+<span class="lineNum">     220 </span>            :  * ExecScanSubPlan: default case where we have to rescan subplan each time
+<a name="221"><span class="lineNum">     221 </span>            :  */</a>
+<span class="lineNum">     222 </span>            : static Datum
+<span class="lineNum">     223 </span><span class="lineCov">      26800 : ExecScanSubPlan(SubPlanState *node,</span>
+<span class="lineNum">     224 </span>            :                 ExprContext *econtext,
+<span class="lineNum">     225 </span>            :                 bool *isNull)
+<span class="lineNum">     226 </span>            : {
+<span class="lineNum">     227 </span><span class="lineCov">      26800 :     SubPlan    *subplan = node-&gt;subplan;</span>
+<span class="lineNum">     228 </span><span class="lineCov">      26800 :     PlanState  *planstate = node-&gt;planstate;</span>
+<span class="lineNum">     229 </span><span class="lineCov">      26800 :     SubLinkType subLinkType = subplan-&gt;subLinkType;</span>
+<span class="lineNum">     230 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">     231 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     232 </span>            :     Datum       result;
+<span class="lineNum">     233 </span><span class="lineCov">      26800 :     bool        found = false;  /* true if got at least one subplan tuple */</span>
+<span class="lineNum">     234 </span>            :     ListCell   *pvar;
+<span class="lineNum">     235 </span>            :     ListCell   *l;
+<span class="lineNum">     236 </span><span class="lineCov">      26800 :     ArrayBuildStateAny *astate = NULL;</span>
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span>            :     /*
+<span class="lineNum">     239 </span>            :      * MULTIEXPR subplans, when &quot;executed&quot;, just return NULL; but first we
+<span class="lineNum">     240 </span>            :      * mark the subplan's output parameters as needing recalculation.  (This
+<span class="lineNum">     241 </span>            :      * is a bit of a hack: it relies on the subplan appearing later in its
+<span class="lineNum">     242 </span>            :      * targetlist than any of the referencing Params, so that all the Params
+<span class="lineNum">     243 </span>            :      * have been evaluated before we re-mark them for the next evaluation
+<span class="lineNum">     244 </span>            :      * cycle.  But in general resjunk tlist items appear after non-resjunk
+<span class="lineNum">     245 </span>            :      * ones, so this should be safe.)  Unlike ExecReScanSetParamPlan, we do
+<span class="lineNum">     246 </span>            :      * *not* set bits in the parent plan node's chgParam, because we don't
+<span class="lineNum">     247 </span>            :      * want to cause a rescan of the parent.
+<span class="lineNum">     248 </span>            :      */
+<span class="lineNum">     249 </span><span class="lineCov">      26800 :     if (subLinkType == MULTIEXPR_SUBLINK)</span>
+<span class="lineNum">     250 </span>            :     {
+<span class="lineNum">     251 </span><span class="lineCov">         26 :         EState     *estate = node-&gt;parent-&gt;state;</span>
+<span class="lineNum">     252 </span>            : 
+<span class="lineNum">     253 </span><span class="lineCov">         78 :         foreach(l, subplan-&gt;setParam)</span>
+<span class="lineNum">     254 </span>            :         {
+<span class="lineNum">     255 </span><span class="lineCov">         52 :             int         paramid = lfirst_int(l);</span>
+<span class="lineNum">     256 </span><span class="lineCov">         52 :             ParamExecData *prm = &amp;(estate-&gt;es_param_exec_vals[paramid]);</span>
+<span class="lineNum">     257 </span>            : 
+<span class="lineNum">     258 </span><span class="lineCov">         52 :             prm-&gt;execPlan = node;</span>
+<span class="lineNum">     259 </span>            :         }
+<span class="lineNum">     260 </span><span class="lineCov">         26 :         *isNull = true;</span>
+<span class="lineNum">     261 </span><span class="lineCov">         26 :         return (Datum) 0;</span>
+<span class="lineNum">     262 </span>            :     }
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span>            :     /* Initialize ArrayBuildStateAny in caller's context, if needed */
+<span class="lineNum">     265 </span><span class="lineCov">      26774 :     if (subLinkType == ARRAY_SUBLINK)</span>
+<span class="lineNum">     266 </span><span class="lineCov">       1088 :         astate = initArrayResultAny(subplan-&gt;firstColType,</span>
+<span class="lineNum">     267 </span>            :                                     CurrentMemoryContext, true);
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span>            :     /*
+<span class="lineNum">     270 </span>            :      * We are probably in a short-lived expression-evaluation context. Switch
+<span class="lineNum">     271 </span>            :      * to the per-query context for manipulating the child plan's chgParam,
+<span class="lineNum">     272 </span>            :      * calling ExecProcNode on it, etc.
+<span class="lineNum">     273 </span>            :      */
+<span class="lineNum">     274 </span><span class="lineCov">      26774 :     oldcontext = MemoryContextSwitchTo(econtext-&gt;ecxt_per_query_memory);</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span>            :     /*
+<span class="lineNum">     277 </span>            :      * Set Params of this plan from parent plan correlation values. (Any
+<span class="lineNum">     278 </span>            :      * calculation we have to do is done in the parent econtext, since the
+<span class="lineNum">     279 </span>            :      * Param values don't need to have per-query lifetime.)
+<span class="lineNum">     280 </span>            :      */
+<span class="lineNum">     281 </span><span class="lineCov">      26774 :     Assert(list_length(subplan-&gt;parParam) == list_length(node-&gt;args));</span>
+<span class="lineNum">     282 </span>            : 
+<span class="lineNum">     283 </span><span class="lineCov">      58916 :     forboth(l, subplan-&gt;parParam, pvar, node-&gt;args)</span>
+<span class="lineNum">     284 </span>            :     {
+<span class="lineNum">     285 </span><span class="lineCov">      32142 :         int         paramid = lfirst_int(l);</span>
+<span class="lineNum">     286 </span><span class="lineCov">      32142 :         ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">     287 </span>            : 
+<span class="lineNum">     288 </span><span class="lineCov">      32142 :         prm-&gt;value = ExecEvalExprSwitchContext((ExprState *) lfirst(pvar),</span>
+<span class="lineNum">     289 </span>            :                                                econtext,
+<span class="lineNum">     290 </span>            :                                                &amp;(prm-&gt;isnull));
+<span class="lineNum">     291 </span><span class="lineCov">      32142 :         planstate-&gt;chgParam = bms_add_member(planstate-&gt;chgParam, paramid);</span>
+<span class="lineNum">     292 </span>            :     }
+<span class="lineNum">     293 </span>            : 
+<span class="lineNum">     294 </span>            :     /*
+<span class="lineNum">     295 </span>            :      * Now that we've set up its parameters, we can reset the subplan.
+<span class="lineNum">     296 </span>            :      */
+<span class="lineNum">     297 </span><span class="lineCov">      26774 :     ExecReScan(planstate);</span>
+<span class="lineNum">     298 </span>            : 
+<span class="lineNum">     299 </span>            :     /*
+<span class="lineNum">     300 </span>            :      * For all sublink types except EXPR_SUBLINK and ARRAY_SUBLINK, the result
+<span class="lineNum">     301 </span>            :      * is boolean as are the results of the combining operators. We combine
+<span class="lineNum">     302 </span>            :      * results across tuples (if the subplan produces more than one) using OR
+<span class="lineNum">     303 </span>            :      * semantics for ANY_SUBLINK or AND semantics for ALL_SUBLINK.
+<span class="lineNum">     304 </span>            :      * (ROWCOMPARE_SUBLINK doesn't allow multiple tuples from the subplan.)
+<span class="lineNum">     305 </span>            :      * NULL results from the combining operators are handled according to the
+<span class="lineNum">     306 </span>            :      * usual SQL semantics for OR and AND.  The result for no input tuples is
+<span class="lineNum">     307 </span>            :      * FALSE for ANY_SUBLINK, TRUE for ALL_SUBLINK, NULL for
+<span class="lineNum">     308 </span>            :      * ROWCOMPARE_SUBLINK.
+<span class="lineNum">     309 </span>            :      *
+<span class="lineNum">     310 </span>            :      * For EXPR_SUBLINK we require the subplan to produce no more than one
+<span class="lineNum">     311 </span>            :      * tuple, else an error is raised.  If zero tuples are produced, we return
+<span class="lineNum">     312 </span>            :      * NULL.  Assuming we get a tuple, we just use its first column (there can
+<span class="lineNum">     313 </span>            :      * be only one non-junk column in this case).
+<span class="lineNum">     314 </span>            :      *
+<span class="lineNum">     315 </span>            :      * For ARRAY_SUBLINK we allow the subplan to produce any number of tuples,
+<span class="lineNum">     316 </span>            :      * and form an array of the first column's values.  Note in particular
+<span class="lineNum">     317 </span>            :      * that we produce a zero-element array if no tuples are produced (this is
+<span class="lineNum">     318 </span>            :      * a change from pre-8.3 behavior of returning NULL).
+<span class="lineNum">     319 </span>            :      */
+<span class="lineNum">     320 </span><span class="lineCov">      26774 :     result = BoolGetDatum(subLinkType == ALL_SUBLINK);</span>
+<span class="lineNum">     321 </span><span class="lineCov">      26774 :     *isNull = false;</span>
+<span class="lineNum">     322 </span>            : 
+<span class="lineNum">     323 </span><span class="lineCov">      76770 :     for (slot = ExecProcNode(planstate);</span>
+<span class="lineNum">     324 </span><span class="lineCov">      44690 :          !TupIsNull(slot);</span>
+<span class="lineNum">     325 </span><span class="lineCov">      23222 :          slot = ExecProcNode(planstate))</span>
+<span class="lineNum">     326 </span>            :     {
+<span class="lineNum">     327 </span><span class="lineCov">      23468 :         TupleDesc   tdesc = slot-&gt;tts_tupleDescriptor;</span>
+<span class="lineNum">     328 </span>            :         Datum       rowresult;
+<span class="lineNum">     329 </span>            :         bool        rownull;
+<span class="lineNum">     330 </span>            :         int         col;
+<span class="lineNum">     331 </span>            :         ListCell   *plst;
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span><span class="lineCov">      23468 :         if (subLinkType == EXISTS_SUBLINK)</span>
+<span class="lineNum">     334 </span>            :         {
+<span class="lineNum">     335 </span><span class="lineCov">        148 :             found = true;</span>
+<span class="lineNum">     336 </span><span class="lineCov">        148 :             result = BoolGetDatum(true);</span>
+<span class="lineNum">     337 </span><span class="lineCov">        394 :             break;</span>
+<span class="lineNum">     338 </span>            :         }
+<span class="lineNum">     339 </span>            : 
+<span class="lineNum">     340 </span><span class="lineCov">      23320 :         if (subLinkType == EXPR_SUBLINK)</span>
+<span class="lineNum">     341 </span>            :         {
+<span class="lineNum">     342 </span>            :             /* cannot allow multiple input tuples for EXPR sublink */
+<span class="lineNum">     343 </span><span class="lineCov">      21878 :             if (found)</span>
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     345 </span>            :                         (errcode(ERRCODE_CARDINALITY_VIOLATION),
+<span class="lineNum">     346 </span>            :                          errmsg(&quot;more than one row returned by a subquery used as an expression&quot;)));
+<span class="lineNum">     347 </span><span class="lineCov">      21878 :             found = true;</span>
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span>            :             /*
+<span class="lineNum">     350 </span>            :              * We need to copy the subplan's tuple in case the result is of
+<span class="lineNum">     351 </span>            :              * pass-by-ref type --- our return value will point into this
+<span class="lineNum">     352 </span>            :              * copied tuple!  Can't use the subplan's instance of the tuple
+<span class="lineNum">     353 </span>            :              * since it won't still be valid after next ExecProcNode() call.
+<span class="lineNum">     354 </span>            :              * node-&gt;curTuple keeps track of the copied tuple for eventual
+<span class="lineNum">     355 </span>            :              * freeing.
+<span class="lineNum">     356 </span>            :              */
+<span class="lineNum">     357 </span><span class="lineCov">      21878 :             if (node-&gt;curTuple)</span>
+<span class="lineNum">     358 </span><span class="lineCov">      21596 :                 heap_freetuple(node-&gt;curTuple);</span>
+<span class="lineNum">     359 </span><span class="lineCov">      21878 :             node-&gt;curTuple = ExecCopySlotHeapTuple(slot);</span>
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span><span class="lineCov">      21878 :             result = heap_getattr(node-&gt;curTuple, 1, tdesc, isNull);</span>
+<span class="lineNum">     362 </span>            :             /* keep scanning subplan to make sure there's only one tuple */
+<span class="lineNum">     363 </span><span class="lineCov">      44926 :             continue;</span>
+<span class="lineNum">     364 </span>            :         }
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span><span class="lineCov">       1442 :         if (subLinkType == ARRAY_SUBLINK)</span>
+<span class="lineNum">     367 </span>            :         {
+<span class="lineNum">     368 </span>            :             Datum       dvalue;
+<span class="lineNum">     369 </span>            :             bool        disnull;
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineCov">       1170 :             found = true;</span>
+<span class="lineNum">     372 </span>            :             /* stash away current value */
+<span class="lineNum">     373 </span><span class="lineCov">       1170 :             Assert(subplan-&gt;firstColType == TupleDescAttr(tdesc, 0)-&gt;atttypid);</span>
+<span class="lineNum">     374 </span><span class="lineCov">       1170 :             dvalue = slot_getattr(slot, 1, &amp;disnull);</span>
+<span class="lineNum">     375 </span><span class="lineCov">       1170 :             astate = accumArrayResultAny(astate, dvalue, disnull,</span>
+<span class="lineNum">     376 </span>            :                                          subplan-&gt;firstColType, oldcontext);
+<span class="lineNum">     377 </span>            :             /* keep scanning subplan to collect all values */
+<span class="lineNum">     378 </span><span class="lineCov">       1170 :             continue;</span>
+<span class="lineNum">     379 </span>            :         }
+<span class="lineNum">     380 </span>            : 
+<span class="lineNum">     381 </span>            :         /* cannot allow multiple input tuples for ROWCOMPARE sublink either */
+<span class="lineNum">     382 </span><span class="lineCov">        272 :         if (subLinkType == ROWCOMPARE_SUBLINK &amp;&amp; found)</span>
+<span class="lineNum">     383 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     384 </span>            :                     (errcode(ERRCODE_CARDINALITY_VIOLATION),
+<span class="lineNum">     385 </span>            :                      errmsg(&quot;more than one row returned by a subquery used as an expression&quot;)));
+<span class="lineNum">     386 </span>            : 
+<span class="lineNum">     387 </span><span class="lineCov">        272 :         found = true;</span>
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span>            :         /*
+<span class="lineNum">     390 </span>            :          * For ALL, ANY, and ROWCOMPARE sublinks, load up the Params
+<span class="lineNum">     391 </span>            :          * representing the columns of the sub-select, and then evaluate the
+<span class="lineNum">     392 </span>            :          * combining expression.
+<span class="lineNum">     393 </span>            :          */
+<span class="lineNum">     394 </span><span class="lineCov">        272 :         col = 1;</span>
+<span class="lineNum">     395 </span><span class="lineCov">        544 :         foreach(plst, subplan-&gt;paramIds)</span>
+<span class="lineNum">     396 </span>            :         {
+<span class="lineNum">     397 </span><span class="lineCov">        272 :             int         paramid = lfirst_int(plst);</span>
+<span class="lineNum">     398 </span>            :             ParamExecData *prmdata;
+<span class="lineNum">     399 </span>            : 
+<span class="lineNum">     400 </span><span class="lineCov">        272 :             prmdata = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">     401 </span><span class="lineCov">        272 :             Assert(prmdata-&gt;execPlan == NULL);</span>
+<span class="lineNum">     402 </span><span class="lineCov">        272 :             prmdata-&gt;value = slot_getattr(slot, col, &amp;(prmdata-&gt;isnull));</span>
+<span class="lineNum">     403 </span><span class="lineCov">        272 :             col++;</span>
+<span class="lineNum">     404 </span>            :         }
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span><span class="lineCov">        272 :         rowresult = ExecEvalExprSwitchContext(node-&gt;testexpr, econtext,</span>
+<span class="lineNum">     407 </span>            :                                               &amp;rownull);
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span><span class="lineCov">        272 :         if (subLinkType == ANY_SUBLINK)</span>
+<span class="lineNum">     410 </span>            :         {
+<span class="lineNum">     411 </span>            :             /* combine across rows per OR semantics */
+<span class="lineNum">     412 </span><span class="lineCov">        242 :             if (rownull)</span>
+<span class="lineNum">     413 </span><span class="lineCov">          6 :                 *isNull = true;</span>
+<span class="lineNum">     414 </span><span class="lineCov">        236 :             else if (DatumGetBool(rowresult))</span>
+<span class="lineNum">     415 </span>            :             {
+<span class="lineNum">     416 </span><span class="lineCov">         90 :                 result = BoolGetDatum(true);</span>
+<span class="lineNum">     417 </span><span class="lineCov">         90 :                 *isNull = false;</span>
+<span class="lineNum">     418 </span><span class="lineCov">         90 :                 break;          /* needn't look at any more rows */</span>
+<span class="lineNum">     419 </span>            :             }
+<span class="lineNum">     420 </span>            :         }
+<span class="lineNum">     421 </span><span class="lineCov">         30 :         else if (subLinkType == ALL_SUBLINK)</span>
+<span class="lineNum">     422 </span>            :         {
+<span class="lineNum">     423 </span>            :             /* combine across rows per AND semantics */
+<span class="lineNum">     424 </span><span class="lineCov">         30 :             if (rownull)</span>
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :                 *isNull = true;</span>
+<span class="lineNum">     426 </span><span class="lineCov">         30 :             else if (!DatumGetBool(rowresult))</span>
+<span class="lineNum">     427 </span>            :             {
+<span class="lineNum">     428 </span><span class="lineCov">          8 :                 result = BoolGetDatum(false);</span>
+<span class="lineNum">     429 </span><span class="lineCov">          8 :                 *isNull = false;</span>
+<span class="lineNum">     430 </span><span class="lineCov">          8 :                 break;          /* needn't look at any more rows */</span>
+<span class="lineNum">     431 </span>            :             }
+<span class="lineNum">     432 </span>            :         }
+<span class="lineNum">     433 </span>            :         else
+<span class="lineNum">     434 </span>            :         {
+<span class="lineNum">     435 </span>            :             /* must be ROWCOMPARE_SUBLINK */
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :             result = rowresult;</span>
+<span class="lineNum">     437 </span><span class="lineNoCov">          0 :             *isNull = rownull;</span>
+<span class="lineNum">     438 </span>            :         }
+<span class="lineNum">     439 </span>            :     }
+<span class="lineNum">     440 </span>            : 
+<span class="lineNum">     441 </span><span class="lineCov">      26774 :     MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     442 </span>            : 
+<span class="lineNum">     443 </span><span class="lineCov">      26774 :     if (subLinkType == ARRAY_SUBLINK)</span>
+<span class="lineNum">     444 </span>            :     {
+<span class="lineNum">     445 </span>            :         /* We return the result in the caller's context */
+<span class="lineNum">     446 </span><span class="lineCov">       1088 :         result = makeArrayResultAny(astate, oldcontext, true);</span>
+<span class="lineNum">     447 </span>            :     }
+<span class="lineNum">     448 </span><span class="lineCov">      25686 :     else if (!found)</span>
+<span class="lineNum">     449 </span>            :     {
+<span class="lineNum">     450 </span>            :         /*
+<span class="lineNum">     451 </span>            :          * deal with empty subplan result.  result/isNull were previously
+<span class="lineNum">     452 </span>            :          * initialized correctly for all sublink types except EXPR and
+<span class="lineNum">     453 </span>            :          * ROWCOMPARE; for those, return NULL.
+<span class="lineNum">     454 </span>            :          */
+<span class="lineNum">     455 </span><span class="lineCov">       3496 :         if (subLinkType == EXPR_SUBLINK ||</span>
+<span class="lineNum">     456 </span>            :             subLinkType == ROWCOMPARE_SUBLINK)
+<span class="lineNum">     457 </span>            :         {
+<span class="lineNum">     458 </span><span class="lineCov">       3224 :             result = (Datum) 0;</span>
+<span class="lineNum">     459 </span><span class="lineCov">       3224 :             *isNull = true;</span>
+<span class="lineNum">     460 </span>            :         }
+<span class="lineNum">     461 </span>            :     }
+<span class="lineNum">     462 </span>            : 
+<span class="lineNum">     463 </span><span class="lineCov">      26774 :     return result;</span>
+<span class="lineNum">     464 </span>            : }
+<span class="lineNum">     465 </span>            : 
+<span class="lineNum">     466 </span>            : /*
+<span class="lineNum">     467 </span>            :  * buildSubPlanHash: load hash table by scanning subplan output.
+<a name="468"><span class="lineNum">     468 </span>            :  */</a>
+<span class="lineNum">     469 </span>            : static void
+<span class="lineNum">     470 </span><span class="lineCov">        370 : buildSubPlanHash(SubPlanState *node, ExprContext *econtext)</span>
+<span class="lineNum">     471 </span>            : {
+<span class="lineNum">     472 </span><span class="lineCov">        370 :     SubPlan    *subplan = node-&gt;subplan;</span>
+<span class="lineNum">     473 </span><span class="lineCov">        370 :     PlanState  *planstate = node-&gt;planstate;</span>
+<span class="lineNum">     474 </span><span class="lineCov">        370 :     int         ncols = list_length(subplan-&gt;paramIds);</span>
+<span class="lineNum">     475 </span><span class="lineCov">        370 :     ExprContext *innerecontext = node-&gt;innerecontext;</span>
+<span class="lineNum">     476 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">     477 </span>            :     long        nbuckets;
+<span class="lineNum">     478 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span><span class="lineCov">        370 :     Assert(subplan-&gt;subLinkType == ANY_SUBLINK);</span>
+<span class="lineNum">     481 </span>            : 
+<span class="lineNum">     482 </span>            :     /*
+<span class="lineNum">     483 </span>            :      * If we already had any hash tables, reset 'em; otherwise create empty
+<span class="lineNum">     484 </span>            :      * hash table(s).
+<span class="lineNum">     485 </span>            :      *
+<span class="lineNum">     486 </span>            :      * If we need to distinguish accurately between FALSE and UNKNOWN (i.e.,
+<span class="lineNum">     487 </span>            :      * NULL) results of the IN operation, then we have to store subplan output
+<span class="lineNum">     488 </span>            :      * rows that are partly or wholly NULL.  We store such rows in a separate
+<span class="lineNum">     489 </span>            :      * hash table that we expect will be much smaller than the main table. (We
+<span class="lineNum">     490 </span>            :      * can use hashing to eliminate partly-null rows that are not distinct. We
+<span class="lineNum">     491 </span>            :      * keep them separate to minimize the cost of the inevitable full-table
+<span class="lineNum">     492 </span>            :      * searches; see findPartialMatch.)
+<span class="lineNum">     493 </span>            :      *
+<span class="lineNum">     494 </span>            :      * If it's not necessary to distinguish FALSE and UNKNOWN, then we don't
+<span class="lineNum">     495 </span>            :      * need to store subplan output rows that contain NULL.
+<span class="lineNum">     496 </span>            :      */
+<span class="lineNum">     497 </span><span class="lineCov">        370 :     MemoryContextReset(node-&gt;hashtablecxt);</span>
+<span class="lineNum">     498 </span><span class="lineCov">        370 :     node-&gt;hashtable = NULL;</span>
+<span class="lineNum">     499 </span><span class="lineCov">        370 :     node-&gt;hashnulls = NULL;</span>
+<span class="lineNum">     500 </span><span class="lineCov">        370 :     node-&gt;havehashrows = false;</span>
+<span class="lineNum">     501 </span><span class="lineCov">        370 :     node-&gt;havenullrows = false;</span>
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span><span class="lineCov">        370 :     nbuckets = (long) Min(planstate-&gt;plan-&gt;plan_rows, (double) LONG_MAX);</span>
+<span class="lineNum">     504 </span><span class="lineCov">        370 :     if (nbuckets &lt; 1)</span>
+<span class="lineNum">     505 </span><span class="lineNoCov">          0 :         nbuckets = 1;</span>
+<span class="lineNum">     506 </span>            : 
+<span class="lineNum">     507 </span><span class="lineCov">        370 :     if (node-&gt;hashtable)</span>
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 :         ResetTupleHashTable(node-&gt;hashtable);</span>
+<span class="lineNum">     509 </span>            :     else
+<span class="lineNum">     510 </span><span class="lineCov">       1110 :         node-&gt;hashtable = BuildTupleHashTableExt(node-&gt;parent,</span>
+<span class="lineNum">     511 </span>            :                                                  node-&gt;descRight,
+<span class="lineNum">     512 </span>            :                                                  ncols,
+<span class="lineNum">     513 </span>            :                                                  node-&gt;keyColIdx,
+<span class="lineNum">     514 </span><span class="lineCov">        370 :                                                  node-&gt;tab_eq_funcoids,</span>
+<span class="lineNum">     515 </span>            :                                                  node-&gt;tab_hash_funcs,
+<span class="lineNum">     516 </span>            :                                                  node-&gt;tab_collations,
+<span class="lineNum">     517 </span>            :                                                  nbuckets,
+<span class="lineNum">     518 </span>            :                                                  0,
+<span class="lineNum">     519 </span><span class="lineCov">        370 :                                                  node-&gt;planstate-&gt;state-&gt;es_query_cxt,</span>
+<span class="lineNum">     520 </span>            :                                                  node-&gt;hashtablecxt,
+<span class="lineNum">     521 </span>            :                                                  node-&gt;hashtempcxt,
+<span class="lineNum">     522 </span>            :                                                  false);
+<span class="lineNum">     523 </span>            : 
+<span class="lineNum">     524 </span><span class="lineCov">        370 :     if (!subplan-&gt;unknownEqFalse)</span>
+<span class="lineNum">     525 </span>            :     {
+<span class="lineNum">     526 </span><span class="lineCov">        344 :         if (ncols == 1)</span>
+<span class="lineNum">     527 </span><span class="lineCov">         40 :             nbuckets = 1;       /* there can only be one entry */</span>
+<span class="lineNum">     528 </span>            :         else
+<span class="lineNum">     529 </span>            :         {
+<span class="lineNum">     530 </span><span class="lineCov">        304 :             nbuckets /= 16;</span>
+<span class="lineNum">     531 </span><span class="lineCov">        304 :             if (nbuckets &lt; 1)</span>
+<span class="lineNum">     532 </span><span class="lineCov">        282 :                 nbuckets = 1;</span>
+<span class="lineNum">     533 </span>            :         }
+<span class="lineNum">     534 </span>            : 
+<span class="lineNum">     535 </span><span class="lineCov">        344 :         if (node-&gt;hashnulls)</span>
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 :             ResetTupleHashTable(node-&gt;hashtable);</span>
+<span class="lineNum">     537 </span>            :         else
+<span class="lineNum">     538 </span><span class="lineCov">       1032 :             node-&gt;hashnulls = BuildTupleHashTableExt(node-&gt;parent,</span>
+<span class="lineNum">     539 </span>            :                                                      node-&gt;descRight,
+<span class="lineNum">     540 </span>            :                                                      ncols,
+<span class="lineNum">     541 </span>            :                                                      node-&gt;keyColIdx,
+<span class="lineNum">     542 </span><span class="lineCov">        344 :                                                      node-&gt;tab_eq_funcoids,</span>
+<span class="lineNum">     543 </span>            :                                                      node-&gt;tab_hash_funcs,
+<span class="lineNum">     544 </span>            :                                                      node-&gt;tab_collations,
+<span class="lineNum">     545 </span>            :                                                      nbuckets,
+<span class="lineNum">     546 </span>            :                                                      0,
+<span class="lineNum">     547 </span><span class="lineCov">        344 :                                                      node-&gt;planstate-&gt;state-&gt;es_query_cxt,</span>
+<span class="lineNum">     548 </span>            :                                                      node-&gt;hashtablecxt,
+<span class="lineNum">     549 </span>            :                                                      node-&gt;hashtempcxt,
+<span class="lineNum">     550 </span>            :                                                      false);
+<span class="lineNum">     551 </span>            :     }
+<span class="lineNum">     552 </span>            : 
+<span class="lineNum">     553 </span>            :     /*
+<span class="lineNum">     554 </span>            :      * We are probably in a short-lived expression-evaluation context. Switch
+<span class="lineNum">     555 </span>            :      * to the per-query context for manipulating the child plan.
+<span class="lineNum">     556 </span>            :      */
+<span class="lineNum">     557 </span><span class="lineCov">        370 :     oldcontext = MemoryContextSwitchTo(econtext-&gt;ecxt_per_query_memory);</span>
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span>            :     /*
+<span class="lineNum">     560 </span>            :      * Reset subplan to start.
+<span class="lineNum">     561 </span>            :      */
+<span class="lineNum">     562 </span><span class="lineCov">        370 :     ExecReScan(planstate);</span>
+<span class="lineNum">     563 </span>            : 
+<span class="lineNum">     564 </span>            :     /*
+<span class="lineNum">     565 </span>            :      * Scan the subplan and load the hash table(s).  Note that when there are
+<span class="lineNum">     566 </span>            :      * duplicate rows coming out of the sub-select, only one copy is stored.
+<span class="lineNum">     567 </span>            :      */
+<span class="lineNum">     568 </span><span class="lineCov">     111532 :     for (slot = ExecProcNode(planstate);</span>
+<span class="lineNum">     569 </span><span class="lineCov">     110846 :          !TupIsNull(slot);</span>
+<span class="lineNum">     570 </span><span class="lineCov">     110792 :          slot = ExecProcNode(planstate))</span>
+<span class="lineNum">     571 </span>            :     {
+<span class="lineNum">     572 </span><span class="lineCov">     110794 :         int         col = 1;</span>
+<span class="lineNum">     573 </span>            :         ListCell   *plst;
+<span class="lineNum">     574 </span>            :         bool        isnew;
+<span class="lineNum">     575 </span>            : 
+<span class="lineNum">     576 </span>            :         /*
+<span class="lineNum">     577 </span>            :          * Load up the Params representing the raw sub-select outputs, then
+<span class="lineNum">     578 </span>            :          * form the projection tuple to store in the hashtable.
+<span class="lineNum">     579 </span>            :          */
+<span class="lineNum">     580 </span><span class="lineCov">     312000 :         foreach(plst, subplan-&gt;paramIds)</span>
+<span class="lineNum">     581 </span>            :         {
+<span class="lineNum">     582 </span><span class="lineCov">     201206 :             int         paramid = lfirst_int(plst);</span>
+<span class="lineNum">     583 </span>            :             ParamExecData *prmdata;
+<span class="lineNum">     584 </span>            : 
+<span class="lineNum">     585 </span><span class="lineCov">     201206 :             prmdata = &amp;(innerecontext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">     586 </span><span class="lineCov">     201206 :             Assert(prmdata-&gt;execPlan == NULL);</span>
+<span class="lineNum">     587 </span><span class="lineCov">     201206 :             prmdata-&gt;value = slot_getattr(slot, col,</span>
+<span class="lineNum">     588 </span>            :                                           &amp;(prmdata-&gt;isnull));
+<span class="lineNum">     589 </span><span class="lineCov">     201206 :             col++;</span>
+<span class="lineNum">     590 </span>            :         }
+<span class="lineNum">     591 </span><span class="lineCov">     110794 :         slot = ExecProject(node-&gt;projRight);</span>
+<span class="lineNum">     592 </span>            : 
+<span class="lineNum">     593 </span>            :         /*
+<span class="lineNum">     594 </span>            :          * If result contains any nulls, store separately or not at all.
+<span class="lineNum">     595 </span>            :          */
+<span class="lineNum">     596 </span><span class="lineCov">     110794 :         if (slotNoNulls(slot))</span>
+<span class="lineNum">     597 </span>            :         {
+<span class="lineNum">     598 </span><span class="lineCov">     110714 :             (void) LookupTupleHashEntry(node-&gt;hashtable, slot, &amp;isnew);</span>
+<span class="lineNum">     599 </span><span class="lineCov">     110712 :             node-&gt;havehashrows = true;</span>
+<span class="lineNum">     600 </span>            :         }
+<span class="lineNum">     601 </span><span class="lineCov">         80 :         else if (node-&gt;hashnulls)</span>
+<span class="lineNum">     602 </span>            :         {
+<span class="lineNum">     603 </span><span class="lineCov">         80 :             (void) LookupTupleHashEntry(node-&gt;hashnulls, slot, &amp;isnew);</span>
+<span class="lineNum">     604 </span><span class="lineCov">         80 :             node-&gt;havenullrows = true;</span>
+<span class="lineNum">     605 </span>            :         }
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span>            :         /*
+<span class="lineNum">     608 </span>            :          * Reset innerecontext after each inner tuple to free any memory used
+<span class="lineNum">     609 </span>            :          * during ExecProject.
+<span class="lineNum">     610 </span>            :          */
+<span class="lineNum">     611 </span><span class="lineCov">     110792 :         ResetExprContext(innerecontext);</span>
+<span class="lineNum">     612 </span>            :     }
+<span class="lineNum">     613 </span>            : 
+<span class="lineNum">     614 </span>            :     /*
+<span class="lineNum">     615 </span>            :      * Since the projected tuples are in the sub-query's context and not the
+<span class="lineNum">     616 </span>            :      * main context, we'd better clear the tuple slot before there's any
+<span class="lineNum">     617 </span>            :      * chance of a reset of the sub-query's context.  Else we will have the
+<span class="lineNum">     618 </span>            :      * potential for a double free attempt.  (XXX possibly no longer needed,
+<span class="lineNum">     619 </span>            :      * but can't hurt.)
+<span class="lineNum">     620 </span>            :      */
+<span class="lineNum">     621 </span><span class="lineCov">        368 :     ExecClearTuple(node-&gt;projRight-&gt;pi_state.resultslot);</span>
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span><span class="lineCov">        368 :     MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     624 </span><span class="lineCov">        368 : }</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span>            : /*
+<span class="lineNum">     627 </span>            :  * execTuplesUnequal
+<span class="lineNum">     628 </span>            :  *      Return true if two tuples are definitely unequal in the indicated
+<span class="lineNum">     629 </span>            :  *      fields.
+<span class="lineNum">     630 </span>            :  *
+<span class="lineNum">     631 </span>            :  * Nulls are neither equal nor unequal to anything else.  A true result
+<span class="lineNum">     632 </span>            :  * is obtained only if there are non-null fields that compare not-equal.
+<span class="lineNum">     633 </span>            :  *
+<span class="lineNum">     634 </span>            :  * slot1, slot2: the tuples to compare (must have same columns!)
+<span class="lineNum">     635 </span>            :  * numCols: the number of attributes to be examined
+<span class="lineNum">     636 </span>            :  * matchColIdx: array of attribute column numbers
+<span class="lineNum">     637 </span>            :  * eqFunctions: array of fmgr lookup info for the equality functions to use
+<span class="lineNum">     638 </span>            :  * evalContext: short-term memory context for executing the functions
+<a name="639"><span class="lineNum">     639 </span>            :  */</a>
+<span class="lineNum">     640 </span>            : static bool
+<span class="lineNum">     641 </span><span class="lineCov">        210 : execTuplesUnequal(TupleTableSlot *slot1,</span>
+<span class="lineNum">     642 </span>            :                   TupleTableSlot *slot2,
+<span class="lineNum">     643 </span>            :                   int numCols,
+<span class="lineNum">     644 </span>            :                   AttrNumber *matchColIdx,
+<span class="lineNum">     645 </span>            :                   FmgrInfo *eqfunctions,
+<span class="lineNum">     646 </span>            :                   const Oid *collations,
+<span class="lineNum">     647 </span>            :                   MemoryContext evalContext)
+<span class="lineNum">     648 </span>            : {
+<span class="lineNum">     649 </span>            :     MemoryContext oldContext;
+<span class="lineNum">     650 </span>            :     bool        result;
+<span class="lineNum">     651 </span>            :     int         i;
+<span class="lineNum">     652 </span>            : 
+<span class="lineNum">     653 </span>            :     /* Reset and switch into the temp context. */
+<span class="lineNum">     654 </span><span class="lineCov">        210 :     MemoryContextReset(evalContext);</span>
+<span class="lineNum">     655 </span><span class="lineCov">        210 :     oldContext = MemoryContextSwitchTo(evalContext);</span>
+<span class="lineNum">     656 </span>            : 
+<span class="lineNum">     657 </span>            :     /*
+<span class="lineNum">     658 </span>            :      * We cannot report a match without checking all the fields, but we can
+<span class="lineNum">     659 </span>            :      * report a non-match as soon as we find unequal fields.  So, start
+<span class="lineNum">     660 </span>            :      * comparing at the last field (least significant sort key). That's the
+<span class="lineNum">     661 </span>            :      * most likely to be different if we are dealing with sorted input.
+<span class="lineNum">     662 </span>            :      */
+<span class="lineNum">     663 </span><span class="lineCov">        210 :     result = false;</span>
+<span class="lineNum">     664 </span>            : 
+<span class="lineNum">     665 </span><span class="lineCov">        824 :     for (i = numCols; --i &gt;= 0;)</span>
+<span class="lineNum">     666 </span>            :     {
+<span class="lineNum">     667 </span><span class="lineCov">        532 :         AttrNumber  att = matchColIdx[i];</span>
+<span class="lineNum">     668 </span>            :         Datum       attr1,
+<span class="lineNum">     669 </span>            :                     attr2;
+<span class="lineNum">     670 </span>            :         bool        isNull1,
+<span class="lineNum">     671 </span>            :                     isNull2;
+<span class="lineNum">     672 </span>            : 
+<span class="lineNum">     673 </span><span class="lineCov">        532 :         attr1 = slot_getattr(slot1, att, &amp;isNull1);</span>
+<span class="lineNum">     674 </span>            : 
+<span class="lineNum">     675 </span><span class="lineCov">        532 :         if (isNull1)</span>
+<span class="lineNum">     676 </span><span class="lineCov">        392 :             continue;           /* can't prove anything here */</span>
+<span class="lineNum">     677 </span>            : 
+<span class="lineNum">     678 </span><span class="lineCov">        350 :         attr2 = slot_getattr(slot2, att, &amp;isNull2);</span>
+<span class="lineNum">     679 </span>            : 
+<span class="lineNum">     680 </span><span class="lineCov">        350 :         if (isNull2)</span>
+<span class="lineNum">     681 </span><span class="lineCov">         28 :             continue;           /* can't prove anything here */</span>
+<span class="lineNum">     682 </span>            : 
+<span class="lineNum">     683 </span>            :         /* Apply the type-specific equality function */
+<span class="lineNum">     684 </span><span class="lineCov">        322 :         if (!DatumGetBool(FunctionCall2Coll(&amp;eqfunctions[i],</span>
+<span class="lineNum">     685 </span>            :                                             collations[i],
+<span class="lineNum">     686 </span>            :                                             attr1, attr2)))
+<span class="lineNum">     687 </span>            :         {
+<span class="lineNum">     688 </span><span class="lineCov">        128 :             result = true;      /* they are unequal */</span>
+<span class="lineNum">     689 </span><span class="lineCov">        128 :             break;</span>
+<span class="lineNum">     690 </span>            :         }
+<span class="lineNum">     691 </span>            :     }
+<span class="lineNum">     692 </span>            : 
+<span class="lineNum">     693 </span><span class="lineCov">        210 :     MemoryContextSwitchTo(oldContext);</span>
+<span class="lineNum">     694 </span>            : 
+<span class="lineNum">     695 </span><span class="lineCov">        210 :     return result;</span>
+<span class="lineNum">     696 </span>            : }
+<span class="lineNum">     697 </span>            : 
+<span class="lineNum">     698 </span>            : /*
+<span class="lineNum">     699 </span>            :  * findPartialMatch: does the hashtable contain an entry that is not
+<span class="lineNum">     700 </span>            :  * provably distinct from the tuple?
+<span class="lineNum">     701 </span>            :  *
+<span class="lineNum">     702 </span>            :  * We have to scan the whole hashtable; we can't usefully use hashkeys
+<span class="lineNum">     703 </span>            :  * to guide probing, since we might get partial matches on tuples with
+<span class="lineNum">     704 </span>            :  * hashkeys quite unrelated to what we'd get from the given tuple.
+<span class="lineNum">     705 </span>            :  *
+<span class="lineNum">     706 </span>            :  * Caller must provide the equality functions to use, since in cross-type
+<span class="lineNum">     707 </span>            :  * cases these are different from the hashtable's internal functions.
+<a name="708"><span class="lineNum">     708 </span>            :  */</a>
+<span class="lineNum">     709 </span>            : static bool
+<span class="lineNum">     710 </span><span class="lineCov">        178 : findPartialMatch(TupleHashTable hashtable, TupleTableSlot *slot,</span>
+<span class="lineNum">     711 </span>            :                  FmgrInfo *eqfunctions)
+<span class="lineNum">     712 </span>            : {
+<span class="lineNum">     713 </span><span class="lineCov">        178 :     int         numCols = hashtable-&gt;numCols;</span>
+<span class="lineNum">     714 </span><span class="lineCov">        178 :     AttrNumber *keyColIdx = hashtable-&gt;keyColIdx;</span>
+<span class="lineNum">     715 </span>            :     TupleHashIterator hashiter;
+<span class="lineNum">     716 </span>            :     TupleHashEntry entry;
+<span class="lineNum">     717 </span>            : 
+<span class="lineNum">     718 </span><span class="lineCov">        178 :     InitTupleHashIterator(hashtable, &amp;hashiter);</span>
+<span class="lineNum">     719 </span><span class="lineCov">        178 :     while ((entry = ScanTupleHashTable(hashtable, &amp;hashiter)) != NULL)</span>
+<span class="lineNum">     720 </span>            :     {
+<span class="lineNum">     721 </span><span class="lineCov">        210 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     722 </span>            : 
+<span class="lineNum">     723 </span><span class="lineCov">        210 :         ExecStoreMinimalTuple(entry-&gt;firstTuple, hashtable-&gt;tableslot, false);</span>
+<span class="lineNum">     724 </span><span class="lineCov">        420 :         if (!execTuplesUnequal(slot, hashtable-&gt;tableslot,</span>
+<span class="lineNum">     725 </span>            :                                numCols, keyColIdx,
+<span class="lineNum">     726 </span>            :                                eqfunctions,
+<span class="lineNum">     727 </span><span class="lineCov">        210 :                                hashtable-&gt;tab_collations,</span>
+<span class="lineNum">     728 </span>            :                                hashtable-&gt;tempcxt))
+<span class="lineNum">     729 </span>            :         {
+<span class="lineNum">     730 </span>            :             TermTupleHashIterator(&amp;hashiter);
+<span class="lineNum">     731 </span><span class="lineCov">         82 :             return true;</span>
+<span class="lineNum">     732 </span>            :         }
+<span class="lineNum">     733 </span>            :     }
+<span class="lineNum">     734 </span>            :     /* No TermTupleHashIterator call needed here */
+<span class="lineNum">     735 </span><span class="lineCov">         96 :     return false;</span>
+<span class="lineNum">     736 </span>            : }
+<span class="lineNum">     737 </span>            : 
+<span class="lineNum">     738 </span>            : /*
+<span class="lineNum">     739 </span>            :  * slotAllNulls: is the slot completely NULL?
+<span class="lineNum">     740 </span>            :  *
+<span class="lineNum">     741 </span>            :  * This does not test for dropped columns, which is OK because we only
+<span class="lineNum">     742 </span>            :  * use it on projected tuples.
+<a name="743"><span class="lineNum">     743 </span>            :  */</a>
+<span class="lineNum">     744 </span>            : static bool
+<span class="lineNum">     745 </span><span class="lineCov">        116 : slotAllNulls(TupleTableSlot *slot)</span>
+<span class="lineNum">     746 </span>            : {
+<span class="lineNum">     747 </span><span class="lineCov">        116 :     int         ncols = slot-&gt;tts_tupleDescriptor-&gt;natts;</span>
+<span class="lineNum">     748 </span>            :     int         i;
+<span class="lineNum">     749 </span>            : 
+<span class="lineNum">     750 </span><span class="lineCov">        244 :     for (i = 1; i &lt;= ncols; i++)</span>
+<span class="lineNum">     751 </span>            :     {
+<span class="lineNum">     752 </span><span class="lineCov">        244 :         if (!slot_attisnull(slot, i))</span>
+<span class="lineNum">     753 </span><span class="lineCov">        116 :             return false;</span>
+<span class="lineNum">     754 </span>            :     }
+<span class="lineNum">     755 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     756 </span>            : }
+<span class="lineNum">     757 </span>            : 
+<span class="lineNum">     758 </span>            : /*
+<span class="lineNum">     759 </span>            :  * slotNoNulls: is the slot entirely not NULL?
+<span class="lineNum">     760 </span>            :  *
+<span class="lineNum">     761 </span>            :  * This does not test for dropped columns, which is OK because we only
+<span class="lineNum">     762 </span>            :  * use it on projected tuples.
+<a name="763"><span class="lineNum">     763 </span>            :  */</a>
+<span class="lineNum">     764 </span>            : static bool
+<span class="lineNum">     765 </span><span class="lineCov">     231344 : slotNoNulls(TupleTableSlot *slot)</span>
+<span class="lineNum">     766 </span>            : {
+<span class="lineNum">     767 </span><span class="lineCov">     231344 :     int         ncols = slot-&gt;tts_tupleDescriptor-&gt;natts;</span>
+<span class="lineNum">     768 </span>            :     int         i;
+<span class="lineNum">     769 </span>            : 
+<span class="lineNum">     770 </span><span class="lineCov">     573396 :     for (i = 1; i &lt;= ncols; i++)</span>
+<span class="lineNum">     771 </span>            :     {
+<span class="lineNum">     772 </span><span class="lineCov">     342248 :         if (slot_attisnull(slot, i))</span>
+<span class="lineNum">     773 </span><span class="lineCov">        196 :             return false;</span>
+<span class="lineNum">     774 </span>            :     }
+<span class="lineNum">     775 </span><span class="lineCov">     231148 :     return true;</span>
+<span class="lineNum">     776 </span>            : }
+<span class="lineNum">     777 </span>            : 
+<span class="lineNum">     778 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     779 </span>            :  *      ExecInitSubPlan
+<span class="lineNum">     780 </span>            :  *
+<span class="lineNum">     781 </span>            :  * Create a SubPlanState for a SubPlan; this is the SubPlan-specific part
+<span class="lineNum">     782 </span>            :  * of ExecInitExpr().  We split it out so that it can be used for InitPlans
+<span class="lineNum">     783 </span>            :  * as well as regular SubPlans.  Note that we don't link the SubPlan into
+<span class="lineNum">     784 </span>            :  * the parent's subPlan list, because that shouldn't happen for InitPlans.
+<span class="lineNum">     785 </span>            :  * Instead, ExecInitExpr() does that one part.
+<span class="lineNum">     786 </span>            :  * ----------------------------------------------------------------
+<a name="787"><span class="lineNum">     787 </span>            :  */</a>
+<span class="lineNum">     788 </span>            : SubPlanState *
+<span class="lineNum">     789 </span><span class="lineCov">       8502 : ExecInitSubPlan(SubPlan *subplan, PlanState *parent)</span>
+<span class="lineNum">     790 </span>            : {
+<span class="lineNum">     791 </span><span class="lineCov">       8502 :     SubPlanState *sstate = makeNode(SubPlanState);</span>
+<span class="lineNum">     792 </span><span class="lineCov">       8502 :     EState     *estate = parent-&gt;state;</span>
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span><span class="lineCov">       8502 :     sstate-&gt;subplan = subplan;</span>
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span>            :     /* Link the SubPlanState to already-initialized subplan */
+<span class="lineNum">     797 </span><span class="lineCov">       8502 :     sstate-&gt;planstate = (PlanState *) list_nth(estate-&gt;es_subplanstates,</span>
+<span class="lineNum">     798 </span><span class="lineCov">       8502 :                                                subplan-&gt;plan_id - 1);</span>
+<span class="lineNum">     799 </span>            : 
+<span class="lineNum">     800 </span>            :     /* ... and to its parent's state */
+<span class="lineNum">     801 </span><span class="lineCov">       8502 :     sstate-&gt;parent = parent;</span>
+<span class="lineNum">     802 </span>            : 
+<span class="lineNum">     803 </span>            :     /* Initialize subexpressions */
+<span class="lineNum">     804 </span><span class="lineCov">       8502 :     sstate-&gt;testexpr = ExecInitExpr((Expr *) subplan-&gt;testexpr, parent);</span>
+<span class="lineNum">     805 </span><span class="lineCov">       8502 :     sstate-&gt;args = ExecInitExprList(subplan-&gt;args, parent);</span>
+<span class="lineNum">     806 </span>            : 
+<span class="lineNum">     807 </span>            :     /*
+<span class="lineNum">     808 </span>            :      * initialize my state
+<span class="lineNum">     809 </span>            :      */
+<span class="lineNum">     810 </span><span class="lineCov">       8502 :     sstate-&gt;curTuple = NULL;</span>
+<span class="lineNum">     811 </span><span class="lineCov">       8502 :     sstate-&gt;curArray = PointerGetDatum(NULL);</span>
+<span class="lineNum">     812 </span><span class="lineCov">       8502 :     sstate-&gt;projLeft = NULL;</span>
+<span class="lineNum">     813 </span><span class="lineCov">       8502 :     sstate-&gt;projRight = NULL;</span>
+<span class="lineNum">     814 </span><span class="lineCov">       8502 :     sstate-&gt;hashtable = NULL;</span>
+<span class="lineNum">     815 </span><span class="lineCov">       8502 :     sstate-&gt;hashnulls = NULL;</span>
+<span class="lineNum">     816 </span><span class="lineCov">       8502 :     sstate-&gt;hashtablecxt = NULL;</span>
+<span class="lineNum">     817 </span><span class="lineCov">       8502 :     sstate-&gt;hashtempcxt = NULL;</span>
+<span class="lineNum">     818 </span><span class="lineCov">       8502 :     sstate-&gt;innerecontext = NULL;</span>
+<span class="lineNum">     819 </span><span class="lineCov">       8502 :     sstate-&gt;keyColIdx = NULL;</span>
+<span class="lineNum">     820 </span><span class="lineCov">       8502 :     sstate-&gt;tab_eq_funcoids = NULL;</span>
+<span class="lineNum">     821 </span><span class="lineCov">       8502 :     sstate-&gt;tab_hash_funcs = NULL;</span>
+<span class="lineNum">     822 </span><span class="lineCov">       8502 :     sstate-&gt;tab_eq_funcs = NULL;</span>
+<span class="lineNum">     823 </span><span class="lineCov">       8502 :     sstate-&gt;tab_collations = NULL;</span>
+<span class="lineNum">     824 </span><span class="lineCov">       8502 :     sstate-&gt;lhs_hash_funcs = NULL;</span>
+<span class="lineNum">     825 </span><span class="lineCov">       8502 :     sstate-&gt;cur_eq_funcs = NULL;</span>
+<span class="lineNum">     826 </span>            : 
+<span class="lineNum">     827 </span>            :     /*
+<span class="lineNum">     828 </span>            :      * If this is an initplan or MULTIEXPR subplan, it has output parameters
+<span class="lineNum">     829 </span>            :      * that the parent plan will use, so mark those parameters as needing
+<span class="lineNum">     830 </span>            :      * evaluation.  We don't actually run the subplan until we first need one
+<span class="lineNum">     831 </span>            :      * of its outputs.
+<span class="lineNum">     832 </span>            :      *
+<span class="lineNum">     833 </span>            :      * A CTE subplan's output parameter is never to be evaluated in the normal
+<span class="lineNum">     834 </span>            :      * way, so skip this in that case.
+<span class="lineNum">     835 </span>            :      *
+<span class="lineNum">     836 </span>            :      * Note that we don't set parent-&gt;chgParam here: the parent plan hasn't
+<span class="lineNum">     837 </span>            :      * been run yet, so no need to force it to re-run.
+<span class="lineNum">     838 </span>            :      */
+<span class="lineNum">     839 </span><span class="lineCov">       8502 :     if (subplan-&gt;setParam != NIL &amp;&amp; subplan-&gt;subLinkType != CTE_SUBLINK)</span>
+<span class="lineNum">     840 </span>            :     {
+<span class="lineNum">     841 </span>            :         ListCell   *lst;
+<span class="lineNum">     842 </span>            : 
+<span class="lineNum">     843 </span><span class="lineCov">       5286 :         foreach(lst, subplan-&gt;setParam)</span>
+<span class="lineNum">     844 </span>            :         {
+<span class="lineNum">     845 </span><span class="lineCov">       2656 :             int         paramid = lfirst_int(lst);</span>
+<span class="lineNum">     846 </span><span class="lineCov">       2656 :             ParamExecData *prm = &amp;(estate-&gt;es_param_exec_vals[paramid]);</span>
+<span class="lineNum">     847 </span>            : 
+<span class="lineNum">     848 </span><span class="lineCov">       2656 :             prm-&gt;execPlan = sstate;</span>
+<span class="lineNum">     849 </span>            :         }
+<span class="lineNum">     850 </span>            :     }
+<span class="lineNum">     851 </span>            : 
+<span class="lineNum">     852 </span>            :     /*
+<span class="lineNum">     853 </span>            :      * If we are going to hash the subquery output, initialize relevant stuff.
+<span class="lineNum">     854 </span>            :      * (We don't create the hashtable until needed, though.)
+<span class="lineNum">     855 </span>            :      */
+<span class="lineNum">     856 </span><span class="lineCov">       8502 :     if (subplan-&gt;useHashTable)</span>
+<span class="lineNum">     857 </span>            :     {
+<span class="lineNum">     858 </span>            :         int         ncols,
+<span class="lineNum">     859 </span>            :                     i;
+<span class="lineNum">     860 </span>            :         TupleDesc   tupDescLeft;
+<span class="lineNum">     861 </span>            :         TupleDesc   tupDescRight;
+<span class="lineNum">     862 </span>            :         Oid        *cross_eq_funcoids;
+<span class="lineNum">     863 </span>            :         TupleTableSlot *slot;
+<span class="lineNum">     864 </span>            :         List       *oplist,
+<span class="lineNum">     865 </span>            :                    *lefttlist,
+<span class="lineNum">     866 </span>            :                    *righttlist;
+<span class="lineNum">     867 </span>            :         ListCell   *l;
+<span class="lineNum">     868 </span>            : 
+<span class="lineNum">     869 </span>            :         /* We need a memory context to hold the hash table(s) */
+<span class="lineNum">     870 </span><span class="lineCov">        834 :         sstate-&gt;hashtablecxt =</span>
+<span class="lineNum">     871 </span><span class="lineCov">        834 :             AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     872 </span>            :                                   &quot;Subplan HashTable Context&quot;,
+<span class="lineNum">     873 </span>            :                                   ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     874 </span>            :         /* and a small one for the hash tables to use as temp storage */
+<span class="lineNum">     875 </span><span class="lineCov">        834 :         sstate-&gt;hashtempcxt =</span>
+<span class="lineNum">     876 </span><span class="lineCov">        834 :             AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     877 </span>            :                                   &quot;Subplan HashTable Temp Context&quot;,
+<span class="lineNum">     878 </span>            :                                   ALLOCSET_SMALL_SIZES);
+<span class="lineNum">     879 </span>            :         /* and a short-lived exprcontext for function evaluation */
+<span class="lineNum">     880 </span><span class="lineCov">        834 :         sstate-&gt;innerecontext = CreateExprContext(estate);</span>
+<span class="lineNum">     881 </span>            :         /* Silly little array of column numbers 1..n */
+<span class="lineNum">     882 </span><span class="lineCov">        834 :         ncols = list_length(subplan-&gt;paramIds);</span>
+<span class="lineNum">     883 </span><span class="lineCov">        834 :         sstate-&gt;keyColIdx = (AttrNumber *) palloc(ncols * sizeof(AttrNumber));</span>
+<span class="lineNum">     884 </span><span class="lineCov">       2654 :         for (i = 0; i &lt; ncols; i++)</span>
+<span class="lineNum">     885 </span><span class="lineCov">       1820 :             sstate-&gt;keyColIdx[i] = i + 1;</span>
+<span class="lineNum">     886 </span>            : 
+<span class="lineNum">     887 </span>            :         /*
+<span class="lineNum">     888 </span>            :          * We use ExecProject to evaluate the lefthand and righthand
+<span class="lineNum">     889 </span>            :          * expression lists and form tuples.  (You might think that we could
+<span class="lineNum">     890 </span>            :          * use the sub-select's output tuples directly, but that is not the
+<span class="lineNum">     891 </span>            :          * case if we had to insert any run-time coercions of the sub-select's
+<span class="lineNum">     892 </span>            :          * output datatypes; anyway this avoids storing any resjunk columns
+<span class="lineNum">     893 </span>            :          * that might be in the sub-select's output.)  Run through the
+<span class="lineNum">     894 </span>            :          * combining expressions to build tlists for the lefthand and
+<span class="lineNum">     895 </span>            :          * righthand sides.
+<span class="lineNum">     896 </span>            :          *
+<span class="lineNum">     897 </span>            :          * We also extract the combining operators themselves to initialize
+<span class="lineNum">     898 </span>            :          * the equality and hashing functions for the hash tables.
+<span class="lineNum">     899 </span>            :          */
+<span class="lineNum">     900 </span><span class="lineCov">        834 :         if (IsA(subplan-&gt;testexpr, OpExpr))</span>
+<span class="lineNum">     901 </span>            :         {
+<span class="lineNum">     902 </span>            :             /* single combining operator */
+<span class="lineNum">     903 </span><span class="lineCov">        258 :             oplist = list_make1(subplan-&gt;testexpr);</span>
+<span class="lineNum">     904 </span>            :         }
+<span class="lineNum">     905 </span><span class="lineCov">        576 :         else if (is_andclause(subplan-&gt;testexpr))</span>
+<span class="lineNum">     906 </span>            :         {
+<span class="lineNum">     907 </span>            :             /* multiple combining operators */
+<span class="lineNum">     908 </span><span class="lineCov">        576 :             oplist = castNode(BoolExpr, subplan-&gt;testexpr)-&gt;args;</span>
+<span class="lineNum">     909 </span>            :         }
+<span class="lineNum">     910 </span>            :         else
+<span class="lineNum">     911 </span>            :         {
+<span class="lineNum">     912 </span>            :             /* shouldn't see anything else in a hashable subplan */
+<span class="lineNum">     913 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized testexpr type: %d&quot;,</span>
+<span class="lineNum">     914 </span>            :                  (int) nodeTag(subplan-&gt;testexpr));
+<span class="lineNum">     915 </span>            :             oplist = NIL;       /* keep compiler quiet */
+<span class="lineNum">     916 </span>            :         }
+<span class="lineNum">     917 </span><span class="lineCov">        834 :         Assert(list_length(oplist) == ncols);</span>
+<span class="lineNum">     918 </span>            : 
+<span class="lineNum">     919 </span><span class="lineCov">        834 :         lefttlist = righttlist = NIL;</span>
+<span class="lineNum">     920 </span><span class="lineCov">        834 :         sstate-&gt;tab_eq_funcoids = (Oid *) palloc(ncols * sizeof(Oid));</span>
+<span class="lineNum">     921 </span><span class="lineCov">        834 :         sstate-&gt;tab_hash_funcs = (FmgrInfo *) palloc(ncols * sizeof(FmgrInfo));</span>
+<span class="lineNum">     922 </span><span class="lineCov">        834 :         sstate-&gt;tab_eq_funcs = (FmgrInfo *) palloc(ncols * sizeof(FmgrInfo));</span>
+<span class="lineNum">     923 </span><span class="lineCov">        834 :         sstate-&gt;tab_collations = (Oid *) palloc(ncols * sizeof(Oid));</span>
+<span class="lineNum">     924 </span><span class="lineCov">        834 :         sstate-&gt;lhs_hash_funcs = (FmgrInfo *) palloc(ncols * sizeof(FmgrInfo));</span>
+<span class="lineNum">     925 </span><span class="lineCov">        834 :         sstate-&gt;cur_eq_funcs = (FmgrInfo *) palloc(ncols * sizeof(FmgrInfo));</span>
+<span class="lineNum">     926 </span>            :         /* we'll need the cross-type equality fns below, but not in sstate */
+<span class="lineNum">     927 </span><span class="lineCov">        834 :         cross_eq_funcoids = (Oid *) palloc(ncols * sizeof(Oid));</span>
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineCov">        834 :         i = 1;</span>
+<span class="lineNum">     930 </span><span class="lineCov">       2654 :         foreach(l, oplist)</span>
+<span class="lineNum">     931 </span>            :         {
+<span class="lineNum">     932 </span><span class="lineCov">       1820 :             OpExpr     *opexpr = lfirst_node(OpExpr, l);</span>
+<span class="lineNum">     933 </span>            :             Expr       *expr;
+<span class="lineNum">     934 </span>            :             TargetEntry *tle;
+<span class="lineNum">     935 </span>            :             Oid         rhs_eq_oper;
+<span class="lineNum">     936 </span>            :             Oid         left_hashfn;
+<span class="lineNum">     937 </span>            :             Oid         right_hashfn;
+<span class="lineNum">     938 </span>            : 
+<span class="lineNum">     939 </span><span class="lineCov">       1820 :             Assert(list_length(opexpr-&gt;args) == 2);</span>
+<span class="lineNum">     940 </span>            : 
+<span class="lineNum">     941 </span>            :             /* Process lefthand argument */
+<span class="lineNum">     942 </span><span class="lineCov">       1820 :             expr = (Expr *) linitial(opexpr-&gt;args);</span>
+<span class="lineNum">     943 </span><span class="lineCov">       1820 :             tle = makeTargetEntry(expr,</span>
+<span class="lineNum">     944 </span>            :                                   i,
+<span class="lineNum">     945 </span>            :                                   NULL,
+<span class="lineNum">     946 </span>            :                                   false);
+<span class="lineNum">     947 </span><span class="lineCov">       1820 :             lefttlist = lappend(lefttlist, tle);</span>
+<span class="lineNum">     948 </span>            : 
+<span class="lineNum">     949 </span>            :             /* Process righthand argument */
+<span class="lineNum">     950 </span><span class="lineCov">       1820 :             expr = (Expr *) lsecond(opexpr-&gt;args);</span>
+<span class="lineNum">     951 </span><span class="lineCov">       1820 :             tle = makeTargetEntry(expr,</span>
+<span class="lineNum">     952 </span>            :                                   i,
+<span class="lineNum">     953 </span>            :                                   NULL,
+<span class="lineNum">     954 </span>            :                                   false);
+<span class="lineNum">     955 </span><span class="lineCov">       1820 :             righttlist = lappend(righttlist, tle);</span>
+<span class="lineNum">     956 </span>            : 
+<span class="lineNum">     957 </span>            :             /* Lookup the equality function (potentially cross-type) */
+<span class="lineNum">     958 </span><span class="lineCov">       1820 :             cross_eq_funcoids[i - 1] = opexpr-&gt;opfuncid;</span>
+<span class="lineNum">     959 </span><span class="lineCov">       1820 :             fmgr_info(opexpr-&gt;opfuncid, &amp;sstate-&gt;cur_eq_funcs[i - 1]);</span>
+<span class="lineNum">     960 </span><span class="lineCov">       1820 :             fmgr_info_set_expr((Node *) opexpr, &amp;sstate-&gt;cur_eq_funcs[i - 1]);</span>
+<span class="lineNum">     961 </span>            : 
+<span class="lineNum">     962 </span>            :             /* Look up the equality function for the RHS type */
+<span class="lineNum">     963 </span><span class="lineCov">       1820 :             if (!get_compatible_hash_operators(opexpr-&gt;opno,</span>
+<span class="lineNum">     964 </span>            :                                                NULL, &amp;rhs_eq_oper))
+<span class="lineNum">     965 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;could not find compatible hash operator for operator %u&quot;,</span>
+<span class="lineNum">     966 </span>            :                      opexpr-&gt;opno);
+<span class="lineNum">     967 </span><span class="lineCov">       1820 :             sstate-&gt;tab_eq_funcoids[i - 1] = get_opcode(rhs_eq_oper);</span>
+<span class="lineNum">     968 </span><span class="lineCov">       1820 :             fmgr_info(sstate-&gt;tab_eq_funcoids[i - 1],</span>
+<span class="lineNum">     969 </span><span class="lineCov">       1820 :                       &amp;sstate-&gt;tab_eq_funcs[i - 1]);</span>
+<span class="lineNum">     970 </span>            : 
+<span class="lineNum">     971 </span>            :             /* Lookup the associated hash functions */
+<span class="lineNum">     972 </span><span class="lineCov">       1820 :             if (!get_op_hash_functions(opexpr-&gt;opno,</span>
+<span class="lineNum">     973 </span>            :                                        &amp;left_hashfn, &amp;right_hashfn))
+<span class="lineNum">     974 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;could not find hash function for hash operator %u&quot;,</span>
+<span class="lineNum">     975 </span>            :                      opexpr-&gt;opno);
+<span class="lineNum">     976 </span><span class="lineCov">       1820 :             fmgr_info(left_hashfn, &amp;sstate-&gt;lhs_hash_funcs[i - 1]);</span>
+<span class="lineNum">     977 </span><span class="lineCov">       1820 :             fmgr_info(right_hashfn, &amp;sstate-&gt;tab_hash_funcs[i - 1]);</span>
+<span class="lineNum">     978 </span>            : 
+<span class="lineNum">     979 </span>            :             /* Set collation */
+<span class="lineNum">     980 </span><span class="lineCov">       1820 :             sstate-&gt;tab_collations[i - 1] = opexpr-&gt;inputcollid;</span>
+<span class="lineNum">     981 </span>            : 
+<span class="lineNum">     982 </span><span class="lineCov">       1820 :             i++;</span>
+<span class="lineNum">     983 </span>            :         }
+<span class="lineNum">     984 </span>            : 
+<span class="lineNum">     985 </span>            :         /*
+<span class="lineNum">     986 </span>            :          * Construct tupdescs, slots and projection nodes for left and right
+<span class="lineNum">     987 </span>            :          * sides.  The lefthand expressions will be evaluated in the parent
+<span class="lineNum">     988 </span>            :          * plan node's exprcontext, which we don't have access to here.
+<span class="lineNum">     989 </span>            :          * Fortunately we can just pass NULL for now and fill it in later
+<span class="lineNum">     990 </span>            :          * (hack alert!).  The righthand expressions will be evaluated in our
+<span class="lineNum">     991 </span>            :          * own innerecontext.
+<span class="lineNum">     992 </span>            :          */
+<span class="lineNum">     993 </span><span class="lineCov">        834 :         tupDescLeft = ExecTypeFromTL(lefttlist);</span>
+<span class="lineNum">     994 </span><span class="lineCov">        834 :         slot = ExecInitExtraTupleSlot(estate, tupDescLeft, &amp;TTSOpsVirtual);</span>
+<span class="lineNum">     995 </span><span class="lineCov">        834 :         sstate-&gt;projLeft = ExecBuildProjectionInfo(lefttlist,</span>
+<span class="lineNum">     996 </span>            :                                                    NULL,
+<span class="lineNum">     997 </span>            :                                                    slot,
+<span class="lineNum">     998 </span>            :                                                    parent,
+<span class="lineNum">     999 </span>            :                                                    NULL);
+<span class="lineNum">    1000 </span>            : 
+<span class="lineNum">    1001 </span><span class="lineCov">        834 :         sstate-&gt;descRight = tupDescRight = ExecTypeFromTL(righttlist);</span>
+<span class="lineNum">    1002 </span><span class="lineCov">        834 :         slot = ExecInitExtraTupleSlot(estate, tupDescRight, &amp;TTSOpsVirtual);</span>
+<span class="lineNum">    1003 </span><span class="lineCov">        834 :         sstate-&gt;projRight = ExecBuildProjectionInfo(righttlist,</span>
+<span class="lineNum">    1004 </span>            :                                                     sstate-&gt;innerecontext,
+<span class="lineNum">    1005 </span>            :                                                     slot,
+<span class="lineNum">    1006 </span><span class="lineCov">        834 :                                                     sstate-&gt;planstate,</span>
+<span class="lineNum">    1007 </span>            :                                                     NULL);
+<span class="lineNum">    1008 </span>            : 
+<span class="lineNum">    1009 </span>            :         /*
+<span class="lineNum">    1010 </span>            :          * Create comparator for lookups of rows in the table (potentially
+<span class="lineNum">    1011 </span>            :          * cross-type comparisons).
+<span class="lineNum">    1012 </span>            :          */
+<span class="lineNum">    1013 </span><span class="lineCov">        834 :         sstate-&gt;cur_eq_comp = ExecBuildGroupingEqual(tupDescLeft, tupDescRight,</span>
+<span class="lineNum">    1014 </span>            :                                                      &amp;TTSOpsVirtual, &amp;TTSOpsMinimalTuple,
+<span class="lineNum">    1015 </span>            :                                                      ncols,
+<span class="lineNum">    1016 </span><span class="lineCov">        834 :                                                      sstate-&gt;keyColIdx,</span>
+<span class="lineNum">    1017 </span>            :                                                      cross_eq_funcoids,
+<span class="lineNum">    1018 </span><span class="lineCov">        834 :                                                      sstate-&gt;tab_collations,</span>
+<span class="lineNum">    1019 </span>            :                                                      parent);
+<span class="lineNum">    1020 </span>            :     }
+<span class="lineNum">    1021 </span>            : 
+<span class="lineNum">    1022 </span><span class="lineCov">       8502 :     return sstate;</span>
+<span class="lineNum">    1023 </span>            : }
+<span class="lineNum">    1024 </span>            : 
+<span class="lineNum">    1025 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">    1026 </span>            :  *      ExecSetParamPlan
+<span class="lineNum">    1027 </span>            :  *
+<span class="lineNum">    1028 </span>            :  *      Executes a subplan and sets its output parameters.
+<span class="lineNum">    1029 </span>            :  *
+<span class="lineNum">    1030 </span>            :  * This is called from ExecEvalParamExec() when the value of a PARAM_EXEC
+<span class="lineNum">    1031 </span>            :  * parameter is requested and the param's execPlan field is set (indicating
+<span class="lineNum">    1032 </span>            :  * that the param has not yet been evaluated).  This allows lazy evaluation
+<span class="lineNum">    1033 </span>            :  * of initplans: we don't run the subplan until/unless we need its output.
+<span class="lineNum">    1034 </span>            :  * Note that this routine MUST clear the execPlan fields of the plan's
+<span class="lineNum">    1035 </span>            :  * output parameters after evaluating them!
+<span class="lineNum">    1036 </span>            :  *
+<span class="lineNum">    1037 </span>            :  * The results of this function are stored in the EState associated with the
+<span class="lineNum">    1038 </span>            :  * ExprContext (particularly, its ecxt_param_exec_vals); any pass-by-ref
+<span class="lineNum">    1039 </span>            :  * result Datums are allocated in the EState's per-query memory.  The passed
+<span class="lineNum">    1040 </span>            :  * econtext can be any ExprContext belonging to that EState; which one is
+<span class="lineNum">    1041 </span>            :  * important only to the extent that the ExprContext's per-tuple memory
+<span class="lineNum">    1042 </span>            :  * context is used to evaluate any parameters passed down to the subplan.
+<span class="lineNum">    1043 </span>            :  * (Thus in principle, the shorter-lived the ExprContext the better, since
+<span class="lineNum">    1044 </span>            :  * that data isn't needed after we return.  In practice, because initplan
+<span class="lineNum">    1045 </span>            :  * parameters are never more complex than Vars, Aggrefs, etc, evaluating them
+<span class="lineNum">    1046 </span>            :  * currently never leaks any memory anyway.)
+<span class="lineNum">    1047 </span>            :  * ----------------------------------------------------------------
+<a name="1048"><span class="lineNum">    1048 </span>            :  */</a>
+<span class="lineNum">    1049 </span>            : void
+<span class="lineNum">    1050 </span><span class="lineCov">       2616 : ExecSetParamPlan(SubPlanState *node, ExprContext *econtext)</span>
+<span class="lineNum">    1051 </span>            : {
+<span class="lineNum">    1052 </span><span class="lineCov">       2616 :     SubPlan    *subplan = node-&gt;subplan;</span>
+<span class="lineNum">    1053 </span><span class="lineCov">       2616 :     PlanState  *planstate = node-&gt;planstate;</span>
+<span class="lineNum">    1054 </span><span class="lineCov">       2616 :     SubLinkType subLinkType = subplan-&gt;subLinkType;</span>
+<span class="lineNum">    1055 </span><span class="lineCov">       2616 :     EState     *estate = planstate-&gt;state;</span>
+<span class="lineNum">    1056 </span><span class="lineCov">       2616 :     ScanDirection dir = estate-&gt;es_direction;</span>
+<span class="lineNum">    1057 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">    1058 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">    1059 </span>            :     ListCell   *pvar;
+<span class="lineNum">    1060 </span>            :     ListCell   *l;
+<span class="lineNum">    1061 </span><span class="lineCov">       2616 :     bool        found = false;</span>
+<span class="lineNum">    1062 </span><span class="lineCov">       2616 :     ArrayBuildStateAny *astate = NULL;</span>
+<span class="lineNum">    1063 </span>            : 
+<span class="lineNum">    1064 </span><span class="lineCov">       2616 :     if (subLinkType == ANY_SUBLINK ||</span>
+<span class="lineNum">    1065 </span>            :         subLinkType == ALL_SUBLINK)
+<span class="lineNum">    1066 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;ANY/ALL subselect unsupported as initplan&quot;);</span>
+<span class="lineNum">    1067 </span><span class="lineCov">       2616 :     if (subLinkType == CTE_SUBLINK)</span>
+<span class="lineNum">    1068 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;CTE subplans should not be executed via ExecSetParamPlan&quot;);</span>
+<span class="lineNum">    1069 </span>            : 
+<span class="lineNum">    1070 </span>            :     /*
+<span class="lineNum">    1071 </span>            :      * Enforce forward scan direction regardless of caller. It's hard but not
+<span class="lineNum">    1072 </span>            :      * impossible to get here in backward scan, so make it work anyway.
+<span class="lineNum">    1073 </span>            :      */
+<span class="lineNum">    1074 </span><span class="lineCov">       2616 :     estate-&gt;es_direction = ForwardScanDirection;</span>
+<span class="lineNum">    1075 </span>            : 
+<span class="lineNum">    1076 </span>            :     /* Initialize ArrayBuildStateAny in caller's context, if needed */
+<span class="lineNum">    1077 </span><span class="lineCov">       2616 :     if (subLinkType == ARRAY_SUBLINK)</span>
+<span class="lineNum">    1078 </span><span class="lineCov">         16 :         astate = initArrayResultAny(subplan-&gt;firstColType,</span>
+<span class="lineNum">    1079 </span>            :                                     CurrentMemoryContext, true);
+<span class="lineNum">    1080 </span>            : 
+<span class="lineNum">    1081 </span>            :     /*
+<span class="lineNum">    1082 </span>            :      * Must switch to per-query memory context.
+<span class="lineNum">    1083 </span>            :      */
+<span class="lineNum">    1084 </span><span class="lineCov">       2616 :     oldcontext = MemoryContextSwitchTo(econtext-&gt;ecxt_per_query_memory);</span>
+<span class="lineNum">    1085 </span>            : 
+<span class="lineNum">    1086 </span>            :     /*
+<span class="lineNum">    1087 </span>            :      * Set Params of this plan from parent plan correlation values. (Any
+<span class="lineNum">    1088 </span>            :      * calculation we have to do is done in the parent econtext, since the
+<span class="lineNum">    1089 </span>            :      * Param values don't need to have per-query lifetime.)  Currently, we
+<span class="lineNum">    1090 </span>            :      * expect only MULTIEXPR_SUBLINK plans to have any correlation values.
+<span class="lineNum">    1091 </span>            :      */
+<span class="lineNum">    1092 </span><span class="lineCov">       2616 :     Assert(subplan-&gt;parParam == NIL || subLinkType == MULTIEXPR_SUBLINK);</span>
+<span class="lineNum">    1093 </span><span class="lineCov">       2616 :     Assert(list_length(subplan-&gt;parParam) == list_length(node-&gt;args));</span>
+<span class="lineNum">    1094 </span>            : 
+<span class="lineNum">    1095 </span><span class="lineCov">       2658 :     forboth(l, subplan-&gt;parParam, pvar, node-&gt;args)</span>
+<span class="lineNum">    1096 </span>            :     {
+<span class="lineNum">    1097 </span><span class="lineCov">         42 :         int         paramid = lfirst_int(l);</span>
+<span class="lineNum">    1098 </span><span class="lineCov">         42 :         ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1099 </span>            : 
+<span class="lineNum">    1100 </span><span class="lineCov">         42 :         prm-&gt;value = ExecEvalExprSwitchContext((ExprState *) lfirst(pvar),</span>
+<span class="lineNum">    1101 </span>            :                                                econtext,
+<span class="lineNum">    1102 </span>            :                                                &amp;(prm-&gt;isnull));
+<span class="lineNum">    1103 </span><span class="lineCov">         42 :         planstate-&gt;chgParam = bms_add_member(planstate-&gt;chgParam, paramid);</span>
+<span class="lineNum">    1104 </span>            :     }
+<span class="lineNum">    1105 </span>            : 
+<span class="lineNum">    1106 </span>            :     /*
+<span class="lineNum">    1107 </span>            :      * Run the plan.  (If it needs to be rescanned, the first ExecProcNode
+<span class="lineNum">    1108 </span>            :      * call will take care of that.)
+<span class="lineNum">    1109 </span>            :      */
+<span class="lineNum">    1110 </span><span class="lineCov">       8980 :     for (slot = ExecProcNode(planstate);</span>
+<span class="lineNum">    1111 </span><span class="lineCov">       5760 :          !TupIsNull(slot);</span>
+<span class="lineNum">    1112 </span><span class="lineCov">       3748 :          slot = ExecProcNode(planstate))</span>
+<span class="lineNum">    1113 </span>            :     {
+<span class="lineNum">    1114 </span><span class="lineCov">       3892 :         TupleDesc   tdesc = slot-&gt;tts_tupleDescriptor;</span>
+<span class="lineNum">    1115 </span><span class="lineCov">       3892 :         int         i = 1;</span>
+<span class="lineNum">    1116 </span>            : 
+<span class="lineNum">    1117 </span><span class="lineCov">       3892 :         if (subLinkType == EXISTS_SUBLINK)</span>
+<span class="lineNum">    1118 </span>            :         {
+<span class="lineNum">    1119 </span>            :             /* There can be only one setParam... */
+<span class="lineNum">    1120 </span><span class="lineCov">        142 :             int         paramid = linitial_int(subplan-&gt;setParam);</span>
+<span class="lineNum">    1121 </span><span class="lineCov">        142 :             ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1122 </span>            : 
+<span class="lineNum">    1123 </span><span class="lineCov">        142 :             prm-&gt;execPlan = NULL;</span>
+<span class="lineNum">    1124 </span><span class="lineCov">        142 :             prm-&gt;value = BoolGetDatum(true);</span>
+<span class="lineNum">    1125 </span><span class="lineCov">        142 :             prm-&gt;isnull = false;</span>
+<span class="lineNum">    1126 </span><span class="lineCov">        142 :             found = true;</span>
+<span class="lineNum">    1127 </span><span class="lineCov">        142 :             break;</span>
+<span class="lineNum">    1128 </span>            :         }
+<span class="lineNum">    1129 </span>            : 
+<span class="lineNum">    1130 </span><span class="lineCov">       3750 :         if (subLinkType == ARRAY_SUBLINK)</span>
+<span class="lineNum">    1131 </span>            :         {
+<span class="lineNum">    1132 </span>            :             Datum       dvalue;
+<span class="lineNum">    1133 </span>            :             bool        disnull;
+<span class="lineNum">    1134 </span>            : 
+<span class="lineNum">    1135 </span><span class="lineCov">       2636 :             found = true;</span>
+<span class="lineNum">    1136 </span>            :             /* stash away current value */
+<span class="lineNum">    1137 </span><span class="lineCov">       2636 :             Assert(subplan-&gt;firstColType == TupleDescAttr(tdesc, 0)-&gt;atttypid);</span>
+<span class="lineNum">    1138 </span><span class="lineCov">       2636 :             dvalue = slot_getattr(slot, 1, &amp;disnull);</span>
+<span class="lineNum">    1139 </span><span class="lineCov">       2636 :             astate = accumArrayResultAny(astate, dvalue, disnull,</span>
+<span class="lineNum">    1140 </span>            :                                          subplan-&gt;firstColType, oldcontext);
+<span class="lineNum">    1141 </span>            :             /* keep scanning subplan to collect all values */
+<span class="lineNum">    1142 </span><span class="lineCov">       2636 :             continue;</span>
+<span class="lineNum">    1143 </span>            :         }
+<span class="lineNum">    1144 </span>            : 
+<span class="lineNum">    1145 </span><span class="lineCov">       1114 :         if (found &amp;&amp;</span>
+<span class="lineNum">    1146 </span><span class="lineCov">          2 :             (subLinkType == EXPR_SUBLINK ||</span>
+<span class="lineNum">    1147 </span><span class="lineNoCov">          0 :              subLinkType == MULTIEXPR_SUBLINK ||</span>
+<span class="lineNum">    1148 </span>            :              subLinkType == ROWCOMPARE_SUBLINK))
+<span class="lineNum">    1149 </span><span class="lineCov">          2 :             ereport(ERROR,</span>
+<span class="lineNum">    1150 </span>            :                     (errcode(ERRCODE_CARDINALITY_VIOLATION),
+<span class="lineNum">    1151 </span>            :                      errmsg(&quot;more than one row returned by a subquery used as an expression&quot;)));
+<span class="lineNum">    1152 </span>            : 
+<span class="lineNum">    1153 </span><span class="lineCov">       1112 :         found = true;</span>
+<span class="lineNum">    1154 </span>            : 
+<span class="lineNum">    1155 </span>            :         /*
+<span class="lineNum">    1156 </span>            :          * We need to copy the subplan's tuple into our own context, in case
+<span class="lineNum">    1157 </span>            :          * any of the params are pass-by-ref type --- the pointers stored in
+<span class="lineNum">    1158 </span>            :          * the param structs will point at this copied tuple! node-&gt;curTuple
+<span class="lineNum">    1159 </span>            :          * keeps track of the copied tuple for eventual freeing.
+<span class="lineNum">    1160 </span>            :          */
+<span class="lineNum">    1161 </span><span class="lineCov">       1112 :         if (node-&gt;curTuple)</span>
+<span class="lineNum">    1162 </span><span class="lineCov">        132 :             heap_freetuple(node-&gt;curTuple);</span>
+<span class="lineNum">    1163 </span><span class="lineCov">       1112 :         node-&gt;curTuple = ExecCopySlotHeapTuple(slot);</span>
+<span class="lineNum">    1164 </span>            : 
+<span class="lineNum">    1165 </span>            :         /*
+<span class="lineNum">    1166 </span>            :          * Now set all the setParam params from the columns of the tuple
+<span class="lineNum">    1167 </span>            :          */
+<span class="lineNum">    1168 </span><span class="lineCov">       2254 :         foreach(l, subplan-&gt;setParam)</span>
+<span class="lineNum">    1169 </span>            :         {
+<span class="lineNum">    1170 </span><span class="lineCov">       1142 :             int         paramid = lfirst_int(l);</span>
+<span class="lineNum">    1171 </span><span class="lineCov">       1142 :             ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1172 </span>            : 
+<span class="lineNum">    1173 </span><span class="lineCov">       1142 :             prm-&gt;execPlan = NULL;</span>
+<span class="lineNum">    1174 </span><span class="lineCov">       1142 :             prm-&gt;value = heap_getattr(node-&gt;curTuple, i, tdesc,</span>
+<span class="lineNum">    1175 </span>            :                                       &amp;(prm-&gt;isnull));
+<span class="lineNum">    1176 </span><span class="lineCov">       1142 :             i++;</span>
+<span class="lineNum">    1177 </span>            :         }
+<span class="lineNum">    1178 </span>            :     }
+<span class="lineNum">    1179 </span>            : 
+<span class="lineNum">    1180 </span><span class="lineCov">       2614 :     if (subLinkType == ARRAY_SUBLINK)</span>
+<span class="lineNum">    1181 </span>            :     {
+<span class="lineNum">    1182 </span>            :         /* There can be only one setParam... */
+<span class="lineNum">    1183 </span><span class="lineCov">         16 :         int         paramid = linitial_int(subplan-&gt;setParam);</span>
+<span class="lineNum">    1184 </span><span class="lineCov">         16 :         ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1185 </span>            : 
+<span class="lineNum">    1186 </span>            :         /*
+<span class="lineNum">    1187 </span>            :          * We build the result array in query context so it won't disappear;
+<span class="lineNum">    1188 </span>            :          * to avoid leaking memory across repeated calls, we have to remember
+<span class="lineNum">    1189 </span>            :          * the latest value, much as for curTuple above.
+<span class="lineNum">    1190 </span>            :          */
+<span class="lineNum">    1191 </span><span class="lineCov">         16 :         if (node-&gt;curArray != PointerGetDatum(NULL))</span>
+<span class="lineNum">    1192 </span><span class="lineNoCov">          0 :             pfree(DatumGetPointer(node-&gt;curArray));</span>
+<span class="lineNum">    1193 </span><span class="lineCov">         16 :         node-&gt;curArray = makeArrayResultAny(astate,</span>
+<span class="lineNum">    1194 </span>            :                                             econtext-&gt;ecxt_per_query_memory,
+<span class="lineNum">    1195 </span>            :                                             true);
+<span class="lineNum">    1196 </span><span class="lineCov">         16 :         prm-&gt;execPlan = NULL;</span>
+<span class="lineNum">    1197 </span><span class="lineCov">         16 :         prm-&gt;value = node-&gt;curArray;</span>
+<span class="lineNum">    1198 </span><span class="lineCov">         16 :         prm-&gt;isnull = false;</span>
+<span class="lineNum">    1199 </span>            :     }
+<span class="lineNum">    1200 </span><span class="lineCov">       2598 :     else if (!found)</span>
+<span class="lineNum">    1201 </span>            :     {
+<span class="lineNum">    1202 </span><span class="lineCov">       1346 :         if (subLinkType == EXISTS_SUBLINK)</span>
+<span class="lineNum">    1203 </span>            :         {
+<span class="lineNum">    1204 </span>            :             /* There can be only one setParam... */
+<span class="lineNum">    1205 </span><span class="lineCov">       1306 :             int         paramid = linitial_int(subplan-&gt;setParam);</span>
+<span class="lineNum">    1206 </span><span class="lineCov">       1306 :             ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1207 </span>            : 
+<span class="lineNum">    1208 </span><span class="lineCov">       1306 :             prm-&gt;execPlan = NULL;</span>
+<span class="lineNum">    1209 </span><span class="lineCov">       1306 :             prm-&gt;value = BoolGetDatum(false);</span>
+<span class="lineNum">    1210 </span><span class="lineCov">       1306 :             prm-&gt;isnull = false;</span>
+<span class="lineNum">    1211 </span>            :         }
+<span class="lineNum">    1212 </span>            :         else
+<span class="lineNum">    1213 </span>            :         {
+<span class="lineNum">    1214 </span>            :             /* For other sublink types, set all the output params to NULL */
+<span class="lineNum">    1215 </span><span class="lineCov">         84 :             foreach(l, subplan-&gt;setParam)</span>
+<span class="lineNum">    1216 </span>            :             {
+<span class="lineNum">    1217 </span><span class="lineCov">         44 :                 int         paramid = lfirst_int(l);</span>
+<span class="lineNum">    1218 </span><span class="lineCov">         44 :                 ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1219 </span>            : 
+<span class="lineNum">    1220 </span><span class="lineCov">         44 :                 prm-&gt;execPlan = NULL;</span>
+<span class="lineNum">    1221 </span><span class="lineCov">         44 :                 prm-&gt;value = (Datum) 0;</span>
+<span class="lineNum">    1222 </span><span class="lineCov">         44 :                 prm-&gt;isnull = true;</span>
+<span class="lineNum">    1223 </span>            :             }
+<span class="lineNum">    1224 </span>            :         }
+<span class="lineNum">    1225 </span>            :     }
+<span class="lineNum">    1226 </span>            : 
+<span class="lineNum">    1227 </span><span class="lineCov">       2614 :     MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">    1228 </span>            : 
+<span class="lineNum">    1229 </span>            :     /* restore scan direction */
+<span class="lineNum">    1230 </span><span class="lineCov">       2614 :     estate-&gt;es_direction = dir;</span>
+<span class="lineNum">    1231 </span><span class="lineCov">       2614 : }</span>
+<span class="lineNum">    1232 </span>            : 
+<span class="lineNum">    1233 </span>            : /*
+<span class="lineNum">    1234 </span>            :  * ExecSetParamPlanMulti
+<span class="lineNum">    1235 </span>            :  *
+<span class="lineNum">    1236 </span>            :  * Apply ExecSetParamPlan to evaluate any not-yet-evaluated initplan output
+<span class="lineNum">    1237 </span>            :  * parameters whose ParamIDs are listed in &quot;params&quot;.  Any listed params that
+<span class="lineNum">    1238 </span>            :  * are not initplan outputs are ignored.
+<span class="lineNum">    1239 </span>            :  *
+<span class="lineNum">    1240 </span>            :  * As with ExecSetParamPlan, any ExprContext belonging to the current EState
+<span class="lineNum">    1241 </span>            :  * can be used, but in principle a shorter-lived ExprContext is better than a
+<span class="lineNum">    1242 </span>            :  * longer-lived one.
+<a name="1243"><span class="lineNum">    1243 </span>            :  */</a>
+<span class="lineNum">    1244 </span>            : void
+<span class="lineNum">    1245 </span><span class="lineCov">        258 : ExecSetParamPlanMulti(const Bitmapset *params, ExprContext *econtext)</span>
+<span class="lineNum">    1246 </span>            : {
+<span class="lineNum">    1247 </span>            :     int         paramid;
+<span class="lineNum">    1248 </span>            : 
+<span class="lineNum">    1249 </span><span class="lineCov">        258 :     paramid = -1;</span>
+<span class="lineNum">    1250 </span><span class="lineCov">        522 :     while ((paramid = bms_next_member(params, paramid)) &gt;= 0)</span>
+<span class="lineNum">    1251 </span>            :     {
+<span class="lineNum">    1252 </span><span class="lineCov">          6 :         ParamExecData *prm = &amp;(econtext-&gt;ecxt_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1253 </span>            : 
+<span class="lineNum">    1254 </span><span class="lineCov">          6 :         if (prm-&gt;execPlan != NULL)</span>
+<span class="lineNum">    1255 </span>            :         {
+<span class="lineNum">    1256 </span>            :             /* Parameter not evaluated yet, so go do it */
+<span class="lineNum">    1257 </span><span class="lineCov">          6 :             ExecSetParamPlan(prm-&gt;execPlan, econtext);</span>
+<span class="lineNum">    1258 </span>            :             /* ExecSetParamPlan should have processed this param... */
+<span class="lineNum">    1259 </span><span class="lineCov">          6 :             Assert(prm-&gt;execPlan == NULL);</span>
+<span class="lineNum">    1260 </span>            :         }
+<span class="lineNum">    1261 </span>            :     }
+<span class="lineNum">    1262 </span><span class="lineCov">        258 : }</span>
+<span class="lineNum">    1263 </span>            : 
+<span class="lineNum">    1264 </span>            : /*
+<span class="lineNum">    1265 </span>            :  * Mark an initplan as needing recalculation
+<a name="1266"><span class="lineNum">    1266 </span>            :  */</a>
+<span class="lineNum">    1267 </span>            : void
+<span class="lineNum">    1268 </span><span class="lineCov">        236 : ExecReScanSetParamPlan(SubPlanState *node, PlanState *parent)</span>
+<span class="lineNum">    1269 </span>            : {
+<span class="lineNum">    1270 </span><span class="lineCov">        236 :     PlanState  *planstate = node-&gt;planstate;</span>
+<span class="lineNum">    1271 </span><span class="lineCov">        236 :     SubPlan    *subplan = node-&gt;subplan;</span>
+<span class="lineNum">    1272 </span><span class="lineCov">        236 :     EState     *estate = parent-&gt;state;</span>
+<span class="lineNum">    1273 </span>            :     ListCell   *l;
+<span class="lineNum">    1274 </span>            : 
+<span class="lineNum">    1275 </span>            :     /* sanity checks */
+<span class="lineNum">    1276 </span><span class="lineCov">        236 :     if (subplan-&gt;parParam != NIL)</span>
+<span class="lineNum">    1277 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;direct correlated subquery unsupported as initplan&quot;);</span>
+<span class="lineNum">    1278 </span><span class="lineCov">        236 :     if (subplan-&gt;setParam == NIL)</span>
+<span class="lineNum">    1279 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;setParam list of initplan is empty&quot;);</span>
+<span class="lineNum">    1280 </span><span class="lineCov">        236 :     if (bms_is_empty(planstate-&gt;plan-&gt;extParam))</span>
+<span class="lineNum">    1281 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;extParam set of initplan is empty&quot;);</span>
+<span class="lineNum">    1282 </span>            : 
+<span class="lineNum">    1283 </span>            :     /*
+<span class="lineNum">    1284 </span>            :      * Don't actually re-scan: it'll happen inside ExecSetParamPlan if needed.
+<span class="lineNum">    1285 </span>            :      */
+<span class="lineNum">    1286 </span>            : 
+<span class="lineNum">    1287 </span>            :     /*
+<span class="lineNum">    1288 </span>            :      * Mark this subplan's output parameters as needing recalculation.
+<span class="lineNum">    1289 </span>            :      *
+<span class="lineNum">    1290 </span>            :      * CTE subplans are never executed via parameter recalculation; instead
+<span class="lineNum">    1291 </span>            :      * they get run when called by nodeCtescan.c.  So don't mark the output
+<span class="lineNum">    1292 </span>            :      * parameter of a CTE subplan as dirty, but do set the chgParam bit for it
+<span class="lineNum">    1293 </span>            :      * so that dependent plan nodes will get told to rescan.
+<span class="lineNum">    1294 </span>            :      */
+<span class="lineNum">    1295 </span><span class="lineCov">        472 :     foreach(l, subplan-&gt;setParam)</span>
+<span class="lineNum">    1296 </span>            :     {
+<span class="lineNum">    1297 </span><span class="lineCov">        236 :         int         paramid = lfirst_int(l);</span>
+<span class="lineNum">    1298 </span><span class="lineCov">        236 :         ParamExecData *prm = &amp;(estate-&gt;es_param_exec_vals[paramid]);</span>
+<span class="lineNum">    1299 </span>            : 
+<span class="lineNum">    1300 </span><span class="lineCov">        236 :         if (subplan-&gt;subLinkType != CTE_SUBLINK)</span>
+<span class="lineNum">    1301 </span><span class="lineCov">        208 :             prm-&gt;execPlan = node;</span>
+<span class="lineNum">    1302 </span>            : 
+<span class="lineNum">    1303 </span><span class="lineCov">        236 :         parent-&gt;chgParam = bms_add_member(parent-&gt;chgParam, paramid);</span>
+<span class="lineNum">    1304 </span>            :     }
+<span class="lineNum">    1305 </span><span class="lineCov">        236 : }</span>
+<span class="lineNum">    1306 </span>            : 
+<span class="lineNum">    1307 </span>            : 
+<span class="lineNum">    1308 </span>            : /*
+<span class="lineNum">    1309 </span>            :  * ExecInitAlternativeSubPlan
+<span class="lineNum">    1310 </span>            :  *
+<span class="lineNum">    1311 </span>            :  * Initialize for execution of one of a set of alternative subplans.
+<a name="1312"><span class="lineNum">    1312 </span>            :  */</a>
+<span class="lineNum">    1313 </span>            : AlternativeSubPlanState *
+<span class="lineNum">    1314 </span><span class="lineCov">        412 : ExecInitAlternativeSubPlan(AlternativeSubPlan *asplan, PlanState *parent)</span>
+<span class="lineNum">    1315 </span>            : {
+<span class="lineNum">    1316 </span><span class="lineCov">        412 :     AlternativeSubPlanState *asstate = makeNode(AlternativeSubPlanState);</span>
+<span class="lineNum">    1317 </span>            :     double      num_calls;
+<span class="lineNum">    1318 </span>            :     SubPlan    *subplan1;
+<span class="lineNum">    1319 </span>            :     SubPlan    *subplan2;
+<span class="lineNum">    1320 </span>            :     Cost        cost1;
+<span class="lineNum">    1321 </span>            :     Cost        cost2;
+<span class="lineNum">    1322 </span>            :     ListCell   *lc;
+<span class="lineNum">    1323 </span>            : 
+<span class="lineNum">    1324 </span><span class="lineCov">        412 :     asstate-&gt;subplan = asplan;</span>
+<span class="lineNum">    1325 </span>            : 
+<span class="lineNum">    1326 </span>            :     /*
+<span class="lineNum">    1327 </span>            :      * Initialize subplans.  (Can we get away with only initializing the one
+<span class="lineNum">    1328 </span>            :      * we're going to use?)
+<span class="lineNum">    1329 </span>            :      */
+<span class="lineNum">    1330 </span><span class="lineCov">       1236 :     foreach(lc, asplan-&gt;subplans)</span>
+<span class="lineNum">    1331 </span>            :     {
+<span class="lineNum">    1332 </span><span class="lineCov">        824 :         SubPlan    *sp = lfirst_node(SubPlan, lc);</span>
+<span class="lineNum">    1333 </span><span class="lineCov">        824 :         SubPlanState *sps = ExecInitSubPlan(sp, parent);</span>
+<span class="lineNum">    1334 </span>            : 
+<span class="lineNum">    1335 </span><span class="lineCov">        824 :         asstate-&gt;subplans = lappend(asstate-&gt;subplans, sps);</span>
+<span class="lineNum">    1336 </span><span class="lineCov">        824 :         parent-&gt;subPlan = lappend(parent-&gt;subPlan, sps);</span>
+<span class="lineNum">    1337 </span>            :     }
+<span class="lineNum">    1338 </span>            : 
+<span class="lineNum">    1339 </span>            :     /*
+<span class="lineNum">    1340 </span>            :      * Select the one to be used.  For this, we need an estimate of the number
+<span class="lineNum">    1341 </span>            :      * of executions of the subplan.  We use the number of output rows
+<span class="lineNum">    1342 </span>            :      * expected from the parent plan node.  This is a good estimate if we are
+<span class="lineNum">    1343 </span>            :      * in the parent's targetlist, and an underestimate (but probably not by
+<span class="lineNum">    1344 </span>            :      * more than a factor of 2) if we are in the qual.
+<span class="lineNum">    1345 </span>            :      */
+<span class="lineNum">    1346 </span><span class="lineCov">        412 :     num_calls = parent-&gt;plan-&gt;plan_rows;</span>
+<span class="lineNum">    1347 </span>            : 
+<span class="lineNum">    1348 </span>            :     /*
+<span class="lineNum">    1349 </span>            :      * The planner saved enough info so that we don't have to work very hard
+<span class="lineNum">    1350 </span>            :      * to estimate the total cost, given the number-of-calls estimate.
+<span class="lineNum">    1351 </span>            :      */
+<span class="lineNum">    1352 </span><span class="lineCov">        412 :     Assert(list_length(asplan-&gt;subplans) == 2);</span>
+<span class="lineNum">    1353 </span><span class="lineCov">        412 :     subplan1 = (SubPlan *) linitial(asplan-&gt;subplans);</span>
+<span class="lineNum">    1354 </span><span class="lineCov">        412 :     subplan2 = (SubPlan *) lsecond(asplan-&gt;subplans);</span>
+<span class="lineNum">    1355 </span>            : 
+<span class="lineNum">    1356 </span><span class="lineCov">        412 :     cost1 = subplan1-&gt;startup_cost + num_calls * subplan1-&gt;per_call_cost;</span>
+<span class="lineNum">    1357 </span><span class="lineCov">        412 :     cost2 = subplan2-&gt;startup_cost + num_calls * subplan2-&gt;per_call_cost;</span>
+<span class="lineNum">    1358 </span>            : 
+<span class="lineNum">    1359 </span><span class="lineCov">        412 :     if (cost1 &lt; cost2)</span>
+<span class="lineNum">    1360 </span><span class="lineCov">        184 :         asstate-&gt;active = 0;</span>
+<span class="lineNum">    1361 </span>            :     else
+<span class="lineNum">    1362 </span><span class="lineCov">        228 :         asstate-&gt;active = 1;</span>
+<span class="lineNum">    1363 </span>            : 
+<span class="lineNum">    1364 </span><span class="lineCov">        412 :     return asstate;</span>
+<span class="lineNum">    1365 </span>            : }
+<span class="lineNum">    1366 </span>            : 
+<span class="lineNum">    1367 </span>            : /*
+<span class="lineNum">    1368 </span>            :  * ExecAlternativeSubPlan
+<span class="lineNum">    1369 </span>            :  *
+<span class="lineNum">    1370 </span>            :  * Execute one of a set of alternative subplans.
+<span class="lineNum">    1371 </span>            :  *
+<span class="lineNum">    1372 </span>            :  * Note: in future we might consider changing to different subplans on the
+<span class="lineNum">    1373 </span>            :  * fly, in case the original rowcount estimate turns out to be way off.
+<a name="1374"><span class="lineNum">    1374 </span>            :  */</a>
+<span class="lineNum">    1375 </span>            : Datum
+<span class="lineNum">    1376 </span><span class="lineCov">        368 : ExecAlternativeSubPlan(AlternativeSubPlanState *node,</span>
+<span class="lineNum">    1377 </span>            :                        ExprContext *econtext,
+<span class="lineNum">    1378 </span>            :                        bool *isNull)
+<span class="lineNum">    1379 </span>            : {
+<span class="lineNum">    1380 </span>            :     /* Just pass control to the active subplan */
+<span class="lineNum">    1381 </span><span class="lineCov">        368 :     SubPlanState *activesp = list_nth_node(SubPlanState,</span>
+<span class="lineNum">    1382 </span>            :                                            node-&gt;subplans, node-&gt;active);
+<span class="lineNum">    1383 </span>            : 
+<span class="lineNum">    1384 </span><span class="lineCov">        368 :     return ExecSubPlan(activesp, econtext, isNull);</span>
+<span class="lineNum">    1385 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

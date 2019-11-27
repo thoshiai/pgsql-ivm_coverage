@@ -1,0 +1,1345 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/ipc/shm_mq.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/ipc</a> - shm_mq.c<span style="font-size: 80%;"> (source / <a href="shm_mq.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">313</td>
+            <td class="headerCovTableEntry">378</td>
+            <td class="headerCovTableEntryMed">82.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">19</td>
+            <td class="headerCovTableEntry">21</td>
+            <td class="headerCovTableEntryHi">90.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * shm_mq.c
+<span class="lineNum">       4 </span>            :  *    single-reader, single-writer shared memory message queue
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Both the sender and the receiver must have a PGPROC; their respective
+<span class="lineNum">       7 </span>            :  * process latches are used for synchronization.  Only the sender may send,
+<span class="lineNum">       8 </span>            :  * and only the receiver may receive.  This is intended to allow a user
+<span class="lineNum">       9 </span>            :  * backend to communicate with worker backends that it has registered.
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      12 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * src/backend/storage/ipc/shm_mq.c
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      17 </span>            :  */
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      20 </span>            : 
+<span class="lineNum">      21 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;postmaster/bgworker.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;storage/procsignal.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;storage/shm_mq.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;storage/spin.h&quot;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : /*
+<span class="lineNum">      29 </span>            :  * This structure represents the actual queue, stored in shared memory.
+<span class="lineNum">      30 </span>            :  *
+<span class="lineNum">      31 </span>            :  * Some notes on synchronization:
+<span class="lineNum">      32 </span>            :  *
+<span class="lineNum">      33 </span>            :  * mq_receiver and mq_bytes_read can only be changed by the receiver; and
+<span class="lineNum">      34 </span>            :  * mq_sender and mq_bytes_written can only be changed by the sender.
+<span class="lineNum">      35 </span>            :  * mq_receiver and mq_sender are protected by mq_mutex, although, importantly,
+<span class="lineNum">      36 </span>            :  * they cannot change once set, and thus may be read without a lock once this
+<span class="lineNum">      37 </span>            :  * is known to be the case.
+<span class="lineNum">      38 </span>            :  *
+<span class="lineNum">      39 </span>            :  * mq_bytes_read and mq_bytes_written are not protected by the mutex.  Instead,
+<span class="lineNum">      40 </span>            :  * they are written atomically using 8 byte loads and stores.  Memory barriers
+<span class="lineNum">      41 </span>            :  * must be carefully used to synchronize reads and writes of these values with
+<span class="lineNum">      42 </span>            :  * reads and writes of the actual data in mq_ring.
+<span class="lineNum">      43 </span>            :  *
+<span class="lineNum">      44 </span>            :  * mq_detached needs no locking.  It can be set by either the sender or the
+<span class="lineNum">      45 </span>            :  * receiver, but only ever from false to true, so redundant writes don't
+<span class="lineNum">      46 </span>            :  * matter.  It is important that if we set mq_detached and then set the
+<span class="lineNum">      47 </span>            :  * counterparty's latch, the counterparty must be certain to see the change
+<span class="lineNum">      48 </span>            :  * after waking up.  Since SetLatch begins with a memory barrier and ResetLatch
+<span class="lineNum">      49 </span>            :  * ends with one, this should be OK.
+<span class="lineNum">      50 </span>            :  *
+<span class="lineNum">      51 </span>            :  * mq_ring_size and mq_ring_offset never change after initialization, and
+<span class="lineNum">      52 </span>            :  * can therefore be read without the lock.
+<span class="lineNum">      53 </span>            :  *
+<span class="lineNum">      54 </span>            :  * Importantly, mq_ring can be safely read and written without a lock.
+<span class="lineNum">      55 </span>            :  * At any given time, the difference between mq_bytes_read and
+<span class="lineNum">      56 </span>            :  * mq_bytes_written defines the number of bytes within mq_ring that contain
+<span class="lineNum">      57 </span>            :  * unread data, and mq_bytes_read defines the position where those bytes
+<span class="lineNum">      58 </span>            :  * begin.  The sender can increase the number of unread bytes at any time,
+<span class="lineNum">      59 </span>            :  * but only the receiver can give license to overwrite those bytes, by
+<span class="lineNum">      60 </span>            :  * incrementing mq_bytes_read.  Therefore, it's safe for the receiver to read
+<span class="lineNum">      61 </span>            :  * the unread bytes it knows to be present without the lock.  Conversely,
+<span class="lineNum">      62 </span>            :  * the sender can write to the unused portion of the ring buffer without
+<span class="lineNum">      63 </span>            :  * the lock, because nobody else can be reading or writing those bytes.  The
+<span class="lineNum">      64 </span>            :  * receiver could be making more bytes unused by incrementing mq_bytes_read,
+<span class="lineNum">      65 </span>            :  * but that's OK.  Note that it would be unsafe for the receiver to read any
+<span class="lineNum">      66 </span>            :  * data it's already marked as read, or to write any data; and it would be
+<span class="lineNum">      67 </span>            :  * unsafe for the sender to reread any data after incrementing
+<span class="lineNum">      68 </span>            :  * mq_bytes_written, but fortunately there's no need for any of that.
+<span class="lineNum">      69 </span>            :  */
+<span class="lineNum">      70 </span>            : struct shm_mq
+<span class="lineNum">      71 </span>            : {
+<span class="lineNum">      72 </span>            :     slock_t     mq_mutex;
+<span class="lineNum">      73 </span>            :     PGPROC     *mq_receiver;
+<span class="lineNum">      74 </span>            :     PGPROC     *mq_sender;
+<span class="lineNum">      75 </span>            :     pg_atomic_uint64 mq_bytes_read;
+<span class="lineNum">      76 </span>            :     pg_atomic_uint64 mq_bytes_written;
+<span class="lineNum">      77 </span>            :     Size        mq_ring_size;
+<span class="lineNum">      78 </span>            :     bool        mq_detached;
+<span class="lineNum">      79 </span>            :     uint8       mq_ring_offset;
+<span class="lineNum">      80 </span>            :     char        mq_ring[FLEXIBLE_ARRAY_MEMBER];
+<span class="lineNum">      81 </span>            : };
+<span class="lineNum">      82 </span>            : 
+<span class="lineNum">      83 </span>            : /*
+<span class="lineNum">      84 </span>            :  * This structure is a backend-private handle for access to a queue.
+<span class="lineNum">      85 </span>            :  *
+<span class="lineNum">      86 </span>            :  * mqh_queue is a pointer to the queue we've attached, and mqh_segment is
+<span class="lineNum">      87 </span>            :  * an optional pointer to the dynamic shared memory segment that contains it.
+<span class="lineNum">      88 </span>            :  * (If mqh_segment is provided, we register an on_dsm_detach callback to
+<span class="lineNum">      89 </span>            :  * make sure we detach from the queue before detaching from DSM.)
+<span class="lineNum">      90 </span>            :  *
+<span class="lineNum">      91 </span>            :  * If this queue is intended to connect the current process with a background
+<span class="lineNum">      92 </span>            :  * worker that started it, the user can pass a pointer to the worker handle
+<span class="lineNum">      93 </span>            :  * to shm_mq_attach(), and we'll store it in mqh_handle.  The point of this
+<span class="lineNum">      94 </span>            :  * is to allow us to begin sending to or receiving from that queue before the
+<span class="lineNum">      95 </span>            :  * process we'll be communicating with has even been started.  If it fails
+<span class="lineNum">      96 </span>            :  * to start, the handle will allow us to notice that and fail cleanly, rather
+<span class="lineNum">      97 </span>            :  * than waiting forever; see shm_mq_wait_internal.  This is mostly useful in
+<span class="lineNum">      98 </span>            :  * simple cases - e.g. where there are just 2 processes communicating; in
+<span class="lineNum">      99 </span>            :  * more complex scenarios, every process may not have a BackgroundWorkerHandle
+<span class="lineNum">     100 </span>            :  * available, or may need to watch for the failure of more than one other
+<span class="lineNum">     101 </span>            :  * process at a time.
+<span class="lineNum">     102 </span>            :  *
+<span class="lineNum">     103 </span>            :  * When a message exists as a contiguous chunk of bytes in the queue - that is,
+<span class="lineNum">     104 </span>            :  * it is smaller than the size of the ring buffer and does not wrap around
+<span class="lineNum">     105 </span>            :  * the end - we return the message to the caller as a pointer into the buffer.
+<span class="lineNum">     106 </span>            :  * For messages that are larger or happen to wrap, we reassemble the message
+<span class="lineNum">     107 </span>            :  * locally by copying the chunks into a backend-local buffer.  mqh_buffer is
+<span class="lineNum">     108 </span>            :  * the buffer, and mqh_buflen is the number of bytes allocated for it.
+<span class="lineNum">     109 </span>            :  *
+<span class="lineNum">     110 </span>            :  * mqh_partial_bytes, mqh_expected_bytes, and mqh_length_word_complete
+<span class="lineNum">     111 </span>            :  * are used to track the state of non-blocking operations.  When the caller
+<span class="lineNum">     112 </span>            :  * attempts a non-blocking operation that returns SHM_MQ_WOULD_BLOCK, they
+<span class="lineNum">     113 </span>            :  * are expected to retry the call at a later time with the same argument;
+<span class="lineNum">     114 </span>            :  * we need to retain enough state to pick up where we left off.
+<span class="lineNum">     115 </span>            :  * mqh_length_word_complete tracks whether we are done sending or receiving
+<span class="lineNum">     116 </span>            :  * (whichever we're doing) the entire length word.  mqh_partial_bytes tracks
+<span class="lineNum">     117 </span>            :  * the number of bytes read or written for either the length word or the
+<span class="lineNum">     118 </span>            :  * message itself, and mqh_expected_bytes - which is used only for reads -
+<span class="lineNum">     119 </span>            :  * tracks the expected total size of the payload.
+<span class="lineNum">     120 </span>            :  *
+<span class="lineNum">     121 </span>            :  * mqh_counterparty_attached tracks whether we know the counterparty to have
+<span class="lineNum">     122 </span>            :  * attached to the queue at some previous point.  This lets us avoid some
+<span class="lineNum">     123 </span>            :  * mutex acquisitions.
+<span class="lineNum">     124 </span>            :  *
+<span class="lineNum">     125 </span>            :  * mqh_context is the memory context in effect at the time we attached to
+<span class="lineNum">     126 </span>            :  * the shm_mq.  The shm_mq_handle itself is allocated in this context, and
+<span class="lineNum">     127 </span>            :  * we make sure any other allocations we do happen in this context as well,
+<span class="lineNum">     128 </span>            :  * to avoid nasty surprises.
+<span class="lineNum">     129 </span>            :  */
+<span class="lineNum">     130 </span>            : struct shm_mq_handle
+<span class="lineNum">     131 </span>            : {
+<span class="lineNum">     132 </span>            :     shm_mq     *mqh_queue;
+<span class="lineNum">     133 </span>            :     dsm_segment *mqh_segment;
+<span class="lineNum">     134 </span>            :     BackgroundWorkerHandle *mqh_handle;
+<span class="lineNum">     135 </span>            :     char       *mqh_buffer;
+<span class="lineNum">     136 </span>            :     Size        mqh_buflen;
+<span class="lineNum">     137 </span>            :     Size        mqh_consume_pending;
+<span class="lineNum">     138 </span>            :     Size        mqh_partial_bytes;
+<span class="lineNum">     139 </span>            :     Size        mqh_expected_bytes;
+<span class="lineNum">     140 </span>            :     bool        mqh_length_word_complete;
+<span class="lineNum">     141 </span>            :     bool        mqh_counterparty_attached;
+<span class="lineNum">     142 </span>            :     MemoryContext mqh_context;
+<span class="lineNum">     143 </span>            : };
+<span class="lineNum">     144 </span>            : 
+<span class="lineNum">     145 </span>            : static void shm_mq_detach_internal(shm_mq *mq);
+<span class="lineNum">     146 </span>            : static shm_mq_result shm_mq_send_bytes(shm_mq_handle *mqh, Size nbytes,
+<span class="lineNum">     147 </span>            :                                        const void *data, bool nowait, Size *bytes_written);
+<span class="lineNum">     148 </span>            : static shm_mq_result shm_mq_receive_bytes(shm_mq_handle *mqh,
+<span class="lineNum">     149 </span>            :                                           Size bytes_needed, bool nowait, Size *nbytesp,
+<span class="lineNum">     150 </span>            :                                           void **datap);
+<span class="lineNum">     151 </span>            : static bool shm_mq_counterparty_gone(shm_mq *mq,
+<span class="lineNum">     152 </span>            :                                      BackgroundWorkerHandle *handle);
+<span class="lineNum">     153 </span>            : static bool shm_mq_wait_internal(shm_mq *mq, PGPROC **ptr,
+<span class="lineNum">     154 </span>            :                                  BackgroundWorkerHandle *handle);
+<span class="lineNum">     155 </span>            : static void shm_mq_inc_bytes_read(shm_mq *mq, Size n);
+<span class="lineNum">     156 </span>            : static void shm_mq_inc_bytes_written(shm_mq *mq, Size n);
+<span class="lineNum">     157 </span>            : static void shm_mq_detach_callback(dsm_segment *seg, Datum arg);
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span>            : /* Minimum queue size is enough for header and at least one chunk of data. */
+<span class="lineNum">     160 </span>            : const Size  shm_mq_minimum_size =
+<span class="lineNum">     161 </span>            : MAXALIGN(offsetof(shm_mq, mq_ring)) + MAXIMUM_ALIGNOF;
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span>            : #define MQH_INITIAL_BUFSIZE             8192
+<span class="lineNum">     164 </span>            : 
+<span class="lineNum">     165 </span>            : /*
+<span class="lineNum">     166 </span>            :  * Initialize a new shared message queue.
+<a name="167"><span class="lineNum">     167 </span>            :  */</a>
+<span class="lineNum">     168 </span>            : shm_mq *
+<span class="lineNum">     169 </span><span class="lineCov">       1500 : shm_mq_create(void *address, Size size)</span>
+<span class="lineNum">     170 </span>            : {
+<span class="lineNum">     171 </span><span class="lineCov">       1500 :     shm_mq     *mq = address;</span>
+<span class="lineNum">     172 </span><span class="lineCov">       1500 :     Size        data_offset = MAXALIGN(offsetof(shm_mq, mq_ring));</span>
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span>            :     /* If the size isn't MAXALIGN'd, just discard the odd bytes. */
+<span class="lineNum">     175 </span><span class="lineCov">       1500 :     size = MAXALIGN_DOWN(size);</span>
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span>            :     /* Queue size must be large enough to hold some data. */
+<span class="lineNum">     178 </span><span class="lineCov">       1500 :     Assert(size &gt; data_offset);</span>
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span>            :     /* Initialize queue header. */
+<span class="lineNum">     181 </span><span class="lineCov">       1500 :     SpinLockInit(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     182 </span><span class="lineCov">       1500 :     mq-&gt;mq_receiver = NULL;</span>
+<span class="lineNum">     183 </span><span class="lineCov">       1500 :     mq-&gt;mq_sender = NULL;</span>
+<span class="lineNum">     184 </span><span class="lineCov">       1500 :     pg_atomic_init_u64(&amp;mq-&gt;mq_bytes_read, 0);</span>
+<span class="lineNum">     185 </span><span class="lineCov">       1500 :     pg_atomic_init_u64(&amp;mq-&gt;mq_bytes_written, 0);</span>
+<span class="lineNum">     186 </span><span class="lineCov">       1500 :     mq-&gt;mq_ring_size = size - data_offset;</span>
+<span class="lineNum">     187 </span><span class="lineCov">       1500 :     mq-&gt;mq_detached = false;</span>
+<span class="lineNum">     188 </span><span class="lineCov">       1500 :     mq-&gt;mq_ring_offset = data_offset - offsetof(shm_mq, mq_ring);</span>
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span><span class="lineCov">       1500 :     return mq;</span>
+<span class="lineNum">     191 </span>            : }
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            : /*
+<span class="lineNum">     194 </span>            :  * Set the identity of the process that will receive from a shared message
+<span class="lineNum">     195 </span>            :  * queue.
+<a name="196"><span class="lineNum">     196 </span>            :  */</a>
+<span class="lineNum">     197 </span>            : void
+<span class="lineNum">     198 </span><span class="lineCov">       1500 : shm_mq_set_receiver(shm_mq *mq, PGPROC *proc)</span>
+<span class="lineNum">     199 </span>            : {
+<span class="lineNum">     200 </span>            :     PGPROC     *sender;
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span><span class="lineCov">       1500 :     SpinLockAcquire(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     203 </span><span class="lineCov">       1500 :     Assert(mq-&gt;mq_receiver == NULL);</span>
+<span class="lineNum">     204 </span><span class="lineCov">       1500 :     mq-&gt;mq_receiver = proc;</span>
+<span class="lineNum">     205 </span><span class="lineCov">       1500 :     sender = mq-&gt;mq_sender;</span>
+<span class="lineNum">     206 </span><span class="lineCov">       1500 :     SpinLockRelease(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span><span class="lineCov">       1500 :     if (sender != NULL)</span>
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :         SetLatch(&amp;sender-&gt;procLatch);</span>
+<span class="lineNum">     210 </span><span class="lineCov">       1500 : }</span>
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span>            : /*
+<span class="lineNum">     213 </span>            :  * Set the identity of the process that will send to a shared message queue.
+<a name="214"><span class="lineNum">     214 </span>            :  */</a>
+<span class="lineNum">     215 </span>            : void
+<span class="lineNum">     216 </span><span class="lineCov">       1452 : shm_mq_set_sender(shm_mq *mq, PGPROC *proc)</span>
+<span class="lineNum">     217 </span>            : {
+<span class="lineNum">     218 </span>            :     PGPROC     *receiver;
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span><span class="lineCov">       1452 :     SpinLockAcquire(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     221 </span><span class="lineCov">       1452 :     Assert(mq-&gt;mq_sender == NULL);</span>
+<span class="lineNum">     222 </span><span class="lineCov">       1452 :     mq-&gt;mq_sender = proc;</span>
+<span class="lineNum">     223 </span><span class="lineCov">       1452 :     receiver = mq-&gt;mq_receiver;</span>
+<span class="lineNum">     224 </span><span class="lineCov">       1452 :     SpinLockRelease(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineCov">       1452 :     if (receiver != NULL)</span>
+<span class="lineNum">     227 </span><span class="lineCov">       1452 :         SetLatch(&amp;receiver-&gt;procLatch);</span>
+<span class="lineNum">     228 </span><span class="lineCov">       1452 : }</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span>            : /*
+<span class="lineNum">     231 </span>            :  * Get the configured receiver.
+<a name="232"><span class="lineNum">     232 </span>            :  */</a>
+<span class="lineNum">     233 </span>            : PGPROC *
+<span class="lineNum">     234 </span><span class="lineNoCov">          0 : shm_mq_get_receiver(shm_mq *mq)</span>
+<span class="lineNum">     235 </span>            : {
+<span class="lineNum">     236 </span>            :     PGPROC     *receiver;
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     239 </span><span class="lineNoCov">          0 :     receiver = mq-&gt;mq_receiver;</span>
+<span class="lineNum">     240 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     241 </span>            : 
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 :     return receiver;</span>
+<span class="lineNum">     243 </span>            : }
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span>            : /*
+<span class="lineNum">     246 </span>            :  * Get the configured sender.
+<a name="247"><span class="lineNum">     247 </span>            :  */</a>
+<span class="lineNum">     248 </span>            : PGPROC *
+<span class="lineNum">     249 </span><span class="lineCov">    5161870 : shm_mq_get_sender(shm_mq *mq)</span>
+<span class="lineNum">     250 </span>            : {
+<span class="lineNum">     251 </span>            :     PGPROC     *sender;
+<span class="lineNum">     252 </span>            : 
+<span class="lineNum">     253 </span><span class="lineCov">    5161870 :     SpinLockAcquire(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     254 </span><span class="lineCov">    5161870 :     sender = mq-&gt;mq_sender;</span>
+<span class="lineNum">     255 </span><span class="lineCov">    5161870 :     SpinLockRelease(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     256 </span>            : 
+<span class="lineNum">     257 </span><span class="lineCov">    5161870 :     return sender;</span>
+<span class="lineNum">     258 </span>            : }
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span>            : /*
+<span class="lineNum">     261 </span>            :  * Attach to a shared message queue so we can send or receive messages.
+<span class="lineNum">     262 </span>            :  *
+<span class="lineNum">     263 </span>            :  * The memory context in effect at the time this function is called should
+<span class="lineNum">     264 </span>            :  * be one which will last for at least as long as the message queue itself.
+<span class="lineNum">     265 </span>            :  * We'll allocate the handle in that context, and future allocations that
+<span class="lineNum">     266 </span>            :  * are needed to buffer incoming data will happen in that context as well.
+<span class="lineNum">     267 </span>            :  *
+<span class="lineNum">     268 </span>            :  * If seg != NULL, the queue will be automatically detached when that dynamic
+<span class="lineNum">     269 </span>            :  * shared memory segment is detached.
+<span class="lineNum">     270 </span>            :  *
+<span class="lineNum">     271 </span>            :  * If handle != NULL, the queue can be read or written even before the
+<span class="lineNum">     272 </span>            :  * other process has attached.  We'll wait for it to do so if needed.  The
+<span class="lineNum">     273 </span>            :  * handle must be for a background worker initialized with bgw_notify_pid
+<span class="lineNum">     274 </span>            :  * equal to our PID.
+<span class="lineNum">     275 </span>            :  *
+<span class="lineNum">     276 </span>            :  * shm_mq_detach() should be called when done.  This will free the
+<span class="lineNum">     277 </span>            :  * shm_mq_handle and mark the queue itself as detached, so that our
+<span class="lineNum">     278 </span>            :  * counterpart won't get stuck waiting for us to fill or drain the queue
+<span class="lineNum">     279 </span>            :  * after we've already lost interest.
+<a name="280"><span class="lineNum">     280 </span>            :  */</a>
+<span class="lineNum">     281 </span>            : shm_mq_handle *
+<span class="lineNum">     282 </span><span class="lineCov">       2952 : shm_mq_attach(shm_mq *mq, dsm_segment *seg, BackgroundWorkerHandle *handle)</span>
+<span class="lineNum">     283 </span>            : {
+<span class="lineNum">     284 </span><span class="lineCov">       2952 :     shm_mq_handle *mqh = palloc(sizeof(shm_mq_handle));</span>
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span><span class="lineCov">       2952 :     Assert(mq-&gt;mq_receiver == MyProc || mq-&gt;mq_sender == MyProc);</span>
+<span class="lineNum">     287 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_queue = mq;</span>
+<span class="lineNum">     288 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_segment = seg;</span>
+<span class="lineNum">     289 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_handle = handle;</span>
+<span class="lineNum">     290 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_buffer = NULL;</span>
+<span class="lineNum">     291 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_buflen = 0;</span>
+<span class="lineNum">     292 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_consume_pending = 0;</span>
+<span class="lineNum">     293 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_partial_bytes = 0;</span>
+<span class="lineNum">     294 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_expected_bytes = 0;</span>
+<span class="lineNum">     295 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_length_word_complete = false;</span>
+<span class="lineNum">     296 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_counterparty_attached = false;</span>
+<span class="lineNum">     297 </span><span class="lineCov">       2952 :     mqh-&gt;mqh_context = CurrentMemoryContext;</span>
+<span class="lineNum">     298 </span>            : 
+<span class="lineNum">     299 </span><span class="lineCov">       2952 :     if (seg != NULL)</span>
+<span class="lineNum">     300 </span><span class="lineCov">       2952 :         on_dsm_detach(seg, shm_mq_detach_callback, PointerGetDatum(mq));</span>
+<span class="lineNum">     301 </span>            : 
+<span class="lineNum">     302 </span><span class="lineCov">       2952 :     return mqh;</span>
+<span class="lineNum">     303 </span>            : }
+<span class="lineNum">     304 </span>            : 
+<span class="lineNum">     305 </span>            : /*
+<span class="lineNum">     306 </span>            :  * Associate a BackgroundWorkerHandle with a shm_mq_handle just as if it had
+<span class="lineNum">     307 </span>            :  * been passed to shm_mq_attach.
+<a name="308"><span class="lineNum">     308 </span>            :  */</a>
+<span class="lineNum">     309 </span>            : void
+<span class="lineNum">     310 </span><span class="lineCov">       1452 : shm_mq_set_handle(shm_mq_handle *mqh, BackgroundWorkerHandle *handle)</span>
+<span class="lineNum">     311 </span>            : {
+<span class="lineNum">     312 </span><span class="lineCov">       1452 :     Assert(mqh-&gt;mqh_handle == NULL);</span>
+<span class="lineNum">     313 </span><span class="lineCov">       1452 :     mqh-&gt;mqh_handle = handle;</span>
+<span class="lineNum">     314 </span><span class="lineCov">       1452 : }</span>
+<span class="lineNum">     315 </span>            : 
+<span class="lineNum">     316 </span>            : /*
+<span class="lineNum">     317 </span>            :  * Write a message into a shared message queue.
+<a name="318"><span class="lineNum">     318 </span>            :  */</a>
+<span class="lineNum">     319 </span>            : shm_mq_result
+<span class="lineNum">     320 </span><span class="lineCov">     600270 : shm_mq_send(shm_mq_handle *mqh, Size nbytes, const void *data, bool nowait)</span>
+<span class="lineNum">     321 </span>            : {
+<span class="lineNum">     322 </span>            :     shm_mq_iovec iov;
+<span class="lineNum">     323 </span>            : 
+<span class="lineNum">     324 </span><span class="lineCov">     600270 :     iov.data = data;</span>
+<span class="lineNum">     325 </span><span class="lineCov">     600270 :     iov.len = nbytes;</span>
+<span class="lineNum">     326 </span>            : 
+<span class="lineNum">     327 </span><span class="lineCov">     600270 :     return shm_mq_sendv(mqh, &amp;iov, 1, nowait);</span>
+<span class="lineNum">     328 </span>            : }
+<span class="lineNum">     329 </span>            : 
+<span class="lineNum">     330 </span>            : /*
+<span class="lineNum">     331 </span>            :  * Write a message into a shared message queue, gathered from multiple
+<span class="lineNum">     332 </span>            :  * addresses.
+<span class="lineNum">     333 </span>            :  *
+<span class="lineNum">     334 </span>            :  * When nowait = false, we'll wait on our process latch when the ring buffer
+<span class="lineNum">     335 </span>            :  * fills up, and then continue writing once the receiver has drained some data.
+<span class="lineNum">     336 </span>            :  * The process latch is reset after each wait.
+<span class="lineNum">     337 </span>            :  *
+<span class="lineNum">     338 </span>            :  * When nowait = true, we do not manipulate the state of the process latch;
+<span class="lineNum">     339 </span>            :  * instead, if the buffer becomes full, we return SHM_MQ_WOULD_BLOCK.  In
+<span class="lineNum">     340 </span>            :  * this case, the caller should call this function again, with the same
+<span class="lineNum">     341 </span>            :  * arguments, each time the process latch is set.  (Once begun, the sending
+<span class="lineNum">     342 </span>            :  * of a message cannot be aborted except by detaching from the queue; changing
+<span class="lineNum">     343 </span>            :  * the length or payload will corrupt the queue.)
+<a name="344"><span class="lineNum">     344 </span>            :  */</a>
+<span class="lineNum">     345 </span>            : shm_mq_result
+<span class="lineNum">     346 </span><span class="lineCov">     601762 : shm_mq_sendv(shm_mq_handle *mqh, shm_mq_iovec *iov, int iovcnt, bool nowait)</span>
+<span class="lineNum">     347 </span>            : {
+<span class="lineNum">     348 </span>            :     shm_mq_result res;
+<span class="lineNum">     349 </span><span class="lineCov">     601762 :     shm_mq     *mq = mqh-&gt;mqh_queue;</span>
+<span class="lineNum">     350 </span>            :     PGPROC     *receiver;
+<span class="lineNum">     351 </span><span class="lineCov">     601762 :     Size        nbytes = 0;</span>
+<span class="lineNum">     352 </span>            :     Size        bytes_written;
+<span class="lineNum">     353 </span>            :     int         i;
+<span class="lineNum">     354 </span><span class="lineCov">     601762 :     int         which_iov = 0;</span>
+<span class="lineNum">     355 </span>            :     Size        offset;
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span><span class="lineCov">     601762 :     Assert(mq-&gt;mq_sender == MyProc);</span>
+<span class="lineNum">     358 </span>            : 
+<span class="lineNum">     359 </span>            :     /* Compute total size of write. */
+<span class="lineNum">     360 </span><span class="lineCov">    1205016 :     for (i = 0; i &lt; iovcnt; ++i)</span>
+<span class="lineNum">     361 </span><span class="lineCov">     603254 :         nbytes += iov[i].len;</span>
+<span class="lineNum">     362 </span>            : 
+<span class="lineNum">     363 </span>            :     /* Try to write, or finish writing, the length word into the buffer. */
+<span class="lineNum">     364 </span><span class="lineCov">    1805286 :     while (!mqh-&gt;mqh_length_word_complete)</span>
+<span class="lineNum">     365 </span>            :     {
+<span class="lineNum">     366 </span><span class="lineCov">     601762 :         Assert(mqh-&gt;mqh_partial_bytes &lt; sizeof(Size));</span>
+<span class="lineNum">     367 </span><span class="lineCov">    1203524 :         res = shm_mq_send_bytes(mqh, sizeof(Size) - mqh-&gt;mqh_partial_bytes,</span>
+<span class="lineNum">     368 </span><span class="lineCov">     601762 :                                 ((char *) &amp;nbytes) + mqh-&gt;mqh_partial_bytes,</span>
+<span class="lineNum">     369 </span>            :                                 nowait, &amp;bytes_written);
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineCov">     601762 :         if (res == SHM_MQ_DETACHED)</span>
+<span class="lineNum">     372 </span>            :         {
+<span class="lineNum">     373 </span>            :             /* Reset state in case caller tries to send another message. */
+<span class="lineNum">     374 </span><span class="lineNoCov">          0 :             mqh-&gt;mqh_partial_bytes = 0;</span>
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :             mqh-&gt;mqh_length_word_complete = false;</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :             return res;</span>
+<span class="lineNum">     377 </span>            :         }
+<span class="lineNum">     378 </span><span class="lineCov">     601762 :         mqh-&gt;mqh_partial_bytes += bytes_written;</span>
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span><span class="lineCov">     601762 :         if (mqh-&gt;mqh_partial_bytes &gt;= sizeof(Size))</span>
+<span class="lineNum">     381 </span>            :         {
+<span class="lineNum">     382 </span><span class="lineCov">     601762 :             Assert(mqh-&gt;mqh_partial_bytes == sizeof(Size));</span>
+<span class="lineNum">     383 </span>            : 
+<span class="lineNum">     384 </span><span class="lineCov">     601762 :             mqh-&gt;mqh_partial_bytes = 0;</span>
+<span class="lineNum">     385 </span><span class="lineCov">     601762 :             mqh-&gt;mqh_length_word_complete = true;</span>
+<span class="lineNum">     386 </span>            :         }
+<span class="lineNum">     387 </span>            : 
+<span class="lineNum">     388 </span><span class="lineCov">     601762 :         if (res != SHM_MQ_SUCCESS)</span>
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :             return res;</span>
+<span class="lineNum">     390 </span>            : 
+<span class="lineNum">     391 </span>            :         /* Length word can't be split unless bigger than required alignment. */
+<span class="lineNum">     392 </span><span class="lineCov">     601762 :         Assert(mqh-&gt;mqh_length_word_complete || sizeof(Size) &gt; MAXIMUM_ALIGNOF);</span>
+<span class="lineNum">     393 </span>            :     }
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span>            :     /* Write the actual data bytes into the buffer. */
+<span class="lineNum">     396 </span><span class="lineCov">     601762 :     Assert(mqh-&gt;mqh_partial_bytes &lt;= nbytes);</span>
+<span class="lineNum">     397 </span><span class="lineCov">     601762 :     offset = mqh-&gt;mqh_partial_bytes;</span>
+<span class="lineNum">     398 </span>            :     do
+<span class="lineNum">     399 </span>            :     {
+<span class="lineNum">     400 </span>            :         Size        chunksize;
+<span class="lineNum">     401 </span>            : 
+<span class="lineNum">     402 </span>            :         /* Figure out which bytes need to be sent next. */
+<span class="lineNum">     403 </span><span class="lineCov">     602510 :         if (offset &gt;= iov[which_iov].len)</span>
+<span class="lineNum">     404 </span>            :         {
+<span class="lineNum">     405 </span><span class="lineNoCov">          0 :             offset -= iov[which_iov].len;</span>
+<span class="lineNum">     406 </span><span class="lineNoCov">          0 :             ++which_iov;</span>
+<span class="lineNum">     407 </span><span class="lineNoCov">          0 :             if (which_iov &gt;= iovcnt)</span>
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     410 </span>            :         }
+<span class="lineNum">     411 </span>            : 
+<span class="lineNum">     412 </span>            :         /*
+<span class="lineNum">     413 </span>            :          * We want to avoid copying the data if at all possible, but every
+<span class="lineNum">     414 </span>            :          * chunk of bytes we write into the queue has to be MAXALIGN'd, except
+<span class="lineNum">     415 </span>            :          * the last.  Thus, if a chunk other than the last one ends on a
+<span class="lineNum">     416 </span>            :          * non-MAXALIGN'd boundary, we have to combine the tail end of its
+<span class="lineNum">     417 </span>            :          * data with data from one or more following chunks until we either
+<span class="lineNum">     418 </span>            :          * reach the last chunk or accumulate a number of bytes which is
+<span class="lineNum">     419 </span>            :          * MAXALIGN'd.
+<span class="lineNum">     420 </span>            :          */
+<span class="lineNum">     421 </span><span class="lineCov">     604002 :         if (which_iov + 1 &lt; iovcnt &amp;&amp;</span>
+<span class="lineNum">     422 </span><span class="lineCov">       1492 :             offset + MAXIMUM_ALIGNOF &gt; iov[which_iov].len)</span>
+<span class="lineNum">     423 </span>            :         {
+<span class="lineNum">     424 </span>            :             char        tmpbuf[MAXIMUM_ALIGNOF];
+<span class="lineNum">     425 </span><span class="lineCov">       1492 :             int         j = 0;</span>
+<span class="lineNum">     426 </span>            : 
+<span class="lineNum">     427 </span>            :             for (;;)
+<span class="lineNum">     428 </span>            :             {
+<span class="lineNum">     429 </span><span class="lineCov">       8964 :                 if (offset &lt; iov[which_iov].len)</span>
+<span class="lineNum">     430 </span>            :                 {
+<span class="lineNum">     431 </span><span class="lineCov">       6728 :                     tmpbuf[j] = iov[which_iov].data[offset];</span>
+<span class="lineNum">     432 </span><span class="lineCov">       6728 :                     j++;</span>
+<span class="lineNum">     433 </span><span class="lineCov">       6728 :                     offset++;</span>
+<span class="lineNum">     434 </span><span class="lineCov">       6728 :                     if (j == MAXIMUM_ALIGNOF)</span>
+<span class="lineNum">     435 </span><span class="lineCov">        748 :                         break;</span>
+<span class="lineNum">     436 </span>            :                 }
+<span class="lineNum">     437 </span>            :                 else
+<span class="lineNum">     438 </span>            :                 {
+<span class="lineNum">     439 </span><span class="lineCov">       2236 :                     offset -= iov[which_iov].len;</span>
+<span class="lineNum">     440 </span><span class="lineCov">       2236 :                     which_iov++;</span>
+<span class="lineNum">     441 </span><span class="lineCov">       2236 :                     if (which_iov &gt;= iovcnt)</span>
+<span class="lineNum">     442 </span><span class="lineCov">        744 :                         break;</span>
+<span class="lineNum">     443 </span>            :                 }
+<span class="lineNum">     444 </span><span class="lineCov">       7472 :             }</span>
+<span class="lineNum">     445 </span>            : 
+<span class="lineNum">     446 </span><span class="lineCov">       1492 :             res = shm_mq_send_bytes(mqh, j, tmpbuf, nowait, &amp;bytes_written);</span>
+<span class="lineNum">     447 </span>            : 
+<span class="lineNum">     448 </span><span class="lineCov">       1492 :             if (res == SHM_MQ_DETACHED)</span>
+<span class="lineNum">     449 </span>            :             {
+<span class="lineNum">     450 </span>            :                 /* Reset state in case caller tries to send another message. */
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :                 mqh-&gt;mqh_partial_bytes = 0;</span>
+<span class="lineNum">     452 </span><span class="lineNoCov">          0 :                 mqh-&gt;mqh_length_word_complete = false;</span>
+<span class="lineNum">     453 </span><span class="lineNoCov">          0 :                 return res;</span>
+<span class="lineNum">     454 </span>            :             }
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span><span class="lineCov">       1492 :             mqh-&gt;mqh_partial_bytes += bytes_written;</span>
+<span class="lineNum">     457 </span><span class="lineCov">       1492 :             if (res != SHM_MQ_SUCCESS)</span>
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 :                 return res;</span>
+<span class="lineNum">     459 </span><span class="lineCov">       1492 :             continue;</span>
+<span class="lineNum">     460 </span>            :         }
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span>            :         /*
+<span class="lineNum">     463 </span>            :          * If this is the last chunk, we can write all the data, even if it
+<span class="lineNum">     464 </span>            :          * isn't a multiple of MAXIMUM_ALIGNOF.  Otherwise, we need to
+<span class="lineNum">     465 </span>            :          * MAXALIGN_DOWN the write size.
+<span class="lineNum">     466 </span>            :          */
+<span class="lineNum">     467 </span><span class="lineCov">     601018 :         chunksize = iov[which_iov].len - offset;</span>
+<span class="lineNum">     468 </span><span class="lineCov">     601018 :         if (which_iov + 1 &lt; iovcnt)</span>
+<span class="lineNum">     469 </span><span class="lineNoCov">          0 :             chunksize = MAXALIGN_DOWN(chunksize);</span>
+<span class="lineNum">     470 </span><span class="lineCov">     601018 :         res = shm_mq_send_bytes(mqh, chunksize, &amp;iov[which_iov].data[offset],</span>
+<span class="lineNum">     471 </span>            :                                 nowait, &amp;bytes_written);
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span><span class="lineCov">     601018 :         if (res == SHM_MQ_DETACHED)</span>
+<span class="lineNum">     474 </span>            :         {
+<span class="lineNum">     475 </span>            :             /* Reset state in case caller tries to send another message. */
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 :             mqh-&gt;mqh_length_word_complete = false;</span>
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :             mqh-&gt;mqh_partial_bytes = 0;</span>
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :             return res;</span>
+<span class="lineNum">     479 </span>            :         }
+<span class="lineNum">     480 </span>            : 
+<span class="lineNum">     481 </span><span class="lineCov">     601018 :         mqh-&gt;mqh_partial_bytes += bytes_written;</span>
+<span class="lineNum">     482 </span><span class="lineCov">     601018 :         offset += bytes_written;</span>
+<span class="lineNum">     483 </span><span class="lineCov">     601018 :         if (res != SHM_MQ_SUCCESS)</span>
+<span class="lineNum">     484 </span><span class="lineNoCov">          0 :             return res;</span>
+<span class="lineNum">     485 </span><span class="lineCov">     602510 :     } while (mqh-&gt;mqh_partial_bytes &lt; nbytes);</span>
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            :     /* Reset for next message. */
+<span class="lineNum">     488 </span><span class="lineCov">     601762 :     mqh-&gt;mqh_partial_bytes = 0;</span>
+<span class="lineNum">     489 </span><span class="lineCov">     601762 :     mqh-&gt;mqh_length_word_complete = false;</span>
+<span class="lineNum">     490 </span>            : 
+<span class="lineNum">     491 </span>            :     /* If queue has been detached, let caller know. */
+<span class="lineNum">     492 </span><span class="lineCov">     601762 :     if (mq-&gt;mq_detached)</span>
+<span class="lineNum">     493 </span><span class="lineNoCov">          0 :         return SHM_MQ_DETACHED;</span>
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span>            :     /*
+<span class="lineNum">     496 </span>            :      * If the counterparty is known to have attached, we can read mq_receiver
+<span class="lineNum">     497 </span>            :      * without acquiring the spinlock and assume it isn't NULL.  Otherwise,
+<span class="lineNum">     498 </span>            :      * more caution is needed.
+<span class="lineNum">     499 </span>            :      */
+<span class="lineNum">     500 </span><span class="lineCov">     601762 :     if (mqh-&gt;mqh_counterparty_attached)</span>
+<span class="lineNum">     501 </span><span class="lineCov">     600512 :         receiver = mq-&gt;mq_receiver;</span>
+<span class="lineNum">     502 </span>            :     else
+<span class="lineNum">     503 </span>            :     {
+<span class="lineNum">     504 </span><span class="lineCov">       1250 :         SpinLockAcquire(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     505 </span><span class="lineCov">       1250 :         receiver = mq-&gt;mq_receiver;</span>
+<span class="lineNum">     506 </span><span class="lineCov">       1250 :         SpinLockRelease(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     507 </span><span class="lineCov">       1250 :         if (receiver == NULL)</span>
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 :             return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">     509 </span><span class="lineCov">       1250 :         mqh-&gt;mqh_counterparty_attached = true;</span>
+<span class="lineNum">     510 </span>            :     }
+<span class="lineNum">     511 </span>            : 
+<span class="lineNum">     512 </span>            :     /* Notify receiver of the newly-written data, and return. */
+<span class="lineNum">     513 </span><span class="lineCov">     601762 :     SetLatch(&amp;receiver-&gt;procLatch);</span>
+<span class="lineNum">     514 </span><span class="lineCov">     601762 :     return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">     515 </span>            : }
+<span class="lineNum">     516 </span>            : 
+<span class="lineNum">     517 </span>            : /*
+<span class="lineNum">     518 </span>            :  * Receive a message from a shared message queue.
+<span class="lineNum">     519 </span>            :  *
+<span class="lineNum">     520 </span>            :  * We set *nbytes to the message length and *data to point to the message
+<span class="lineNum">     521 </span>            :  * payload.  If the entire message exists in the queue as a single,
+<span class="lineNum">     522 </span>            :  * contiguous chunk, *data will point directly into shared memory; otherwise,
+<span class="lineNum">     523 </span>            :  * it will point to a temporary buffer.  This mostly avoids data copying in
+<span class="lineNum">     524 </span>            :  * the hoped-for case where messages are short compared to the buffer size,
+<span class="lineNum">     525 </span>            :  * while still allowing longer messages.  In either case, the return value
+<span class="lineNum">     526 </span>            :  * remains valid until the next receive operation is performed on the queue.
+<span class="lineNum">     527 </span>            :  *
+<span class="lineNum">     528 </span>            :  * When nowait = false, we'll wait on our process latch when the ring buffer
+<span class="lineNum">     529 </span>            :  * is empty and we have not yet received a full message.  The sender will
+<span class="lineNum">     530 </span>            :  * set our process latch after more data has been written, and we'll resume
+<span class="lineNum">     531 </span>            :  * processing.  Each call will therefore return a complete message
+<span class="lineNum">     532 </span>            :  * (unless the sender detaches the queue).
+<span class="lineNum">     533 </span>            :  *
+<span class="lineNum">     534 </span>            :  * When nowait = true, we do not manipulate the state of the process latch;
+<span class="lineNum">     535 </span>            :  * instead, whenever the buffer is empty and we need to read from it, we
+<span class="lineNum">     536 </span>            :  * return SHM_MQ_WOULD_BLOCK.  In this case, the caller should call this
+<span class="lineNum">     537 </span>            :  * function again after the process latch has been set.
+<a name="538"><span class="lineNum">     538 </span>            :  */</a>
+<span class="lineNum">     539 </span>            : shm_mq_result
+<span class="lineNum">     540 </span><span class="lineCov">    1915022 : shm_mq_receive(shm_mq_handle *mqh, Size *nbytesp, void **datap, bool nowait)</span>
+<span class="lineNum">     541 </span>            : {
+<span class="lineNum">     542 </span><span class="lineCov">    1915022 :     shm_mq     *mq = mqh-&gt;mqh_queue;</span>
+<span class="lineNum">     543 </span>            :     shm_mq_result res;
+<span class="lineNum">     544 </span><span class="lineCov">    1915022 :     Size        rb = 0;</span>
+<span class="lineNum">     545 </span>            :     Size        nbytes;
+<span class="lineNum">     546 </span>            :     void       *rawdata;
+<span class="lineNum">     547 </span>            : 
+<span class="lineNum">     548 </span><span class="lineCov">    1915022 :     Assert(mq-&gt;mq_receiver == MyProc);</span>
+<span class="lineNum">     549 </span>            : 
+<span class="lineNum">     550 </span>            :     /* We can't receive data until the sender has attached. */
+<span class="lineNum">     551 </span><span class="lineCov">    1915022 :     if (!mqh-&gt;mqh_counterparty_attached)</span>
+<span class="lineNum">     552 </span>            :     {
+<span class="lineNum">     553 </span><span class="lineCov">    1193580 :         if (nowait)</span>
+<span class="lineNum">     554 </span>            :         {
+<span class="lineNum">     555 </span>            :             int         counterparty_gone;
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span>            :             /*
+<span class="lineNum">     558 </span>            :              * We shouldn't return at this point at all unless the sender
+<span class="lineNum">     559 </span>            :              * hasn't attached yet.  However, the correct return value depends
+<span class="lineNum">     560 </span>            :              * on whether the sender is still attached.  If we first test
+<span class="lineNum">     561 </span>            :              * whether the sender has ever attached and then test whether the
+<span class="lineNum">     562 </span>            :              * sender has detached, there's a race condition: a sender that
+<span class="lineNum">     563 </span>            :              * attaches and detaches very quickly might fool us into thinking
+<span class="lineNum">     564 </span>            :              * the sender never attached at all.  So, test whether our
+<span class="lineNum">     565 </span>            :              * counterparty is definitively gone first, and only afterwards
+<span class="lineNum">     566 </span>            :              * check whether the sender ever attached in the first place.
+<span class="lineNum">     567 </span>            :              */
+<span class="lineNum">     568 </span><span class="lineCov">    1193542 :             counterparty_gone = shm_mq_counterparty_gone(mq, mqh-&gt;mqh_handle);</span>
+<span class="lineNum">     569 </span><span class="lineCov">    1193542 :             if (shm_mq_get_sender(mq) == NULL)</span>
+<span class="lineNum">     570 </span>            :             {
+<span class="lineNum">     571 </span><span class="lineCov">    1192128 :                 if (counterparty_gone)</span>
+<span class="lineNum">     572 </span><span class="lineNoCov">          0 :                     return SHM_MQ_DETACHED;</span>
+<span class="lineNum">     573 </span>            :                 else
+<span class="lineNum">     574 </span><span class="lineCov">    1192128 :                     return SHM_MQ_WOULD_BLOCK;</span>
+<span class="lineNum">     575 </span>            :             }
+<span class="lineNum">     576 </span>            :         }
+<span class="lineNum">     577 </span><span class="lineCov">         38 :         else if (!shm_mq_wait_internal(mq, &amp;mq-&gt;mq_sender, mqh-&gt;mqh_handle)</span>
+<span class="lineNum">     578 </span><span class="lineCov">         28 :                  &amp;&amp; shm_mq_get_sender(mq) == NULL)</span>
+<span class="lineNum">     579 </span>            :         {
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :             mq-&gt;mq_detached = true;</span>
+<span class="lineNum">     581 </span><span class="lineNoCov">          0 :             return SHM_MQ_DETACHED;</span>
+<span class="lineNum">     582 </span>            :         }
+<span class="lineNum">     583 </span><span class="lineCov">       1452 :         mqh-&gt;mqh_counterparty_attached = true;</span>
+<span class="lineNum">     584 </span>            :     }
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span>            :     /*
+<span class="lineNum">     587 </span>            :      * If we've consumed an amount of data greater than 1/4th of the ring
+<span class="lineNum">     588 </span>            :      * size, mark it consumed in shared memory.  We try to avoid doing this
+<span class="lineNum">     589 </span>            :      * unnecessarily when only a small amount of data has been consumed,
+<span class="lineNum">     590 </span>            :      * because SetLatch() is fairly expensive and we don't want to do it too
+<span class="lineNum">     591 </span>            :      * often.
+<span class="lineNum">     592 </span>            :      */
+<span class="lineNum">     593 </span><span class="lineCov">     722894 :     if (mqh-&gt;mqh_consume_pending &gt; mq-&gt;mq_ring_size / 4)</span>
+<span class="lineNum">     594 </span>            :     {
+<span class="lineNum">     595 </span><span class="lineCov">        276 :         shm_mq_inc_bytes_read(mq, mqh-&gt;mqh_consume_pending);</span>
+<span class="lineNum">     596 </span><span class="lineCov">        276 :         mqh-&gt;mqh_consume_pending = 0;</span>
+<span class="lineNum">     597 </span>            :     }
+<span class="lineNum">     598 </span>            : 
+<span class="lineNum">     599 </span>            :     /* Try to read, or finish reading, the length word from the buffer. */
+<span class="lineNum">     600 </span><span class="lineCov">    1449656 :     while (!mqh-&gt;mqh_length_word_complete)</span>
+<span class="lineNum">     601 </span>            :     {
+<span class="lineNum">     602 </span>            :         /* Try to receive the message length word. */
+<span class="lineNum">     603 </span><span class="lineCov">     720514 :         Assert(mqh-&gt;mqh_partial_bytes &lt; sizeof(Size));</span>
+<span class="lineNum">     604 </span><span class="lineCov">     720514 :         res = shm_mq_receive_bytes(mqh, sizeof(Size) - mqh-&gt;mqh_partial_bytes,</span>
+<span class="lineNum">     605 </span>            :                                    nowait, &amp;rb, &amp;rawdata);
+<span class="lineNum">     606 </span><span class="lineCov">     720514 :         if (res != SHM_MQ_SUCCESS)</span>
+<span class="lineNum">     607 </span><span class="lineCov">     118752 :             return res;</span>
+<span class="lineNum">     608 </span>            : 
+<span class="lineNum">     609 </span>            :         /*
+<span class="lineNum">     610 </span>            :          * Hopefully, we'll receive the entire message length word at once.
+<span class="lineNum">     611 </span>            :          * But if sizeof(Size) &gt; MAXIMUM_ALIGNOF, then it might be split over
+<span class="lineNum">     612 </span>            :          * multiple reads.
+<span class="lineNum">     613 </span>            :          */
+<span class="lineNum">     614 </span><span class="lineCov">     601762 :         if (mqh-&gt;mqh_partial_bytes == 0 &amp;&amp; rb &gt;= sizeof(Size))</span>
+<span class="lineNum">     615 </span><span class="lineCov">       3868 :         {</span>
+<span class="lineNum">     616 </span>            :             Size        needed;
+<span class="lineNum">     617 </span>            : 
+<span class="lineNum">     618 </span><span class="lineCov">     601762 :             nbytes = *(Size *) rawdata;</span>
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span>            :             /* If we've already got the whole message, we're done. */
+<span class="lineNum">     621 </span><span class="lineCov">     601762 :             needed = MAXALIGN(sizeof(Size)) + MAXALIGN(nbytes);</span>
+<span class="lineNum">     622 </span><span class="lineCov">     601762 :             if (rb &gt;= needed)</span>
+<span class="lineNum">     623 </span>            :             {
+<span class="lineNum">     624 </span><span class="lineCov">     597894 :                 mqh-&gt;mqh_consume_pending += needed;</span>
+<span class="lineNum">     625 </span><span class="lineCov">     597894 :                 *nbytesp = nbytes;</span>
+<span class="lineNum">     626 </span><span class="lineCov">     597894 :                 *datap = ((char *) rawdata) + MAXALIGN(sizeof(Size));</span>
+<span class="lineNum">     627 </span><span class="lineCov">     597894 :                 return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">     628 </span>            :             }
+<span class="lineNum">     629 </span>            : 
+<span class="lineNum">     630 </span>            :             /*
+<span class="lineNum">     631 </span>            :              * We don't have the whole message, but we at least have the whole
+<span class="lineNum">     632 </span>            :              * length word.
+<span class="lineNum">     633 </span>            :              */
+<span class="lineNum">     634 </span><span class="lineCov">       3868 :             mqh-&gt;mqh_expected_bytes = nbytes;</span>
+<span class="lineNum">     635 </span><span class="lineCov">       3868 :             mqh-&gt;mqh_length_word_complete = true;</span>
+<span class="lineNum">     636 </span><span class="lineCov">       3868 :             mqh-&gt;mqh_consume_pending += MAXALIGN(sizeof(Size));</span>
+<span class="lineNum">     637 </span><span class="lineCov">       3868 :             rb -= MAXALIGN(sizeof(Size));</span>
+<span class="lineNum">     638 </span>            :         }
+<span class="lineNum">     639 </span>            :         else
+<span class="lineNum">     640 </span>            :         {
+<span class="lineNum">     641 </span>            :             Size        lengthbytes;
+<span class="lineNum">     642 </span>            : 
+<span class="lineNum">     643 </span>            :             /* Can't be split unless bigger than required alignment. */
+<span class="lineNum">     644 </span><span class="lineNoCov">          0 :             Assert(sizeof(Size) &gt; MAXIMUM_ALIGNOF);</span>
+<span class="lineNum">     645 </span>            : 
+<span class="lineNum">     646 </span>            :             /* Message word is split; need buffer to reassemble. */
+<span class="lineNum">     647 </span>            :             if (mqh-&gt;mqh_buffer == NULL)
+<span class="lineNum">     648 </span>            :             {
+<span class="lineNum">     649 </span>            :                 mqh-&gt;mqh_buffer = MemoryContextAlloc(mqh-&gt;mqh_context,
+<span class="lineNum">     650 </span>            :                                                      MQH_INITIAL_BUFSIZE);
+<span class="lineNum">     651 </span>            :                 mqh-&gt;mqh_buflen = MQH_INITIAL_BUFSIZE;
+<span class="lineNum">     652 </span>            :             }
+<span class="lineNum">     653 </span>            :             Assert(mqh-&gt;mqh_buflen &gt;= sizeof(Size));
+<span class="lineNum">     654 </span>            : 
+<span class="lineNum">     655 </span>            :             /* Copy partial length word; remember to consume it. */
+<span class="lineNum">     656 </span>            :             if (mqh-&gt;mqh_partial_bytes + rb &gt; sizeof(Size))
+<span class="lineNum">     657 </span>            :                 lengthbytes = sizeof(Size) - mqh-&gt;mqh_partial_bytes;
+<span class="lineNum">     658 </span>            :             else
+<span class="lineNum">     659 </span>            :                 lengthbytes = rb;
+<span class="lineNum">     660 </span>            :             memcpy(&amp;mqh-&gt;mqh_buffer[mqh-&gt;mqh_partial_bytes], rawdata,
+<span class="lineNum">     661 </span>            :                    lengthbytes);
+<span class="lineNum">     662 </span>            :             mqh-&gt;mqh_partial_bytes += lengthbytes;
+<span class="lineNum">     663 </span>            :             mqh-&gt;mqh_consume_pending += MAXALIGN(lengthbytes);
+<span class="lineNum">     664 </span>            :             rb -= lengthbytes;
+<span class="lineNum">     665 </span>            : 
+<span class="lineNum">     666 </span>            :             /* If we now have the whole word, we're ready to read payload. */
+<span class="lineNum">     667 </span>            :             if (mqh-&gt;mqh_partial_bytes &gt;= sizeof(Size))
+<span class="lineNum">     668 </span>            :             {
+<span class="lineNum">     669 </span>            :                 Assert(mqh-&gt;mqh_partial_bytes == sizeof(Size));
+<span class="lineNum">     670 </span>            :                 mqh-&gt;mqh_expected_bytes = *(Size *) mqh-&gt;mqh_buffer;
+<span class="lineNum">     671 </span>            :                 mqh-&gt;mqh_length_word_complete = true;
+<span class="lineNum">     672 </span>            :                 mqh-&gt;mqh_partial_bytes = 0;
+<span class="lineNum">     673 </span>            :             }
+<span class="lineNum">     674 </span>            :         }
+<span class="lineNum">     675 </span>            :     }
+<span class="lineNum">     676 </span><span class="lineCov">       6248 :     nbytes = mqh-&gt;mqh_expected_bytes;</span>
+<span class="lineNum">     677 </span>            : 
+<span class="lineNum">     678 </span><span class="lineCov">       6248 :     if (mqh-&gt;mqh_partial_bytes == 0)</span>
+<span class="lineNum">     679 </span>            :     {
+<span class="lineNum">     680 </span>            :         /*
+<span class="lineNum">     681 </span>            :          * Try to obtain the whole message in a single chunk.  If this works,
+<span class="lineNum">     682 </span>            :          * we need not copy the data and can return a pointer directly into
+<span class="lineNum">     683 </span>            :          * shared memory.
+<span class="lineNum">     684 </span>            :          */
+<span class="lineNum">     685 </span><span class="lineCov">       6248 :         res = shm_mq_receive_bytes(mqh, nbytes, nowait, &amp;rb, &amp;rawdata);</span>
+<span class="lineNum">     686 </span><span class="lineCov">       6248 :         if (res != SHM_MQ_SUCCESS)</span>
+<span class="lineNum">     687 </span><span class="lineCov">       2380 :             return res;</span>
+<span class="lineNum">     688 </span><span class="lineCov">       3868 :         if (rb &gt;= nbytes)</span>
+<span class="lineNum">     689 </span>            :         {
+<span class="lineNum">     690 </span><span class="lineCov">       3864 :             mqh-&gt;mqh_length_word_complete = false;</span>
+<span class="lineNum">     691 </span><span class="lineCov">       3864 :             mqh-&gt;mqh_consume_pending += MAXALIGN(nbytes);</span>
+<span class="lineNum">     692 </span><span class="lineCov">       3864 :             *nbytesp = nbytes;</span>
+<span class="lineNum">     693 </span><span class="lineCov">       3864 :             *datap = rawdata;</span>
+<span class="lineNum">     694 </span><span class="lineCov">       3864 :             return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">     695 </span>            :         }
+<span class="lineNum">     696 </span>            : 
+<span class="lineNum">     697 </span>            :         /*
+<span class="lineNum">     698 </span>            :          * The message has wrapped the buffer.  We'll need to copy it in order
+<span class="lineNum">     699 </span>            :          * to return it to the client in one chunk.  First, make sure we have
+<span class="lineNum">     700 </span>            :          * a large enough buffer available.
+<span class="lineNum">     701 </span>            :          */
+<span class="lineNum">     702 </span><span class="lineCov">          4 :         if (mqh-&gt;mqh_buflen &lt; nbytes)</span>
+<span class="lineNum">     703 </span>            :         {
+<span class="lineNum">     704 </span><span class="lineCov">          4 :             Size        newbuflen = Max(mqh-&gt;mqh_buflen, MQH_INITIAL_BUFSIZE);</span>
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span><span class="lineCov">          8 :             while (newbuflen &lt; nbytes)</span>
+<span class="lineNum">     707 </span><span class="lineNoCov">          0 :                 newbuflen *= 2;</span>
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span><span class="lineCov">          4 :             if (mqh-&gt;mqh_buffer != NULL)</span>
+<span class="lineNum">     710 </span>            :             {
+<span class="lineNum">     711 </span><span class="lineNoCov">          0 :                 pfree(mqh-&gt;mqh_buffer);</span>
+<span class="lineNum">     712 </span><span class="lineNoCov">          0 :                 mqh-&gt;mqh_buffer = NULL;</span>
+<span class="lineNum">     713 </span><span class="lineNoCov">          0 :                 mqh-&gt;mqh_buflen = 0;</span>
+<span class="lineNum">     714 </span>            :             }
+<span class="lineNum">     715 </span><span class="lineCov">          4 :             mqh-&gt;mqh_buffer = MemoryContextAlloc(mqh-&gt;mqh_context, newbuflen);</span>
+<span class="lineNum">     716 </span><span class="lineCov">          4 :             mqh-&gt;mqh_buflen = newbuflen;</span>
+<span class="lineNum">     717 </span>            :         }
+<span class="lineNum">     718 </span>            :     }
+<span class="lineNum">     719 </span>            : 
+<span class="lineNum">     720 </span>            :     /* Loop until we've copied the entire message. */
+<span class="lineNum">     721 </span>            :     for (;;)
+<span class="lineNum">     722 </span>            :     {
+<span class="lineNum">     723 </span>            :         Size        still_needed;
+<span class="lineNum">     724 </span>            : 
+<span class="lineNum">     725 </span>            :         /* Copy as much as we can. */
+<span class="lineNum">     726 </span><span class="lineCov">          8 :         Assert(mqh-&gt;mqh_partial_bytes + rb &lt;= nbytes);</span>
+<span class="lineNum">     727 </span><span class="lineCov">          8 :         memcpy(&amp;mqh-&gt;mqh_buffer[mqh-&gt;mqh_partial_bytes], rawdata, rb);</span>
+<span class="lineNum">     728 </span><span class="lineCov">          8 :         mqh-&gt;mqh_partial_bytes += rb;</span>
+<span class="lineNum">     729 </span>            : 
+<span class="lineNum">     730 </span>            :         /*
+<span class="lineNum">     731 </span>            :          * Update count of bytes that can be consumed, accounting for
+<span class="lineNum">     732 </span>            :          * alignment padding.  Note that this will never actually insert any
+<span class="lineNum">     733 </span>            :          * padding except at the end of a message, because the buffer size is
+<span class="lineNum">     734 </span>            :          * a multiple of MAXIMUM_ALIGNOF, and each read and write is as well.
+<span class="lineNum">     735 </span>            :          */
+<span class="lineNum">     736 </span><span class="lineCov">          8 :         Assert(mqh-&gt;mqh_partial_bytes == nbytes || rb == MAXALIGN(rb));</span>
+<span class="lineNum">     737 </span><span class="lineCov">          8 :         mqh-&gt;mqh_consume_pending += MAXALIGN(rb);</span>
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span>            :         /* If we got all the data, exit the loop. */
+<span class="lineNum">     740 </span><span class="lineCov">          8 :         if (mqh-&gt;mqh_partial_bytes &gt;= nbytes)</span>
+<span class="lineNum">     741 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">     742 </span>            : 
+<span class="lineNum">     743 </span>            :         /* Wait for some more data. */
+<span class="lineNum">     744 </span><span class="lineCov">          4 :         still_needed = nbytes - mqh-&gt;mqh_partial_bytes;</span>
+<span class="lineNum">     745 </span><span class="lineCov">          4 :         res = shm_mq_receive_bytes(mqh, still_needed, nowait, &amp;rb, &amp;rawdata);</span>
+<span class="lineNum">     746 </span><span class="lineCov">          4 :         if (res != SHM_MQ_SUCCESS)</span>
+<span class="lineNum">     747 </span><span class="lineNoCov">          0 :             return res;</span>
+<span class="lineNum">     748 </span><span class="lineCov">          4 :         if (rb &gt; still_needed)</span>
+<span class="lineNum">     749 </span><span class="lineCov">          4 :             rb = still_needed;</span>
+<span class="lineNum">     750 </span><span class="lineCov">          4 :     }</span>
+<span class="lineNum">     751 </span>            : 
+<span class="lineNum">     752 </span>            :     /* Return the complete message, and reset for next message. */
+<span class="lineNum">     753 </span><span class="lineCov">          4 :     *nbytesp = nbytes;</span>
+<span class="lineNum">     754 </span><span class="lineCov">          4 :     *datap = mqh-&gt;mqh_buffer;</span>
+<span class="lineNum">     755 </span><span class="lineCov">          4 :     mqh-&gt;mqh_length_word_complete = false;</span>
+<span class="lineNum">     756 </span><span class="lineCov">          4 :     mqh-&gt;mqh_partial_bytes = 0;</span>
+<span class="lineNum">     757 </span><span class="lineCov">          4 :     return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">     758 </span>            : }
+<span class="lineNum">     759 </span>            : 
+<span class="lineNum">     760 </span>            : /*
+<span class="lineNum">     761 </span>            :  * Wait for the other process that's supposed to use this queue to attach
+<span class="lineNum">     762 </span>            :  * to it.
+<span class="lineNum">     763 </span>            :  *
+<span class="lineNum">     764 </span>            :  * The return value is SHM_MQ_DETACHED if the worker has already detached or
+<span class="lineNum">     765 </span>            :  * if it dies; it is SHM_MQ_SUCCESS if we detect that the worker has attached.
+<span class="lineNum">     766 </span>            :  * Note that we will only be able to detect that the worker has died before
+<span class="lineNum">     767 </span>            :  * attaching if a background worker handle was passed to shm_mq_attach().
+<a name="768"><span class="lineNum">     768 </span>            :  */</a>
+<span class="lineNum">     769 </span>            : shm_mq_result
+<span class="lineNum">     770 </span><span class="lineNoCov">          0 : shm_mq_wait_for_attach(shm_mq_handle *mqh)</span>
+<span class="lineNum">     771 </span>            : {
+<span class="lineNum">     772 </span><span class="lineNoCov">          0 :     shm_mq     *mq = mqh-&gt;mqh_queue;</span>
+<span class="lineNum">     773 </span>            :     PGPROC    **victim;
+<span class="lineNum">     774 </span>            : 
+<span class="lineNum">     775 </span><span class="lineNoCov">          0 :     if (shm_mq_get_receiver(mq) == MyProc)</span>
+<span class="lineNum">     776 </span><span class="lineNoCov">          0 :         victim = &amp;mq-&gt;mq_sender;</span>
+<span class="lineNum">     777 </span>            :     else
+<span class="lineNum">     778 </span>            :     {
+<span class="lineNum">     779 </span><span class="lineNoCov">          0 :         Assert(shm_mq_get_sender(mq) == MyProc);</span>
+<span class="lineNum">     780 </span><span class="lineNoCov">          0 :         victim = &amp;mq-&gt;mq_receiver;</span>
+<span class="lineNum">     781 </span>            :     }
+<span class="lineNum">     782 </span>            : 
+<span class="lineNum">     783 </span><span class="lineNoCov">          0 :     if (shm_mq_wait_internal(mq, victim, mqh-&gt;mqh_handle))</span>
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :         return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">     785 </span>            :     else
+<span class="lineNum">     786 </span><span class="lineNoCov">          0 :         return SHM_MQ_DETACHED;</span>
+<span class="lineNum">     787 </span>            : }
+<span class="lineNum">     788 </span>            : 
+<span class="lineNum">     789 </span>            : /*
+<span class="lineNum">     790 </span>            :  * Detach from a shared message queue, and destroy the shm_mq_handle.
+<a name="791"><span class="lineNum">     791 </span>            :  */</a>
+<span class="lineNum">     792 </span>            : void
+<span class="lineNum">     793 </span><span class="lineCov">       2178 : shm_mq_detach(shm_mq_handle *mqh)</span>
+<span class="lineNum">     794 </span>            : {
+<span class="lineNum">     795 </span>            :     /* Notify counterparty that we're outta here. */
+<span class="lineNum">     796 </span><span class="lineCov">       2178 :     shm_mq_detach_internal(mqh-&gt;mqh_queue);</span>
+<span class="lineNum">     797 </span>            : 
+<span class="lineNum">     798 </span>            :     /* Cancel on_dsm_detach callback, if any. */
+<span class="lineNum">     799 </span><span class="lineCov">       2178 :     if (mqh-&gt;mqh_segment)</span>
+<span class="lineNum">     800 </span><span class="lineCov">       2178 :         cancel_on_dsm_detach(mqh-&gt;mqh_segment,</span>
+<span class="lineNum">     801 </span>            :                              shm_mq_detach_callback,
+<span class="lineNum">     802 </span><span class="lineCov">       2178 :                              PointerGetDatum(mqh-&gt;mqh_queue));</span>
+<span class="lineNum">     803 </span>            : 
+<span class="lineNum">     804 </span>            :     /* Release local memory associated with handle. */
+<span class="lineNum">     805 </span><span class="lineCov">       2178 :     if (mqh-&gt;mqh_buffer != NULL)</span>
+<span class="lineNum">     806 </span><span class="lineCov">          4 :         pfree(mqh-&gt;mqh_buffer);</span>
+<span class="lineNum">     807 </span><span class="lineCov">       2178 :     pfree(mqh);</span>
+<span class="lineNum">     808 </span><span class="lineCov">       2178 : }</span>
+<span class="lineNum">     809 </span>            : 
+<span class="lineNum">     810 </span>            : /*
+<span class="lineNum">     811 </span>            :  * Notify counterparty that we're detaching from shared message queue.
+<span class="lineNum">     812 </span>            :  *
+<span class="lineNum">     813 </span>            :  * The purpose of this function is to make sure that the process
+<span class="lineNum">     814 </span>            :  * with which we're communicating doesn't block forever waiting for us to
+<span class="lineNum">     815 </span>            :  * fill or drain the queue once we've lost interest.  When the sender
+<span class="lineNum">     816 </span>            :  * detaches, the receiver can read any messages remaining in the queue;
+<span class="lineNum">     817 </span>            :  * further reads will return SHM_MQ_DETACHED.  If the receiver detaches,
+<span class="lineNum">     818 </span>            :  * further attempts to send messages will likewise return SHM_MQ_DETACHED.
+<span class="lineNum">     819 </span>            :  *
+<span class="lineNum">     820 </span>            :  * This is separated out from shm_mq_detach() because if the on_dsm_detach
+<span class="lineNum">     821 </span>            :  * callback fires, we only want to do this much.  We do not try to touch
+<span class="lineNum">     822 </span>            :  * the local shm_mq_handle, as it may have been pfree'd already.
+<a name="823"><span class="lineNum">     823 </span>            :  */</a>
+<span class="lineNum">     824 </span>            : static void
+<span class="lineNum">     825 </span><span class="lineCov">       2952 : shm_mq_detach_internal(shm_mq *mq)</span>
+<span class="lineNum">     826 </span>            : {
+<span class="lineNum">     827 </span>            :     PGPROC     *victim;
+<span class="lineNum">     828 </span>            : 
+<span class="lineNum">     829 </span><span class="lineCov">       2952 :     SpinLockAcquire(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     830 </span><span class="lineCov">       2952 :     if (mq-&gt;mq_sender == MyProc)</span>
+<span class="lineNum">     831 </span><span class="lineCov">       1452 :         victim = mq-&gt;mq_receiver;</span>
+<span class="lineNum">     832 </span>            :     else
+<span class="lineNum">     833 </span>            :     {
+<span class="lineNum">     834 </span><span class="lineCov">       1500 :         Assert(mq-&gt;mq_receiver == MyProc);</span>
+<span class="lineNum">     835 </span><span class="lineCov">       1500 :         victim = mq-&gt;mq_sender;</span>
+<span class="lineNum">     836 </span>            :     }
+<span class="lineNum">     837 </span><span class="lineCov">       2952 :     mq-&gt;mq_detached = true;</span>
+<span class="lineNum">     838 </span><span class="lineCov">       2952 :     SpinLockRelease(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">     839 </span>            : 
+<span class="lineNum">     840 </span><span class="lineCov">       2952 :     if (victim != NULL)</span>
+<span class="lineNum">     841 </span><span class="lineCov">       2904 :         SetLatch(&amp;victim-&gt;procLatch);</span>
+<span class="lineNum">     842 </span><span class="lineCov">       2952 : }</span>
+<span class="lineNum">     843 </span>            : 
+<span class="lineNum">     844 </span>            : /*
+<span class="lineNum">     845 </span>            :  * Get the shm_mq from handle.
+<a name="846"><span class="lineNum">     846 </span>            :  */</a>
+<span class="lineNum">     847 </span>            : shm_mq *
+<span class="lineNum">     848 </span><span class="lineCov">    3968300 : shm_mq_get_queue(shm_mq_handle *mqh)</span>
+<span class="lineNum">     849 </span>            : {
+<span class="lineNum">     850 </span><span class="lineCov">    3968300 :     return mqh-&gt;mqh_queue;</span>
+<span class="lineNum">     851 </span>            : }
+<span class="lineNum">     852 </span>            : 
+<span class="lineNum">     853 </span>            : /*
+<span class="lineNum">     854 </span>            :  * Write bytes into a shared message queue.
+<a name="855"><span class="lineNum">     855 </span>            :  */</a>
+<span class="lineNum">     856 </span>            : static shm_mq_result
+<span class="lineNum">     857 </span><span class="lineCov">    1204272 : shm_mq_send_bytes(shm_mq_handle *mqh, Size nbytes, const void *data,</span>
+<span class="lineNum">     858 </span>            :                   bool nowait, Size *bytes_written)
+<span class="lineNum">     859 </span>            : {
+<span class="lineNum">     860 </span><span class="lineCov">    1204272 :     shm_mq     *mq = mqh-&gt;mqh_queue;</span>
+<span class="lineNum">     861 </span><span class="lineCov">    1204272 :     Size        sent = 0;</span>
+<span class="lineNum">     862 </span>            :     uint64      used;
+<span class="lineNum">     863 </span><span class="lineCov">    1204272 :     Size        ringsize = mq-&gt;mq_ring_size;</span>
+<span class="lineNum">     864 </span>            :     Size        available;
+<span class="lineNum">     865 </span>            : 
+<span class="lineNum">     866 </span><span class="lineCov">    3612896 :     while (sent &lt; nbytes)</span>
+<span class="lineNum">     867 </span>            :     {
+<span class="lineNum">     868 </span>            :         uint64      rb;
+<span class="lineNum">     869 </span>            :         uint64      wb;
+<span class="lineNum">     870 </span>            : 
+<span class="lineNum">     871 </span>            :         /* Compute number of ring buffer bytes used and available. */
+<span class="lineNum">     872 </span><span class="lineCov">    1204352 :         rb = pg_atomic_read_u64(&amp;mq-&gt;mq_bytes_read);</span>
+<span class="lineNum">     873 </span><span class="lineCov">    1204352 :         wb = pg_atomic_read_u64(&amp;mq-&gt;mq_bytes_written);</span>
+<span class="lineNum">     874 </span><span class="lineCov">    1204352 :         Assert(wb &gt;= rb);</span>
+<span class="lineNum">     875 </span><span class="lineCov">    1204352 :         used = wb - rb;</span>
+<span class="lineNum">     876 </span><span class="lineCov">    1204352 :         Assert(used &lt;= ringsize);</span>
+<span class="lineNum">     877 </span><span class="lineCov">    1204352 :         available = Min(ringsize - used, nbytes - sent);</span>
+<span class="lineNum">     878 </span>            : 
+<span class="lineNum">     879 </span>            :         /*
+<span class="lineNum">     880 </span>            :          * Bail out if the queue has been detached.  Note that we would be in
+<span class="lineNum">     881 </span>            :          * trouble if the compiler decided to cache the value of
+<span class="lineNum">     882 </span>            :          * mq-&gt;mq_detached in a register or on the stack across loop
+<span class="lineNum">     883 </span>            :          * iterations.  It probably shouldn't do that anyway since we'll
+<span class="lineNum">     884 </span>            :          * always return, call an external function that performs a system
+<span class="lineNum">     885 </span>            :          * call, or reach a memory barrier at some point later in the loop,
+<span class="lineNum">     886 </span>            :          * but just to be sure, insert a compiler barrier here.
+<span class="lineNum">     887 </span>            :          */
+<span class="lineNum">     888 </span><span class="lineCov">    1204352 :         pg_compiler_barrier();</span>
+<span class="lineNum">     889 </span><span class="lineCov">    1204352 :         if (mq-&gt;mq_detached)</span>
+<span class="lineNum">     890 </span>            :         {
+<span class="lineNum">     891 </span><span class="lineNoCov">          0 :             *bytes_written = sent;</span>
+<span class="lineNum">     892 </span><span class="lineNoCov">          0 :             return SHM_MQ_DETACHED;</span>
+<span class="lineNum">     893 </span>            :         }
+<span class="lineNum">     894 </span>            : 
+<span class="lineNum">     895 </span><span class="lineCov">    1204352 :         if (available == 0 &amp;&amp; !mqh-&gt;mqh_counterparty_attached)</span>
+<span class="lineNum">     896 </span>            :         {
+<span class="lineNum">     897 </span>            :             /*
+<span class="lineNum">     898 </span>            :              * The queue is full, so if the receiver isn't yet known to be
+<span class="lineNum">     899 </span>            :              * attached, we must wait for that to happen.
+<span class="lineNum">     900 </span>            :              */
+<span class="lineNum">     901 </span><span class="lineNoCov">          0 :             if (nowait)</span>
+<span class="lineNum">     902 </span>            :             {
+<span class="lineNum">     903 </span><span class="lineNoCov">          0 :                 if (shm_mq_counterparty_gone(mq, mqh-&gt;mqh_handle))</span>
+<span class="lineNum">     904 </span>            :                 {
+<span class="lineNum">     905 </span><span class="lineNoCov">          0 :                     *bytes_written = sent;</span>
+<span class="lineNum">     906 </span><span class="lineNoCov">          0 :                     return SHM_MQ_DETACHED;</span>
+<span class="lineNum">     907 </span>            :                 }
+<span class="lineNum">     908 </span><span class="lineNoCov">          0 :                 if (shm_mq_get_receiver(mq) == NULL)</span>
+<span class="lineNum">     909 </span>            :                 {
+<span class="lineNum">     910 </span><span class="lineNoCov">          0 :                     *bytes_written = sent;</span>
+<span class="lineNum">     911 </span><span class="lineNoCov">          0 :                     return SHM_MQ_WOULD_BLOCK;</span>
+<span class="lineNum">     912 </span>            :                 }
+<span class="lineNum">     913 </span>            :             }
+<span class="lineNum">     914 </span><span class="lineNoCov">          0 :             else if (!shm_mq_wait_internal(mq, &amp;mq-&gt;mq_receiver,</span>
+<span class="lineNum">     915 </span>            :                                            mqh-&gt;mqh_handle))
+<span class="lineNum">     916 </span>            :             {
+<span class="lineNum">     917 </span><span class="lineNoCov">          0 :                 mq-&gt;mq_detached = true;</span>
+<span class="lineNum">     918 </span><span class="lineNoCov">          0 :                 *bytes_written = sent;</span>
+<span class="lineNum">     919 </span><span class="lineNoCov">          0 :                 return SHM_MQ_DETACHED;</span>
+<span class="lineNum">     920 </span>            :             }
+<span class="lineNum">     921 </span><span class="lineNoCov">          0 :             mqh-&gt;mqh_counterparty_attached = true;</span>
+<span class="lineNum">     922 </span>            : 
+<span class="lineNum">     923 </span>            :             /*
+<span class="lineNum">     924 </span>            :              * The receiver may have read some data after attaching, so we
+<span class="lineNum">     925 </span>            :              * must not wait without rechecking the queue state.
+<span class="lineNum">     926 </span>            :              */
+<span class="lineNum">     927 </span>            :         }
+<span class="lineNum">     928 </span><span class="lineCov">    1204352 :         else if (available == 0)</span>
+<span class="lineNum">     929 </span>            :         {
+<span class="lineNum">     930 </span>            :             /*
+<span class="lineNum">     931 </span>            :              * Since mq-&gt;mqh_counterparty_attached is known to be true at this
+<span class="lineNum">     932 </span>            :              * point, mq_receiver has been set, and it can't change once set.
+<span class="lineNum">     933 </span>            :              * Therefore, we can read it without acquiring the spinlock.
+<span class="lineNum">     934 </span>            :              */
+<span class="lineNum">     935 </span><span class="lineCov">         76 :             Assert(mqh-&gt;mqh_counterparty_attached);</span>
+<span class="lineNum">     936 </span><span class="lineCov">         76 :             SetLatch(&amp;mq-&gt;mq_receiver-&gt;procLatch);</span>
+<span class="lineNum">     937 </span>            : 
+<span class="lineNum">     938 </span>            :             /* Skip manipulation of our latch if nowait = true. */
+<span class="lineNum">     939 </span><span class="lineCov">         76 :             if (nowait)</span>
+<span class="lineNum">     940 </span>            :             {
+<span class="lineNum">     941 </span><span class="lineNoCov">          0 :                 *bytes_written = sent;</span>
+<span class="lineNum">     942 </span><span class="lineNoCov">          0 :                 return SHM_MQ_WOULD_BLOCK;</span>
+<span class="lineNum">     943 </span>            :             }
+<span class="lineNum">     944 </span>            : 
+<span class="lineNum">     945 </span>            :             /*
+<span class="lineNum">     946 </span>            :              * Wait for our latch to be set.  It might already be set for some
+<span class="lineNum">     947 </span>            :              * unrelated reason, but that'll just result in one extra trip
+<span class="lineNum">     948 </span>            :              * through the loop.  It's worth it to avoid resetting the latch
+<span class="lineNum">     949 </span>            :              * at top of loop, because setting an already-set latch is much
+<span class="lineNum">     950 </span>            :              * cheaper than setting one that has been reset.
+<span class="lineNum">     951 </span>            :              */
+<span class="lineNum">     952 </span><span class="lineCov">         76 :             (void) WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0,</span>
+<span class="lineNum">     953 </span>            :                              WAIT_EVENT_MQ_SEND);
+<span class="lineNum">     954 </span>            : 
+<span class="lineNum">     955 </span>            :             /* Reset the latch so we don't spin. */
+<span class="lineNum">     956 </span><span class="lineCov">         76 :             ResetLatch(MyLatch);</span>
+<span class="lineNum">     957 </span>            : 
+<span class="lineNum">     958 </span>            :             /* An interrupt may have occurred while we were waiting. */
+<span class="lineNum">     959 </span><span class="lineCov">         76 :             CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     960 </span>            :         }
+<span class="lineNum">     961 </span>            :         else
+<span class="lineNum">     962 </span>            :         {
+<span class="lineNum">     963 </span>            :             Size        offset;
+<span class="lineNum">     964 </span>            :             Size        sendnow;
+<span class="lineNum">     965 </span>            : 
+<span class="lineNum">     966 </span><span class="lineCov">    1204276 :             offset = wb % (uint64) ringsize;</span>
+<span class="lineNum">     967 </span><span class="lineCov">    1204276 :             sendnow = Min(available, ringsize - offset);</span>
+<span class="lineNum">     968 </span>            : 
+<span class="lineNum">     969 </span>            :             /*
+<span class="lineNum">     970 </span>            :              * Write as much data as we can via a single memcpy(). Make sure
+<span class="lineNum">     971 </span>            :              * these writes happen after the read of mq_bytes_read, above.
+<span class="lineNum">     972 </span>            :              * This barrier pairs with the one in shm_mq_inc_bytes_read.
+<span class="lineNum">     973 </span>            :              * (Since we're separating the read of mq_bytes_read from a
+<span class="lineNum">     974 </span>            :              * subsequent write to mq_ring, we need a full barrier here.)
+<span class="lineNum">     975 </span>            :              */
+<span class="lineNum">     976 </span><span class="lineCov">    1204276 :             pg_memory_barrier();</span>
+<span class="lineNum">     977 </span><span class="lineCov">    1204276 :             memcpy(&amp;mq-&gt;mq_ring[mq-&gt;mq_ring_offset + offset],</span>
+<span class="lineNum">     978 </span><span class="lineCov">    1204276 :                    (char *) data + sent, sendnow);</span>
+<span class="lineNum">     979 </span><span class="lineCov">    1204276 :             sent += sendnow;</span>
+<span class="lineNum">     980 </span>            : 
+<span class="lineNum">     981 </span>            :             /*
+<span class="lineNum">     982 </span>            :              * Update count of bytes written, with alignment padding.  Note
+<span class="lineNum">     983 </span>            :              * that this will never actually insert any padding except at the
+<span class="lineNum">     984 </span>            :              * end of a run of bytes, because the buffer size is a multiple of
+<span class="lineNum">     985 </span>            :              * MAXIMUM_ALIGNOF, and each read is as well.
+<span class="lineNum">     986 </span>            :              */
+<span class="lineNum">     987 </span><span class="lineCov">    1204276 :             Assert(sent == nbytes || sendnow == MAXALIGN(sendnow));</span>
+<span class="lineNum">     988 </span><span class="lineCov">    1204276 :             shm_mq_inc_bytes_written(mq, MAXALIGN(sendnow));</span>
+<span class="lineNum">     989 </span>            : 
+<span class="lineNum">     990 </span>            :             /*
+<span class="lineNum">     991 </span>            :              * For efficiency, we don't set the reader's latch here.  We'll do
+<span class="lineNum">     992 </span>            :              * that only when the buffer fills up or after writing an entire
+<span class="lineNum">     993 </span>            :              * message.
+<span class="lineNum">     994 </span>            :              */
+<span class="lineNum">     995 </span>            :         }
+<span class="lineNum">     996 </span>            :     }
+<span class="lineNum">     997 </span>            : 
+<span class="lineNum">     998 </span><span class="lineCov">    1204272 :     *bytes_written = sent;</span>
+<span class="lineNum">     999 </span><span class="lineCov">    1204272 :     return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">    1000 </span>            : }
+<span class="lineNum">    1001 </span>            : 
+<span class="lineNum">    1002 </span>            : /*
+<span class="lineNum">    1003 </span>            :  * Wait until at least *nbytesp bytes are available to be read from the
+<span class="lineNum">    1004 </span>            :  * shared message queue, or until the buffer wraps around.  If the queue is
+<span class="lineNum">    1005 </span>            :  * detached, returns SHM_MQ_DETACHED.  If nowait is specified and a wait
+<span class="lineNum">    1006 </span>            :  * would be required, returns SHM_MQ_WOULD_BLOCK.  Otherwise, *datap is set
+<span class="lineNum">    1007 </span>            :  * to the location at which data bytes can be read, *nbytesp is set to the
+<span class="lineNum">    1008 </span>            :  * number of bytes which can be read at that address, and the return value
+<span class="lineNum">    1009 </span>            :  * is SHM_MQ_SUCCESS.
+<a name="1010"><span class="lineNum">    1010 </span>            :  */</a>
+<span class="lineNum">    1011 </span>            : static shm_mq_result
+<span class="lineNum">    1012 </span><span class="lineCov">     726766 : shm_mq_receive_bytes(shm_mq_handle *mqh, Size bytes_needed, bool nowait,</span>
+<span class="lineNum">    1013 </span>            :                      Size *nbytesp, void **datap)
+<span class="lineNum">    1014 </span>            : {
+<span class="lineNum">    1015 </span><span class="lineCov">     726766 :     shm_mq     *mq = mqh-&gt;mqh_queue;</span>
+<span class="lineNum">    1016 </span><span class="lineCov">     726766 :     Size        ringsize = mq-&gt;mq_ring_size;</span>
+<span class="lineNum">    1017 </span>            :     uint64      used;
+<span class="lineNum">    1018 </span>            :     uint64      written;
+<span class="lineNum">    1019 </span>            : 
+<span class="lineNum">    1020 </span>            :     for (;;)
+<span class="lineNum">    1021 </span>            :     {
+<span class="lineNum">    1022 </span>            :         Size        offset;
+<span class="lineNum">    1023 </span>            :         uint64      read;
+<span class="lineNum">    1024 </span>            : 
+<span class="lineNum">    1025 </span>            :         /* Get bytes written, so we can compute what's available to read. */
+<span class="lineNum">    1026 </span><span class="lineCov">     726818 :         written = pg_atomic_read_u64(&amp;mq-&gt;mq_bytes_written);</span>
+<span class="lineNum">    1027 </span>            : 
+<span class="lineNum">    1028 </span>            :         /*
+<span class="lineNum">    1029 </span>            :          * Get bytes read.  Include bytes we could consume but have not yet
+<span class="lineNum">    1030 </span>            :          * consumed.
+<span class="lineNum">    1031 </span>            :          */
+<span class="lineNum">    1032 </span><span class="lineCov">    1453636 :         read = pg_atomic_read_u64(&amp;mq-&gt;mq_bytes_read) +</span>
+<span class="lineNum">    1033 </span><span class="lineCov">     726818 :             mqh-&gt;mqh_consume_pending;</span>
+<span class="lineNum">    1034 </span><span class="lineCov">     726818 :         used = written - read;</span>
+<span class="lineNum">    1035 </span><span class="lineCov">     726818 :         Assert(used &lt;= ringsize);</span>
+<span class="lineNum">    1036 </span><span class="lineCov">     726818 :         offset = read % (uint64) ringsize;</span>
+<span class="lineNum">    1037 </span>            : 
+<span class="lineNum">    1038 </span>            :         /* If we have enough data or buffer has wrapped, we're done. */
+<span class="lineNum">    1039 </span><span class="lineCov">     726818 :         if (used &gt;= bytes_needed || offset + used &gt;= ringsize)</span>
+<span class="lineNum">    1040 </span>            :         {
+<span class="lineNum">    1041 </span><span class="lineCov">     605634 :             *nbytesp = Min(used, ringsize - offset);</span>
+<span class="lineNum">    1042 </span><span class="lineCov">     605634 :             *datap = &amp;mq-&gt;mq_ring[mq-&gt;mq_ring_offset + offset];</span>
+<span class="lineNum">    1043 </span>            : 
+<span class="lineNum">    1044 </span>            :             /*
+<span class="lineNum">    1045 </span>            :              * Separate the read of mq_bytes_written, above, from caller's
+<span class="lineNum">    1046 </span>            :              * attempt to read the data itself.  Pairs with the barrier in
+<span class="lineNum">    1047 </span>            :              * shm_mq_inc_bytes_written.
+<span class="lineNum">    1048 </span>            :              */
+<span class="lineNum">    1049 </span><span class="lineCov">     605634 :             pg_read_barrier();</span>
+<span class="lineNum">    1050 </span><span class="lineCov">     605634 :             return SHM_MQ_SUCCESS;</span>
+<span class="lineNum">    1051 </span>            :         }
+<span class="lineNum">    1052 </span>            : 
+<span class="lineNum">    1053 </span>            :         /*
+<span class="lineNum">    1054 </span>            :          * Fall out before waiting if the queue has been detached.
+<span class="lineNum">    1055 </span>            :          *
+<span class="lineNum">    1056 </span>            :          * Note that we don't check for this until *after* considering whether
+<span class="lineNum">    1057 </span>            :          * the data already available is enough, since the receiver can finish
+<span class="lineNum">    1058 </span>            :          * receiving a message stored in the buffer even after the sender has
+<span class="lineNum">    1059 </span>            :          * detached.
+<span class="lineNum">    1060 </span>            :          */
+<span class="lineNum">    1061 </span><span class="lineCov">     121184 :         if (mq-&gt;mq_detached)</span>
+<span class="lineNum">    1062 </span>            :         {
+<span class="lineNum">    1063 </span>            :             /*
+<span class="lineNum">    1064 </span>            :              * If the writer advanced mq_bytes_written and then set
+<span class="lineNum">    1065 </span>            :              * mq_detached, we might not have read the final value of
+<span class="lineNum">    1066 </span>            :              * mq_bytes_written above.  Insert a read barrier and then check
+<span class="lineNum">    1067 </span>            :              * again if mq_bytes_written has advanced.
+<span class="lineNum">    1068 </span>            :              */
+<span class="lineNum">    1069 </span><span class="lineCov">        704 :             pg_read_barrier();</span>
+<span class="lineNum">    1070 </span><span class="lineCov">        704 :             if (written != pg_atomic_read_u64(&amp;mq-&gt;mq_bytes_written))</span>
+<span class="lineNum">    1071 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">    1072 </span>            : 
+<span class="lineNum">    1073 </span><span class="lineCov">        704 :             return SHM_MQ_DETACHED;</span>
+<span class="lineNum">    1074 </span>            :         }
+<span class="lineNum">    1075 </span>            : 
+<span class="lineNum">    1076 </span>            :         /*
+<span class="lineNum">    1077 </span>            :          * We didn't get enough data to satisfy the request, so mark any data
+<span class="lineNum">    1078 </span>            :          * previously-consumed as read to make more buffer space.
+<span class="lineNum">    1079 </span>            :          */
+<span class="lineNum">    1080 </span><span class="lineCov">     120480 :         if (mqh-&gt;mqh_consume_pending &gt; 0)</span>
+<span class="lineNum">    1081 </span>            :         {
+<span class="lineNum">    1082 </span><span class="lineCov">      29134 :             shm_mq_inc_bytes_read(mq, mqh-&gt;mqh_consume_pending);</span>
+<span class="lineNum">    1083 </span><span class="lineCov">      29134 :             mqh-&gt;mqh_consume_pending = 0;</span>
+<span class="lineNum">    1084 </span>            :         }
+<span class="lineNum">    1085 </span>            : 
+<span class="lineNum">    1086 </span>            :         /* Skip manipulation of our latch if nowait = true. */
+<span class="lineNum">    1087 </span><span class="lineCov">     120480 :         if (nowait)</span>
+<span class="lineNum">    1088 </span><span class="lineCov">     120428 :             return SHM_MQ_WOULD_BLOCK;</span>
+<span class="lineNum">    1089 </span>            : 
+<span class="lineNum">    1090 </span>            :         /*
+<span class="lineNum">    1091 </span>            :          * Wait for our latch to be set.  It might already be set for some
+<span class="lineNum">    1092 </span>            :          * unrelated reason, but that'll just result in one extra trip through
+<span class="lineNum">    1093 </span>            :          * the loop.  It's worth it to avoid resetting the latch at top of
+<span class="lineNum">    1094 </span>            :          * loop, because setting an already-set latch is much cheaper than
+<span class="lineNum">    1095 </span>            :          * setting one that has been reset.
+<span class="lineNum">    1096 </span>            :          */
+<span class="lineNum">    1097 </span><span class="lineCov">         52 :         (void) WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0,</span>
+<span class="lineNum">    1098 </span>            :                          WAIT_EVENT_MQ_RECEIVE);
+<span class="lineNum">    1099 </span>            : 
+<span class="lineNum">    1100 </span>            :         /* Reset the latch so we don't spin. */
+<span class="lineNum">    1101 </span><span class="lineCov">         52 :         ResetLatch(MyLatch);</span>
+<span class="lineNum">    1102 </span>            : 
+<span class="lineNum">    1103 </span>            :         /* An interrupt may have occurred while we were waiting. */
+<span class="lineNum">    1104 </span><span class="lineCov">         52 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1105 </span><span class="lineCov">         52 :     }</span>
+<span class="lineNum">    1106 </span>            : }
+<span class="lineNum">    1107 </span>            : 
+<span class="lineNum">    1108 </span>            : /*
+<span class="lineNum">    1109 </span>            :  * Test whether a counterparty who may not even be alive yet is definitely gone.
+<a name="1110"><span class="lineNum">    1110 </span>            :  */</a>
+<span class="lineNum">    1111 </span>            : static bool
+<span class="lineNum">    1112 </span><span class="lineCov">    1193542 : shm_mq_counterparty_gone(shm_mq *mq, BackgroundWorkerHandle *handle)</span>
+<span class="lineNum">    1113 </span>            : {
+<span class="lineNum">    1114 </span>            :     pid_t       pid;
+<span class="lineNum">    1115 </span>            : 
+<span class="lineNum">    1116 </span>            :     /* If the queue has been detached, counterparty is definitely gone. */
+<span class="lineNum">    1117 </span><span class="lineCov">    1193542 :     if (mq-&gt;mq_detached)</span>
+<span class="lineNum">    1118 </span><span class="lineCov">        418 :         return true;</span>
+<span class="lineNum">    1119 </span>            : 
+<span class="lineNum">    1120 </span>            :     /* If there's a handle, check worker status. */
+<span class="lineNum">    1121 </span><span class="lineCov">    1193124 :     if (handle != NULL)</span>
+<span class="lineNum">    1122 </span>            :     {
+<span class="lineNum">    1123 </span>            :         BgwHandleStatus status;
+<span class="lineNum">    1124 </span>            : 
+<span class="lineNum">    1125 </span>            :         /* Check for unexpected worker death. */
+<span class="lineNum">    1126 </span><span class="lineCov">    1193124 :         status = GetBackgroundWorkerPid(handle, &amp;pid);</span>
+<span class="lineNum">    1127 </span><span class="lineCov">    1193124 :         if (status != BGWH_STARTED &amp;&amp; status != BGWH_NOT_YET_STARTED)</span>
+<span class="lineNum">    1128 </span>            :         {
+<span class="lineNum">    1129 </span>            :             /* Mark it detached, just to make it official. */
+<span class="lineNum">    1130 </span><span class="lineNoCov">          0 :             mq-&gt;mq_detached = true;</span>
+<span class="lineNum">    1131 </span><span class="lineNoCov">          0 :             return true;</span>
+<span class="lineNum">    1132 </span>            :         }
+<span class="lineNum">    1133 </span>            :     }
+<span class="lineNum">    1134 </span>            : 
+<span class="lineNum">    1135 </span>            :     /* Counterparty is not definitively gone. */
+<span class="lineNum">    1136 </span><span class="lineCov">    1193124 :     return false;</span>
+<span class="lineNum">    1137 </span>            : }
+<span class="lineNum">    1138 </span>            : 
+<span class="lineNum">    1139 </span>            : /*
+<span class="lineNum">    1140 </span>            :  * This is used when a process is waiting for its counterpart to attach to the
+<span class="lineNum">    1141 </span>            :  * queue.  We exit when the other process attaches as expected, or, if
+<span class="lineNum">    1142 </span>            :  * handle != NULL, when the referenced background process or the postmaster
+<span class="lineNum">    1143 </span>            :  * dies.  Note that if handle == NULL, and the process fails to attach, we'll
+<span class="lineNum">    1144 </span>            :  * potentially get stuck here forever waiting for a process that may never
+<span class="lineNum">    1145 </span>            :  * start.  We do check for interrupts, though.
+<span class="lineNum">    1146 </span>            :  *
+<span class="lineNum">    1147 </span>            :  * ptr is a pointer to the memory address that we're expecting to become
+<span class="lineNum">    1148 </span>            :  * non-NULL when our counterpart attaches to the queue.
+<a name="1149"><span class="lineNum">    1149 </span>            :  */</a>
+<span class="lineNum">    1150 </span>            : static bool
+<span class="lineNum">    1151 </span><span class="lineCov">         38 : shm_mq_wait_internal(shm_mq *mq, PGPROC **ptr, BackgroundWorkerHandle *handle)</span>
+<span class="lineNum">    1152 </span>            : {
+<span class="lineNum">    1153 </span><span class="lineCov">         38 :     bool        result = false;</span>
+<span class="lineNum">    1154 </span>            : 
+<span class="lineNum">    1155 </span>            :     for (;;)
+<span class="lineNum">    1156 </span>            :     {
+<span class="lineNum">    1157 </span>            :         BgwHandleStatus status;
+<span class="lineNum">    1158 </span>            :         pid_t       pid;
+<span class="lineNum">    1159 </span>            : 
+<span class="lineNum">    1160 </span>            :         /* Acquire the lock just long enough to check the pointer. */
+<span class="lineNum">    1161 </span><span class="lineCov">        148 :         SpinLockAcquire(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">    1162 </span><span class="lineCov">        148 :         result = (*ptr != NULL);</span>
+<span class="lineNum">    1163 </span><span class="lineCov">        148 :         SpinLockRelease(&amp;mq-&gt;mq_mutex);</span>
+<span class="lineNum">    1164 </span>            : 
+<span class="lineNum">    1165 </span>            :         /* Fail if detached; else succeed if initialized. */
+<span class="lineNum">    1166 </span><span class="lineCov">        148 :         if (mq-&gt;mq_detached)</span>
+<span class="lineNum">    1167 </span>            :         {
+<span class="lineNum">    1168 </span><span class="lineCov">         28 :             result = false;</span>
+<span class="lineNum">    1169 </span><span class="lineCov">         66 :             break;</span>
+<span class="lineNum">    1170 </span>            :         }
+<span class="lineNum">    1171 </span><span class="lineCov">        120 :         if (result)</span>
+<span class="lineNum">    1172 </span><span class="lineCov">         10 :             break;</span>
+<span class="lineNum">    1173 </span>            : 
+<span class="lineNum">    1174 </span><span class="lineCov">        110 :         if (handle != NULL)</span>
+<span class="lineNum">    1175 </span>            :         {
+<span class="lineNum">    1176 </span>            :             /* Check for unexpected worker death. */
+<span class="lineNum">    1177 </span><span class="lineCov">        110 :             status = GetBackgroundWorkerPid(handle, &amp;pid);</span>
+<span class="lineNum">    1178 </span><span class="lineCov">        110 :             if (status != BGWH_STARTED &amp;&amp; status != BGWH_NOT_YET_STARTED)</span>
+<span class="lineNum">    1179 </span>            :             {
+<span class="lineNum">    1180 </span><span class="lineNoCov">          0 :                 result = false;</span>
+<span class="lineNum">    1181 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1182 </span>            :             }
+<span class="lineNum">    1183 </span>            :         }
+<span class="lineNum">    1184 </span>            : 
+<span class="lineNum">    1185 </span>            :         /* Wait to be signalled. */
+<span class="lineNum">    1186 </span><span class="lineCov">        110 :         (void) WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0,</span>
+<span class="lineNum">    1187 </span>            :                          WAIT_EVENT_MQ_INTERNAL);
+<span class="lineNum">    1188 </span>            : 
+<span class="lineNum">    1189 </span>            :         /* Reset the latch so we don't spin. */
+<span class="lineNum">    1190 </span><span class="lineCov">        110 :         ResetLatch(MyLatch);</span>
+<span class="lineNum">    1191 </span>            : 
+<span class="lineNum">    1192 </span>            :         /* An interrupt may have occurred while we were waiting. */
+<span class="lineNum">    1193 </span><span class="lineCov">        110 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1194 </span><span class="lineCov">        110 :     }</span>
+<span class="lineNum">    1195 </span>            : 
+<span class="lineNum">    1196 </span><span class="lineCov">         38 :     return result;</span>
+<span class="lineNum">    1197 </span>            : }
+<span class="lineNum">    1198 </span>            : 
+<span class="lineNum">    1199 </span>            : /*
+<span class="lineNum">    1200 </span>            :  * Increment the number of bytes read.
+<a name="1201"><span class="lineNum">    1201 </span>            :  */</a>
+<span class="lineNum">    1202 </span>            : static void
+<span class="lineNum">    1203 </span><span class="lineCov">      29410 : shm_mq_inc_bytes_read(shm_mq *mq, Size n)</span>
+<span class="lineNum">    1204 </span>            : {
+<span class="lineNum">    1205 </span>            :     PGPROC     *sender;
+<span class="lineNum">    1206 </span>            : 
+<span class="lineNum">    1207 </span>            :     /*
+<span class="lineNum">    1208 </span>            :      * Separate prior reads of mq_ring from the increment of mq_bytes_read
+<span class="lineNum">    1209 </span>            :      * which follows.  This pairs with the full barrier in
+<span class="lineNum">    1210 </span>            :      * shm_mq_send_bytes(). We only need a read barrier here because the
+<span class="lineNum">    1211 </span>            :      * increment of mq_bytes_read is actually a read followed by a dependent
+<span class="lineNum">    1212 </span>            :      * write.
+<span class="lineNum">    1213 </span>            :      */
+<span class="lineNum">    1214 </span><span class="lineCov">      29410 :     pg_read_barrier();</span>
+<span class="lineNum">    1215 </span>            : 
+<span class="lineNum">    1216 </span>            :     /*
+<span class="lineNum">    1217 </span>            :      * There's no need to use pg_atomic_fetch_add_u64 here, because nobody
+<span class="lineNum">    1218 </span>            :      * else can be changing this value.  This method should be cheaper.
+<span class="lineNum">    1219 </span>            :      */
+<span class="lineNum">    1220 </span><span class="lineCov">      29410 :     pg_atomic_write_u64(&amp;mq-&gt;mq_bytes_read,</span>
+<span class="lineNum">    1221 </span><span class="lineCov">      29410 :                         pg_atomic_read_u64(&amp;mq-&gt;mq_bytes_read) + n);</span>
+<span class="lineNum">    1222 </span>            : 
+<span class="lineNum">    1223 </span>            :     /*
+<span class="lineNum">    1224 </span>            :      * We shouldn't have any bytes to read without a sender, so we can read
+<span class="lineNum">    1225 </span>            :      * mq_sender here without a lock.  Once it's initialized, it can't change.
+<span class="lineNum">    1226 </span>            :      */
+<span class="lineNum">    1227 </span><span class="lineCov">      29410 :     sender = mq-&gt;mq_sender;</span>
+<span class="lineNum">    1228 </span><span class="lineCov">      29410 :     Assert(sender != NULL);</span>
+<span class="lineNum">    1229 </span><span class="lineCov">      29410 :     SetLatch(&amp;sender-&gt;procLatch);</span>
+<span class="lineNum">    1230 </span><span class="lineCov">      29410 : }</span>
+<span class="lineNum">    1231 </span>            : 
+<span class="lineNum">    1232 </span>            : /*
+<span class="lineNum">    1233 </span>            :  * Increment the number of bytes written.
+<a name="1234"><span class="lineNum">    1234 </span>            :  */</a>
+<span class="lineNum">    1235 </span>            : static void
+<span class="lineNum">    1236 </span><span class="lineCov">    1204276 : shm_mq_inc_bytes_written(shm_mq *mq, Size n)</span>
+<span class="lineNum">    1237 </span>            : {
+<span class="lineNum">    1238 </span>            :     /*
+<span class="lineNum">    1239 </span>            :      * Separate prior reads of mq_ring from the write of mq_bytes_written
+<span class="lineNum">    1240 </span>            :      * which we're about to do.  Pairs with the read barrier found in
+<span class="lineNum">    1241 </span>            :      * shm_mq_receive_bytes.
+<span class="lineNum">    1242 </span>            :      */
+<span class="lineNum">    1243 </span><span class="lineCov">    1204276 :     pg_write_barrier();</span>
+<span class="lineNum">    1244 </span>            : 
+<span class="lineNum">    1245 </span>            :     /*
+<span class="lineNum">    1246 </span>            :      * There's no need to use pg_atomic_fetch_add_u64 here, because nobody
+<span class="lineNum">    1247 </span>            :      * else can be changing this value.  This method avoids taking the bus
+<span class="lineNum">    1248 </span>            :      * lock unnecessarily.
+<span class="lineNum">    1249 </span>            :      */
+<span class="lineNum">    1250 </span><span class="lineCov">    1204276 :     pg_atomic_write_u64(&amp;mq-&gt;mq_bytes_written,</span>
+<span class="lineNum">    1251 </span><span class="lineCov">    1204276 :                         pg_atomic_read_u64(&amp;mq-&gt;mq_bytes_written) + n);</span>
+<span class="lineNum">    1252 </span><span class="lineCov">    1204276 : }</span>
+<span class="lineNum">    1253 </span>            : 
+<a name="1254"><span class="lineNum">    1254 </span>            : /* Shim for on_dsm_detach callback. */</a>
+<span class="lineNum">    1255 </span>            : static void
+<span class="lineNum">    1256 </span><span class="lineCov">        774 : shm_mq_detach_callback(dsm_segment *seg, Datum arg)</span>
+<span class="lineNum">    1257 </span>            : {
+<span class="lineNum">    1258 </span><span class="lineCov">        774 :     shm_mq     *mq = (shm_mq *) DatumGetPointer(arg);</span>
+<span class="lineNum">    1259 </span>            : 
+<span class="lineNum">    1260 </span><span class="lineCov">        774 :     shm_mq_detach_internal(mq);</span>
+<span class="lineNum">    1261 </span><span class="lineCov">        774 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

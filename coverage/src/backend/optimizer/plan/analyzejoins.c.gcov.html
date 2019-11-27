@@ -1,0 +1,1204 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/optimizer/plan/analyzejoins.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/optimizer/plan</a> - analyzejoins.c<span style="font-size: 80%;"> (source / <a href="analyzejoins.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">268</td>
+            <td class="headerCovTableEntry">288</td>
+            <td class="headerCovTableEntryHi">93.1 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">13</td>
+            <td class="headerCovTableEntry">13</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * analyzejoins.c
+<span class="lineNum">       4 </span>            :  *    Routines for simplifying joins after initial query analysis
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * While we do a great deal of join simplification in prep/prepjointree.c,
+<span class="lineNum">       7 </span>            :  * certain optimizations cannot be performed at that stage for lack of
+<span class="lineNum">       8 </span>            :  * detailed information about the query.  The routines here are invoked
+<span class="lineNum">       9 </span>            :  * after initsplan.c has done its work, and can do additional join removal
+<span class="lineNum">      10 </span>            :  * and simplification steps based on the information extracted.  The penalty
+<span class="lineNum">      11 </span>            :  * is that we have to work harder to clean up after ourselves when we modify
+<span class="lineNum">      12 </span>            :  * the query, since the derived data structures have to be updated too.
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      15 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  *
+<span class="lineNum">      18 </span>            :  * IDENTIFICATION
+<span class="lineNum">      19 </span>            :  *    src/backend/optimizer/plan/analyzejoins.c
+<span class="lineNum">      20 </span>            :  *
+<span class="lineNum">      21 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      22 </span>            :  */
+<span class="lineNum">      23 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;optimizer/clauses.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;optimizer/joininfo.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;optimizer/optimizer.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;optimizer/pathnode.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;optimizer/paths.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;optimizer/planmain.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;optimizer/tlist.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : /* local functions */
+<span class="lineNum">      36 </span>            : static bool join_is_removable(PlannerInfo *root, SpecialJoinInfo *sjinfo);
+<span class="lineNum">      37 </span>            : static void remove_rel_from_query(PlannerInfo *root, int relid,
+<span class="lineNum">      38 </span>            :                                   Relids joinrelids);
+<span class="lineNum">      39 </span>            : static List *remove_rel_from_joinlist(List *joinlist, int relid, int *nremoved);
+<span class="lineNum">      40 </span>            : static bool rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel);
+<span class="lineNum">      41 </span>            : static bool rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel,
+<span class="lineNum">      42 </span>            :                                 List *clause_list);
+<span class="lineNum">      43 </span>            : static Oid  distinct_col_search(int colno, List *colnos, List *opids);
+<span class="lineNum">      44 </span>            : static bool is_innerrel_unique_for(PlannerInfo *root,
+<span class="lineNum">      45 </span>            :                                    Relids joinrelids,
+<span class="lineNum">      46 </span>            :                                    Relids outerrelids,
+<span class="lineNum">      47 </span>            :                                    RelOptInfo *innerrel,
+<span class="lineNum">      48 </span>            :                                    JoinType jointype,
+<span class="lineNum">      49 </span>            :                                    List *restrictlist);
+<span class="lineNum">      50 </span>            : 
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            : /*
+<span class="lineNum">      53 </span>            :  * remove_useless_joins
+<span class="lineNum">      54 </span>            :  *      Check for relations that don't actually need to be joined at all,
+<span class="lineNum">      55 </span>            :  *      and remove them from the query.
+<span class="lineNum">      56 </span>            :  *
+<span class="lineNum">      57 </span>            :  * We are passed the current joinlist and return the updated list.  Other
+<span class="lineNum">      58 </span>            :  * data structures that have to be updated are accessible via &quot;root&quot;.
+<a name="59"><span class="lineNum">      59 </span>            :  */</a>
+<span class="lineNum">      60 </span>            : List *
+<span class="lineNum">      61 </span><span class="lineCov">      46460 : remove_useless_joins(PlannerInfo *root, List *joinlist)</span>
+<span class="lineNum">      62 </span>            : {
+<span class="lineNum">      63 </span>            :     ListCell   *lc;
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            :     /*
+<span class="lineNum">      66 </span>            :      * We are only interested in relations that are left-joined to, so we can
+<span class="lineNum">      67 </span>            :      * scan the join_info_list to find them easily.
+<span class="lineNum">      68 </span>            :      */
+<span class="lineNum">      69 </span>            : restart:
+<span class="lineNum">      70 </span><span class="lineCov">     105352 :     foreach(lc, root-&gt;join_info_list)</span>
+<span class="lineNum">      71 </span>            :     {
+<span class="lineNum">      72 </span><span class="lineCov">       7510 :         SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(lc);</span>
+<span class="lineNum">      73 </span>            :         int         innerrelid;
+<span class="lineNum">      74 </span>            :         int         nremoved;
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            :         /* Skip if not removable */
+<span class="lineNum">      77 </span><span class="lineCov">       7510 :         if (!join_is_removable(root, sjinfo))</span>
+<span class="lineNum">      78 </span><span class="lineCov">       6216 :             continue;</span>
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            :         /*
+<span class="lineNum">      81 </span>            :          * Currently, join_is_removable can only succeed when the sjinfo's
+<span class="lineNum">      82 </span>            :          * righthand is a single baserel.  Remove that rel from the query and
+<span class="lineNum">      83 </span>            :          * joinlist.
+<span class="lineNum">      84 </span>            :          */
+<span class="lineNum">      85 </span><span class="lineCov">       1294 :         innerrelid = bms_singleton_member(sjinfo-&gt;min_righthand);</span>
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span><span class="lineCov">       1294 :         remove_rel_from_query(root, innerrelid,</span>
+<span class="lineNum">      88 </span><span class="lineCov">       1294 :                               bms_union(sjinfo-&gt;min_lefthand,</span>
+<span class="lineNum">      89 </span><span class="lineCov">       1294 :                                         sjinfo-&gt;min_righthand));</span>
+<span class="lineNum">      90 </span>            : 
+<span class="lineNum">      91 </span>            :         /* We verify that exactly one reference gets removed from joinlist */
+<span class="lineNum">      92 </span><span class="lineCov">       1294 :         nremoved = 0;</span>
+<span class="lineNum">      93 </span><span class="lineCov">       1294 :         joinlist = remove_rel_from_joinlist(joinlist, innerrelid, &amp;nremoved);</span>
+<span class="lineNum">      94 </span><span class="lineCov">       1294 :         if (nremoved != 1)</span>
+<span class="lineNum">      95 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;failed to find relation %d in joinlist&quot;, innerrelid);</span>
+<span class="lineNum">      96 </span>            : 
+<span class="lineNum">      97 </span>            :         /*
+<span class="lineNum">      98 </span>            :          * We can delete this SpecialJoinInfo from the list too, since it's no
+<span class="lineNum">      99 </span>            :          * longer of interest.  (Since we'll restart the foreach loop
+<span class="lineNum">     100 </span>            :          * immediately, we don't bother with foreach_delete_current.)
+<span class="lineNum">     101 </span>            :          */
+<span class="lineNum">     102 </span><span class="lineCov">       1294 :         root-&gt;join_info_list = list_delete_cell(root-&gt;join_info_list, lc);</span>
+<span class="lineNum">     103 </span>            : 
+<span class="lineNum">     104 </span>            :         /*
+<span class="lineNum">     105 </span>            :          * Restart the scan.  This is necessary to ensure we find all
+<span class="lineNum">     106 </span>            :          * removable joins independently of ordering of the join_info_list
+<span class="lineNum">     107 </span>            :          * (note that removal of attr_needed bits may make a join appear
+<span class="lineNum">     108 </span>            :          * removable that did not before).
+<span class="lineNum">     109 </span>            :          */
+<span class="lineNum">     110 </span><span class="lineCov">       1294 :         goto restart;</span>
+<span class="lineNum">     111 </span>            :     }
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span><span class="lineCov">      45166 :     return joinlist;</span>
+<span class="lineNum">     114 </span>            : }
+<span class="lineNum">     115 </span>            : 
+<span class="lineNum">     116 </span>            : /*
+<span class="lineNum">     117 </span>            :  * clause_sides_match_join
+<span class="lineNum">     118 </span>            :  *    Determine whether a join clause is of the right form to use in this join.
+<span class="lineNum">     119 </span>            :  *
+<span class="lineNum">     120 </span>            :  * We already know that the clause is a binary opclause referencing only the
+<span class="lineNum">     121 </span>            :  * rels in the current join.  The point here is to check whether it has the
+<span class="lineNum">     122 </span>            :  * form &quot;outerrel_expr op innerrel_expr&quot; or &quot;innerrel_expr op outerrel_expr&quot;,
+<span class="lineNum">     123 </span>            :  * rather than mixing outer and inner vars on either side.  If it matches,
+<span class="lineNum">     124 </span>            :  * we set the transient flag outer_is_left to identify which side is which.
+<a name="125"><span class="lineNum">     125 </span>            :  */</a>
+<span class="lineNum">     126 </span>            : static inline bool
+<span class="lineNum">     127 </span><span class="lineCov">      16968 : clause_sides_match_join(RestrictInfo *rinfo, Relids outerrelids,</span>
+<span class="lineNum">     128 </span>            :                         Relids innerrelids)
+<span class="lineNum">     129 </span>            : {
+<span class="lineNum">     130 </span><span class="lineCov">      26164 :     if (bms_is_subset(rinfo-&gt;left_relids, outerrelids) &amp;&amp;</span>
+<span class="lineNum">     131 </span><span class="lineCov">       9196 :         bms_is_subset(rinfo-&gt;right_relids, innerrelids))</span>
+<span class="lineNum">     132 </span>            :     {
+<span class="lineNum">     133 </span>            :         /* lefthand side is outer */
+<span class="lineNum">     134 </span><span class="lineCov">       9196 :         rinfo-&gt;outer_is_left = true;</span>
+<span class="lineNum">     135 </span><span class="lineCov">       9196 :         return true;</span>
+<span class="lineNum">     136 </span>            :     }
+<span class="lineNum">     137 </span><span class="lineCov">      15544 :     else if (bms_is_subset(rinfo-&gt;left_relids, innerrelids) &amp;&amp;</span>
+<span class="lineNum">     138 </span><span class="lineCov">       7772 :              bms_is_subset(rinfo-&gt;right_relids, outerrelids))</span>
+<span class="lineNum">     139 </span>            :     {
+<span class="lineNum">     140 </span>            :         /* righthand side is outer */
+<span class="lineNum">     141 </span><span class="lineCov">       7772 :         rinfo-&gt;outer_is_left = false;</span>
+<span class="lineNum">     142 </span><span class="lineCov">       7772 :         return true;</span>
+<span class="lineNum">     143 </span>            :     }
+<span class="lineNum">     144 </span><span class="lineNoCov">          0 :     return false;               /* no good for these input relations */</span>
+<span class="lineNum">     145 </span>            : }
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            : /*
+<span class="lineNum">     148 </span>            :  * join_is_removable
+<span class="lineNum">     149 </span>            :  *    Check whether we need not perform this special join at all, because
+<span class="lineNum">     150 </span>            :  *    it will just duplicate its left input.
+<span class="lineNum">     151 </span>            :  *
+<span class="lineNum">     152 </span>            :  * This is true for a left join for which the join condition cannot match
+<span class="lineNum">     153 </span>            :  * more than one inner-side row.  (There are other possibly interesting
+<span class="lineNum">     154 </span>            :  * cases, but we don't have the infrastructure to prove them.)  We also
+<span class="lineNum">     155 </span>            :  * have to check that the inner side doesn't generate any variables needed
+<span class="lineNum">     156 </span>            :  * above the join.
+<a name="157"><span class="lineNum">     157 </span>            :  */</a>
+<span class="lineNum">     158 </span>            : static bool
+<span class="lineNum">     159 </span><span class="lineCov">       7510 : join_is_removable(PlannerInfo *root, SpecialJoinInfo *sjinfo)</span>
+<span class="lineNum">     160 </span>            : {
+<span class="lineNum">     161 </span>            :     int         innerrelid;
+<span class="lineNum">     162 </span>            :     RelOptInfo *innerrel;
+<span class="lineNum">     163 </span>            :     Relids      joinrelids;
+<span class="lineNum">     164 </span><span class="lineCov">       7510 :     List       *clause_list = NIL;</span>
+<span class="lineNum">     165 </span>            :     ListCell   *l;
+<span class="lineNum">     166 </span>            :     int         attroff;
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            :     /*
+<span class="lineNum">     169 </span>            :      * Must be a non-delaying left join to a single baserel, else we aren't
+<span class="lineNum">     170 </span>            :      * going to be able to do anything with it.
+<span class="lineNum">     171 </span>            :      */
+<span class="lineNum">     172 </span><span class="lineCov">      13216 :     if (sjinfo-&gt;jointype != JOIN_LEFT ||</span>
+<span class="lineNum">     173 </span><span class="lineCov">       5706 :         sjinfo-&gt;delay_upper_joins)</span>
+<span class="lineNum">     174 </span><span class="lineCov">       1884 :         return false;</span>
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span><span class="lineCov">       5626 :     if (!bms_get_singleton_member(sjinfo-&gt;min_righthand, &amp;innerrelid))</span>
+<span class="lineNum">     177 </span><span class="lineCov">        412 :         return false;</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span><span class="lineCov">       5214 :     innerrel = find_base_rel(root, innerrelid);</span>
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span>            :     /*
+<span class="lineNum">     182 </span>            :      * Before we go to the effort of checking whether any innerrel variables
+<span class="lineNum">     183 </span>            :      * are needed above the join, make a quick check to eliminate cases in
+<span class="lineNum">     184 </span>            :      * which we will surely be unable to prove uniqueness of the innerrel.
+<span class="lineNum">     185 </span>            :      */
+<span class="lineNum">     186 </span><span class="lineCov">       5214 :     if (!rel_supports_distinctness(root, innerrel))</span>
+<span class="lineNum">     187 </span><span class="lineCov">       1604 :         return false;</span>
+<span class="lineNum">     188 </span>            : 
+<span class="lineNum">     189 </span>            :     /* Compute the relid set for the join we are considering */
+<span class="lineNum">     190 </span><span class="lineCov">       3610 :     joinrelids = bms_union(sjinfo-&gt;min_lefthand, sjinfo-&gt;min_righthand);</span>
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span>            :     /*
+<span class="lineNum">     193 </span>            :      * We can't remove the join if any inner-rel attributes are used above the
+<span class="lineNum">     194 </span>            :      * join.
+<span class="lineNum">     195 </span>            :      *
+<span class="lineNum">     196 </span>            :      * Note that this test only detects use of inner-rel attributes in higher
+<span class="lineNum">     197 </span>            :      * join conditions and the target list.  There might be such attributes in
+<span class="lineNum">     198 </span>            :      * pushed-down conditions at this join, too.  We check that case below.
+<span class="lineNum">     199 </span>            :      *
+<span class="lineNum">     200 </span>            :      * As a micro-optimization, it seems better to start with max_attr and
+<span class="lineNum">     201 </span>            :      * count down rather than starting with min_attr and counting up, on the
+<span class="lineNum">     202 </span>            :      * theory that the system attributes are somewhat less likely to be wanted
+<span class="lineNum">     203 </span>            :      * and should be tested last.
+<span class="lineNum">     204 </span>            :      */
+<span class="lineNum">     205 </span><span class="lineCov">      44066 :     for (attroff = innerrel-&gt;max_attr - innerrel-&gt;min_attr;</span>
+<span class="lineNum">     206 </span>            :          attroff &gt;= 0;
+<span class="lineNum">     207 </span><span class="lineCov">      36846 :          attroff--)</span>
+<span class="lineNum">     208 </span>            :     {
+<span class="lineNum">     209 </span><span class="lineCov">      39142 :         if (!bms_is_subset(innerrel-&gt;attr_needed[attroff], joinrelids))</span>
+<span class="lineNum">     210 </span><span class="lineCov">       2296 :             return false;</span>
+<span class="lineNum">     211 </span>            :     }
+<span class="lineNum">     212 </span>            : 
+<span class="lineNum">     213 </span>            :     /*
+<span class="lineNum">     214 </span>            :      * Similarly check that the inner rel isn't needed by any PlaceHolderVars
+<span class="lineNum">     215 </span>            :      * that will be used above the join.  We only need to fail if such a PHV
+<span class="lineNum">     216 </span>            :      * actually references some inner-rel attributes; but the correct check
+<span class="lineNum">     217 </span>            :      * for that is relatively expensive, so we first check against ph_eval_at,
+<span class="lineNum">     218 </span>            :      * which must mention the inner rel if the PHV uses any inner-rel attrs as
+<span class="lineNum">     219 </span>            :      * non-lateral references.  Note that if the PHV's syntactic scope is just
+<span class="lineNum">     220 </span>            :      * the inner rel, we can't drop the rel even if the PHV is variable-free.
+<span class="lineNum">     221 </span>            :      */
+<span class="lineNum">     222 </span><span class="lineCov">       1322 :     foreach(l, root-&gt;placeholder_list)</span>
+<span class="lineNum">     223 </span>            :     {
+<span class="lineNum">     224 </span><span class="lineCov">         18 :         PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(l);</span>
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineCov">         18 :         if (bms_overlap(phinfo-&gt;ph_lateral, innerrel-&gt;relids))</span>
+<span class="lineNum">     227 </span><span class="lineCov">         10 :             return false;       /* it references innerrel laterally */</span>
+<span class="lineNum">     228 </span><span class="lineCov">         18 :         if (bms_is_subset(phinfo-&gt;ph_needed, joinrelids))</span>
+<span class="lineNum">     229 </span><span class="lineCov">          8 :             continue;           /* PHV is not used above the join */</span>
+<span class="lineNum">     230 </span><span class="lineCov">         10 :         if (!bms_overlap(phinfo-&gt;ph_eval_at, innerrel-&gt;relids))</span>
+<span class="lineNum">     231 </span><span class="lineNoCov">          0 :             continue;           /* it definitely doesn't reference innerrel */</span>
+<span class="lineNum">     232 </span><span class="lineCov">         10 :         if (bms_is_subset(phinfo-&gt;ph_eval_at, innerrel-&gt;relids))</span>
+<span class="lineNum">     233 </span><span class="lineCov">          6 :             return false;       /* there isn't any other place to eval PHV */</span>
+<span class="lineNum">     234 </span><span class="lineCov">          4 :         if (bms_overlap(pull_varnos((Node *) phinfo-&gt;ph_var-&gt;phexpr),</span>
+<span class="lineNum">     235 </span><span class="lineCov">          4 :                         innerrel-&gt;relids))</span>
+<span class="lineNum">     236 </span><span class="lineCov">          4 :             return false;       /* it does reference innerrel */</span>
+<span class="lineNum">     237 </span>            :     }
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span>            :     /*
+<span class="lineNum">     240 </span>            :      * Search for mergejoinable clauses that constrain the inner rel against
+<span class="lineNum">     241 </span>            :      * either the outer rel or a pseudoconstant.  If an operator is
+<span class="lineNum">     242 </span>            :      * mergejoinable then it behaves like equality for some btree opclass, so
+<span class="lineNum">     243 </span>            :      * it's what we want.  The mergejoinability test also eliminates clauses
+<span class="lineNum">     244 </span>            :      * containing volatile functions, which we couldn't depend on.
+<span class="lineNum">     245 </span>            :      */
+<span class="lineNum">     246 </span><span class="lineCov">       2656 :     foreach(l, innerrel-&gt;joininfo)</span>
+<span class="lineNum">     247 </span>            :     {
+<span class="lineNum">     248 </span><span class="lineCov">       1352 :         RestrictInfo *restrictinfo = (RestrictInfo *) lfirst(l);</span>
+<span class="lineNum">     249 </span>            : 
+<span class="lineNum">     250 </span>            :         /*
+<span class="lineNum">     251 </span>            :          * If it's not a join clause for this outer join, we can't use it.
+<span class="lineNum">     252 </span>            :          * Note that if the clause is pushed-down, then it is logically from
+<span class="lineNum">     253 </span>            :          * above the outer join, even if it references no other rels (it might
+<span class="lineNum">     254 </span>            :          * be from WHERE, for example).
+<span class="lineNum">     255 </span>            :          */
+<span class="lineNum">     256 </span><span class="lineCov">       1352 :         if (RINFO_IS_PUSHED_DOWN(restrictinfo, joinrelids))</span>
+<span class="lineNum">     257 </span>            :         {
+<span class="lineNum">     258 </span>            :             /*
+<span class="lineNum">     259 </span>            :              * If such a clause actually references the inner rel then join
+<span class="lineNum">     260 </span>            :              * removal has to be disallowed.  We have to check this despite
+<span class="lineNum">     261 </span>            :              * the previous attr_needed checks because of the possibility of
+<span class="lineNum">     262 </span>            :              * pushed-down clauses referencing the rel.
+<span class="lineNum">     263 </span>            :              */
+<span class="lineNum">     264 </span><span class="lineCov">          8 :             if (bms_is_member(innerrelid, restrictinfo-&gt;clause_relids))</span>
+<span class="lineNum">     265 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">     266 </span><span class="lineCov">          8 :             continue;           /* else, ignore; not useful here */</span>
+<span class="lineNum">     267 </span>            :         }
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span>            :         /* Ignore if it's not a mergejoinable clause */
+<span class="lineNum">     270 </span><span class="lineCov">       2688 :         if (!restrictinfo-&gt;can_join ||</span>
+<span class="lineNum">     271 </span><span class="lineCov">       1344 :             restrictinfo-&gt;mergeopfamilies == NIL)</span>
+<span class="lineNum">     272 </span><span class="lineNoCov">          0 :             continue;           /* not mergejoinable */</span>
+<span class="lineNum">     273 </span>            : 
+<span class="lineNum">     274 </span>            :         /*
+<span class="lineNum">     275 </span>            :          * Check if clause has the form &quot;outer op inner&quot; or &quot;inner op outer&quot;,
+<span class="lineNum">     276 </span>            :          * and if so mark which side is inner.
+<span class="lineNum">     277 </span>            :          */
+<span class="lineNum">     278 </span><span class="lineCov">       1344 :         if (!clause_sides_match_join(restrictinfo, sjinfo-&gt;min_lefthand,</span>
+<span class="lineNum">     279 </span>            :                                      innerrel-&gt;relids))
+<span class="lineNum">     280 </span><span class="lineNoCov">          0 :             continue;           /* no good for these input relations */</span>
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span>            :         /* OK, add to list */
+<span class="lineNum">     283 </span><span class="lineCov">       1344 :         clause_list = lappend(clause_list, restrictinfo);</span>
+<span class="lineNum">     284 </span>            :     }
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span>            :     /*
+<span class="lineNum">     287 </span>            :      * Now that we have the relevant equality join clauses, try to prove the
+<span class="lineNum">     288 </span>            :      * innerrel distinct.
+<span class="lineNum">     289 </span>            :      */
+<span class="lineNum">     290 </span><span class="lineCov">       1304 :     if (rel_is_distinct_for(root, innerrel, clause_list))</span>
+<span class="lineNum">     291 </span><span class="lineCov">       1294 :         return true;</span>
+<span class="lineNum">     292 </span>            : 
+<span class="lineNum">     293 </span>            :     /*
+<span class="lineNum">     294 </span>            :      * Some day it would be nice to check for other methods of establishing
+<span class="lineNum">     295 </span>            :      * distinctness.
+<span class="lineNum">     296 </span>            :      */
+<span class="lineNum">     297 </span><span class="lineCov">         10 :     return false;</span>
+<span class="lineNum">     298 </span>            : }
+<span class="lineNum">     299 </span>            : 
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            : /*
+<span class="lineNum">     302 </span>            :  * Remove the target relid from the planner's data structures, having
+<span class="lineNum">     303 </span>            :  * determined that there is no need to include it in the query.
+<span class="lineNum">     304 </span>            :  *
+<span class="lineNum">     305 </span>            :  * We are not terribly thorough here.  We must make sure that the rel is
+<span class="lineNum">     306 </span>            :  * no longer treated as a baserel, and that attributes of other baserels
+<span class="lineNum">     307 </span>            :  * are no longer marked as being needed at joins involving this rel.
+<span class="lineNum">     308 </span>            :  * Also, join quals involving the rel have to be removed from the joininfo
+<span class="lineNum">     309 </span>            :  * lists, but only if they belong to the outer join identified by joinrelids.
+<a name="310"><span class="lineNum">     310 </span>            :  */</a>
+<span class="lineNum">     311 </span>            : static void
+<span class="lineNum">     312 </span><span class="lineCov">       1294 : remove_rel_from_query(PlannerInfo *root, int relid, Relids joinrelids)</span>
+<span class="lineNum">     313 </span>            : {
+<span class="lineNum">     314 </span><span class="lineCov">       1294 :     RelOptInfo *rel = find_base_rel(root, relid);</span>
+<span class="lineNum">     315 </span>            :     List       *joininfos;
+<span class="lineNum">     316 </span>            :     Index       rti;
+<span class="lineNum">     317 </span>            :     ListCell   *l;
+<span class="lineNum">     318 </span>            : 
+<span class="lineNum">     319 </span>            :     /*
+<span class="lineNum">     320 </span>            :      * Mark the rel as &quot;dead&quot; to show it is no longer part of the join tree.
+<span class="lineNum">     321 </span>            :      * (Removing it from the baserel array altogether seems too risky.)
+<span class="lineNum">     322 </span>            :      */
+<span class="lineNum">     323 </span><span class="lineCov">       1294 :     rel-&gt;reloptkind = RELOPT_DEADREL;</span>
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span>            :     /*
+<span class="lineNum">     326 </span>            :      * Remove references to the rel from other baserels' attr_needed arrays.
+<span class="lineNum">     327 </span>            :      */
+<span class="lineNum">     328 </span><span class="lineCov">       9826 :     for (rti = 1; rti &lt; root-&gt;simple_rel_array_size; rti++)</span>
+<span class="lineNum">     329 </span>            :     {
+<span class="lineNum">     330 </span><span class="lineCov">       8532 :         RelOptInfo *otherrel = root-&gt;simple_rel_array[rti];</span>
+<span class="lineNum">     331 </span>            :         int         attroff;
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span>            :         /* there may be empty slots corresponding to non-baserel RTEs */
+<span class="lineNum">     334 </span><span class="lineCov">       8532 :         if (otherrel == NULL)</span>
+<span class="lineNum">     335 </span><span class="lineCov">       4790 :             continue;</span>
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span><span class="lineCov">       3742 :         Assert(otherrel-&gt;relid == rti); /* sanity check on array */</span>
+<span class="lineNum">     338 </span>            : 
+<span class="lineNum">     339 </span>            :         /* no point in processing target rel itself */
+<span class="lineNum">     340 </span><span class="lineCov">       3742 :         if (otherrel == rel)</span>
+<span class="lineNum">     341 </span><span class="lineCov">       1294 :             continue;</span>
+<span class="lineNum">     342 </span>            : 
+<span class="lineNum">     343 </span><span class="lineCov">      62332 :         for (attroff = otherrel-&gt;max_attr - otherrel-&gt;min_attr;</span>
+<span class="lineNum">     344 </span>            :              attroff &gt;= 0;
+<span class="lineNum">     345 </span><span class="lineCov">      57436 :              attroff--)</span>
+<span class="lineNum">     346 </span>            :         {
+<span class="lineNum">     347 </span><span class="lineCov">     114872 :             otherrel-&gt;attr_needed[attroff] =</span>
+<span class="lineNum">     348 </span><span class="lineCov">      57436 :                 bms_del_member(otherrel-&gt;attr_needed[attroff], relid);</span>
+<span class="lineNum">     349 </span>            :         }
+<span class="lineNum">     350 </span>            :     }
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span>            :     /*
+<span class="lineNum">     353 </span>            :      * Likewise remove references from SpecialJoinInfo data structures.
+<span class="lineNum">     354 </span>            :      *
+<span class="lineNum">     355 </span>            :      * This is relevant in case the outer join we're deleting is nested inside
+<span class="lineNum">     356 </span>            :      * other outer joins: the upper joins' relid sets have to be adjusted. The
+<span class="lineNum">     357 </span>            :      * RHS of the target outer join will be made empty here, but that's OK
+<span class="lineNum">     358 </span>            :      * since caller will delete that SpecialJoinInfo entirely.
+<span class="lineNum">     359 </span>            :      */
+<span class="lineNum">     360 </span><span class="lineCov">       3242 :     foreach(l, root-&gt;join_info_list)</span>
+<span class="lineNum">     361 </span>            :     {
+<span class="lineNum">     362 </span><span class="lineCov">       1948 :         SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(l);</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span><span class="lineCov">       1948 :         sjinfo-&gt;min_lefthand = bms_del_member(sjinfo-&gt;min_lefthand, relid);</span>
+<span class="lineNum">     365 </span><span class="lineCov">       1948 :         sjinfo-&gt;min_righthand = bms_del_member(sjinfo-&gt;min_righthand, relid);</span>
+<span class="lineNum">     366 </span><span class="lineCov">       1948 :         sjinfo-&gt;syn_lefthand = bms_del_member(sjinfo-&gt;syn_lefthand, relid);</span>
+<span class="lineNum">     367 </span><span class="lineCov">       1948 :         sjinfo-&gt;syn_righthand = bms_del_member(sjinfo-&gt;syn_righthand, relid);</span>
+<span class="lineNum">     368 </span>            :     }
+<span class="lineNum">     369 </span>            : 
+<span class="lineNum">     370 </span>            :     /*
+<span class="lineNum">     371 </span>            :      * Likewise remove references from PlaceHolderVar data structures,
+<span class="lineNum">     372 </span>            :      * removing any no-longer-needed placeholders entirely.
+<span class="lineNum">     373 </span>            :      *
+<span class="lineNum">     374 </span>            :      * Removal is a bit tricker than it might seem: we can remove PHVs that
+<span class="lineNum">     375 </span>            :      * are used at the target rel and/or in the join qual, but not those that
+<span class="lineNum">     376 </span>            :      * are used at join partner rels or above the join.  It's not that easy to
+<span class="lineNum">     377 </span>            :      * distinguish PHVs used at partner rels from those used in the join qual,
+<span class="lineNum">     378 </span>            :      * since they will both have ph_needed sets that are subsets of
+<span class="lineNum">     379 </span>            :      * joinrelids.  However, a PHV used at a partner rel could not have the
+<span class="lineNum">     380 </span>            :      * target rel in ph_eval_at, so we check that while deciding whether to
+<span class="lineNum">     381 </span>            :      * remove or just update the PHV.  There is no corresponding test in
+<span class="lineNum">     382 </span>            :      * join_is_removable because it doesn't need to distinguish those cases.
+<span class="lineNum">     383 </span>            :      */
+<span class="lineNum">     384 </span><span class="lineCov">       1302 :     foreach(l, root-&gt;placeholder_list)</span>
+<span class="lineNum">     385 </span>            :     {
+<span class="lineNum">     386 </span><span class="lineCov">          8 :         PlaceHolderInfo *phinfo = (PlaceHolderInfo *) lfirst(l);</span>
+<span class="lineNum">     387 </span>            : 
+<span class="lineNum">     388 </span><span class="lineCov">          8 :         Assert(!bms_is_member(relid, phinfo-&gt;ph_lateral));</span>
+<span class="lineNum">     389 </span><span class="lineCov">         16 :         if (bms_is_subset(phinfo-&gt;ph_needed, joinrelids) &amp;&amp;</span>
+<span class="lineNum">     390 </span><span class="lineCov">          8 :             bms_is_member(relid, phinfo-&gt;ph_eval_at))</span>
+<span class="lineNum">     391 </span><span class="lineCov">          2 :             root-&gt;placeholder_list = foreach_delete_current(root-&gt;placeholder_list,</span>
+<span class="lineNum">     392 </span>            :                                                             l);
+<span class="lineNum">     393 </span>            :         else
+<span class="lineNum">     394 </span>            :         {
+<span class="lineNum">     395 </span><span class="lineCov">          6 :             phinfo-&gt;ph_eval_at = bms_del_member(phinfo-&gt;ph_eval_at, relid);</span>
+<span class="lineNum">     396 </span><span class="lineCov">          6 :             Assert(!bms_is_empty(phinfo-&gt;ph_eval_at));</span>
+<span class="lineNum">     397 </span><span class="lineCov">          6 :             phinfo-&gt;ph_needed = bms_del_member(phinfo-&gt;ph_needed, relid);</span>
+<span class="lineNum">     398 </span>            :         }
+<span class="lineNum">     399 </span>            :     }
+<span class="lineNum">     400 </span>            : 
+<span class="lineNum">     401 </span>            :     /*
+<span class="lineNum">     402 </span>            :      * Remove any joinquals referencing the rel from the joininfo lists.
+<span class="lineNum">     403 </span>            :      *
+<span class="lineNum">     404 </span>            :      * In some cases, a joinqual has to be put back after deleting its
+<span class="lineNum">     405 </span>            :      * reference to the target rel.  This can occur for pseudoconstant and
+<span class="lineNum">     406 </span>            :      * outerjoin-delayed quals, which can get marked as requiring the rel in
+<span class="lineNum">     407 </span>            :      * order to force them to be evaluated at or above the join.  We can't
+<span class="lineNum">     408 </span>            :      * just discard them, though.  Only quals that logically belonged to the
+<span class="lineNum">     409 </span>            :      * outer join being discarded should be removed from the query.
+<span class="lineNum">     410 </span>            :      *
+<span class="lineNum">     411 </span>            :      * We must make a copy of the rel's old joininfo list before starting the
+<span class="lineNum">     412 </span>            :      * loop, because otherwise remove_join_clause_from_rels would destroy the
+<span class="lineNum">     413 </span>            :      * list while we're scanning it.
+<span class="lineNum">     414 </span>            :      */
+<span class="lineNum">     415 </span><span class="lineCov">       1294 :     joininfos = list_copy(rel-&gt;joininfo);</span>
+<span class="lineNum">     416 </span><span class="lineCov">       2636 :     foreach(l, joininfos)</span>
+<span class="lineNum">     417 </span>            :     {
+<span class="lineNum">     418 </span><span class="lineCov">       1342 :         RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);</span>
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span><span class="lineCov">       1342 :         remove_join_clause_from_rels(root, rinfo, rinfo-&gt;required_relids);</span>
+<span class="lineNum">     421 </span>            : 
+<span class="lineNum">     422 </span><span class="lineCov">       1342 :         if (RINFO_IS_PUSHED_DOWN(rinfo, joinrelids))</span>
+<span class="lineNum">     423 </span>            :         {
+<span class="lineNum">     424 </span>            :             /* Recheck that qual doesn't actually reference the target rel */
+<span class="lineNum">     425 </span><span class="lineCov">          8 :             Assert(!bms_is_member(relid, rinfo-&gt;clause_relids));</span>
+<span class="lineNum">     426 </span>            : 
+<span class="lineNum">     427 </span>            :             /*
+<span class="lineNum">     428 </span>            :              * The required_relids probably aren't shared with anything else,
+<span class="lineNum">     429 </span>            :              * but let's copy them just to be sure.
+<span class="lineNum">     430 </span>            :              */
+<span class="lineNum">     431 </span><span class="lineCov">          8 :             rinfo-&gt;required_relids = bms_copy(rinfo-&gt;required_relids);</span>
+<span class="lineNum">     432 </span><span class="lineCov">          8 :             rinfo-&gt;required_relids = bms_del_member(rinfo-&gt;required_relids,</span>
+<span class="lineNum">     433 </span>            :                                                     relid);
+<span class="lineNum">     434 </span><span class="lineCov">          8 :             distribute_restrictinfo_to_rels(root, rinfo);</span>
+<span class="lineNum">     435 </span>            :         }
+<span class="lineNum">     436 </span>            :     }
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span>            :     /*
+<span class="lineNum">     439 </span>            :      * There may be references to the rel in root-&gt;fkey_list, but if so,
+<span class="lineNum">     440 </span>            :      * match_foreign_keys_to_quals() will get rid of them.
+<span class="lineNum">     441 </span>            :      */
+<span class="lineNum">     442 </span><span class="lineCov">       1294 : }</span>
+<span class="lineNum">     443 </span>            : 
+<span class="lineNum">     444 </span>            : /*
+<span class="lineNum">     445 </span>            :  * Remove any occurrences of the target relid from a joinlist structure.
+<span class="lineNum">     446 </span>            :  *
+<span class="lineNum">     447 </span>            :  * It's easiest to build a whole new list structure, so we handle it that
+<span class="lineNum">     448 </span>            :  * way.  Efficiency is not a big deal here.
+<span class="lineNum">     449 </span>            :  *
+<span class="lineNum">     450 </span>            :  * *nremoved is incremented by the number of occurrences removed (there
+<span class="lineNum">     451 </span>            :  * should be exactly one, but the caller checks that).
+<a name="452"><span class="lineNum">     452 </span>            :  */</a>
+<span class="lineNum">     453 </span>            : static List *
+<span class="lineNum">     454 </span><span class="lineCov">       1362 : remove_rel_from_joinlist(List *joinlist, int relid, int *nremoved)</span>
+<span class="lineNum">     455 </span>            : {
+<span class="lineNum">     456 </span><span class="lineCov">       1362 :     List       *result = NIL;</span>
+<span class="lineNum">     457 </span>            :     ListCell   *jl;
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span><span class="lineCov">       5102 :     foreach(jl, joinlist)</span>
+<span class="lineNum">     460 </span>            :     {
+<span class="lineNum">     461 </span><span class="lineCov">       3740 :         Node       *jlnode = (Node *) lfirst(jl);</span>
+<span class="lineNum">     462 </span>            : 
+<span class="lineNum">     463 </span><span class="lineCov">       3740 :         if (IsA(jlnode, RangeTblRef))</span>
+<span class="lineNum">     464 </span>            :         {
+<span class="lineNum">     465 </span><span class="lineCov">       3672 :             int         varno = ((RangeTblRef *) jlnode)-&gt;rtindex;</span>
+<span class="lineNum">     466 </span>            : 
+<span class="lineNum">     467 </span><span class="lineCov">       3672 :             if (varno == relid)</span>
+<span class="lineNum">     468 </span><span class="lineCov">       1294 :                 (*nremoved)++;</span>
+<span class="lineNum">     469 </span>            :             else
+<span class="lineNum">     470 </span><span class="lineCov">       2378 :                 result = lappend(result, jlnode);</span>
+<span class="lineNum">     471 </span>            :         }
+<span class="lineNum">     472 </span><span class="lineCov">         68 :         else if (IsA(jlnode, List))</span>
+<span class="lineNum">     473 </span>            :         {
+<span class="lineNum">     474 </span>            :             /* Recurse to handle subproblem */
+<span class="lineNum">     475 </span>            :             List       *sublist;
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span><span class="lineCov">         68 :             sublist = remove_rel_from_joinlist((List *) jlnode,</span>
+<span class="lineNum">     478 </span>            :                                                relid, nremoved);
+<span class="lineNum">     479 </span>            :             /* Avoid including empty sub-lists in the result */
+<span class="lineNum">     480 </span><span class="lineCov">         68 :             if (sublist)</span>
+<span class="lineNum">     481 </span><span class="lineCov">         68 :                 result = lappend(result, sublist);</span>
+<span class="lineNum">     482 </span>            :         }
+<span class="lineNum">     483 </span>            :         else
+<span class="lineNum">     484 </span>            :         {
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized joinlist node type: %d&quot;,</span>
+<span class="lineNum">     486 </span>            :                  (int) nodeTag(jlnode));
+<span class="lineNum">     487 </span>            :         }
+<span class="lineNum">     488 </span>            :     }
+<span class="lineNum">     489 </span>            : 
+<span class="lineNum">     490 </span><span class="lineCov">       1362 :     return result;</span>
+<span class="lineNum">     491 </span>            : }
+<span class="lineNum">     492 </span>            : 
+<span class="lineNum">     493 </span>            : 
+<span class="lineNum">     494 </span>            : /*
+<span class="lineNum">     495 </span>            :  * reduce_unique_semijoins
+<span class="lineNum">     496 </span>            :  *      Check for semijoins that can be simplified to plain inner joins
+<span class="lineNum">     497 </span>            :  *      because the inner relation is provably unique for the join clauses.
+<span class="lineNum">     498 </span>            :  *
+<span class="lineNum">     499 </span>            :  * Ideally this would happen during reduce_outer_joins, but we don't have
+<span class="lineNum">     500 </span>            :  * enough information at that point.
+<span class="lineNum">     501 </span>            :  *
+<span class="lineNum">     502 </span>            :  * To perform the strength reduction when applicable, we need only delete
+<span class="lineNum">     503 </span>            :  * the semijoin's SpecialJoinInfo from root-&gt;join_info_list.  (We don't
+<span class="lineNum">     504 </span>            :  * bother fixing the join type attributed to it in the query jointree,
+<span class="lineNum">     505 </span>            :  * since that won't be consulted again.)
+<a name="506"><span class="lineNum">     506 </span>            :  */</a>
+<span class="lineNum">     507 </span>            : void
+<span class="lineNum">     508 </span><span class="lineCov">      45166 : reduce_unique_semijoins(PlannerInfo *root)</span>
+<span class="lineNum">     509 </span>            : {
+<span class="lineNum">     510 </span>            :     ListCell   *lc;
+<span class="lineNum">     511 </span>            : 
+<span class="lineNum">     512 </span>            :     /*
+<span class="lineNum">     513 </span>            :      * Scan the join_info_list to find semijoins.
+<span class="lineNum">     514 </span>            :      */
+<span class="lineNum">     515 </span><span class="lineCov">      51380 :     foreach(lc, root-&gt;join_info_list)</span>
+<span class="lineNum">     516 </span>            :     {
+<span class="lineNum">     517 </span><span class="lineCov">       6214 :         SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) lfirst(lc);</span>
+<span class="lineNum">     518 </span>            :         int         innerrelid;
+<span class="lineNum">     519 </span>            :         RelOptInfo *innerrel;
+<span class="lineNum">     520 </span>            :         Relids      joinrelids;
+<span class="lineNum">     521 </span>            :         List       *restrictlist;
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span>            :         /*
+<span class="lineNum">     524 </span>            :          * Must be a non-delaying semijoin to a single baserel, else we aren't
+<span class="lineNum">     525 </span>            :          * going to be able to do anything with it.  (It's probably not
+<span class="lineNum">     526 </span>            :          * possible for delay_upper_joins to be set on a semijoin, but we
+<span class="lineNum">     527 </span>            :          * might as well check.)
+<span class="lineNum">     528 </span>            :          */
+<span class="lineNum">     529 </span><span class="lineCov">       6700 :         if (sjinfo-&gt;jointype != JOIN_SEMI ||</span>
+<span class="lineNum">     530 </span><span class="lineCov">        486 :             sjinfo-&gt;delay_upper_joins)</span>
+<span class="lineNum">     531 </span><span class="lineCov">      11912 :             continue;</span>
+<span class="lineNum">     532 </span>            : 
+<span class="lineNum">     533 </span><span class="lineCov">        486 :         if (!bms_get_singleton_member(sjinfo-&gt;min_righthand, &amp;innerrelid))</span>
+<span class="lineNum">     534 </span><span class="lineCov">         44 :             continue;</span>
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span><span class="lineCov">        442 :         innerrel = find_base_rel(root, innerrelid);</span>
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span>            :         /*
+<span class="lineNum">     539 </span>            :          * Before we trouble to run generate_join_implied_equalities, make a
+<span class="lineNum">     540 </span>            :          * quick check to eliminate cases in which we will surely be unable to
+<span class="lineNum">     541 </span>            :          * prove uniqueness of the innerrel.
+<span class="lineNum">     542 </span>            :          */
+<span class="lineNum">     543 </span><span class="lineCov">        442 :         if (!rel_supports_distinctness(root, innerrel))</span>
+<span class="lineNum">     544 </span><span class="lineCov">        298 :             continue;</span>
+<span class="lineNum">     545 </span>            : 
+<span class="lineNum">     546 </span>            :         /* Compute the relid set for the join we are considering */
+<span class="lineNum">     547 </span><span class="lineCov">        144 :         joinrelids = bms_union(sjinfo-&gt;min_lefthand, sjinfo-&gt;min_righthand);</span>
+<span class="lineNum">     548 </span>            : 
+<span class="lineNum">     549 </span>            :         /*
+<span class="lineNum">     550 </span>            :          * Since we're only considering a single-rel RHS, any join clauses it
+<span class="lineNum">     551 </span>            :          * has must be clauses linking it to the semijoin's min_lefthand.  We
+<span class="lineNum">     552 </span>            :          * can also consider EC-derived join clauses.
+<span class="lineNum">     553 </span>            :          */
+<span class="lineNum">     554 </span><span class="lineCov">        144 :         restrictlist =</span>
+<span class="lineNum">     555 </span><span class="lineCov">        144 :             list_concat(generate_join_implied_equalities(root,</span>
+<span class="lineNum">     556 </span>            :                                                          joinrelids,
+<span class="lineNum">     557 </span>            :                                                          sjinfo-&gt;min_lefthand,
+<span class="lineNum">     558 </span>            :                                                          innerrel),
+<span class="lineNum">     559 </span><span class="lineCov">        144 :                         innerrel-&gt;joininfo);</span>
+<span class="lineNum">     560 </span>            : 
+<span class="lineNum">     561 </span>            :         /* Test whether the innerrel is unique for those clauses. */
+<span class="lineNum">     562 </span><span class="lineCov">        144 :         if (!innerrel_is_unique(root,</span>
+<span class="lineNum">     563 </span>            :                                 joinrelids, sjinfo-&gt;min_lefthand, innerrel,
+<span class="lineNum">     564 </span>            :                                 JOIN_SEMI, restrictlist, true))
+<span class="lineNum">     565 </span><span class="lineCov">        114 :             continue;</span>
+<span class="lineNum">     566 </span>            : 
+<span class="lineNum">     567 </span>            :         /* OK, remove the SpecialJoinInfo from the list. */
+<span class="lineNum">     568 </span><span class="lineCov">         30 :         root-&gt;join_info_list = foreach_delete_current(root-&gt;join_info_list, lc);</span>
+<span class="lineNum">     569 </span>            :     }
+<span class="lineNum">     570 </span><span class="lineCov">      45166 : }</span>
+<span class="lineNum">     571 </span>            : 
+<span class="lineNum">     572 </span>            : 
+<span class="lineNum">     573 </span>            : /*
+<span class="lineNum">     574 </span>            :  * rel_supports_distinctness
+<span class="lineNum">     575 </span>            :  *      Could the relation possibly be proven distinct on some set of columns?
+<span class="lineNum">     576 </span>            :  *
+<span class="lineNum">     577 </span>            :  * This is effectively a pre-checking function for rel_is_distinct_for().
+<span class="lineNum">     578 </span>            :  * It must return true if rel_is_distinct_for() could possibly return true
+<span class="lineNum">     579 </span>            :  * with this rel, but it should not expend a lot of cycles.  The idea is
+<span class="lineNum">     580 </span>            :  * that callers can avoid doing possibly-expensive processing to compute
+<span class="lineNum">     581 </span>            :  * rel_is_distinct_for()'s argument lists if the call could not possibly
+<span class="lineNum">     582 </span>            :  * succeed.
+<a name="583"><span class="lineNum">     583 </span>            :  */</a>
+<span class="lineNum">     584 </span>            : static bool
+<span class="lineNum">     585 </span><span class="lineCov">      53564 : rel_supports_distinctness(PlannerInfo *root, RelOptInfo *rel)</span>
+<span class="lineNum">     586 </span>            : {
+<span class="lineNum">     587 </span>            :     /* We only know about baserels ... */
+<span class="lineNum">     588 </span><span class="lineCov">      53564 :     if (rel-&gt;reloptkind != RELOPT_BASEREL)</span>
+<span class="lineNum">     589 </span><span class="lineCov">      13010 :         return false;</span>
+<span class="lineNum">     590 </span><span class="lineCov">      40554 :     if (rel-&gt;rtekind == RTE_RELATION)</span>
+<span class="lineNum">     591 </span>            :     {
+<span class="lineNum">     592 </span>            :         /*
+<span class="lineNum">     593 </span>            :          * For a plain relation, we only know how to prove uniqueness by
+<span class="lineNum">     594 </span>            :          * reference to unique indexes.  Make sure there's at least one
+<span class="lineNum">     595 </span>            :          * suitable unique index.  It must be immediately enforced, and if
+<span class="lineNum">     596 </span>            :          * it's a partial index, it must match the query.  (Keep these
+<span class="lineNum">     597 </span>            :          * conditions in sync with relation_has_unique_index_for!)
+<span class="lineNum">     598 </span>            :          */
+<span class="lineNum">     599 </span>            :         ListCell   *lc;
+<span class="lineNum">     600 </span>            : 
+<span class="lineNum">     601 </span><span class="lineCov">      47274 :         foreach(lc, rel-&gt;indexlist)</span>
+<span class="lineNum">     602 </span>            :         {
+<span class="lineNum">     603 </span><span class="lineCov">      32098 :             IndexOptInfo *ind = (IndexOptInfo *) lfirst(lc);</span>
+<span class="lineNum">     604 </span>            : 
+<span class="lineNum">     605 </span><span class="lineCov">      54086 :             if (ind-&gt;unique &amp;&amp; ind-&gt;immediate &amp;&amp;</span>
+<span class="lineNum">     606 </span><span class="lineCov">      21988 :                 (ind-&gt;indpred == NIL || ind-&gt;predOK))</span>
+<span class="lineNum">     607 </span><span class="lineCov">      21988 :                 return true;</span>
+<span class="lineNum">     608 </span>            :         }
+<span class="lineNum">     609 </span>            :     }
+<span class="lineNum">     610 </span><span class="lineCov">       3390 :     else if (rel-&gt;rtekind == RTE_SUBQUERY)</span>
+<span class="lineNum">     611 </span>            :     {
+<span class="lineNum">     612 </span><span class="lineCov">       1668 :         Query      *subquery = root-&gt;simple_rte_array[rel-&gt;relid]-&gt;subquery;</span>
+<span class="lineNum">     613 </span>            : 
+<span class="lineNum">     614 </span>            :         /* Check if the subquery has any qualities that support distinctness */
+<span class="lineNum">     615 </span><span class="lineCov">       1668 :         if (query_supports_distinctness(subquery))</span>
+<span class="lineNum">     616 </span><span class="lineCov">        502 :             return true;</span>
+<span class="lineNum">     617 </span>            :     }
+<span class="lineNum">     618 </span>            :     /* We have no proof rules for any other rtekinds. */
+<span class="lineNum">     619 </span><span class="lineCov">      18064 :     return false;</span>
+<span class="lineNum">     620 </span>            : }
+<span class="lineNum">     621 </span>            : 
+<span class="lineNum">     622 </span>            : /*
+<span class="lineNum">     623 </span>            :  * rel_is_distinct_for
+<span class="lineNum">     624 </span>            :  *      Does the relation return only distinct rows according to clause_list?
+<span class="lineNum">     625 </span>            :  *
+<span class="lineNum">     626 </span>            :  * clause_list is a list of join restriction clauses involving this rel and
+<span class="lineNum">     627 </span>            :  * some other one.  Return true if no two rows emitted by this rel could
+<span class="lineNum">     628 </span>            :  * possibly join to the same row of the other rel.
+<span class="lineNum">     629 </span>            :  *
+<span class="lineNum">     630 </span>            :  * The caller must have already determined that each condition is a
+<span class="lineNum">     631 </span>            :  * mergejoinable equality with an expression in this relation on one side, and
+<span class="lineNum">     632 </span>            :  * an expression not involving this relation on the other.  The transient
+<span class="lineNum">     633 </span>            :  * outer_is_left flag is used to identify which side references this relation:
+<span class="lineNum">     634 </span>            :  * left side if outer_is_left is false, right side if it is true.
+<span class="lineNum">     635 </span>            :  *
+<span class="lineNum">     636 </span>            :  * Note that the passed-in clause_list may be destructively modified!  This
+<span class="lineNum">     637 </span>            :  * is OK for current uses, because the clause_list is built by the caller for
+<span class="lineNum">     638 </span>            :  * the sole purpose of passing to this function.
+<a name="639"><span class="lineNum">     639 </span>            :  */</a>
+<span class="lineNum">     640 </span>            : static bool
+<span class="lineNum">     641 </span><span class="lineCov">      15868 : rel_is_distinct_for(PlannerInfo *root, RelOptInfo *rel, List *clause_list)</span>
+<span class="lineNum">     642 </span>            : {
+<span class="lineNum">     643 </span>            :     /*
+<span class="lineNum">     644 </span>            :      * We could skip a couple of tests here if we assume all callers checked
+<span class="lineNum">     645 </span>            :      * rel_supports_distinctness first, but it doesn't seem worth taking any
+<span class="lineNum">     646 </span>            :      * risk for.
+<span class="lineNum">     647 </span>            :      */
+<span class="lineNum">     648 </span><span class="lineCov">      15868 :     if (rel-&gt;reloptkind != RELOPT_BASEREL)</span>
+<span class="lineNum">     649 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     650 </span><span class="lineCov">      15868 :     if (rel-&gt;rtekind == RTE_RELATION)</span>
+<span class="lineNum">     651 </span>            :     {
+<span class="lineNum">     652 </span>            :         /*
+<span class="lineNum">     653 </span>            :          * Examine the indexes to see if we have a matching unique index.
+<span class="lineNum">     654 </span>            :          * relation_has_unique_index_for automatically adds any usable
+<span class="lineNum">     655 </span>            :          * restriction clauses for the rel, so we needn't do that here.
+<span class="lineNum">     656 </span>            :          */
+<span class="lineNum">     657 </span><span class="lineCov">      15538 :         if (relation_has_unique_index_for(root, rel, clause_list, NIL, NIL))</span>
+<span class="lineNum">     658 </span><span class="lineCov">      10618 :             return true;</span>
+<span class="lineNum">     659 </span>            :     }
+<span class="lineNum">     660 </span><span class="lineCov">        330 :     else if (rel-&gt;rtekind == RTE_SUBQUERY)</span>
+<span class="lineNum">     661 </span>            :     {
+<span class="lineNum">     662 </span><span class="lineCov">        330 :         Index       relid = rel-&gt;relid;</span>
+<span class="lineNum">     663 </span><span class="lineCov">        330 :         Query      *subquery = root-&gt;simple_rte_array[relid]-&gt;subquery;</span>
+<span class="lineNum">     664 </span><span class="lineCov">        330 :         List       *colnos = NIL;</span>
+<span class="lineNum">     665 </span><span class="lineCov">        330 :         List       *opids = NIL;</span>
+<span class="lineNum">     666 </span>            :         ListCell   *l;
+<span class="lineNum">     667 </span>            : 
+<span class="lineNum">     668 </span>            :         /*
+<span class="lineNum">     669 </span>            :          * Build the argument lists for query_is_distinct_for: a list of
+<span class="lineNum">     670 </span>            :          * output column numbers that the query needs to be distinct over, and
+<span class="lineNum">     671 </span>            :          * a list of equality operators that the output columns need to be
+<span class="lineNum">     672 </span>            :          * distinct according to.
+<span class="lineNum">     673 </span>            :          *
+<span class="lineNum">     674 </span>            :          * (XXX we are not considering restriction clauses attached to the
+<span class="lineNum">     675 </span>            :          * subquery; is that worth doing?)
+<span class="lineNum">     676 </span>            :          */
+<span class="lineNum">     677 </span><span class="lineCov">        642 :         foreach(l, clause_list)</span>
+<span class="lineNum">     678 </span>            :         {
+<span class="lineNum">     679 </span><span class="lineCov">        312 :             RestrictInfo *rinfo = lfirst_node(RestrictInfo, l);</span>
+<span class="lineNum">     680 </span>            :             Oid         op;
+<span class="lineNum">     681 </span>            :             Var        *var;
+<span class="lineNum">     682 </span>            : 
+<span class="lineNum">     683 </span>            :             /*
+<span class="lineNum">     684 </span>            :              * Get the equality operator we need uniqueness according to.
+<span class="lineNum">     685 </span>            :              * (This might be a cross-type operator and thus not exactly the
+<span class="lineNum">     686 </span>            :              * same operator the subquery would consider; that's all right
+<span class="lineNum">     687 </span>            :              * since query_is_distinct_for can resolve such cases.)  The
+<span class="lineNum">     688 </span>            :              * caller's mergejoinability test should have selected only
+<span class="lineNum">     689 </span>            :              * OpExprs.
+<span class="lineNum">     690 </span>            :              */
+<span class="lineNum">     691 </span><span class="lineCov">        312 :             op = castNode(OpExpr, rinfo-&gt;clause)-&gt;opno;</span>
+<span class="lineNum">     692 </span>            : 
+<span class="lineNum">     693 </span>            :             /* caller identified the inner side for us */
+<span class="lineNum">     694 </span><span class="lineCov">        312 :             if (rinfo-&gt;outer_is_left)</span>
+<span class="lineNum">     695 </span><span class="lineCov">        260 :                 var = (Var *) get_rightop(rinfo-&gt;clause);</span>
+<span class="lineNum">     696 </span>            :             else
+<span class="lineNum">     697 </span><span class="lineCov">         52 :                 var = (Var *) get_leftop(rinfo-&gt;clause);</span>
+<span class="lineNum">     698 </span>            : 
+<span class="lineNum">     699 </span>            :             /*
+<span class="lineNum">     700 </span>            :              * We may ignore any RelabelType node above the operand.  (There
+<span class="lineNum">     701 </span>            :              * won't be more than one, since eval_const_expressions() has been
+<span class="lineNum">     702 </span>            :              * applied already.)
+<span class="lineNum">     703 </span>            :              */
+<span class="lineNum">     704 </span><span class="lineCov">        312 :             if (var &amp;&amp; IsA(var, RelabelType))</span>
+<span class="lineNum">     705 </span><span class="lineCov">        108 :                 var = (Var *) ((RelabelType *) var)-&gt;arg;</span>
+<span class="lineNum">     706 </span>            : 
+<span class="lineNum">     707 </span>            :             /*
+<span class="lineNum">     708 </span>            :              * If inner side isn't a Var referencing a subquery output column,
+<span class="lineNum">     709 </span>            :              * this clause doesn't help us.
+<span class="lineNum">     710 </span>            :              */
+<span class="lineNum">     711 </span><span class="lineCov">        620 :             if (!var || !IsA(var, Var) ||</span>
+<span class="lineNum">     712 </span><span class="lineCov">        616 :                 var-&gt;varno != relid || var-&gt;varlevelsup != 0)</span>
+<span class="lineNum">     713 </span><span class="lineCov">          4 :                 continue;</span>
+<span class="lineNum">     714 </span>            : 
+<span class="lineNum">     715 </span><span class="lineCov">        308 :             colnos = lappend_int(colnos, var-&gt;varattno);</span>
+<span class="lineNum">     716 </span><span class="lineCov">        308 :             opids = lappend_oid(opids, op);</span>
+<span class="lineNum">     717 </span>            :         }
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span><span class="lineCov">        330 :         if (query_is_distinct_for(subquery, colnos, opids))</span>
+<span class="lineNum">     720 </span><span class="lineCov">         54 :             return true;</span>
+<span class="lineNum">     721 </span>            :     }
+<span class="lineNum">     722 </span><span class="lineCov">       5196 :     return false;</span>
+<span class="lineNum">     723 </span>            : }
+<span class="lineNum">     724 </span>            : 
+<span class="lineNum">     725 </span>            : 
+<span class="lineNum">     726 </span>            : /*
+<span class="lineNum">     727 </span>            :  * query_supports_distinctness - could the query possibly be proven distinct
+<span class="lineNum">     728 </span>            :  *      on some set of output columns?
+<span class="lineNum">     729 </span>            :  *
+<span class="lineNum">     730 </span>            :  * This is effectively a pre-checking function for query_is_distinct_for().
+<span class="lineNum">     731 </span>            :  * It must return true if query_is_distinct_for() could possibly return true
+<span class="lineNum">     732 </span>            :  * with this query, but it should not expend a lot of cycles.  The idea is
+<span class="lineNum">     733 </span>            :  * that callers can avoid doing possibly-expensive processing to compute
+<span class="lineNum">     734 </span>            :  * query_is_distinct_for()'s argument lists if the call could not possibly
+<span class="lineNum">     735 </span>            :  * succeed.
+<a name="736"><span class="lineNum">     736 </span>            :  */</a>
+<span class="lineNum">     737 </span>            : bool
+<span class="lineNum">     738 </span><span class="lineCov">       1794 : query_supports_distinctness(Query *query)</span>
+<span class="lineNum">     739 </span>            : {
+<span class="lineNum">     740 </span>            :     /* SRFs break distinctness except with DISTINCT, see below */
+<span class="lineNum">     741 </span><span class="lineCov">       1794 :     if (query-&gt;hasTargetSRFs &amp;&amp; query-&gt;distinctClause == NIL)</span>
+<span class="lineNum">     742 </span><span class="lineCov">         90 :         return false;</span>
+<span class="lineNum">     743 </span>            : 
+<span class="lineNum">     744 </span>            :     /* check for features we can prove distinctness with */
+<span class="lineNum">     745 </span><span class="lineCov">       3376 :     if (query-&gt;distinctClause != NIL ||</span>
+<span class="lineNum">     746 </span><span class="lineCov">       3300 :         query-&gt;groupClause != NIL ||</span>
+<span class="lineNum">     747 </span><span class="lineCov">       3256 :         query-&gt;groupingSets != NIL ||</span>
+<span class="lineNum">     748 </span><span class="lineCov">       3216 :         query-&gt;hasAggs ||</span>
+<span class="lineNum">     749 </span><span class="lineCov">       3176 :         query-&gt;havingQual ||</span>
+<span class="lineNum">     750 </span><span class="lineCov">       1588 :         query-&gt;setOperations)</span>
+<span class="lineNum">     751 </span><span class="lineCov">        616 :         return true;</span>
+<span class="lineNum">     752 </span>            : 
+<span class="lineNum">     753 </span><span class="lineCov">       1088 :     return false;</span>
+<span class="lineNum">     754 </span>            : }
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span>            : /*
+<span class="lineNum">     757 </span>            :  * query_is_distinct_for - does query never return duplicates of the
+<span class="lineNum">     758 </span>            :  *      specified columns?
+<span class="lineNum">     759 </span>            :  *
+<span class="lineNum">     760 </span>            :  * query is a not-yet-planned subquery (in current usage, it's always from
+<span class="lineNum">     761 </span>            :  * a subquery RTE, which the planner avoids scribbling on).
+<span class="lineNum">     762 </span>            :  *
+<span class="lineNum">     763 </span>            :  * colnos is an integer list of output column numbers (resno's).  We are
+<span class="lineNum">     764 </span>            :  * interested in whether rows consisting of just these columns are certain
+<span class="lineNum">     765 </span>            :  * to be distinct.  &quot;Distinctness&quot; is defined according to whether the
+<span class="lineNum">     766 </span>            :  * corresponding upper-level equality operators listed in opids would think
+<span class="lineNum">     767 </span>            :  * the values are distinct.  (Note: the opids entries could be cross-type
+<span class="lineNum">     768 </span>            :  * operators, and thus not exactly the equality operators that the subquery
+<span class="lineNum">     769 </span>            :  * would use itself.  We use equality_ops_are_compatible() to check
+<span class="lineNum">     770 </span>            :  * compatibility.  That looks at btree or hash opfamily membership, and so
+<span class="lineNum">     771 </span>            :  * should give trustworthy answers for all operators that we might need
+<span class="lineNum">     772 </span>            :  * to deal with here.)
+<a name="773"><span class="lineNum">     773 </span>            :  */</a>
+<span class="lineNum">     774 </span>            : bool
+<span class="lineNum">     775 </span><span class="lineCov">        336 : query_is_distinct_for(Query *query, List *colnos, List *opids)</span>
+<span class="lineNum">     776 </span>            : {
+<span class="lineNum">     777 </span>            :     ListCell   *l;
+<span class="lineNum">     778 </span>            :     Oid         opid;
+<span class="lineNum">     779 </span>            : 
+<span class="lineNum">     780 </span><span class="lineCov">        336 :     Assert(list_length(colnos) == list_length(opids));</span>
+<span class="lineNum">     781 </span>            : 
+<span class="lineNum">     782 </span>            :     /*
+<span class="lineNum">     783 </span>            :      * DISTINCT (including DISTINCT ON) guarantees uniqueness if all the
+<span class="lineNum">     784 </span>            :      * columns in the DISTINCT clause appear in colnos and operator semantics
+<span class="lineNum">     785 </span>            :      * match.  This is true even if there are SRFs in the DISTINCT columns or
+<span class="lineNum">     786 </span>            :      * elsewhere in the tlist.
+<span class="lineNum">     787 </span>            :      */
+<span class="lineNum">     788 </span><span class="lineCov">        336 :     if (query-&gt;distinctClause)</span>
+<span class="lineNum">     789 </span>            :     {
+<span class="lineNum">     790 </span><span class="lineCov">         34 :         foreach(l, query-&gt;distinctClause)</span>
+<span class="lineNum">     791 </span>            :         {
+<span class="lineNum">     792 </span><span class="lineCov">         24 :             SortGroupClause *sgc = (SortGroupClause *) lfirst(l);</span>
+<span class="lineNum">     793 </span><span class="lineCov">         24 :             TargetEntry *tle = get_sortgroupclause_tle(sgc,</span>
+<span class="lineNum">     794 </span>            :                                                        query-&gt;targetList);
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span><span class="lineCov">         24 :             opid = distinct_col_search(tle-&gt;resno, colnos, opids);</span>
+<span class="lineNum">     797 </span><span class="lineCov">         40 :             if (!OidIsValid(opid) ||</span>
+<span class="lineNum">     798 </span><span class="lineCov">         16 :                 !equality_ops_are_compatible(opid, sgc-&gt;eqop))</span>
+<span class="lineNum">     799 </span>            :                 break;          /* exit early if no match */
+<span class="lineNum">     800 </span>            :         }
+<span class="lineNum">     801 </span><span class="lineCov">         18 :         if (l == NULL)          /* had matches for all? */</span>
+<span class="lineNum">     802 </span><span class="lineCov">         10 :             return true;</span>
+<span class="lineNum">     803 </span>            :     }
+<span class="lineNum">     804 </span>            : 
+<span class="lineNum">     805 </span>            :     /*
+<span class="lineNum">     806 </span>            :      * Otherwise, a set-returning function in the query's targetlist can
+<span class="lineNum">     807 </span>            :      * result in returning duplicate rows, despite any grouping that might
+<span class="lineNum">     808 </span>            :      * occur before tlist evaluation.  (If all tlist SRFs are within GROUP BY
+<span class="lineNum">     809 </span>            :      * columns, it would be safe because they'd be expanded before grouping.
+<span class="lineNum">     810 </span>            :      * But it doesn't currently seem worth the effort to check for that.)
+<span class="lineNum">     811 </span>            :      */
+<span class="lineNum">     812 </span><span class="lineCov">        326 :     if (query-&gt;hasTargetSRFs)</span>
+<span class="lineNum">     813 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     814 </span>            : 
+<span class="lineNum">     815 </span>            :     /*
+<span class="lineNum">     816 </span>            :      * Similarly, GROUP BY without GROUPING SETS guarantees uniqueness if all
+<span class="lineNum">     817 </span>            :      * the grouped columns appear in colnos and operator semantics match.
+<span class="lineNum">     818 </span>            :      */
+<span class="lineNum">     819 </span><span class="lineCov">        326 :     if (query-&gt;groupClause &amp;&amp; !query-&gt;groupingSets)</span>
+<span class="lineNum">     820 </span>            :     {
+<span class="lineNum">     821 </span><span class="lineCov">         46 :         foreach(l, query-&gt;groupClause)</span>
+<span class="lineNum">     822 </span>            :         {
+<span class="lineNum">     823 </span><span class="lineCov">         30 :             SortGroupClause *sgc = (SortGroupClause *) lfirst(l);</span>
+<span class="lineNum">     824 </span><span class="lineCov">         30 :             TargetEntry *tle = get_sortgroupclause_tle(sgc,</span>
+<span class="lineNum">     825 </span>            :                                                        query-&gt;targetList);
+<span class="lineNum">     826 </span>            : 
+<span class="lineNum">     827 </span><span class="lineCov">         30 :             opid = distinct_col_search(tle-&gt;resno, colnos, opids);</span>
+<span class="lineNum">     828 </span><span class="lineCov">         52 :             if (!OidIsValid(opid) ||</span>
+<span class="lineNum">     829 </span><span class="lineCov">         22 :                 !equality_ops_are_compatible(opid, sgc-&gt;eqop))</span>
+<span class="lineNum">     830 </span>            :                 break;          /* exit early if no match */
+<span class="lineNum">     831 </span>            :         }
+<span class="lineNum">     832 </span><span class="lineCov">         32 :         if (l == NULL)          /* had matches for all? */</span>
+<span class="lineNum">     833 </span><span class="lineCov">         16 :             return true;</span>
+<span class="lineNum">     834 </span>            :     }
+<span class="lineNum">     835 </span><span class="lineCov">        302 :     else if (query-&gt;groupingSets)</span>
+<span class="lineNum">     836 </span>            :     {
+<span class="lineNum">     837 </span>            :         /*
+<span class="lineNum">     838 </span>            :          * If we have grouping sets with expressions, we probably don't have
+<span class="lineNum">     839 </span>            :          * uniqueness and analysis would be hard. Punt.
+<span class="lineNum">     840 </span>            :          */
+<span class="lineNum">     841 </span><span class="lineNoCov">          0 :         if (query-&gt;groupClause)</span>
+<span class="lineNum">     842 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     843 </span>            : 
+<span class="lineNum">     844 </span>            :         /*
+<span class="lineNum">     845 </span>            :          * If we have no groupClause (therefore no grouping expressions), we
+<span class="lineNum">     846 </span>            :          * might have one or many empty grouping sets. If there's just one,
+<span class="lineNum">     847 </span>            :          * then we're returning only one row and are certainly unique. But
+<span class="lineNum">     848 </span>            :          * otherwise, we know we're certainly not unique.
+<span class="lineNum">     849 </span>            :          */
+<span class="lineNum">     850 </span><span class="lineNoCov">          0 :         if (list_length(query-&gt;groupingSets) == 1 &amp;&amp;</span>
+<span class="lineNum">     851 </span><span class="lineNoCov">          0 :             ((GroupingSet *) linitial(query-&gt;groupingSets))-&gt;kind == GROUPING_SET_EMPTY)</span>
+<span class="lineNum">     852 </span><span class="lineNoCov">          0 :             return true;</span>
+<span class="lineNum">     853 </span>            :         else
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     855 </span>            :     }
+<span class="lineNum">     856 </span>            :     else
+<span class="lineNum">     857 </span>            :     {
+<span class="lineNum">     858 </span>            :         /*
+<span class="lineNum">     859 </span>            :          * If we have no GROUP BY, but do have aggregates or HAVING, then the
+<span class="lineNum">     860 </span>            :          * result is at most one row so it's surely unique, for any operators.
+<span class="lineNum">     861 </span>            :          */
+<span class="lineNum">     862 </span><span class="lineCov">        302 :         if (query-&gt;hasAggs || query-&gt;havingQual)</span>
+<span class="lineNum">     863 </span><span class="lineCov">         24 :             return true;</span>
+<span class="lineNum">     864 </span>            :     }
+<span class="lineNum">     865 </span>            : 
+<span class="lineNum">     866 </span>            :     /*
+<span class="lineNum">     867 </span>            :      * UNION, INTERSECT, EXCEPT guarantee uniqueness of the whole output row,
+<span class="lineNum">     868 </span>            :      * except with ALL.
+<span class="lineNum">     869 </span>            :      */
+<span class="lineNum">     870 </span><span class="lineCov">        286 :     if (query-&gt;setOperations)</span>
+<span class="lineNum">     871 </span>            :     {
+<span class="lineNum">     872 </span><span class="lineCov">        270 :         SetOperationStmt *topop = castNode(SetOperationStmt, query-&gt;setOperations);</span>
+<span class="lineNum">     873 </span>            : 
+<span class="lineNum">     874 </span><span class="lineCov">        270 :         Assert(topop-&gt;op != SETOP_NONE);</span>
+<span class="lineNum">     875 </span>            : 
+<span class="lineNum">     876 </span><span class="lineCov">        270 :         if (!topop-&gt;all)</span>
+<span class="lineNum">     877 </span>            :         {
+<span class="lineNum">     878 </span>            :             ListCell   *lg;
+<span class="lineNum">     879 </span>            : 
+<span class="lineNum">     880 </span>            :             /* We're good if all the nonjunk output columns are in colnos */
+<span class="lineNum">     881 </span><span class="lineCov">          8 :             lg = list_head(topop-&gt;groupClauses);</span>
+<span class="lineNum">     882 </span><span class="lineCov">         12 :             foreach(l, query-&gt;targetList)</span>
+<span class="lineNum">     883 </span>            :             {
+<span class="lineNum">     884 </span><span class="lineCov">          8 :                 TargetEntry *tle = (TargetEntry *) lfirst(l);</span>
+<span class="lineNum">     885 </span>            :                 SortGroupClause *sgc;
+<span class="lineNum">     886 </span>            : 
+<span class="lineNum">     887 </span><span class="lineCov">          8 :                 if (tle-&gt;resjunk)</span>
+<span class="lineNum">     888 </span><span class="lineNoCov">          0 :                     continue;   /* ignore resjunk columns */</span>
+<span class="lineNum">     889 </span>            : 
+<span class="lineNum">     890 </span>            :                 /* non-resjunk columns should have grouping clauses */
+<span class="lineNum">     891 </span><span class="lineCov">          8 :                 Assert(lg != NULL);</span>
+<span class="lineNum">     892 </span><span class="lineCov">          8 :                 sgc = (SortGroupClause *) lfirst(lg);</span>
+<span class="lineNum">     893 </span><span class="lineCov">          8 :                 lg = lnext(topop-&gt;groupClauses, lg);</span>
+<span class="lineNum">     894 </span>            : 
+<span class="lineNum">     895 </span><span class="lineCov">          8 :                 opid = distinct_col_search(tle-&gt;resno, colnos, opids);</span>
+<span class="lineNum">     896 </span><span class="lineCov">         12 :                 if (!OidIsValid(opid) ||</span>
+<span class="lineNum">     897 </span><span class="lineCov">          4 :                     !equality_ops_are_compatible(opid, sgc-&gt;eqop))</span>
+<span class="lineNum">     898 </span>            :                     break;      /* exit early if no match */
+<span class="lineNum">     899 </span>            :             }
+<span class="lineNum">     900 </span><span class="lineCov">          8 :             if (l == NULL)      /* had matches for all? */</span>
+<span class="lineNum">     901 </span><span class="lineCov">          4 :                 return true;</span>
+<span class="lineNum">     902 </span>            :         }
+<span class="lineNum">     903 </span>            :     }
+<span class="lineNum">     904 </span>            : 
+<span class="lineNum">     905 </span>            :     /*
+<span class="lineNum">     906 </span>            :      * XXX Are there any other cases in which we can easily see the result
+<span class="lineNum">     907 </span>            :      * must be distinct?
+<span class="lineNum">     908 </span>            :      *
+<span class="lineNum">     909 </span>            :      * If you do add more smarts to this function, be sure to update
+<span class="lineNum">     910 </span>            :      * query_supports_distinctness() to match.
+<span class="lineNum">     911 </span>            :      */
+<span class="lineNum">     912 </span>            : 
+<span class="lineNum">     913 </span><span class="lineCov">        282 :     return false;</span>
+<span class="lineNum">     914 </span>            : }
+<span class="lineNum">     915 </span>            : 
+<span class="lineNum">     916 </span>            : /*
+<span class="lineNum">     917 </span>            :  * distinct_col_search - subroutine for query_is_distinct_for
+<span class="lineNum">     918 </span>            :  *
+<span class="lineNum">     919 </span>            :  * If colno is in colnos, return the corresponding element of opids,
+<span class="lineNum">     920 </span>            :  * else return InvalidOid.  (Ordinarily colnos would not contain duplicates,
+<span class="lineNum">     921 </span>            :  * but if it does, we arbitrarily select the first match.)
+<a name="922"><span class="lineNum">     922 </span>            :  */</a>
+<span class="lineNum">     923 </span>            : static Oid
+<span class="lineNum">     924 </span><span class="lineCov">         62 : distinct_col_search(int colno, List *colnos, List *opids)</span>
+<span class="lineNum">     925 </span>            : {
+<span class="lineNum">     926 </span>            :     ListCell   *lc1,
+<span class="lineNum">     927 </span>            :                *lc2;
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineCov">         86 :     forboth(lc1, colnos, lc2, opids)</span>
+<span class="lineNum">     930 </span>            :     {
+<span class="lineNum">     931 </span><span class="lineCov">         66 :         if (colno == lfirst_int(lc1))</span>
+<span class="lineNum">     932 </span><span class="lineCov">         42 :             return lfirst_oid(lc2);</span>
+<span class="lineNum">     933 </span>            :     }
+<span class="lineNum">     934 </span><span class="lineCov">         20 :     return InvalidOid;</span>
+<span class="lineNum">     935 </span>            : }
+<span class="lineNum">     936 </span>            : 
+<span class="lineNum">     937 </span>            : 
+<span class="lineNum">     938 </span>            : /*
+<span class="lineNum">     939 </span>            :  * innerrel_is_unique
+<span class="lineNum">     940 </span>            :  *    Check if the innerrel provably contains at most one tuple matching any
+<span class="lineNum">     941 </span>            :  *    tuple from the outerrel, based on join clauses in the 'restrictlist'.
+<span class="lineNum">     942 </span>            :  *
+<span class="lineNum">     943 </span>            :  * We need an actual RelOptInfo for the innerrel, but it's sufficient to
+<span class="lineNum">     944 </span>            :  * identify the outerrel by its Relids.  This asymmetry supports use of this
+<span class="lineNum">     945 </span>            :  * function before joinrels have been built.  (The caller is expected to
+<span class="lineNum">     946 </span>            :  * also supply the joinrelids, just to save recalculating that.)
+<span class="lineNum">     947 </span>            :  *
+<span class="lineNum">     948 </span>            :  * The proof must be made based only on clauses that will be &quot;joinquals&quot;
+<span class="lineNum">     949 </span>            :  * rather than &quot;otherquals&quot; at execution.  For an inner join there's no
+<span class="lineNum">     950 </span>            :  * difference; but if the join is outer, we must ignore pushed-down quals,
+<span class="lineNum">     951 </span>            :  * as those will become &quot;otherquals&quot;.  Note that this means the answer might
+<span class="lineNum">     952 </span>            :  * vary depending on whether IS_OUTER_JOIN(jointype); since we cache the
+<span class="lineNum">     953 </span>            :  * answer without regard to that, callers must take care not to call this
+<span class="lineNum">     954 </span>            :  * with jointypes that would be classified differently by IS_OUTER_JOIN().
+<span class="lineNum">     955 </span>            :  *
+<span class="lineNum">     956 </span>            :  * The actual proof is undertaken by is_innerrel_unique_for(); this function
+<span class="lineNum">     957 </span>            :  * is a frontend that is mainly concerned with caching the answers.
+<span class="lineNum">     958 </span>            :  * In particular, the force_cache argument allows overriding the internal
+<span class="lineNum">     959 </span>            :  * heuristic about whether to cache negative answers; it should be &quot;true&quot;
+<span class="lineNum">     960 </span>            :  * if making an inquiry that is not part of the normal bottom-up join search
+<span class="lineNum">     961 </span>            :  * sequence.
+<a name="962"><span class="lineNum">     962 </span>            :  */</a>
+<span class="lineNum">     963 </span>            : bool
+<span class="lineNum">     964 </span><span class="lineCov">      60556 : innerrel_is_unique(PlannerInfo *root,</span>
+<span class="lineNum">     965 </span>            :                    Relids joinrelids,
+<span class="lineNum">     966 </span>            :                    Relids outerrelids,
+<span class="lineNum">     967 </span>            :                    RelOptInfo *innerrel,
+<span class="lineNum">     968 </span>            :                    JoinType jointype,
+<span class="lineNum">     969 </span>            :                    List *restrictlist,
+<span class="lineNum">     970 </span>            :                    bool force_cache)
+<span class="lineNum">     971 </span>            : {
+<span class="lineNum">     972 </span>            :     MemoryContext old_context;
+<span class="lineNum">     973 </span>            :     ListCell   *lc;
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span>            :     /* Certainly can't prove uniqueness when there are no joinclauses */
+<span class="lineNum">     976 </span><span class="lineCov">      60556 :     if (restrictlist == NIL)</span>
+<span class="lineNum">     977 </span><span class="lineCov">      12648 :         return false;</span>
+<span class="lineNum">     978 </span>            : 
+<span class="lineNum">     979 </span>            :     /*
+<span class="lineNum">     980 </span>            :      * Make a quick check to eliminate cases in which we will surely be unable
+<span class="lineNum">     981 </span>            :      * to prove uniqueness of the innerrel.
+<span class="lineNum">     982 </span>            :      */
+<span class="lineNum">     983 </span><span class="lineCov">      47908 :     if (!rel_supports_distinctness(root, innerrel))</span>
+<span class="lineNum">     984 </span><span class="lineCov">      29172 :         return false;</span>
+<span class="lineNum">     985 </span>            : 
+<span class="lineNum">     986 </span>            :     /*
+<span class="lineNum">     987 </span>            :      * Query the cache to see if we've managed to prove that innerrel is
+<span class="lineNum">     988 </span>            :      * unique for any subset of this outerrel.  We don't need an exact match,
+<span class="lineNum">     989 </span>            :      * as extra outerrels can't make the innerrel any less unique (or more
+<span class="lineNum">     990 </span>            :      * formally, the restrictlist for a join to a superset outerrel must be a
+<span class="lineNum">     991 </span>            :      * superset of the conditions we successfully used before).
+<span class="lineNum">     992 </span>            :      */
+<span class="lineNum">     993 </span><span class="lineCov">      19862 :     foreach(lc, innerrel-&gt;unique_for_rels)</span>
+<span class="lineNum">     994 </span>            :     {
+<span class="lineNum">     995 </span><span class="lineCov">       5298 :         Relids      unique_for_rels = (Relids) lfirst(lc);</span>
+<span class="lineNum">     996 </span>            : 
+<span class="lineNum">     997 </span><span class="lineCov">       5298 :         if (bms_is_subset(unique_for_rels, outerrelids))</span>
+<span class="lineNum">     998 </span><span class="lineCov">       4172 :             return true;        /* Success! */</span>
+<span class="lineNum">     999 </span>            :     }
+<span class="lineNum">    1000 </span>            : 
+<span class="lineNum">    1001 </span>            :     /*
+<span class="lineNum">    1002 </span>            :      * Conversely, we may have already determined that this outerrel, or some
+<span class="lineNum">    1003 </span>            :      * superset thereof, cannot prove this innerrel to be unique.
+<span class="lineNum">    1004 </span>            :      */
+<span class="lineNum">    1005 </span><span class="lineCov">      14564 :     foreach(lc, innerrel-&gt;non_unique_for_rels)</span>
+<span class="lineNum">    1006 </span>            :     {
+<span class="lineNum">    1007 </span><span class="lineNoCov">          0 :         Relids      unique_for_rels = (Relids) lfirst(lc);</span>
+<span class="lineNum">    1008 </span>            : 
+<span class="lineNum">    1009 </span><span class="lineNoCov">          0 :         if (bms_is_subset(outerrelids, unique_for_rels))</span>
+<span class="lineNum">    1010 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">    1011 </span>            :     }
+<span class="lineNum">    1012 </span>            : 
+<span class="lineNum">    1013 </span>            :     /* No cached information, so try to make the proof. */
+<span class="lineNum">    1014 </span><span class="lineCov">      14564 :     if (is_innerrel_unique_for(root, joinrelids, outerrelids, innerrel,</span>
+<span class="lineNum">    1015 </span>            :                                jointype, restrictlist))
+<span class="lineNum">    1016 </span>            :     {
+<span class="lineNum">    1017 </span>            :         /*
+<span class="lineNum">    1018 </span>            :          * Cache the positive result for future probes, being sure to keep it
+<span class="lineNum">    1019 </span>            :          * in the planner_cxt even if we are working in GEQO.
+<span class="lineNum">    1020 </span>            :          *
+<span class="lineNum">    1021 </span>            :          * Note: one might consider trying to isolate the minimal subset of
+<span class="lineNum">    1022 </span>            :          * the outerrels that proved the innerrel unique.  But it's not worth
+<span class="lineNum">    1023 </span>            :          * the trouble, because the planner builds up joinrels incrementally
+<span class="lineNum">    1024 </span>            :          * and so we'll see the minimally sufficient outerrels before any
+<span class="lineNum">    1025 </span>            :          * supersets of them anyway.
+<span class="lineNum">    1026 </span>            :          */
+<span class="lineNum">    1027 </span><span class="lineCov">       9378 :         old_context = MemoryContextSwitchTo(root-&gt;planner_cxt);</span>
+<span class="lineNum">    1028 </span><span class="lineCov">       9378 :         innerrel-&gt;unique_for_rels = lappend(innerrel-&gt;unique_for_rels,</span>
+<span class="lineNum">    1029 </span><span class="lineCov">       9378 :                                             bms_copy(outerrelids));</span>
+<span class="lineNum">    1030 </span><span class="lineCov">       9378 :         MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">    1031 </span>            : 
+<span class="lineNum">    1032 </span><span class="lineCov">       9378 :         return true;            /* Success! */</span>
+<span class="lineNum">    1033 </span>            :     }
+<span class="lineNum">    1034 </span>            :     else
+<span class="lineNum">    1035 </span>            :     {
+<span class="lineNum">    1036 </span>            :         /*
+<span class="lineNum">    1037 </span>            :          * None of the join conditions for outerrel proved innerrel unique, so
+<span class="lineNum">    1038 </span>            :          * we can safely reject this outerrel or any subset of it in future
+<span class="lineNum">    1039 </span>            :          * checks.
+<span class="lineNum">    1040 </span>            :          *
+<span class="lineNum">    1041 </span>            :          * However, in normal planning mode, caching this knowledge is totally
+<span class="lineNum">    1042 </span>            :          * pointless; it won't be queried again, because we build up joinrels
+<span class="lineNum">    1043 </span>            :          * from smaller to larger.  It is useful in GEQO mode, where the
+<span class="lineNum">    1044 </span>            :          * knowledge can be carried across successive planning attempts; and
+<span class="lineNum">    1045 </span>            :          * it's likely to be useful when using join-search plugins, too. Hence
+<span class="lineNum">    1046 </span>            :          * cache when join_search_private is non-NULL.  (Yeah, that's a hack,
+<span class="lineNum">    1047 </span>            :          * but it seems reasonable.)
+<span class="lineNum">    1048 </span>            :          *
+<span class="lineNum">    1049 </span>            :          * Also, allow callers to override that heuristic and force caching;
+<span class="lineNum">    1050 </span>            :          * that's useful for reduce_unique_semijoins, which calls here before
+<span class="lineNum">    1051 </span>            :          * the normal join search starts.
+<span class="lineNum">    1052 </span>            :          */
+<span class="lineNum">    1053 </span><span class="lineCov">       5186 :         if (force_cache || root-&gt;join_search_private)</span>
+<span class="lineNum">    1054 </span>            :         {
+<span class="lineNum">    1055 </span><span class="lineCov">        114 :             old_context = MemoryContextSwitchTo(root-&gt;planner_cxt);</span>
+<span class="lineNum">    1056 </span><span class="lineCov">        114 :             innerrel-&gt;non_unique_for_rels =</span>
+<span class="lineNum">    1057 </span><span class="lineCov">        114 :                 lappend(innerrel-&gt;non_unique_for_rels,</span>
+<span class="lineNum">    1058 </span><span class="lineCov">        114 :                         bms_copy(outerrelids));</span>
+<span class="lineNum">    1059 </span><span class="lineCov">        114 :             MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">    1060 </span>            :         }
+<span class="lineNum">    1061 </span>            : 
+<span class="lineNum">    1062 </span><span class="lineCov">       5186 :         return false;</span>
+<span class="lineNum">    1063 </span>            :     }
+<span class="lineNum">    1064 </span>            : }
+<span class="lineNum">    1065 </span>            : 
+<span class="lineNum">    1066 </span>            : /*
+<span class="lineNum">    1067 </span>            :  * is_innerrel_unique_for
+<span class="lineNum">    1068 </span>            :  *    Check if the innerrel provably contains at most one tuple matching any
+<span class="lineNum">    1069 </span>            :  *    tuple from the outerrel, based on join clauses in the 'restrictlist'.
+<a name="1070"><span class="lineNum">    1070 </span>            :  */</a>
+<span class="lineNum">    1071 </span>            : static bool
+<span class="lineNum">    1072 </span><span class="lineCov">      14564 : is_innerrel_unique_for(PlannerInfo *root,</span>
+<span class="lineNum">    1073 </span>            :                        Relids joinrelids,
+<span class="lineNum">    1074 </span>            :                        Relids outerrelids,
+<span class="lineNum">    1075 </span>            :                        RelOptInfo *innerrel,
+<span class="lineNum">    1076 </span>            :                        JoinType jointype,
+<span class="lineNum">    1077 </span>            :                        List *restrictlist)
+<span class="lineNum">    1078 </span>            : {
+<span class="lineNum">    1079 </span><span class="lineCov">      14564 :     List       *clause_list = NIL;</span>
+<span class="lineNum">    1080 </span>            :     ListCell   *lc;
+<span class="lineNum">    1081 </span>            : 
+<span class="lineNum">    1082 </span>            :     /*
+<span class="lineNum">    1083 </span>            :      * Search for mergejoinable clauses that constrain the inner rel against
+<span class="lineNum">    1084 </span>            :      * the outer rel.  If an operator is mergejoinable then it behaves like
+<span class="lineNum">    1085 </span>            :      * equality for some btree opclass, so it's what we want.  The
+<span class="lineNum">    1086 </span>            :      * mergejoinability test also eliminates clauses containing volatile
+<span class="lineNum">    1087 </span>            :      * functions, which we couldn't depend on.
+<span class="lineNum">    1088 </span>            :      */
+<span class="lineNum">    1089 </span><span class="lineCov">      30894 :     foreach(lc, restrictlist)</span>
+<span class="lineNum">    1090 </span>            :     {
+<span class="lineNum">    1091 </span><span class="lineCov">      16330 :         RestrictInfo *restrictinfo = (RestrictInfo *) lfirst(lc);</span>
+<span class="lineNum">    1092 </span>            : 
+<span class="lineNum">    1093 </span>            :         /*
+<span class="lineNum">    1094 </span>            :          * As noted above, if it's a pushed-down clause and we're at an outer
+<span class="lineNum">    1095 </span>            :          * join, we can't use it.
+<span class="lineNum">    1096 </span>            :          */
+<span class="lineNum">    1097 </span><span class="lineCov">      22736 :         if (IS_OUTER_JOIN(jointype) &amp;&amp;</span>
+<span class="lineNum">    1098 </span><span class="lineCov">      12760 :             RINFO_IS_PUSHED_DOWN(restrictinfo, joinrelids))</span>
+<span class="lineNum">    1099 </span><span class="lineCov">         52 :             continue;</span>
+<span class="lineNum">    1100 </span>            : 
+<span class="lineNum">    1101 </span>            :         /* Ignore if it's not a mergejoinable clause */
+<span class="lineNum">    1102 </span><span class="lineCov">      32084 :         if (!restrictinfo-&gt;can_join ||</span>
+<span class="lineNum">    1103 </span><span class="lineCov">      15806 :             restrictinfo-&gt;mergeopfamilies == NIL)</span>
+<span class="lineNum">    1104 </span><span class="lineCov">        654 :             continue;           /* not mergejoinable */</span>
+<span class="lineNum">    1105 </span>            : 
+<span class="lineNum">    1106 </span>            :         /*
+<span class="lineNum">    1107 </span>            :          * Check if clause has the form &quot;outer op inner&quot; or &quot;inner op outer&quot;,
+<span class="lineNum">    1108 </span>            :          * and if so mark which side is inner.
+<span class="lineNum">    1109 </span>            :          */
+<span class="lineNum">    1110 </span><span class="lineCov">      15624 :         if (!clause_sides_match_join(restrictinfo, outerrelids,</span>
+<span class="lineNum">    1111 </span>            :                                      innerrel-&gt;relids))
+<span class="lineNum">    1112 </span><span class="lineNoCov">          0 :             continue;           /* no good for these input relations */</span>
+<span class="lineNum">    1113 </span>            : 
+<span class="lineNum">    1114 </span>            :         /* OK, add to list */
+<span class="lineNum">    1115 </span><span class="lineCov">      15624 :         clause_list = lappend(clause_list, restrictinfo);</span>
+<span class="lineNum">    1116 </span>            :     }
+<span class="lineNum">    1117 </span>            : 
+<span class="lineNum">    1118 </span>            :     /* Let rel_is_distinct_for() do the hard work */
+<span class="lineNum">    1119 </span><span class="lineCov">      14564 :     return rel_is_distinct_for(root, innerrel, clause_list);</span>
+<span class="lineNum">    1120 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

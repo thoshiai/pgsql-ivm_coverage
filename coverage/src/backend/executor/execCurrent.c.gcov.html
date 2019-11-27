@@ -1,0 +1,502 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/execCurrent.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - execCurrent.c<span style="font-size: 80%;"> (source / <a href="execCurrent.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">79</td>
+            <td class="headerCovTableEntry">103</td>
+            <td class="headerCovTableEntryMed">76.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">3</td>
+            <td class="headerCovTableEntry">3</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * execCurrent.c
+<span class="lineNum">       4 </span>            :  *    executor support for WHERE CURRENT OF cursor
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *  src/backend/executor/execCurrent.c
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      12 </span>            :  */
+<span class="lineNum">      13 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &quot;access/genam.h&quot;
+<span class="lineNum">      16 </span>            : #include &quot;access/relscan.h&quot;
+<span class="lineNum">      17 </span>            : #include &quot;access/sysattr.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;executor/executor.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;utils/portal.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : static char *fetch_cursor_param_value(ExprContext *econtext, int paramId);
+<span class="lineNum">      27 </span>            : static ScanState *search_plan_tree(PlanState *node, Oid table_oid,
+<span class="lineNum">      28 </span>            :                                    bool *pending_rescan);
+<span class="lineNum">      29 </span>            : 
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : /*
+<span class="lineNum">      32 </span>            :  * execCurrentOf
+<span class="lineNum">      33 </span>            :  *
+<span class="lineNum">      34 </span>            :  * Given a CURRENT OF expression and the OID of a table, determine which row
+<span class="lineNum">      35 </span>            :  * of the table is currently being scanned by the cursor named by CURRENT OF,
+<span class="lineNum">      36 </span>            :  * and return the row's TID into *current_tid.
+<span class="lineNum">      37 </span>            :  *
+<span class="lineNum">      38 </span>            :  * Returns true if a row was identified.  Returns false if the cursor is valid
+<span class="lineNum">      39 </span>            :  * for the table but is not currently scanning a row of the table (this is a
+<span class="lineNum">      40 </span>            :  * legal situation in inheritance cases).  Raises error if cursor is not a
+<span class="lineNum">      41 </span>            :  * valid updatable scan of the specified table.
+<a name="42"><span class="lineNum">      42 </span>            :  */</a>
+<span class="lineNum">      43 </span>            : bool
+<span class="lineNum">      44 </span><span class="lineCov">        126 : execCurrentOf(CurrentOfExpr *cexpr,</span>
+<span class="lineNum">      45 </span>            :               ExprContext *econtext,
+<span class="lineNum">      46 </span>            :               Oid table_oid,
+<span class="lineNum">      47 </span>            :               ItemPointer current_tid)
+<span class="lineNum">      48 </span>            : {
+<span class="lineNum">      49 </span>            :     char       *cursor_name;
+<span class="lineNum">      50 </span>            :     char       *table_name;
+<span class="lineNum">      51 </span>            :     Portal      portal;
+<span class="lineNum">      52 </span>            :     QueryDesc  *queryDesc;
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            :     /* Get the cursor name --- may have to look up a parameter reference */
+<span class="lineNum">      55 </span><span class="lineCov">        126 :     if (cexpr-&gt;cursor_name)</span>
+<span class="lineNum">      56 </span><span class="lineCov">         86 :         cursor_name = cexpr-&gt;cursor_name;</span>
+<span class="lineNum">      57 </span>            :     else
+<span class="lineNum">      58 </span><span class="lineCov">         40 :         cursor_name = fetch_cursor_param_value(econtext, cexpr-&gt;cursor_param);</span>
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            :     /* Fetch table name for possible use in error messages */
+<span class="lineNum">      61 </span><span class="lineCov">        126 :     table_name = get_rel_name(table_oid);</span>
+<span class="lineNum">      62 </span><span class="lineCov">        126 :     if (table_name == NULL)</span>
+<span class="lineNum">      63 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cache lookup failed for relation %u&quot;, table_oid);</span>
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            :     /* Find the cursor's portal */
+<span class="lineNum">      66 </span><span class="lineCov">        126 :     portal = GetPortalByName(cursor_name);</span>
+<span class="lineNum">      67 </span><span class="lineCov">        126 :     if (!PortalIsValid(portal))</span>
+<span class="lineNum">      68 </span><span class="lineCov">          2 :         ereport(ERROR,</span>
+<span class="lineNum">      69 </span>            :                 (errcode(ERRCODE_UNDEFINED_CURSOR),
+<span class="lineNum">      70 </span>            :                  errmsg(&quot;cursor \&quot;%s\&quot; does not exist&quot;, cursor_name)));
+<span class="lineNum">      71 </span>            : 
+<span class="lineNum">      72 </span>            :     /*
+<span class="lineNum">      73 </span>            :      * We have to watch out for non-SELECT queries as well as held cursors,
+<span class="lineNum">      74 </span>            :      * both of which may have null queryDesc.
+<span class="lineNum">      75 </span>            :      */
+<span class="lineNum">      76 </span><span class="lineCov">        124 :     if (portal-&gt;strategy != PORTAL_ONE_SELECT)</span>
+<span class="lineNum">      77 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">      78 </span>            :                 (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">      79 </span>            :                  errmsg(&quot;cursor \&quot;%s\&quot; is not a SELECT query&quot;,
+<span class="lineNum">      80 </span>            :                         cursor_name)));
+<span class="lineNum">      81 </span><span class="lineCov">        124 :     queryDesc = portal-&gt;queryDesc;</span>
+<span class="lineNum">      82 </span><span class="lineCov">        124 :     if (queryDesc == NULL || queryDesc-&gt;estate == NULL)</span>
+<span class="lineNum">      83 </span><span class="lineCov">          2 :         ereport(ERROR,</span>
+<span class="lineNum">      84 </span>            :                 (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">      85 </span>            :                  errmsg(&quot;cursor \&quot;%s\&quot; is held from a previous transaction&quot;,
+<span class="lineNum">      86 </span>            :                         cursor_name)));
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            :     /*
+<span class="lineNum">      89 </span>            :      * We have two different strategies depending on whether the cursor uses
+<span class="lineNum">      90 </span>            :      * FOR UPDATE/SHARE or not.  The reason for supporting both is that the
+<span class="lineNum">      91 </span>            :      * FOR UPDATE code is able to identify a target table in many cases where
+<span class="lineNum">      92 </span>            :      * the other code can't, while the non-FOR-UPDATE case allows use of WHERE
+<span class="lineNum">      93 </span>            :      * CURRENT OF with an insensitive cursor.
+<span class="lineNum">      94 </span>            :      */
+<span class="lineNum">      95 </span><span class="lineCov">        122 :     if (queryDesc-&gt;estate-&gt;es_rowmarks)</span>
+<span class="lineNum">      96 </span>            :     {
+<span class="lineNum">      97 </span>            :         ExecRowMark *erm;
+<span class="lineNum">      98 </span>            :         Index       i;
+<span class="lineNum">      99 </span>            : 
+<span class="lineNum">     100 </span>            :         /*
+<span class="lineNum">     101 </span>            :          * Here, the query must have exactly one FOR UPDATE/SHARE reference to
+<span class="lineNum">     102 </span>            :          * the target table, and we dig the ctid info out of that.
+<span class="lineNum">     103 </span>            :          */
+<span class="lineNum">     104 </span><span class="lineCov">         32 :         erm = NULL;</span>
+<span class="lineNum">     105 </span><span class="lineCov">        114 :         for (i = 0; i &lt; queryDesc-&gt;estate-&gt;es_range_table_size; i++)</span>
+<span class="lineNum">     106 </span>            :         {
+<span class="lineNum">     107 </span><span class="lineCov">         84 :             ExecRowMark *thiserm = queryDesc-&gt;estate-&gt;es_rowmarks[i];</span>
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span><span class="lineCov">        144 :             if (thiserm == NULL ||</span>
+<span class="lineNum">     110 </span><span class="lineCov">         60 :                 !RowMarkRequiresRowShareLock(thiserm-&gt;markType))</span>
+<span class="lineNum">     111 </span><span class="lineCov">         32 :                 continue;       /* ignore non-FOR UPDATE/SHARE items */</span>
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span><span class="lineCov">         52 :             if (thiserm-&gt;relid == table_oid)</span>
+<span class="lineNum">     114 </span>            :             {
+<span class="lineNum">     115 </span><span class="lineCov">         32 :                 if (erm)</span>
+<span class="lineNum">     116 </span><span class="lineCov">          2 :                     ereport(ERROR,</span>
+<span class="lineNum">     117 </span>            :                             (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">     118 </span>            :                              errmsg(&quot;cursor \&quot;%s\&quot; has multiple FOR UPDATE/SHARE references to table \&quot;%s\&quot;&quot;,
+<span class="lineNum">     119 </span>            :                                     cursor_name, table_name)));
+<span class="lineNum">     120 </span><span class="lineCov">         30 :                 erm = thiserm;</span>
+<span class="lineNum">     121 </span>            :             }
+<span class="lineNum">     122 </span>            :         }
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span><span class="lineCov">         30 :         if (erm == NULL)</span>
+<span class="lineNum">     125 </span><span class="lineCov">          2 :             ereport(ERROR,</span>
+<span class="lineNum">     126 </span>            :                     (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">     127 </span>            :                      errmsg(&quot;cursor \&quot;%s\&quot; does not have a FOR UPDATE/SHARE reference to table \&quot;%s\&quot;&quot;,
+<span class="lineNum">     128 </span>            :                             cursor_name, table_name)));
+<span class="lineNum">     129 </span>            : 
+<span class="lineNum">     130 </span>            :         /*
+<span class="lineNum">     131 </span>            :          * The cursor must have a current result row: per the SQL spec, it's
+<span class="lineNum">     132 </span>            :          * an error if not.
+<span class="lineNum">     133 </span>            :          */
+<span class="lineNum">     134 </span><span class="lineCov">         28 :         if (portal-&gt;atStart || portal-&gt;atEnd)</span>
+<span class="lineNum">     135 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     136 </span>            :                     (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">     137 </span>            :                      errmsg(&quot;cursor \&quot;%s\&quot; is not positioned on a row&quot;,
+<span class="lineNum">     138 </span>            :                             cursor_name)));
+<span class="lineNum">     139 </span>            : 
+<span class="lineNum">     140 </span>            :         /* Return the currently scanned TID, if there is one */
+<span class="lineNum">     141 </span><span class="lineCov">         28 :         if (ItemPointerIsValid(&amp;(erm-&gt;curCtid)))</span>
+<span class="lineNum">     142 </span>            :         {
+<span class="lineNum">     143 </span><span class="lineCov">         20 :             *current_tid = erm-&gt;curCtid;</span>
+<span class="lineNum">     144 </span><span class="lineCov">         20 :             return true;</span>
+<span class="lineNum">     145 </span>            :         }
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            :         /*
+<span class="lineNum">     148 </span>            :          * This table didn't produce the cursor's current row; some other
+<span class="lineNum">     149 </span>            :          * inheritance child of the same parent must have.  Signal caller to
+<span class="lineNum">     150 </span>            :          * do nothing on this table.
+<span class="lineNum">     151 </span>            :          */
+<span class="lineNum">     152 </span><span class="lineCov">          8 :         return false;</span>
+<span class="lineNum">     153 </span>            :     }
+<span class="lineNum">     154 </span>            :     else
+<span class="lineNum">     155 </span>            :     {
+<span class="lineNum">     156 </span>            :         /*
+<span class="lineNum">     157 </span>            :          * Without FOR UPDATE, we dig through the cursor's plan to find the
+<span class="lineNum">     158 </span>            :          * scan node.  Fail if it's not there or buried underneath
+<span class="lineNum">     159 </span>            :          * aggregation.
+<span class="lineNum">     160 </span>            :          */
+<span class="lineNum">     161 </span>            :         ScanState  *scanstate;
+<span class="lineNum">     162 </span><span class="lineCov">         90 :         bool        pending_rescan = false;</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span><span class="lineCov">         90 :         scanstate = search_plan_tree(queryDesc-&gt;planstate, table_oid,</span>
+<span class="lineNum">     165 </span>            :                                      &amp;pending_rescan);
+<span class="lineNum">     166 </span><span class="lineCov">         90 :         if (!scanstate)</span>
+<span class="lineNum">     167 </span><span class="lineCov">          8 :             ereport(ERROR,</span>
+<span class="lineNum">     168 </span>            :                     (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">     169 </span>            :                      errmsg(&quot;cursor \&quot;%s\&quot; is not a simply updatable scan of table \&quot;%s\&quot;&quot;,
+<span class="lineNum">     170 </span>            :                             cursor_name, table_name)));
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span>            :         /*
+<span class="lineNum">     173 </span>            :          * The cursor must have a current result row: per the SQL spec, it's
+<span class="lineNum">     174 </span>            :          * an error if not.  We test this at the top level, rather than at the
+<span class="lineNum">     175 </span>            :          * scan node level, because in inheritance cases any one table scan
+<span class="lineNum">     176 </span>            :          * could easily not be on a row. We want to return false, not raise
+<span class="lineNum">     177 </span>            :          * error, if the passed-in table OID is for one of the inactive scans.
+<span class="lineNum">     178 </span>            :          */
+<span class="lineNum">     179 </span><span class="lineCov">         82 :         if (portal-&gt;atStart || portal-&gt;atEnd)</span>
+<span class="lineNum">     180 </span><span class="lineCov">          4 :             ereport(ERROR,</span>
+<span class="lineNum">     181 </span>            :                     (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">     182 </span>            :                      errmsg(&quot;cursor \&quot;%s\&quot; is not positioned on a row&quot;,
+<span class="lineNum">     183 </span>            :                             cursor_name)));
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span>            :         /*
+<span class="lineNum">     186 </span>            :          * Now OK to return false if we found an inactive scan.  It is
+<span class="lineNum">     187 </span>            :          * inactive either if it's not positioned on a row, or there's a
+<span class="lineNum">     188 </span>            :          * rescan pending for it.
+<span class="lineNum">     189 </span>            :          */
+<span class="lineNum">     190 </span><span class="lineCov">         78 :         if (TupIsNull(scanstate-&gt;ss_ScanTupleSlot) || pending_rescan)</span>
+<span class="lineNum">     191 </span><span class="lineCov">          8 :             return false;</span>
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            :         /*
+<span class="lineNum">     194 </span>            :          * Extract TID of the scan's current row.  The mechanism for this is
+<span class="lineNum">     195 </span>            :          * in principle scan-type-dependent, but for most scan types, we can
+<span class="lineNum">     196 </span>            :          * just dig the TID out of the physical scan tuple.
+<span class="lineNum">     197 </span>            :          */
+<span class="lineNum">     198 </span><span class="lineCov">         70 :         if (IsA(scanstate, IndexOnlyScanState))</span>
+<span class="lineNum">     199 </span>            :         {
+<span class="lineNum">     200 </span>            :             /*
+<span class="lineNum">     201 </span>            :              * For IndexOnlyScan, the tuple stored in ss_ScanTupleSlot may be
+<span class="lineNum">     202 </span>            :              * a virtual tuple that does not have the ctid column, so we have
+<span class="lineNum">     203 </span>            :              * to get the TID from xs_ctup.t_self.
+<span class="lineNum">     204 </span>            :              */
+<span class="lineNum">     205 </span><span class="lineCov">          2 :             IndexScanDesc scan = ((IndexOnlyScanState *) scanstate)-&gt;ioss_ScanDesc;</span>
+<span class="lineNum">     206 </span>            : 
+<span class="lineNum">     207 </span><span class="lineCov">          2 :             *current_tid = scan-&gt;xs_heaptid;</span>
+<span class="lineNum">     208 </span>            :         }
+<span class="lineNum">     209 </span>            :         else
+<span class="lineNum">     210 </span>            :         {
+<span class="lineNum">     211 </span>            :             /*
+<span class="lineNum">     212 </span>            :              * Default case: try to fetch TID from the scan node's current
+<span class="lineNum">     213 </span>            :              * tuple.  As an extra cross-check, verify tableoid in the current
+<span class="lineNum">     214 </span>            :              * tuple.  If the scan hasn't provided a physical tuple, we have
+<span class="lineNum">     215 </span>            :              * to fail.
+<span class="lineNum">     216 </span>            :              */
+<span class="lineNum">     217 </span>            :             Datum       ldatum;
+<span class="lineNum">     218 </span>            :             bool        lisnull;
+<span class="lineNum">     219 </span>            :             ItemPointer tuple_tid;
+<span class="lineNum">     220 </span>            : 
+<span class="lineNum">     221 </span>            : #ifdef USE_ASSERT_CHECKING
+<span class="lineNum">     222 </span><span class="lineCov">         68 :             ldatum = slot_getsysattr(scanstate-&gt;ss_ScanTupleSlot,</span>
+<span class="lineNum">     223 </span>            :                                      TableOidAttributeNumber,
+<span class="lineNum">     224 </span>            :                                      &amp;lisnull);
+<span class="lineNum">     225 </span><span class="lineCov">         68 :             if (lisnull)</span>
+<span class="lineNum">     226 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     227 </span>            :                         (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">     228 </span>            :                          errmsg(&quot;cursor \&quot;%s\&quot; is not a simply updatable scan of table \&quot;%s\&quot;&quot;,
+<span class="lineNum">     229 </span>            :                                 cursor_name, table_name)));
+<span class="lineNum">     230 </span><span class="lineCov">         68 :             Assert(DatumGetObjectId(ldatum) == table_oid);</span>
+<span class="lineNum">     231 </span>            : #endif
+<span class="lineNum">     232 </span>            : 
+<span class="lineNum">     233 </span><span class="lineCov">         68 :             ldatum = slot_getsysattr(scanstate-&gt;ss_ScanTupleSlot,</span>
+<span class="lineNum">     234 </span>            :                                      SelfItemPointerAttributeNumber,
+<span class="lineNum">     235 </span>            :                                      &amp;lisnull);
+<span class="lineNum">     236 </span><span class="lineCov">         68 :             if (lisnull)</span>
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     238 </span>            :                         (errcode(ERRCODE_INVALID_CURSOR_STATE),
+<span class="lineNum">     239 </span>            :                          errmsg(&quot;cursor \&quot;%s\&quot; is not a simply updatable scan of table \&quot;%s\&quot;&quot;,
+<span class="lineNum">     240 </span>            :                                 cursor_name, table_name)));
+<span class="lineNum">     241 </span><span class="lineCov">         68 :             tuple_tid = (ItemPointer) DatumGetPointer(ldatum);</span>
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span><span class="lineCov">         68 :             *current_tid = *tuple_tid;</span>
+<span class="lineNum">     244 </span>            :         }
+<span class="lineNum">     245 </span>            : 
+<span class="lineNum">     246 </span><span class="lineCov">         70 :         Assert(ItemPointerIsValid(current_tid));</span>
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span><span class="lineCov">         70 :         return true;</span>
+<span class="lineNum">     249 </span>            :     }
+<span class="lineNum">     250 </span>            : }
+<span class="lineNum">     251 </span>            : 
+<span class="lineNum">     252 </span>            : /*
+<span class="lineNum">     253 </span>            :  * fetch_cursor_param_value
+<span class="lineNum">     254 </span>            :  *
+<span class="lineNum">     255 </span>            :  * Fetch the string value of a param, verifying it is of type REFCURSOR.
+<a name="256"><span class="lineNum">     256 </span>            :  */</a>
+<span class="lineNum">     257 </span>            : static char *
+<span class="lineNum">     258 </span><span class="lineCov">         40 : fetch_cursor_param_value(ExprContext *econtext, int paramId)</span>
+<span class="lineNum">     259 </span>            : {
+<span class="lineNum">     260 </span><span class="lineCov">         40 :     ParamListInfo paramInfo = econtext-&gt;ecxt_param_list_info;</span>
+<span class="lineNum">     261 </span>            : 
+<span class="lineNum">     262 </span><span class="lineCov">         40 :     if (paramInfo &amp;&amp;</span>
+<span class="lineNum">     263 </span><span class="lineCov">         40 :         paramId &gt; 0 &amp;&amp; paramId &lt;= paramInfo-&gt;numParams)</span>
+<span class="lineNum">     264 </span>            :     {
+<span class="lineNum">     265 </span>            :         ParamExternData *prm;
+<span class="lineNum">     266 </span>            :         ParamExternData prmdata;
+<span class="lineNum">     267 </span>            : 
+<span class="lineNum">     268 </span>            :         /* give hook a chance in case parameter is dynamic */
+<span class="lineNum">     269 </span><span class="lineCov">         40 :         if (paramInfo-&gt;paramFetch != NULL)</span>
+<span class="lineNum">     270 </span><span class="lineCov">         40 :             prm = paramInfo-&gt;paramFetch(paramInfo, paramId, false, &amp;prmdata);</span>
+<span class="lineNum">     271 </span>            :         else
+<span class="lineNum">     272 </span><span class="lineNoCov">          0 :             prm = &amp;paramInfo-&gt;params[paramId - 1];</span>
+<span class="lineNum">     273 </span>            : 
+<span class="lineNum">     274 </span><span class="lineCov">         40 :         if (OidIsValid(prm-&gt;ptype) &amp;&amp; !prm-&gt;isnull)</span>
+<span class="lineNum">     275 </span>            :         {
+<span class="lineNum">     276 </span>            :             /* safety check in case hook did something unexpected */
+<span class="lineNum">     277 </span><span class="lineCov">         40 :             if (prm-&gt;ptype != REFCURSOROID)</span>
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     279 </span>            :                         (errcode(ERRCODE_DATATYPE_MISMATCH),
+<span class="lineNum">     280 </span>            :                          errmsg(&quot;type of parameter %d (%s) does not match that when preparing the plan (%s)&quot;,
+<span class="lineNum">     281 </span>            :                                 paramId,
+<span class="lineNum">     282 </span>            :                                 format_type_be(prm-&gt;ptype),
+<span class="lineNum">     283 </span>            :                                 format_type_be(REFCURSOROID))));
+<span class="lineNum">     284 </span>            : 
+<span class="lineNum">     285 </span>            :             /* We know that refcursor uses text's I/O routines */
+<span class="lineNum">     286 </span><span class="lineCov">         40 :             return TextDatumGetCString(prm-&gt;value);</span>
+<span class="lineNum">     287 </span>            :         }
+<span class="lineNum">     288 </span>            :     }
+<span class="lineNum">     289 </span>            : 
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :     ereport(ERROR,</span>
+<span class="lineNum">     291 </span>            :             (errcode(ERRCODE_UNDEFINED_OBJECT),
+<span class="lineNum">     292 </span>            :              errmsg(&quot;no value found for parameter %d&quot;, paramId)));
+<span class="lineNum">     293 </span>            :     return NULL;
+<span class="lineNum">     294 </span>            : }
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span>            : /*
+<span class="lineNum">     297 </span>            :  * search_plan_tree
+<span class="lineNum">     298 </span>            :  *
+<span class="lineNum">     299 </span>            :  * Search through a PlanState tree for a scan node on the specified table.
+<span class="lineNum">     300 </span>            :  * Return NULL if not found or multiple candidates.
+<span class="lineNum">     301 </span>            :  *
+<span class="lineNum">     302 </span>            :  * If a candidate is found, set *pending_rescan to true if that candidate
+<span class="lineNum">     303 </span>            :  * or any node above it has a pending rescan action, i.e. chgParam != NULL.
+<span class="lineNum">     304 </span>            :  * That indicates that we shouldn't consider the node to be positioned on a
+<span class="lineNum">     305 </span>            :  * valid tuple, even if its own state would indicate that it is.  (Caller
+<span class="lineNum">     306 </span>            :  * must initialize *pending_rescan to false, and should not trust its state
+<span class="lineNum">     307 </span>            :  * if multiple candidates are found.)
+<a name="308"><span class="lineNum">     308 </span>            :  */</a>
+<span class="lineNum">     309 </span>            : static ScanState *
+<span class="lineNum">     310 </span><span class="lineCov">        130 : search_plan_tree(PlanState *node, Oid table_oid,</span>
+<span class="lineNum">     311 </span>            :                  bool *pending_rescan)
+<span class="lineNum">     312 </span>            : {
+<span class="lineNum">     313 </span><span class="lineCov">        130 :     ScanState  *result = NULL;</span>
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span><span class="lineCov">        130 :     if (node == NULL)</span>
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     317 </span><span class="lineCov">        130 :     switch (nodeTag(node))</span>
+<span class="lineNum">     318 </span>            :     {
+<span class="lineNum">     319 </span>            :             /*
+<span class="lineNum">     320 </span>            :              * Relation scan nodes can all be treated alike
+<span class="lineNum">     321 </span>            :              */
+<span class="lineNum">     322 </span>            :         case T_SeqScanState:
+<span class="lineNum">     323 </span>            :         case T_SampleScanState:
+<span class="lineNum">     324 </span>            :         case T_IndexScanState:
+<span class="lineNum">     325 </span>            :         case T_IndexOnlyScanState:
+<span class="lineNum">     326 </span>            :         case T_BitmapHeapScanState:
+<span class="lineNum">     327 </span>            :         case T_TidScanState:
+<span class="lineNum">     328 </span>            :         case T_ForeignScanState:
+<span class="lineNum">     329 </span>            :         case T_CustomScanState:
+<span class="lineNum">     330 </span>            :             {
+<span class="lineNum">     331 </span><span class="lineCov">        110 :                 ScanState  *sstate = (ScanState *) node;</span>
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span><span class="lineCov">        110 :                 if (RelationGetRelid(sstate-&gt;ss_currentRelation) == table_oid)</span>
+<span class="lineNum">     334 </span><span class="lineCov">         82 :                     result = sstate;</span>
+<span class="lineNum">     335 </span><span class="lineCov">        110 :                 break;</span>
+<span class="lineNum">     336 </span>            :             }
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span>            :             /*
+<span class="lineNum">     339 </span>            :              * For Append, we must look through the members; watch out for
+<span class="lineNum">     340 </span>            :              * multiple matches (possible if it was from UNION ALL)
+<span class="lineNum">     341 </span>            :              */
+<span class="lineNum">     342 </span>            :         case T_AppendState:
+<span class="lineNum">     343 </span>            :             {
+<span class="lineNum">     344 </span><span class="lineCov">         14 :                 AppendState *astate = (AppendState *) node;</span>
+<span class="lineNum">     345 </span>            :                 int         i;
+<span class="lineNum">     346 </span>            : 
+<span class="lineNum">     347 </span><span class="lineCov">         54 :                 for (i = 0; i &lt; astate-&gt;as_nplans; i++)</span>
+<span class="lineNum">     348 </span>            :                 {
+<span class="lineNum">     349 </span><span class="lineCov">         40 :                     ScanState  *elem = search_plan_tree(astate-&gt;appendplans[i],</span>
+<span class="lineNum">     350 </span>            :                                                         table_oid,
+<span class="lineNum">     351 </span>            :                                                         pending_rescan);
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span><span class="lineCov">         40 :                     if (!elem)</span>
+<span class="lineNum">     354 </span><span class="lineCov">         26 :                         continue;</span>
+<span class="lineNum">     355 </span><span class="lineCov">         14 :                     if (result)</span>
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :                         return NULL;    /* multiple matches */</span>
+<span class="lineNum">     357 </span><span class="lineCov">         14 :                     result = elem;</span>
+<span class="lineNum">     358 </span>            :                 }
+<span class="lineNum">     359 </span><span class="lineCov">         14 :                 break;</span>
+<span class="lineNum">     360 </span>            :             }
+<span class="lineNum">     361 </span>            : 
+<span class="lineNum">     362 </span>            :             /*
+<span class="lineNum">     363 </span>            :              * Similarly for MergeAppend
+<span class="lineNum">     364 </span>            :              */
+<span class="lineNum">     365 </span>            :         case T_MergeAppendState:
+<span class="lineNum">     366 </span>            :             {
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :                 MergeAppendState *mstate = (MergeAppendState *) node;</span>
+<span class="lineNum">     368 </span>            :                 int         i;
+<span class="lineNum">     369 </span>            : 
+<span class="lineNum">     370 </span><span class="lineNoCov">          0 :                 for (i = 0; i &lt; mstate-&gt;ms_nplans; i++)</span>
+<span class="lineNum">     371 </span>            :                 {
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :                     ScanState  *elem = search_plan_tree(mstate-&gt;mergeplans[i],</span>
+<span class="lineNum">     373 </span>            :                                                         table_oid,
+<span class="lineNum">     374 </span>            :                                                         pending_rescan);
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :                     if (!elem)</span>
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :                         continue;</span>
+<span class="lineNum">     378 </span><span class="lineNoCov">          0 :                     if (result)</span>
+<span class="lineNum">     379 </span><span class="lineNoCov">          0 :                         return NULL;    /* multiple matches */</span>
+<span class="lineNum">     380 </span><span class="lineNoCov">          0 :                     result = elem;</span>
+<span class="lineNum">     381 </span>            :                 }
+<span class="lineNum">     382 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     383 </span>            :             }
+<span class="lineNum">     384 </span>            : 
+<span class="lineNum">     385 </span>            :             /*
+<span class="lineNum">     386 </span>            :              * Result and Limit can be descended through (these are safe
+<span class="lineNum">     387 </span>            :              * because they always return their input's current row)
+<span class="lineNum">     388 </span>            :              */
+<span class="lineNum">     389 </span>            :         case T_ResultState:
+<span class="lineNum">     390 </span>            :         case T_LimitState:
+<span class="lineNum">     391 </span><span class="lineNoCov">          0 :             result = search_plan_tree(node-&gt;lefttree,</span>
+<span class="lineNum">     392 </span>            :                                       table_oid,
+<span class="lineNum">     393 </span>            :                                       pending_rescan);
+<span class="lineNum">     394 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     395 </span>            : 
+<span class="lineNum">     396 </span>            :             /*
+<span class="lineNum">     397 </span>            :              * SubqueryScan too, but it keeps the child in a different place
+<span class="lineNum">     398 </span>            :              */
+<span class="lineNum">     399 </span>            :         case T_SubqueryScanState:
+<span class="lineNum">     400 </span><span class="lineNoCov">          0 :             result = search_plan_tree(((SubqueryScanState *) node)-&gt;subplan,</span>
+<span class="lineNum">     401 </span>            :                                       table_oid,
+<span class="lineNum">     402 </span>            :                                       pending_rescan);
+<span class="lineNum">     403 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     404 </span>            : 
+<span class="lineNum">     405 </span>            :         default:
+<span class="lineNum">     406 </span>            :             /* Otherwise, assume we can't descend through it */
+<span class="lineNum">     407 </span><span class="lineCov">          6 :             break;</span>
+<span class="lineNum">     408 </span>            :     }
+<span class="lineNum">     409 </span>            : 
+<span class="lineNum">     410 </span>            :     /*
+<span class="lineNum">     411 </span>            :      * If we found a candidate at or below this node, then this node's
+<span class="lineNum">     412 </span>            :      * chgParam indicates a pending rescan that will affect the candidate.
+<span class="lineNum">     413 </span>            :      */
+<span class="lineNum">     414 </span><span class="lineCov">        130 :     if (result &amp;&amp; node-&gt;chgParam != NULL)</span>
+<span class="lineNum">     415 </span><span class="lineNoCov">          0 :         *pending_rescan = true;</span>
+<span class="lineNum">     416 </span>            : 
+<span class="lineNum">     417 </span><span class="lineCov">        130 :     return result;</span>
+<span class="lineNum">     418 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

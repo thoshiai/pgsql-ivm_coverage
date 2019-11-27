@@ -1,0 +1,1540 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/replication/walreceiver.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/replication</a> - walreceiver.c<span style="font-size: 80%;"> (source / <a href="walreceiver.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">485</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">18</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * walreceiver.c
+<span class="lineNum">       4 </span>            :  *
+<span class="lineNum">       5 </span>            :  * The WAL receiver process (walreceiver) is new as of Postgres 9.0. It
+<span class="lineNum">       6 </span>            :  * is the process in the standby server that takes charge of receiving
+<span class="lineNum">       7 </span>            :  * XLOG records from a primary server during streaming replication.
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  * When the startup process determines that it's time to start streaming,
+<span class="lineNum">      10 </span>            :  * it instructs postmaster to start walreceiver. Walreceiver first connects
+<span class="lineNum">      11 </span>            :  * to the primary server (it will be served by a walsender process
+<span class="lineNum">      12 </span>            :  * in the primary server), and then keeps receiving XLOG records and
+<span class="lineNum">      13 </span>            :  * writing them to the disk as long as the connection is alive. As XLOG
+<span class="lineNum">      14 </span>            :  * records are received and flushed to disk, it updates the
+<span class="lineNum">      15 </span>            :  * WalRcv-&gt;receivedUpto variable in shared memory, to inform the startup
+<span class="lineNum">      16 </span>            :  * process of how far it can proceed with XLOG replay.
+<span class="lineNum">      17 </span>            :  *
+<span class="lineNum">      18 </span>            :  * If the primary server ends streaming, but doesn't disconnect, walreceiver
+<span class="lineNum">      19 </span>            :  * goes into &quot;waiting&quot; mode, and waits for the startup process to give new
+<span class="lineNum">      20 </span>            :  * instructions. The startup process will treat that the same as
+<span class="lineNum">      21 </span>            :  * disconnection, and will rescan the archive/pg_wal directory. But when the
+<span class="lineNum">      22 </span>            :  * startup process wants to try streaming replication again, it will just
+<span class="lineNum">      23 </span>            :  * nudge the existing walreceiver process that's waiting, instead of launching
+<span class="lineNum">      24 </span>            :  * a new one.
+<span class="lineNum">      25 </span>            :  *
+<span class="lineNum">      26 </span>            :  * Normal termination is by SIGTERM, which instructs the walreceiver to
+<span class="lineNum">      27 </span>            :  * exit(0). Emergency termination is by SIGQUIT; like any postmaster child
+<span class="lineNum">      28 </span>            :  * process, the walreceiver will simply abort and exit on SIGQUIT. A close
+<span class="lineNum">      29 </span>            :  * of the connection and a FATAL error are treated not as a crash but as
+<span class="lineNum">      30 </span>            :  * normal operation.
+<span class="lineNum">      31 </span>            :  *
+<span class="lineNum">      32 </span>            :  * This file contains the server-facing parts of walreceiver. The libpq-
+<span class="lineNum">      33 </span>            :  * specific parts are in the libpqwalreceiver module. It's loaded
+<span class="lineNum">      34 </span>            :  * dynamically to avoid linking the server with libpq.
+<span class="lineNum">      35 </span>            :  *
+<span class="lineNum">      36 </span>            :  * Portions Copyright (c) 2010-2019, PostgreSQL Global Development Group
+<span class="lineNum">      37 </span>            :  *
+<span class="lineNum">      38 </span>            :  *
+<span class="lineNum">      39 </span>            :  * IDENTIFICATION
+<span class="lineNum">      40 </span>            :  *    src/backend/replication/walreceiver.c
+<span class="lineNum">      41 </span>            :  *
+<span class="lineNum">      42 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      43 </span>            :  */
+<span class="lineNum">      44 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      47 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      50 </span>            : #include &quot;access/timeline.h&quot;
+<span class="lineNum">      51 </span>            : #include &quot;access/transam.h&quot;
+<span class="lineNum">      52 </span>            : #include &quot;access/xlog_internal.h&quot;
+<span class="lineNum">      53 </span>            : #include &quot;catalog/pg_authid.h&quot;
+<span class="lineNum">      54 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      55 </span>            : #include &quot;common/ip.h&quot;
+<span class="lineNum">      56 </span>            : #include &quot;funcapi.h&quot;
+<span class="lineNum">      57 </span>            : #include &quot;libpq/pqformat.h&quot;
+<span class="lineNum">      58 </span>            : #include &quot;libpq/pqsignal.h&quot;
+<span class="lineNum">      59 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      60 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      61 </span>            : #include &quot;replication/walreceiver.h&quot;
+<span class="lineNum">      62 </span>            : #include &quot;replication/walsender.h&quot;
+<span class="lineNum">      63 </span>            : #include &quot;storage/ipc.h&quot;
+<span class="lineNum">      64 </span>            : #include &quot;storage/pmsignal.h&quot;
+<span class="lineNum">      65 </span>            : #include &quot;storage/procarray.h&quot;
+<span class="lineNum">      66 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      67 </span>            : #include &quot;utils/guc.h&quot;
+<span class="lineNum">      68 </span>            : #include &quot;utils/pg_lsn.h&quot;
+<span class="lineNum">      69 </span>            : #include &quot;utils/ps_status.h&quot;
+<span class="lineNum">      70 </span>            : #include &quot;utils/resowner.h&quot;
+<span class="lineNum">      71 </span>            : #include &quot;utils/timestamp.h&quot;
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span>            : /* GUC variables */
+<span class="lineNum">      75 </span>            : int         wal_receiver_status_interval;
+<span class="lineNum">      76 </span>            : int         wal_receiver_timeout;
+<span class="lineNum">      77 </span>            : bool        hot_standby_feedback;
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            : /* libpqwalreceiver connection */
+<span class="lineNum">      80 </span>            : static WalReceiverConn *wrconn = NULL;
+<span class="lineNum">      81 </span>            : WalReceiverFunctionsType *WalReceiverFunctions = NULL;
+<span class="lineNum">      82 </span>            : 
+<span class="lineNum">      83 </span>            : #define NAPTIME_PER_CYCLE 100   /* max sleep time between cycles (100ms) */
+<span class="lineNum">      84 </span>            : 
+<span class="lineNum">      85 </span>            : /*
+<span class="lineNum">      86 </span>            :  * These variables are used similarly to openLogFile/SegNo/Off,
+<span class="lineNum">      87 </span>            :  * but for walreceiver to write the XLOG. recvFileTLI is the TimeLineID
+<span class="lineNum">      88 </span>            :  * corresponding the filename of recvFile.
+<span class="lineNum">      89 </span>            :  */
+<span class="lineNum">      90 </span>            : static int  recvFile = -1;
+<span class="lineNum">      91 </span>            : static TimeLineID recvFileTLI = 0;
+<span class="lineNum">      92 </span>            : static XLogSegNo recvSegNo = 0;
+<span class="lineNum">      93 </span>            : static uint32 recvOff = 0;
+<span class="lineNum">      94 </span>            : 
+<span class="lineNum">      95 </span>            : /*
+<span class="lineNum">      96 </span>            :  * Flags set by interrupt handlers of walreceiver for later service in the
+<span class="lineNum">      97 </span>            :  * main loop.
+<span class="lineNum">      98 </span>            :  */
+<span class="lineNum">      99 </span>            : static volatile sig_atomic_t got_SIGHUP = false;
+<span class="lineNum">     100 </span>            : static volatile sig_atomic_t got_SIGTERM = false;
+<span class="lineNum">     101 </span>            : 
+<span class="lineNum">     102 </span>            : /*
+<span class="lineNum">     103 </span>            :  * LogstreamResult indicates the byte positions that we have already
+<span class="lineNum">     104 </span>            :  * written/fsynced.
+<span class="lineNum">     105 </span>            :  */
+<span class="lineNum">     106 </span>            : static struct
+<span class="lineNum">     107 </span>            : {
+<span class="lineNum">     108 </span>            :     XLogRecPtr  Write;          /* last byte + 1 written out in the standby */
+<span class="lineNum">     109 </span>            :     XLogRecPtr  Flush;          /* last byte + 1 flushed in the standby */
+<span class="lineNum">     110 </span>            : }           LogstreamResult;
+<span class="lineNum">     111 </span>            : 
+<span class="lineNum">     112 </span>            : static StringInfoData reply_message;
+<span class="lineNum">     113 </span>            : static StringInfoData incoming_message;
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span>            : /* Prototypes for private functions */
+<span class="lineNum">     116 </span>            : static void WalRcvFetchTimeLineHistoryFiles(TimeLineID first, TimeLineID last);
+<span class="lineNum">     117 </span>            : static void WalRcvWaitForStartPosition(XLogRecPtr *startpoint, TimeLineID *startpointTLI);
+<span class="lineNum">     118 </span>            : static void WalRcvDie(int code, Datum arg);
+<span class="lineNum">     119 </span>            : static void XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len);
+<span class="lineNum">     120 </span>            : static void XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr);
+<span class="lineNum">     121 </span>            : static void XLogWalRcvFlush(bool dying);
+<span class="lineNum">     122 </span>            : static void XLogWalRcvSendReply(bool force, bool requestReply);
+<span class="lineNum">     123 </span>            : static void XLogWalRcvSendHSFeedback(bool immed);
+<span class="lineNum">     124 </span>            : static void ProcessWalSndrMessage(XLogRecPtr walEnd, TimestampTz sendTime);
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span>            : /* Signal handlers */
+<span class="lineNum">     127 </span>            : static void WalRcvSigHupHandler(SIGNAL_ARGS);
+<span class="lineNum">     128 </span>            : static void WalRcvSigUsr1Handler(SIGNAL_ARGS);
+<span class="lineNum">     129 </span>            : static void WalRcvShutdownHandler(SIGNAL_ARGS);
+<span class="lineNum">     130 </span>            : static void WalRcvQuickDieHandler(SIGNAL_ARGS);
+<span class="lineNum">     131 </span>            : 
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span>            : /*
+<span class="lineNum">     134 </span>            :  * Process any interrupts the walreceiver process may have received.
+<span class="lineNum">     135 </span>            :  * This should be called any time the process's latch has become set.
+<span class="lineNum">     136 </span>            :  *
+<span class="lineNum">     137 </span>            :  * Currently, only SIGTERM is of interest.  We can't just exit(1) within the
+<span class="lineNum">     138 </span>            :  * SIGTERM signal handler, because the signal might arrive in the middle of
+<span class="lineNum">     139 </span>            :  * some critical operation, like while we're holding a spinlock.  Instead, the
+<span class="lineNum">     140 </span>            :  * signal handler sets a flag variable as well as setting the process's latch.
+<span class="lineNum">     141 </span>            :  * We must check the flag (by calling ProcessWalRcvInterrupts) anytime the
+<span class="lineNum">     142 </span>            :  * latch has become set.  Operations that could block for a long time, such as
+<span class="lineNum">     143 </span>            :  * reading from a remote server, must pay attention to the latch too; see
+<span class="lineNum">     144 </span>            :  * libpqrcv_PQgetResult for example.
+<a name="145"><span class="lineNum">     145 </span>            :  */</a>
+<span class="lineNum">     146 </span>            : void
+<span class="lineNum">     147 </span><span class="lineNoCov">          0 : ProcessWalRcvInterrupts(void)</span>
+<span class="lineNum">     148 </span>            : {
+<span class="lineNum">     149 </span>            :     /*
+<span class="lineNum">     150 </span>            :      * Although walreceiver interrupt handling doesn't use the same scheme as
+<span class="lineNum">     151 </span>            :      * regular backends, call CHECK_FOR_INTERRUPTS() to make sure we receive
+<span class="lineNum">     152 </span>            :      * any incoming signals on Win32.
+<span class="lineNum">     153 </span>            :      */
+<span class="lineNum">     154 </span><span class="lineNoCov">          0 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     155 </span>            : 
+<span class="lineNum">     156 </span><span class="lineNoCov">          0 :     if (got_SIGTERM)</span>
+<span class="lineNum">     157 </span>            :     {
+<span class="lineNum">     158 </span><span class="lineNoCov">          0 :         ereport(FATAL,</span>
+<span class="lineNum">     159 </span>            :                 (errcode(ERRCODE_ADMIN_SHUTDOWN),
+<span class="lineNum">     160 </span>            :                  errmsg(&quot;terminating walreceiver process due to administrator command&quot;)));
+<span class="lineNum">     161 </span>            :     }
+<span class="lineNum">     162 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span>            : 
+<a name="165"><span class="lineNum">     165 </span>            : /* Main entry point for walreceiver process */</a>
+<span class="lineNum">     166 </span>            : void
+<span class="lineNum">     167 </span><span class="lineNoCov">          0 : WalReceiverMain(void)</span>
+<span class="lineNum">     168 </span>            : {
+<span class="lineNum">     169 </span>            :     char        conninfo[MAXCONNINFO];
+<span class="lineNum">     170 </span>            :     char       *tmp_conninfo;
+<span class="lineNum">     171 </span>            :     char        slotname[NAMEDATALEN];
+<span class="lineNum">     172 </span>            :     XLogRecPtr  startpoint;
+<span class="lineNum">     173 </span>            :     TimeLineID  startpointTLI;
+<span class="lineNum">     174 </span>            :     TimeLineID  primaryTLI;
+<span class="lineNum">     175 </span>            :     bool        first_stream;
+<span class="lineNum">     176 </span><span class="lineNoCov">          0 :     WalRcvData *walrcv = WalRcv;</span>
+<span class="lineNum">     177 </span>            :     TimestampTz last_recv_timestamp;
+<span class="lineNum">     178 </span>            :     TimestampTz now;
+<span class="lineNum">     179 </span>            :     bool        ping_sent;
+<span class="lineNum">     180 </span>            :     char       *err;
+<span class="lineNum">     181 </span><span class="lineNoCov">          0 :     char       *sender_host = NULL;</span>
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :     int         sender_port = 0;</span>
+<span class="lineNum">     183 </span>            : 
+<span class="lineNum">     184 </span>            :     /*
+<span class="lineNum">     185 </span>            :      * WalRcv should be set up already (if we are a backend, we inherit this
+<span class="lineNum">     186 </span>            :      * by fork() or EXEC_BACKEND mechanism from the postmaster).
+<span class="lineNum">     187 </span>            :      */
+<span class="lineNum">     188 </span><span class="lineNoCov">          0 :     Assert(walrcv != NULL);</span>
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span><span class="lineNoCov">          0 :     now = GetCurrentTimestamp();</span>
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span>            :     /*
+<span class="lineNum">     193 </span>            :      * Mark walreceiver as running in shared memory.
+<span class="lineNum">     194 </span>            :      *
+<span class="lineNum">     195 </span>            :      * Do this as early as possible, so that if we fail later on, we'll set
+<span class="lineNum">     196 </span>            :      * state to STOPPED. If we die before this, the startup process will keep
+<span class="lineNum">     197 </span>            :      * waiting for us to start up, until it times out.
+<span class="lineNum">     198 </span>            :      */
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     200 </span><span class="lineNoCov">          0 :     Assert(walrcv-&gt;pid == 0);</span>
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :     switch (walrcv-&gt;walRcvState)</span>
+<span class="lineNum">     202 </span>            :     {
+<span class="lineNum">     203 </span>            :         case WALRCV_STOPPING:
+<span class="lineNum">     204 </span>            :             /* If we've already been requested to stop, don't start up. */
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 :             walrcv-&gt;walRcvState = WALRCV_STOPPED;</span>
+<span class="lineNum">     206 </span>            :             /* fall through */
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span>            :         case WALRCV_STOPPED:
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :             SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     210 </span><span class="lineNoCov">          0 :             proc_exit(1);</span>
+<span class="lineNum">     211 </span>            :             break;
+<span class="lineNum">     212 </span>            : 
+<span class="lineNum">     213 </span>            :         case WALRCV_STARTING:
+<span class="lineNum">     214 </span>            :             /* The usual case */
+<span class="lineNum">     215 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span>            :         case WALRCV_WAITING:
+<span class="lineNum">     218 </span>            :         case WALRCV_STREAMING:
+<span class="lineNum">     219 </span>            :         case WALRCV_RESTARTING:
+<span class="lineNum">     220 </span>            :         default:
+<span class="lineNum">     221 </span>            :             /* Shouldn't happen */
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :             SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 :             elog(PANIC, &quot;walreceiver still running according to shared memory state&quot;);</span>
+<span class="lineNum">     224 </span>            :     }
+<span class="lineNum">     225 </span>            :     /* Advertise our PID so that the startup process can kill us */
+<span class="lineNum">     226 </span><span class="lineNoCov">          0 :     walrcv-&gt;pid = MyProcPid;</span>
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :     walrcv-&gt;walRcvState = WALRCV_STREAMING;</span>
+<span class="lineNum">     228 </span>            : 
+<span class="lineNum">     229 </span>            :     /* Fetch information required to start streaming */
+<span class="lineNum">     230 </span><span class="lineNoCov">          0 :     walrcv-&gt;ready_to_display = false;</span>
+<span class="lineNum">     231 </span><span class="lineNoCov">          0 :     strlcpy(conninfo, (char *) walrcv-&gt;conninfo, MAXCONNINFO);</span>
+<span class="lineNum">     232 </span><span class="lineNoCov">          0 :     strlcpy(slotname, (char *) walrcv-&gt;slotname, NAMEDATALEN);</span>
+<span class="lineNum">     233 </span><span class="lineNoCov">          0 :     startpoint = walrcv-&gt;receiveStart;</span>
+<span class="lineNum">     234 </span><span class="lineNoCov">          0 :     startpointTLI = walrcv-&gt;receiveStartTLI;</span>
+<span class="lineNum">     235 </span>            : 
+<span class="lineNum">     236 </span>            :     /* Initialise to a sanish value */
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 :     walrcv-&gt;lastMsgSendTime =</span>
+<span class="lineNum">     238 </span><span class="lineNoCov">          0 :         walrcv-&gt;lastMsgReceiptTime = walrcv-&gt;latestWalEndTime = now;</span>
+<span class="lineNum">     239 </span>            : 
+<span class="lineNum">     240 </span>            :     /* Report the latch to use to awaken this process */
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :     walrcv-&gt;latch = &amp;MyProc-&gt;procLatch;</span>
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span>            :     /* Arrange to clean up at walreceiver exit */
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 :     on_shmem_exit(WalRcvDie, 0);</span>
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span>            :     /* Properly accept or ignore signals the postmaster might send us */
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :     pqsignal(SIGHUP, WalRcvSigHupHandler);  /* set flag to read config file */</span>
+<span class="lineNum">     250 </span><span class="lineNoCov">          0 :     pqsignal(SIGINT, SIG_IGN);</span>
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :     pqsignal(SIGTERM, WalRcvShutdownHandler);   /* request shutdown */</span>
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :     pqsignal(SIGQUIT, WalRcvQuickDieHandler);   /* hard crash time */</span>
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 :     pqsignal(SIGALRM, SIG_IGN);</span>
+<span class="lineNum">     254 </span><span class="lineNoCov">          0 :     pqsignal(SIGPIPE, SIG_IGN);</span>
+<span class="lineNum">     255 </span><span class="lineNoCov">          0 :     pqsignal(SIGUSR1, WalRcvSigUsr1Handler);</span>
+<span class="lineNum">     256 </span><span class="lineNoCov">          0 :     pqsignal(SIGUSR2, SIG_IGN);</span>
+<span class="lineNum">     257 </span>            : 
+<span class="lineNum">     258 </span>            :     /* Reset some signals that are accepted by postmaster but not here */
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :     pqsignal(SIGCHLD, SIG_DFL);</span>
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span>            :     /* We allow SIGQUIT (quickdie) at all times */
+<span class="lineNum">     262 </span><span class="lineNoCov">          0 :     sigdelset(&amp;BlockSig, SIGQUIT);</span>
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span>            :     /* Load the libpq-specific functions */
+<span class="lineNum">     265 </span><span class="lineNoCov">          0 :     load_file(&quot;libpqwalreceiver&quot;, false);</span>
+<span class="lineNum">     266 </span><span class="lineNoCov">          0 :     if (WalReceiverFunctions == NULL)</span>
+<span class="lineNum">     267 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;libpqwalreceiver didn't initialize correctly&quot;);</span>
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span>            :     /* Unblock signals (they were blocked when the postmaster forked us) */
+<span class="lineNum">     270 </span><span class="lineNoCov">          0 :     PG_SETMASK(&amp;UnBlockSig);</span>
+<span class="lineNum">     271 </span>            : 
+<span class="lineNum">     272 </span>            :     /* Establish the connection to the primary for XLOG streaming */
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 :     wrconn = walrcv_connect(conninfo, false, cluster_name[0] ? cluster_name : &quot;walreceiver&quot;, &amp;err);</span>
+<span class="lineNum">     274 </span><span class="lineNoCov">          0 :     if (!wrconn)</span>
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     276 </span>            :                 (errmsg(&quot;could not connect to the primary server: %s&quot;, err)));
+<span class="lineNum">     277 </span>            : 
+<span class="lineNum">     278 </span>            :     /*
+<span class="lineNum">     279 </span>            :      * Save user-visible connection string.  This clobbers the original
+<span class="lineNum">     280 </span>            :      * conninfo, for security. Also save host and port of the sender server
+<span class="lineNum">     281 </span>            :      * this walreceiver is connected to.
+<span class="lineNum">     282 </span>            :      */
+<span class="lineNum">     283 </span><span class="lineNoCov">          0 :     tmp_conninfo = walrcv_get_conninfo(wrconn);</span>
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :     walrcv_get_senderinfo(wrconn, &amp;sender_host, &amp;sender_port);</span>
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     286 </span><span class="lineNoCov">          0 :     memset(walrcv-&gt;conninfo, 0, MAXCONNINFO);</span>
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :     if (tmp_conninfo)</span>
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :         strlcpy((char *) walrcv-&gt;conninfo, tmp_conninfo, MAXCONNINFO);</span>
+<span class="lineNum">     289 </span>            : 
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :     memset(walrcv-&gt;sender_host, 0, NI_MAXHOST);</span>
+<span class="lineNum">     291 </span><span class="lineNoCov">          0 :     if (sender_host)</span>
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :         strlcpy((char *) walrcv-&gt;sender_host, sender_host, NI_MAXHOST);</span>
+<span class="lineNum">     293 </span>            : 
+<span class="lineNum">     294 </span><span class="lineNoCov">          0 :     walrcv-&gt;sender_port = sender_port;</span>
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :     walrcv-&gt;ready_to_display = true;</span>
+<span class="lineNum">     296 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :     if (tmp_conninfo)</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :         pfree(tmp_conninfo);</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span><span class="lineNoCov">          0 :     if (sender_host)</span>
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :         pfree(sender_host);</span>
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span><span class="lineNoCov">          0 :     first_stream = true;</span>
+<span class="lineNum">     305 </span>            :     for (;;)
+<span class="lineNum">     306 </span>            :     {
+<span class="lineNum">     307 </span>            :         char       *primary_sysid;
+<span class="lineNum">     308 </span>            :         char        standby_sysid[32];
+<span class="lineNum">     309 </span>            :         WalRcvStreamOptions options;
+<span class="lineNum">     310 </span>            : 
+<span class="lineNum">     311 </span>            :         /*
+<span class="lineNum">     312 </span>            :          * Check that we're connected to a valid server using the
+<span class="lineNum">     313 </span>            :          * IDENTIFY_SYSTEM replication command.
+<span class="lineNum">     314 </span>            :          */
+<span class="lineNum">     315 </span><span class="lineNoCov">          0 :         primary_sysid = walrcv_identify_system(wrconn, &amp;primaryTLI);</span>
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span><span class="lineNoCov">          0 :         snprintf(standby_sysid, sizeof(standby_sysid), UINT64_FORMAT,</span>
+<span class="lineNum">     318 </span>            :                  GetSystemIdentifier());
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :         if (strcmp(primary_sysid, standby_sysid) != 0)</span>
+<span class="lineNum">     320 </span>            :         {
+<span class="lineNum">     321 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     322 </span>            :                     (errmsg(&quot;database system identifier differs between the primary and standby&quot;),
+<span class="lineNum">     323 </span>            :                      errdetail(&quot;The primary's identifier is %s, the standby's identifier is %s.&quot;,
+<span class="lineNum">     324 </span>            :                                primary_sysid, standby_sysid)));
+<span class="lineNum">     325 </span>            :         }
+<span class="lineNum">     326 </span>            : 
+<span class="lineNum">     327 </span>            :         /*
+<span class="lineNum">     328 </span>            :          * Confirm that the current timeline of the primary is the same or
+<span class="lineNum">     329 </span>            :          * ahead of ours.
+<span class="lineNum">     330 </span>            :          */
+<span class="lineNum">     331 </span><span class="lineNoCov">          0 :         if (primaryTLI &lt; startpointTLI)</span>
+<span class="lineNum">     332 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     333 </span>            :                     (errmsg(&quot;highest timeline %u of the primary is behind recovery timeline %u&quot;,
+<span class="lineNum">     334 </span>            :                             primaryTLI, startpointTLI)));
+<span class="lineNum">     335 </span>            : 
+<span class="lineNum">     336 </span>            :         /*
+<span class="lineNum">     337 </span>            :          * Get any missing history files. We do this always, even when we're
+<span class="lineNum">     338 </span>            :          * not interested in that timeline, so that if we're promoted to
+<span class="lineNum">     339 </span>            :          * become the master later on, we don't select the same timeline that
+<span class="lineNum">     340 </span>            :          * was already used in the current master. This isn't bullet-proof -
+<span class="lineNum">     341 </span>            :          * you'll need some external software to manage your cluster if you
+<span class="lineNum">     342 </span>            :          * need to ensure that a unique timeline id is chosen in every case,
+<span class="lineNum">     343 </span>            :          * but let's avoid the confusion of timeline id collisions where we
+<span class="lineNum">     344 </span>            :          * can.
+<span class="lineNum">     345 </span>            :          */
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :         WalRcvFetchTimeLineHistoryFiles(startpointTLI, primaryTLI);</span>
+<span class="lineNum">     347 </span>            : 
+<span class="lineNum">     348 </span>            :         /*
+<span class="lineNum">     349 </span>            :          * Start streaming.
+<span class="lineNum">     350 </span>            :          *
+<span class="lineNum">     351 </span>            :          * We'll try to start at the requested starting point and timeline,
+<span class="lineNum">     352 </span>            :          * even if it's different from the server's latest timeline. In case
+<span class="lineNum">     353 </span>            :          * we've already reached the end of the old timeline, the server will
+<span class="lineNum">     354 </span>            :          * finish the streaming immediately, and we will go back to await
+<span class="lineNum">     355 </span>            :          * orders from the startup process. If recovery_target_timeline is
+<span class="lineNum">     356 </span>            :          * 'latest', the startup process will scan pg_wal and find the new
+<span class="lineNum">     357 </span>            :          * history file, bump recovery target timeline, and ask us to restart
+<span class="lineNum">     358 </span>            :          * on the new timeline.
+<span class="lineNum">     359 </span>            :          */
+<span class="lineNum">     360 </span><span class="lineNoCov">          0 :         options.logical = false;</span>
+<span class="lineNum">     361 </span><span class="lineNoCov">          0 :         options.startpoint = startpoint;</span>
+<span class="lineNum">     362 </span><span class="lineNoCov">          0 :         options.slotname = slotname[0] != '\0' ? slotname : NULL;</span>
+<span class="lineNum">     363 </span><span class="lineNoCov">          0 :         options.proto.physical.startpointTLI = startpointTLI;</span>
+<span class="lineNum">     364 </span><span class="lineNoCov">          0 :         ThisTimeLineID = startpointTLI;</span>
+<span class="lineNum">     365 </span><span class="lineNoCov">          0 :         if (walrcv_startstreaming(wrconn, &amp;options))</span>
+<span class="lineNum">     366 </span>            :         {
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :             if (first_stream)</span>
+<span class="lineNum">     368 </span><span class="lineNoCov">          0 :                 ereport(LOG,</span>
+<span class="lineNum">     369 </span>            :                         (errmsg(&quot;started streaming WAL from primary at %X/%X on timeline %u&quot;,
+<span class="lineNum">     370 </span>            :                                 (uint32) (startpoint &gt;&gt; 32), (uint32) startpoint,
+<span class="lineNum">     371 </span>            :                                 startpointTLI)));
+<span class="lineNum">     372 </span>            :             else
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 :                 ereport(LOG,</span>
+<span class="lineNum">     374 </span>            :                         (errmsg(&quot;restarted WAL streaming at %X/%X on timeline %u&quot;,
+<span class="lineNum">     375 </span>            :                                 (uint32) (startpoint &gt;&gt; 32), (uint32) startpoint,
+<span class="lineNum">     376 </span>            :                                 startpointTLI)));
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :             first_stream = false;</span>
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span>            :             /* Initialize LogstreamResult and buffers for processing messages */
+<span class="lineNum">     380 </span><span class="lineNoCov">          0 :             LogstreamResult.Write = LogstreamResult.Flush = GetXLogReplayRecPtr(NULL);</span>
+<span class="lineNum">     381 </span><span class="lineNoCov">          0 :             initStringInfo(&amp;reply_message);</span>
+<span class="lineNum">     382 </span><span class="lineNoCov">          0 :             initStringInfo(&amp;incoming_message);</span>
+<span class="lineNum">     383 </span>            : 
+<span class="lineNum">     384 </span>            :             /* Initialize the last recv timestamp */
+<span class="lineNum">     385 </span><span class="lineNoCov">          0 :             last_recv_timestamp = GetCurrentTimestamp();</span>
+<span class="lineNum">     386 </span><span class="lineNoCov">          0 :             ping_sent = false;</span>
+<span class="lineNum">     387 </span>            : 
+<span class="lineNum">     388 </span>            :             /* Loop until end-of-streaming or error */
+<span class="lineNum">     389 </span>            :             for (;;)
+<span class="lineNum">     390 </span>            :             {
+<span class="lineNum">     391 </span>            :                 char       *buf;
+<span class="lineNum">     392 </span>            :                 int         len;
+<span class="lineNum">     393 </span><span class="lineNoCov">          0 :                 bool        endofwal = false;</span>
+<span class="lineNum">     394 </span><span class="lineNoCov">          0 :                 pgsocket    wait_fd = PGINVALID_SOCKET;</span>
+<span class="lineNum">     395 </span>            :                 int         rc;
+<span class="lineNum">     396 </span>            : 
+<span class="lineNum">     397 </span>            :                 /*
+<span class="lineNum">     398 </span>            :                  * Exit walreceiver if we're not in recovery. This should not
+<span class="lineNum">     399 </span>            :                  * happen, but cross-check the status here.
+<span class="lineNum">     400 </span>            :                  */
+<span class="lineNum">     401 </span><span class="lineNoCov">          0 :                 if (!RecoveryInProgress())</span>
+<span class="lineNum">     402 </span><span class="lineNoCov">          0 :                     ereport(FATAL,</span>
+<span class="lineNum">     403 </span>            :                             (errmsg(&quot;cannot continue WAL streaming, recovery has already ended&quot;)));
+<span class="lineNum">     404 </span>            : 
+<span class="lineNum">     405 </span>            :                 /* Process any requests or signals received recently */
+<span class="lineNum">     406 </span><span class="lineNoCov">          0 :                 ProcessWalRcvInterrupts();</span>
+<span class="lineNum">     407 </span>            : 
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :                 if (got_SIGHUP)</span>
+<span class="lineNum">     409 </span>            :                 {
+<span class="lineNum">     410 </span><span class="lineNoCov">          0 :                     got_SIGHUP = false;</span>
+<span class="lineNum">     411 </span><span class="lineNoCov">          0 :                     ProcessConfigFile(PGC_SIGHUP);</span>
+<span class="lineNum">     412 </span><span class="lineNoCov">          0 :                     XLogWalRcvSendHSFeedback(true);</span>
+<span class="lineNum">     413 </span>            :                 }
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span>            :                 /* See if we can read data immediately */
+<span class="lineNum">     416 </span><span class="lineNoCov">          0 :                 len = walrcv_receive(wrconn, &amp;buf, &amp;wait_fd);</span>
+<span class="lineNum">     417 </span><span class="lineNoCov">          0 :                 if (len != 0)</span>
+<span class="lineNum">     418 </span>            :                 {
+<span class="lineNum">     419 </span>            :                     /*
+<span class="lineNum">     420 </span>            :                      * Process the received data, and any subsequent data we
+<span class="lineNum">     421 </span>            :                      * can read without blocking.
+<span class="lineNum">     422 </span>            :                      */
+<span class="lineNum">     423 </span>            :                     for (;;)
+<span class="lineNum">     424 </span>            :                     {
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :                         if (len &gt; 0)</span>
+<span class="lineNum">     426 </span>            :                         {
+<span class="lineNum">     427 </span>            :                             /*
+<span class="lineNum">     428 </span>            :                              * Something was received from master, so reset
+<span class="lineNum">     429 </span>            :                              * timeout
+<span class="lineNum">     430 </span>            :                              */
+<span class="lineNum">     431 </span><span class="lineNoCov">          0 :                             last_recv_timestamp = GetCurrentTimestamp();</span>
+<span class="lineNum">     432 </span><span class="lineNoCov">          0 :                             ping_sent = false;</span>
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 :                             XLogWalRcvProcessMsg(buf[0], &amp;buf[1], len - 1);</span>
+<span class="lineNum">     434 </span>            :                         }
+<span class="lineNum">     435 </span><span class="lineNoCov">          0 :                         else if (len == 0)</span>
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :                             break;</span>
+<span class="lineNum">     437 </span><span class="lineNoCov">          0 :                         else if (len &lt; 0)</span>
+<span class="lineNum">     438 </span>            :                         {
+<span class="lineNum">     439 </span><span class="lineNoCov">          0 :                             ereport(LOG,</span>
+<span class="lineNum">     440 </span>            :                                     (errmsg(&quot;replication terminated by primary server&quot;),
+<span class="lineNum">     441 </span>            :                                      errdetail(&quot;End of WAL reached on timeline %u at %X/%X.&quot;,
+<span class="lineNum">     442 </span>            :                                                startpointTLI,
+<span class="lineNum">     443 </span>            :                                                (uint32) (LogstreamResult.Write &gt;&gt; 32), (uint32) LogstreamResult.Write)));
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :                             endofwal = true;</span>
+<span class="lineNum">     445 </span><span class="lineNoCov">          0 :                             break;</span>
+<span class="lineNum">     446 </span>            :                         }
+<span class="lineNum">     447 </span><span class="lineNoCov">          0 :                         len = walrcv_receive(wrconn, &amp;buf, &amp;wait_fd);</span>
+<span class="lineNum">     448 </span><span class="lineNoCov">          0 :                     }</span>
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span>            :                     /* Let the master know that we received some data. */
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :                     XLogWalRcvSendReply(false, false);</span>
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span>            :                     /*
+<span class="lineNum">     454 </span>            :                      * If we've written some records, flush them to disk and
+<span class="lineNum">     455 </span>            :                      * let the startup process and primary server know about
+<span class="lineNum">     456 </span>            :                      * them.
+<span class="lineNum">     457 </span>            :                      */
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 :                     XLogWalRcvFlush(false);</span>
+<span class="lineNum">     459 </span>            :                 }
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span>            :                 /* Check if we need to exit the streaming loop. */
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :                 if (endofwal)</span>
+<span class="lineNum">     463 </span><span class="lineNoCov">          0 :                     break;</span>
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span>            :                 /*
+<span class="lineNum">     466 </span>            :                  * Ideally we would reuse a WaitEventSet object repeatedly
+<span class="lineNum">     467 </span>            :                  * here to avoid the overheads of WaitLatchOrSocket on epoll
+<span class="lineNum">     468 </span>            :                  * systems, but we can't be sure that libpq (or any other
+<span class="lineNum">     469 </span>            :                  * walreceiver implementation) has the same socket (even if
+<span class="lineNum">     470 </span>            :                  * the fd is the same number, it may have been closed and
+<span class="lineNum">     471 </span>            :                  * reopened since the last time).  In future, if there is a
+<span class="lineNum">     472 </span>            :                  * function for removing sockets from WaitEventSet, then we
+<span class="lineNum">     473 </span>            :                  * could add and remove just the socket each time, potentially
+<span class="lineNum">     474 </span>            :                  * avoiding some system calls.
+<span class="lineNum">     475 </span>            :                  */
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 :                 Assert(wait_fd != PGINVALID_SOCKET);</span>
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :                 rc = WaitLatchOrSocket(walrcv-&gt;latch,</span>
+<span class="lineNum">     478 </span>            :                                        WL_EXIT_ON_PM_DEATH | WL_SOCKET_READABLE |
+<span class="lineNum">     479 </span>            :                                        WL_TIMEOUT | WL_LATCH_SET,
+<span class="lineNum">     480 </span>            :                                        wait_fd,
+<span class="lineNum">     481 </span>            :                                        NAPTIME_PER_CYCLE,
+<span class="lineNum">     482 </span>            :                                        WAIT_EVENT_WAL_RECEIVER_MAIN);
+<span class="lineNum">     483 </span><span class="lineNoCov">          0 :                 if (rc &amp; WL_LATCH_SET)</span>
+<span class="lineNum">     484 </span>            :                 {
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :                     ResetLatch(walrcv-&gt;latch);</span>
+<span class="lineNum">     486 </span><span class="lineNoCov">          0 :                     ProcessWalRcvInterrupts();</span>
+<span class="lineNum">     487 </span>            : 
+<span class="lineNum">     488 </span><span class="lineNoCov">          0 :                     if (walrcv-&gt;force_reply)</span>
+<span class="lineNum">     489 </span>            :                     {
+<span class="lineNum">     490 </span>            :                         /*
+<span class="lineNum">     491 </span>            :                          * The recovery process has asked us to send apply
+<span class="lineNum">     492 </span>            :                          * feedback now.  Make sure the flag is really set to
+<span class="lineNum">     493 </span>            :                          * false in shared memory before sending the reply, so
+<span class="lineNum">     494 </span>            :                          * we don't miss a new request for a reply.
+<span class="lineNum">     495 </span>            :                          */
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :                         walrcv-&gt;force_reply = false;</span>
+<span class="lineNum">     497 </span><span class="lineNoCov">          0 :                         pg_memory_barrier();</span>
+<span class="lineNum">     498 </span><span class="lineNoCov">          0 :                         XLogWalRcvSendReply(true, false);</span>
+<span class="lineNum">     499 </span>            :                     }
+<span class="lineNum">     500 </span>            :                 }
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :                 if (rc &amp; WL_TIMEOUT)</span>
+<span class="lineNum">     502 </span>            :                 {
+<span class="lineNum">     503 </span>            :                     /*
+<span class="lineNum">     504 </span>            :                      * We didn't receive anything new. If we haven't heard
+<span class="lineNum">     505 </span>            :                      * anything from the server for more than
+<span class="lineNum">     506 </span>            :                      * wal_receiver_timeout / 2, ping the server. Also, if
+<span class="lineNum">     507 </span>            :                      * it's been longer than wal_receiver_status_interval
+<span class="lineNum">     508 </span>            :                      * since the last update we sent, send a status update to
+<span class="lineNum">     509 </span>            :                      * the master anyway, to report any progress in applying
+<span class="lineNum">     510 </span>            :                      * WAL.
+<span class="lineNum">     511 </span>            :                      */
+<span class="lineNum">     512 </span><span class="lineNoCov">          0 :                     bool        requestReply = false;</span>
+<span class="lineNum">     513 </span>            : 
+<span class="lineNum">     514 </span>            :                     /*
+<span class="lineNum">     515 </span>            :                      * Check if time since last receive from standby has
+<span class="lineNum">     516 </span>            :                      * reached the configured limit.
+<span class="lineNum">     517 </span>            :                      */
+<span class="lineNum">     518 </span><span class="lineNoCov">          0 :                     if (wal_receiver_timeout &gt; 0)</span>
+<span class="lineNum">     519 </span>            :                     {
+<span class="lineNum">     520 </span><span class="lineNoCov">          0 :                         TimestampTz now = GetCurrentTimestamp();</span>
+<span class="lineNum">     521 </span>            :                         TimestampTz timeout;
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span><span class="lineNoCov">          0 :                         timeout =</span>
+<span class="lineNum">     524 </span><span class="lineNoCov">          0 :                             TimestampTzPlusMilliseconds(last_recv_timestamp,</span>
+<span class="lineNum">     525 </span>            :                                                         wal_receiver_timeout);
+<span class="lineNum">     526 </span>            : 
+<span class="lineNum">     527 </span><span class="lineNoCov">          0 :                         if (now &gt;= timeout)</span>
+<span class="lineNum">     528 </span><span class="lineNoCov">          0 :                             ereport(ERROR,</span>
+<span class="lineNum">     529 </span>            :                                     (errmsg(&quot;terminating walreceiver due to timeout&quot;)));
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span>            :                         /*
+<span class="lineNum">     532 </span>            :                          * We didn't receive anything new, for half of
+<span class="lineNum">     533 </span>            :                          * receiver replication timeout. Ping the server.
+<span class="lineNum">     534 </span>            :                          */
+<span class="lineNum">     535 </span><span class="lineNoCov">          0 :                         if (!ping_sent)</span>
+<span class="lineNum">     536 </span>            :                         {
+<span class="lineNum">     537 </span><span class="lineNoCov">          0 :                             timeout = TimestampTzPlusMilliseconds(last_recv_timestamp,</span>
+<span class="lineNum">     538 </span>            :                                                                   (wal_receiver_timeout / 2));
+<span class="lineNum">     539 </span><span class="lineNoCov">          0 :                             if (now &gt;= timeout)</span>
+<span class="lineNum">     540 </span>            :                             {
+<span class="lineNum">     541 </span><span class="lineNoCov">          0 :                                 requestReply = true;</span>
+<span class="lineNum">     542 </span><span class="lineNoCov">          0 :                                 ping_sent = true;</span>
+<span class="lineNum">     543 </span>            :                             }
+<span class="lineNum">     544 </span>            :                         }
+<span class="lineNum">     545 </span>            :                     }
+<span class="lineNum">     546 </span>            : 
+<span class="lineNum">     547 </span><span class="lineNoCov">          0 :                     XLogWalRcvSendReply(requestReply, requestReply);</span>
+<span class="lineNum">     548 </span><span class="lineNoCov">          0 :                     XLogWalRcvSendHSFeedback(false);</span>
+<span class="lineNum">     549 </span>            :                 }
+<span class="lineNum">     550 </span><span class="lineNoCov">          0 :             }</span>
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span>            :             /*
+<span class="lineNum">     553 </span>            :              * The backend finished streaming. Exit streaming COPY-mode from
+<span class="lineNum">     554 </span>            :              * our side, too.
+<span class="lineNum">     555 </span>            :              */
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :             walrcv_endstreaming(wrconn, &amp;primaryTLI);</span>
+<span class="lineNum">     557 </span>            : 
+<span class="lineNum">     558 </span>            :             /*
+<span class="lineNum">     559 </span>            :              * If the server had switched to a new timeline that we didn't
+<span class="lineNum">     560 </span>            :              * know about when we began streaming, fetch its timeline history
+<span class="lineNum">     561 </span>            :              * file now.
+<span class="lineNum">     562 </span>            :              */
+<span class="lineNum">     563 </span><span class="lineNoCov">          0 :             WalRcvFetchTimeLineHistoryFiles(startpointTLI, primaryTLI);</span>
+<span class="lineNum">     564 </span>            :         }
+<span class="lineNum">     565 </span>            :         else
+<span class="lineNum">     566 </span><span class="lineNoCov">          0 :             ereport(LOG,</span>
+<span class="lineNum">     567 </span>            :                     (errmsg(&quot;primary server contains no more WAL on requested timeline %u&quot;,
+<span class="lineNum">     568 </span>            :                             startpointTLI)));
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span>            :         /*
+<span class="lineNum">     571 </span>            :          * End of WAL reached on the requested timeline. Close the last
+<span class="lineNum">     572 </span>            :          * segment, and await for new orders from the startup process.
+<span class="lineNum">     573 </span>            :          */
+<span class="lineNum">     574 </span><span class="lineNoCov">          0 :         if (recvFile &gt;= 0)</span>
+<span class="lineNum">     575 </span>            :         {
+<span class="lineNum">     576 </span>            :             char        xlogfname[MAXFNAMELEN];
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span><span class="lineNoCov">          0 :             XLogWalRcvFlush(false);</span>
+<span class="lineNum">     579 </span><span class="lineNoCov">          0 :             if (close(recvFile) != 0)</span>
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :                 ereport(PANIC,</span>
+<span class="lineNum">     581 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     582 </span>            :                          errmsg(&quot;could not close log segment %s: %m&quot;,
+<span class="lineNum">     583 </span>            :                                 XLogFileNameP(recvFileTLI, recvSegNo))));
+<span class="lineNum">     584 </span>            : 
+<span class="lineNum">     585 </span>            :             /*
+<span class="lineNum">     586 </span>            :              * Create .done file forcibly to prevent the streamed segment from
+<span class="lineNum">     587 </span>            :              * being archived later.
+<span class="lineNum">     588 </span>            :              */
+<span class="lineNum">     589 </span><span class="lineNoCov">          0 :             XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);</span>
+<span class="lineNum">     590 </span><span class="lineNoCov">          0 :             if (XLogArchiveMode != ARCHIVE_MODE_ALWAYS)</span>
+<span class="lineNum">     591 </span><span class="lineNoCov">          0 :                 XLogArchiveForceDone(xlogfname);</span>
+<span class="lineNum">     592 </span>            :             else
+<span class="lineNum">     593 </span><span class="lineNoCov">          0 :                 XLogArchiveNotify(xlogfname);</span>
+<span class="lineNum">     594 </span>            :         }
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :         recvFile = -1;</span>
+<span class="lineNum">     596 </span>            : 
+<span class="lineNum">     597 </span><span class="lineNoCov">          0 :         elog(DEBUG1, &quot;walreceiver ended streaming and awaits new instructions&quot;);</span>
+<span class="lineNum">     598 </span><span class="lineNoCov">          0 :         WalRcvWaitForStartPosition(&amp;startpoint, &amp;startpointTLI);</span>
+<span class="lineNum">     599 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     600 </span>            :     /* not reached */
+<span class="lineNum">     601 </span>            : }
+<span class="lineNum">     602 </span>            : 
+<span class="lineNum">     603 </span>            : /*
+<span class="lineNum">     604 </span>            :  * Wait for startup process to set receiveStart and receiveStartTLI.
+<a name="605"><span class="lineNum">     605 </span>            :  */</a>
+<span class="lineNum">     606 </span>            : static void
+<span class="lineNum">     607 </span><span class="lineNoCov">          0 : WalRcvWaitForStartPosition(XLogRecPtr *startpoint, TimeLineID *startpointTLI)</span>
+<span class="lineNum">     608 </span>            : {
+<span class="lineNum">     609 </span><span class="lineNoCov">          0 :     WalRcvData *walrcv = WalRcv;</span>
+<span class="lineNum">     610 </span>            :     int         state;
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :     state = walrcv-&gt;walRcvState;</span>
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :     if (state != WALRCV_STREAMING)</span>
+<span class="lineNum">     615 </span>            :     {
+<span class="lineNum">     616 </span><span class="lineNoCov">          0 :         SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :         if (state == WALRCV_STOPPING)</span>
+<span class="lineNum">     618 </span><span class="lineNoCov">          0 :             proc_exit(0);</span>
+<span class="lineNum">     619 </span>            :         else
+<span class="lineNum">     620 </span><span class="lineNoCov">          0 :             elog(FATAL, &quot;unexpected walreceiver state&quot;);</span>
+<span class="lineNum">     621 </span>            :     }
+<span class="lineNum">     622 </span><span class="lineNoCov">          0 :     walrcv-&gt;walRcvState = WALRCV_WAITING;</span>
+<span class="lineNum">     623 </span><span class="lineNoCov">          0 :     walrcv-&gt;receiveStart = InvalidXLogRecPtr;</span>
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :     walrcv-&gt;receiveStartTLI = 0;</span>
+<span class="lineNum">     625 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     626 </span>            : 
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :     if (update_process_title)</span>
+<span class="lineNum">     628 </span><span class="lineNoCov">          0 :         set_ps_display(&quot;idle&quot;, false);</span>
+<span class="lineNum">     629 </span>            : 
+<span class="lineNum">     630 </span>            :     /*
+<span class="lineNum">     631 </span>            :      * nudge startup process to notice that we've stopped streaming and are
+<span class="lineNum">     632 </span>            :      * now waiting for instructions.
+<span class="lineNum">     633 </span>            :      */
+<span class="lineNum">     634 </span><span class="lineNoCov">          0 :     WakeupRecovery();</span>
+<span class="lineNum">     635 </span>            :     for (;;)
+<span class="lineNum">     636 </span>            :     {
+<span class="lineNum">     637 </span><span class="lineNoCov">          0 :         ResetLatch(walrcv-&gt;latch);</span>
+<span class="lineNum">     638 </span>            : 
+<span class="lineNum">     639 </span><span class="lineNoCov">          0 :         ProcessWalRcvInterrupts();</span>
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span><span class="lineNoCov">          0 :         SpinLockAcquire(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :         Assert(walrcv-&gt;walRcvState == WALRCV_RESTARTING ||</span>
+<span class="lineNum">     643 </span>            :                walrcv-&gt;walRcvState == WALRCV_WAITING ||
+<span class="lineNum">     644 </span>            :                walrcv-&gt;walRcvState == WALRCV_STOPPING);
+<span class="lineNum">     645 </span><span class="lineNoCov">          0 :         if (walrcv-&gt;walRcvState == WALRCV_RESTARTING)</span>
+<span class="lineNum">     646 </span>            :         {
+<span class="lineNum">     647 </span>            :             /* we don't expect primary_conninfo to change */
+<span class="lineNum">     648 </span><span class="lineNoCov">          0 :             *startpoint = walrcv-&gt;receiveStart;</span>
+<span class="lineNum">     649 </span><span class="lineNoCov">          0 :             *startpointTLI = walrcv-&gt;receiveStartTLI;</span>
+<span class="lineNum">     650 </span><span class="lineNoCov">          0 :             walrcv-&gt;walRcvState = WALRCV_STREAMING;</span>
+<span class="lineNum">     651 </span><span class="lineNoCov">          0 :             SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     652 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     653 </span>            :         }
+<span class="lineNum">     654 </span><span class="lineNoCov">          0 :         if (walrcv-&gt;walRcvState == WALRCV_STOPPING)</span>
+<span class="lineNum">     655 </span>            :         {
+<span class="lineNum">     656 </span>            :             /*
+<span class="lineNum">     657 </span>            :              * We should've received SIGTERM if the startup process wants us
+<span class="lineNum">     658 </span>            :              * to die, but might as well check it here too.
+<span class="lineNum">     659 </span>            :              */
+<span class="lineNum">     660 </span><span class="lineNoCov">          0 :             SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     661 </span><span class="lineNoCov">          0 :             exit(1);</span>
+<span class="lineNum">     662 </span>            :         }
+<span class="lineNum">     663 </span><span class="lineNoCov">          0 :         SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     664 </span>            : 
+<span class="lineNum">     665 </span><span class="lineNoCov">          0 :         (void) WaitLatch(walrcv-&gt;latch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0,</span>
+<span class="lineNum">     666 </span>            :                          WAIT_EVENT_WAL_RECEIVER_WAIT_START);
+<span class="lineNum">     667 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     668 </span>            : 
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :     if (update_process_title)</span>
+<span class="lineNum">     670 </span>            :     {
+<span class="lineNum">     671 </span>            :         char        activitymsg[50];
+<span class="lineNum">     672 </span>            : 
+<span class="lineNum">     673 </span><span class="lineNoCov">          0 :         snprintf(activitymsg, sizeof(activitymsg), &quot;restarting at %X/%X&quot;,</span>
+<span class="lineNum">     674 </span><span class="lineNoCov">          0 :                  (uint32) (*startpoint &gt;&gt; 32),</span>
+<span class="lineNum">     675 </span><span class="lineNoCov">          0 :                  (uint32) *startpoint);</span>
+<span class="lineNum">     676 </span><span class="lineNoCov">          0 :         set_ps_display(activitymsg, false);</span>
+<span class="lineNum">     677 </span>            :     }
+<span class="lineNum">     678 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     679 </span>            : 
+<span class="lineNum">     680 </span>            : /*
+<span class="lineNum">     681 </span>            :  * Fetch any missing timeline history files between 'first' and 'last'
+<span class="lineNum">     682 </span>            :  * (inclusive) from the server.
+<a name="683"><span class="lineNum">     683 </span>            :  */</a>
+<span class="lineNum">     684 </span>            : static void
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 : WalRcvFetchTimeLineHistoryFiles(TimeLineID first, TimeLineID last)</span>
+<span class="lineNum">     686 </span>            : {
+<span class="lineNum">     687 </span>            :     TimeLineID  tli;
+<span class="lineNum">     688 </span>            : 
+<span class="lineNum">     689 </span><span class="lineNoCov">          0 :     for (tli = first; tli &lt;= last; tli++)</span>
+<span class="lineNum">     690 </span>            :     {
+<span class="lineNum">     691 </span>            :         /* there's no history file for timeline 1 */
+<span class="lineNum">     692 </span><span class="lineNoCov">          0 :         if (tli != 1 &amp;&amp; !existsTimeLineHistory(tli))</span>
+<span class="lineNum">     693 </span>            :         {
+<span class="lineNum">     694 </span>            :             char       *fname;
+<span class="lineNum">     695 </span>            :             char       *content;
+<span class="lineNum">     696 </span>            :             int         len;
+<span class="lineNum">     697 </span>            :             char        expectedfname[MAXFNAMELEN];
+<span class="lineNum">     698 </span>            : 
+<span class="lineNum">     699 </span><span class="lineNoCov">          0 :             ereport(LOG,</span>
+<span class="lineNum">     700 </span>            :                     (errmsg(&quot;fetching timeline history file for timeline %u from primary server&quot;,
+<span class="lineNum">     701 </span>            :                             tli)));
+<span class="lineNum">     702 </span>            : 
+<span class="lineNum">     703 </span><span class="lineNoCov">          0 :             walrcv_readtimelinehistoryfile(wrconn, tli, &amp;fname, &amp;content, &amp;len);</span>
+<span class="lineNum">     704 </span>            : 
+<span class="lineNum">     705 </span>            :             /*
+<span class="lineNum">     706 </span>            :              * Check that the filename on the master matches what we
+<span class="lineNum">     707 </span>            :              * calculated ourselves. This is just a sanity check, it should
+<span class="lineNum">     708 </span>            :              * always match.
+<span class="lineNum">     709 </span>            :              */
+<span class="lineNum">     710 </span><span class="lineNoCov">          0 :             TLHistoryFileName(expectedfname, tli);</span>
+<span class="lineNum">     711 </span><span class="lineNoCov">          0 :             if (strcmp(fname, expectedfname) != 0)</span>
+<span class="lineNum">     712 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     713 </span>            :                         (errcode(ERRCODE_PROTOCOL_VIOLATION),
+<span class="lineNum">     714 </span>            :                          errmsg_internal(&quot;primary reported unexpected file name for timeline history file of timeline %u&quot;,
+<span class="lineNum">     715 </span>            :                                          tli)));
+<span class="lineNum">     716 </span>            : 
+<span class="lineNum">     717 </span>            :             /*
+<span class="lineNum">     718 </span>            :              * Write the file to pg_wal.
+<span class="lineNum">     719 </span>            :              */
+<span class="lineNum">     720 </span><span class="lineNoCov">          0 :             writeTimeLineHistoryFile(tli, content, len);</span>
+<span class="lineNum">     721 </span>            : 
+<span class="lineNum">     722 </span><span class="lineNoCov">          0 :             pfree(fname);</span>
+<span class="lineNum">     723 </span><span class="lineNoCov">          0 :             pfree(content);</span>
+<span class="lineNum">     724 </span>            :         }
+<span class="lineNum">     725 </span>            :     }
+<span class="lineNum">     726 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     727 </span>            : 
+<span class="lineNum">     728 </span>            : /*
+<span class="lineNum">     729 </span>            :  * Mark us as STOPPED in shared memory at exit.
+<a name="730"><span class="lineNum">     730 </span>            :  */</a>
+<span class="lineNum">     731 </span>            : static void
+<span class="lineNum">     732 </span><span class="lineNoCov">          0 : WalRcvDie(int code, Datum arg)</span>
+<span class="lineNum">     733 </span>            : {
+<span class="lineNum">     734 </span><span class="lineNoCov">          0 :     WalRcvData *walrcv = WalRcv;</span>
+<span class="lineNum">     735 </span>            : 
+<span class="lineNum">     736 </span>            :     /* Ensure that all WAL records received are flushed to disk */
+<span class="lineNum">     737 </span><span class="lineNoCov">          0 :     XLogWalRcvFlush(true);</span>
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span>            :     /* Mark ourselves inactive in shared memory */
+<span class="lineNum">     740 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     741 </span><span class="lineNoCov">          0 :     Assert(walrcv-&gt;walRcvState == WALRCV_STREAMING ||</span>
+<span class="lineNum">     742 </span>            :            walrcv-&gt;walRcvState == WALRCV_RESTARTING ||
+<span class="lineNum">     743 </span>            :            walrcv-&gt;walRcvState == WALRCV_STARTING ||
+<span class="lineNum">     744 </span>            :            walrcv-&gt;walRcvState == WALRCV_WAITING ||
+<span class="lineNum">     745 </span>            :            walrcv-&gt;walRcvState == WALRCV_STOPPING);
+<span class="lineNum">     746 </span><span class="lineNoCov">          0 :     Assert(walrcv-&gt;pid == MyProcPid);</span>
+<span class="lineNum">     747 </span><span class="lineNoCov">          0 :     walrcv-&gt;walRcvState = WALRCV_STOPPED;</span>
+<span class="lineNum">     748 </span><span class="lineNoCov">          0 :     walrcv-&gt;pid = 0;</span>
+<span class="lineNum">     749 </span><span class="lineNoCov">          0 :     walrcv-&gt;ready_to_display = false;</span>
+<span class="lineNum">     750 </span><span class="lineNoCov">          0 :     walrcv-&gt;latch = NULL;</span>
+<span class="lineNum">     751 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">     752 </span>            : 
+<span class="lineNum">     753 </span>            :     /* Terminate the connection gracefully. */
+<span class="lineNum">     754 </span><span class="lineNoCov">          0 :     if (wrconn != NULL)</span>
+<span class="lineNum">     755 </span><span class="lineNoCov">          0 :         walrcv_disconnect(wrconn);</span>
+<span class="lineNum">     756 </span>            : 
+<span class="lineNum">     757 </span>            :     /* Wake up the startup process to notice promptly that we're gone */
+<span class="lineNum">     758 </span><span class="lineNoCov">          0 :     WakeupRecovery();</span>
+<span class="lineNum">     759 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     760 </span>            : 
+<a name="761"><span class="lineNum">     761 </span>            : /* SIGHUP: set flag to re-read config file at next convenient time */</a>
+<span class="lineNum">     762 </span>            : static void
+<span class="lineNum">     763 </span><span class="lineNoCov">          0 : WalRcvSigHupHandler(SIGNAL_ARGS)</span>
+<span class="lineNum">     764 </span>            : {
+<span class="lineNum">     765 </span><span class="lineNoCov">          0 :     got_SIGHUP = true;</span>
+<span class="lineNum">     766 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     767 </span>            : 
+<span class="lineNum">     768 </span>            : 
+<a name="769"><span class="lineNum">     769 </span>            : /* SIGUSR1: used by latch mechanism */</a>
+<span class="lineNum">     770 </span>            : static void
+<span class="lineNum">     771 </span><span class="lineNoCov">          0 : WalRcvSigUsr1Handler(SIGNAL_ARGS)</span>
+<span class="lineNum">     772 </span>            : {
+<span class="lineNum">     773 </span><span class="lineNoCov">          0 :     int         save_errno = errno;</span>
+<span class="lineNum">     774 </span>            : 
+<span class="lineNum">     775 </span><span class="lineNoCov">          0 :     latch_sigusr1_handler();</span>
+<span class="lineNum">     776 </span>            : 
+<span class="lineNum">     777 </span><span class="lineNoCov">          0 :     errno = save_errno;</span>
+<span class="lineNum">     778 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     779 </span>            : 
+<a name="780"><span class="lineNum">     780 </span>            : /* SIGTERM: set flag for ProcessWalRcvInterrupts */</a>
+<span class="lineNum">     781 </span>            : static void
+<span class="lineNum">     782 </span><span class="lineNoCov">          0 : WalRcvShutdownHandler(SIGNAL_ARGS)</span>
+<span class="lineNum">     783 </span>            : {
+<span class="lineNum">     784 </span><span class="lineNoCov">          0 :     int         save_errno = errno;</span>
+<span class="lineNum">     785 </span>            : 
+<span class="lineNum">     786 </span><span class="lineNoCov">          0 :     got_SIGTERM = true;</span>
+<span class="lineNum">     787 </span>            : 
+<span class="lineNum">     788 </span><span class="lineNoCov">          0 :     if (WalRcv-&gt;latch)</span>
+<span class="lineNum">     789 </span><span class="lineNoCov">          0 :         SetLatch(WalRcv-&gt;latch);</span>
+<span class="lineNum">     790 </span>            : 
+<span class="lineNum">     791 </span><span class="lineNoCov">          0 :     errno = save_errno;</span>
+<span class="lineNum">     792 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span>            : /*
+<span class="lineNum">     795 </span>            :  * WalRcvQuickDieHandler() occurs when signalled SIGQUIT by the postmaster.
+<span class="lineNum">     796 </span>            :  *
+<span class="lineNum">     797 </span>            :  * Some backend has bought the farm, so we need to stop what we're doing and
+<span class="lineNum">     798 </span>            :  * exit.
+<a name="799"><span class="lineNum">     799 </span>            :  */</a>
+<span class="lineNum">     800 </span>            : static void
+<span class="lineNum">     801 </span><span class="lineNoCov">          0 : WalRcvQuickDieHandler(SIGNAL_ARGS)</span>
+<span class="lineNum">     802 </span>            : {
+<span class="lineNum">     803 </span>            :     /*
+<span class="lineNum">     804 </span>            :      * We DO NOT want to run proc_exit() or atexit() callbacks -- we're here
+<span class="lineNum">     805 </span>            :      * because shared memory may be corrupted, so we don't want to try to
+<span class="lineNum">     806 </span>            :      * clean up our transaction.  Just nail the windows shut and get out of
+<span class="lineNum">     807 </span>            :      * town.  The callbacks wouldn't be safe to run from a signal handler,
+<span class="lineNum">     808 </span>            :      * anyway.
+<span class="lineNum">     809 </span>            :      *
+<span class="lineNum">     810 </span>            :      * Note we use _exit(2) not _exit(0).  This is to force the postmaster
+<span class="lineNum">     811 </span>            :      * into a system reset cycle if someone sends a manual SIGQUIT to a random
+<span class="lineNum">     812 </span>            :      * backend.  This is necessary precisely because we don't clean up our
+<span class="lineNum">     813 </span>            :      * shared memory state.  (The &quot;dead man switch&quot; mechanism in pmsignal.c
+<span class="lineNum">     814 </span>            :      * should ensure the postmaster sees this as a crash, too, but no harm in
+<span class="lineNum">     815 </span>            :      * being doubly sure.)
+<span class="lineNum">     816 </span>            :      */
+<span class="lineNum">     817 </span><span class="lineNoCov">          0 :     _exit(2);</span>
+<span class="lineNum">     818 </span>            : }
+<span class="lineNum">     819 </span>            : 
+<span class="lineNum">     820 </span>            : /*
+<span class="lineNum">     821 </span>            :  * Accept the message from XLOG stream, and process it.
+<a name="822"><span class="lineNum">     822 </span>            :  */</a>
+<span class="lineNum">     823 </span>            : static void
+<span class="lineNum">     824 </span><span class="lineNoCov">          0 : XLogWalRcvProcessMsg(unsigned char type, char *buf, Size len)</span>
+<span class="lineNum">     825 </span>            : {
+<span class="lineNum">     826 </span>            :     int         hdrlen;
+<span class="lineNum">     827 </span>            :     XLogRecPtr  dataStart;
+<span class="lineNum">     828 </span>            :     XLogRecPtr  walEnd;
+<span class="lineNum">     829 </span>            :     TimestampTz sendTime;
+<span class="lineNum">     830 </span>            :     bool        replyRequested;
+<span class="lineNum">     831 </span>            : 
+<span class="lineNum">     832 </span><span class="lineNoCov">          0 :     resetStringInfo(&amp;incoming_message);</span>
+<span class="lineNum">     833 </span>            : 
+<span class="lineNum">     834 </span><span class="lineNoCov">          0 :     switch (type)</span>
+<span class="lineNum">     835 </span>            :     {
+<span class="lineNum">     836 </span>            :         case 'w':               /* WAL records */
+<span class="lineNum">     837 </span>            :             {
+<span class="lineNum">     838 </span>            :                 /* copy message to StringInfo */
+<span class="lineNum">     839 </span><span class="lineNoCov">          0 :                 hdrlen = sizeof(int64) + sizeof(int64) + sizeof(int64);</span>
+<span class="lineNum">     840 </span><span class="lineNoCov">          0 :                 if (len &lt; hdrlen)</span>
+<span class="lineNum">     841 </span><span class="lineNoCov">          0 :                     ereport(ERROR,</span>
+<span class="lineNum">     842 </span>            :                             (errcode(ERRCODE_PROTOCOL_VIOLATION),
+<span class="lineNum">     843 </span>            :                              errmsg_internal(&quot;invalid WAL message received from primary&quot;)));
+<span class="lineNum">     844 </span><span class="lineNoCov">          0 :                 appendBinaryStringInfo(&amp;incoming_message, buf, hdrlen);</span>
+<span class="lineNum">     845 </span>            : 
+<span class="lineNum">     846 </span>            :                 /* read the fields */
+<span class="lineNum">     847 </span><span class="lineNoCov">          0 :                 dataStart = pq_getmsgint64(&amp;incoming_message);</span>
+<span class="lineNum">     848 </span><span class="lineNoCov">          0 :                 walEnd = pq_getmsgint64(&amp;incoming_message);</span>
+<span class="lineNum">     849 </span><span class="lineNoCov">          0 :                 sendTime = pq_getmsgint64(&amp;incoming_message);</span>
+<span class="lineNum">     850 </span><span class="lineNoCov">          0 :                 ProcessWalSndrMessage(walEnd, sendTime);</span>
+<span class="lineNum">     851 </span>            : 
+<span class="lineNum">     852 </span><span class="lineNoCov">          0 :                 buf += hdrlen;</span>
+<span class="lineNum">     853 </span><span class="lineNoCov">          0 :                 len -= hdrlen;</span>
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :                 XLogWalRcvWrite(buf, len, dataStart);</span>
+<span class="lineNum">     855 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     856 </span>            :             }
+<span class="lineNum">     857 </span>            :         case 'k':               /* Keepalive */
+<span class="lineNum">     858 </span>            :             {
+<span class="lineNum">     859 </span>            :                 /* copy message to StringInfo */
+<span class="lineNum">     860 </span><span class="lineNoCov">          0 :                 hdrlen = sizeof(int64) + sizeof(int64) + sizeof(char);</span>
+<span class="lineNum">     861 </span><span class="lineNoCov">          0 :                 if (len != hdrlen)</span>
+<span class="lineNum">     862 </span><span class="lineNoCov">          0 :                     ereport(ERROR,</span>
+<span class="lineNum">     863 </span>            :                             (errcode(ERRCODE_PROTOCOL_VIOLATION),
+<span class="lineNum">     864 </span>            :                              errmsg_internal(&quot;invalid keepalive message received from primary&quot;)));
+<span class="lineNum">     865 </span><span class="lineNoCov">          0 :                 appendBinaryStringInfo(&amp;incoming_message, buf, hdrlen);</span>
+<span class="lineNum">     866 </span>            : 
+<span class="lineNum">     867 </span>            :                 /* read the fields */
+<span class="lineNum">     868 </span><span class="lineNoCov">          0 :                 walEnd = pq_getmsgint64(&amp;incoming_message);</span>
+<span class="lineNum">     869 </span><span class="lineNoCov">          0 :                 sendTime = pq_getmsgint64(&amp;incoming_message);</span>
+<span class="lineNum">     870 </span><span class="lineNoCov">          0 :                 replyRequested = pq_getmsgbyte(&amp;incoming_message);</span>
+<span class="lineNum">     871 </span>            : 
+<span class="lineNum">     872 </span><span class="lineNoCov">          0 :                 ProcessWalSndrMessage(walEnd, sendTime);</span>
+<span class="lineNum">     873 </span>            : 
+<span class="lineNum">     874 </span>            :                 /* If the primary requested a reply, send one immediately */
+<span class="lineNum">     875 </span><span class="lineNoCov">          0 :                 if (replyRequested)</span>
+<span class="lineNum">     876 </span><span class="lineNoCov">          0 :                     XLogWalRcvSendReply(true, false);</span>
+<span class="lineNum">     877 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     878 </span>            :             }
+<span class="lineNum">     879 </span>            :         default:
+<span class="lineNum">     880 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     881 </span>            :                     (errcode(ERRCODE_PROTOCOL_VIOLATION),
+<span class="lineNum">     882 </span>            :                      errmsg_internal(&quot;invalid replication message type %d&quot;,
+<span class="lineNum">     883 </span>            :                                      type)));
+<span class="lineNum">     884 </span>            :     }
+<span class="lineNum">     885 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     886 </span>            : 
+<span class="lineNum">     887 </span>            : /*
+<span class="lineNum">     888 </span>            :  * Write XLOG data to disk.
+<a name="889"><span class="lineNum">     889 </span>            :  */</a>
+<span class="lineNum">     890 </span>            : static void
+<span class="lineNum">     891 </span><span class="lineNoCov">          0 : XLogWalRcvWrite(char *buf, Size nbytes, XLogRecPtr recptr)</span>
+<span class="lineNum">     892 </span>            : {
+<span class="lineNum">     893 </span>            :     int         startoff;
+<span class="lineNum">     894 </span>            :     int         byteswritten;
+<span class="lineNum">     895 </span>            : 
+<span class="lineNum">     896 </span><span class="lineNoCov">          0 :     while (nbytes &gt; 0)</span>
+<span class="lineNum">     897 </span>            :     {
+<span class="lineNum">     898 </span>            :         int         segbytes;
+<span class="lineNum">     899 </span>            : 
+<span class="lineNum">     900 </span><span class="lineNoCov">          0 :         if (recvFile &lt; 0 || !XLByteInSeg(recptr, recvSegNo, wal_segment_size))</span>
+<span class="lineNum">     901 </span>            :         {
+<span class="lineNum">     902 </span>            :             bool        use_existent;
+<span class="lineNum">     903 </span>            : 
+<span class="lineNum">     904 </span>            :             /*
+<span class="lineNum">     905 </span>            :              * fsync() and close current file before we switch to next one. We
+<span class="lineNum">     906 </span>            :              * would otherwise have to reopen this file to fsync it later
+<span class="lineNum">     907 </span>            :              */
+<span class="lineNum">     908 </span><span class="lineNoCov">          0 :             if (recvFile &gt;= 0)</span>
+<span class="lineNum">     909 </span>            :             {
+<span class="lineNum">     910 </span>            :                 char        xlogfname[MAXFNAMELEN];
+<span class="lineNum">     911 </span>            : 
+<span class="lineNum">     912 </span><span class="lineNoCov">          0 :                 XLogWalRcvFlush(false);</span>
+<span class="lineNum">     913 </span>            : 
+<span class="lineNum">     914 </span>            :                 /*
+<span class="lineNum">     915 </span>            :                  * XLOG segment files will be re-read by recovery in startup
+<span class="lineNum">     916 </span>            :                  * process soon, so we don't advise the OS to release cache
+<span class="lineNum">     917 </span>            :                  * pages associated with the file like XLogFileClose() does.
+<span class="lineNum">     918 </span>            :                  */
+<span class="lineNum">     919 </span><span class="lineNoCov">          0 :                 if (close(recvFile) != 0)</span>
+<span class="lineNum">     920 </span><span class="lineNoCov">          0 :                     ereport(PANIC,</span>
+<span class="lineNum">     921 </span>            :                             (errcode_for_file_access(),
+<span class="lineNum">     922 </span>            :                              errmsg(&quot;could not close log segment %s: %m&quot;,
+<span class="lineNum">     923 </span>            :                                     XLogFileNameP(recvFileTLI, recvSegNo))));
+<span class="lineNum">     924 </span>            : 
+<span class="lineNum">     925 </span>            :                 /*
+<span class="lineNum">     926 </span>            :                  * Create .done file forcibly to prevent the streamed segment
+<span class="lineNum">     927 </span>            :                  * from being archived later.
+<span class="lineNum">     928 </span>            :                  */
+<span class="lineNum">     929 </span><span class="lineNoCov">          0 :                 XLogFileName(xlogfname, recvFileTLI, recvSegNo, wal_segment_size);</span>
+<span class="lineNum">     930 </span><span class="lineNoCov">          0 :                 if (XLogArchiveMode != ARCHIVE_MODE_ALWAYS)</span>
+<span class="lineNum">     931 </span><span class="lineNoCov">          0 :                     XLogArchiveForceDone(xlogfname);</span>
+<span class="lineNum">     932 </span>            :                 else
+<span class="lineNum">     933 </span><span class="lineNoCov">          0 :                     XLogArchiveNotify(xlogfname);</span>
+<span class="lineNum">     934 </span>            :             }
+<span class="lineNum">     935 </span><span class="lineNoCov">          0 :             recvFile = -1;</span>
+<span class="lineNum">     936 </span>            : 
+<span class="lineNum">     937 </span>            :             /* Create/use new log file */
+<span class="lineNum">     938 </span><span class="lineNoCov">          0 :             XLByteToSeg(recptr, recvSegNo, wal_segment_size);</span>
+<span class="lineNum">     939 </span><span class="lineNoCov">          0 :             use_existent = true;</span>
+<span class="lineNum">     940 </span><span class="lineNoCov">          0 :             recvFile = XLogFileInit(recvSegNo, &amp;use_existent, true);</span>
+<span class="lineNum">     941 </span><span class="lineNoCov">          0 :             recvFileTLI = ThisTimeLineID;</span>
+<span class="lineNum">     942 </span><span class="lineNoCov">          0 :             recvOff = 0;</span>
+<span class="lineNum">     943 </span>            :         }
+<span class="lineNum">     944 </span>            : 
+<span class="lineNum">     945 </span>            :         /* Calculate the start offset of the received logs */
+<span class="lineNum">     946 </span><span class="lineNoCov">          0 :         startoff = XLogSegmentOffset(recptr, wal_segment_size);</span>
+<span class="lineNum">     947 </span>            : 
+<span class="lineNum">     948 </span><span class="lineNoCov">          0 :         if (startoff + nbytes &gt; wal_segment_size)</span>
+<span class="lineNum">     949 </span><span class="lineNoCov">          0 :             segbytes = wal_segment_size - startoff;</span>
+<span class="lineNum">     950 </span>            :         else
+<span class="lineNum">     951 </span><span class="lineNoCov">          0 :             segbytes = nbytes;</span>
+<span class="lineNum">     952 </span>            : 
+<span class="lineNum">     953 </span>            :         /* Need to seek in the file? */
+<span class="lineNum">     954 </span><span class="lineNoCov">          0 :         if (recvOff != startoff)</span>
+<span class="lineNum">     955 </span>            :         {
+<span class="lineNum">     956 </span><span class="lineNoCov">          0 :             if (lseek(recvFile, (off_t) startoff, SEEK_SET) &lt; 0)</span>
+<span class="lineNum">     957 </span><span class="lineNoCov">          0 :                 ereport(PANIC,</span>
+<span class="lineNum">     958 </span>            :                         (errcode_for_file_access(),
+<span class="lineNum">     959 </span>            :                          errmsg(&quot;could not seek in log segment %s to offset %u: %m&quot;,
+<span class="lineNum">     960 </span>            :                                 XLogFileNameP(recvFileTLI, recvSegNo),
+<span class="lineNum">     961 </span>            :                                 startoff)));
+<span class="lineNum">     962 </span><span class="lineNoCov">          0 :             recvOff = startoff;</span>
+<span class="lineNum">     963 </span>            :         }
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span>            :         /* OK to write the logs */
+<span class="lineNum">     966 </span><span class="lineNoCov">          0 :         errno = 0;</span>
+<span class="lineNum">     967 </span>            : 
+<span class="lineNum">     968 </span><span class="lineNoCov">          0 :         byteswritten = write(recvFile, buf, segbytes);</span>
+<span class="lineNum">     969 </span><span class="lineNoCov">          0 :         if (byteswritten &lt;= 0)</span>
+<span class="lineNum">     970 </span>            :         {
+<span class="lineNum">     971 </span>            :             /* if write didn't set errno, assume no disk space */
+<span class="lineNum">     972 </span><span class="lineNoCov">          0 :             if (errno == 0)</span>
+<span class="lineNum">     973 </span><span class="lineNoCov">          0 :                 errno = ENOSPC;</span>
+<span class="lineNum">     974 </span><span class="lineNoCov">          0 :             ereport(PANIC,</span>
+<span class="lineNum">     975 </span>            :                     (errcode_for_file_access(),
+<span class="lineNum">     976 </span>            :                      errmsg(&quot;could not write to log segment %s &quot;
+<span class="lineNum">     977 </span>            :                             &quot;at offset %u, length %lu: %m&quot;,
+<span class="lineNum">     978 </span>            :                             XLogFileNameP(recvFileTLI, recvSegNo),
+<span class="lineNum">     979 </span>            :                             recvOff, (unsigned long) segbytes)));
+<span class="lineNum">     980 </span>            :         }
+<span class="lineNum">     981 </span>            : 
+<span class="lineNum">     982 </span>            :         /* Update state for write */
+<span class="lineNum">     983 </span><span class="lineNoCov">          0 :         recptr += byteswritten;</span>
+<span class="lineNum">     984 </span>            : 
+<span class="lineNum">     985 </span><span class="lineNoCov">          0 :         recvOff += byteswritten;</span>
+<span class="lineNum">     986 </span><span class="lineNoCov">          0 :         nbytes -= byteswritten;</span>
+<span class="lineNum">     987 </span><span class="lineNoCov">          0 :         buf += byteswritten;</span>
+<span class="lineNum">     988 </span>            : 
+<span class="lineNum">     989 </span><span class="lineNoCov">          0 :         LogstreamResult.Write = recptr;</span>
+<span class="lineNum">     990 </span>            :     }
+<span class="lineNum">     991 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     992 </span>            : 
+<span class="lineNum">     993 </span>            : /*
+<span class="lineNum">     994 </span>            :  * Flush the log to disk.
+<span class="lineNum">     995 </span>            :  *
+<span class="lineNum">     996 </span>            :  * If we're in the midst of dying, it's unwise to do anything that might throw
+<span class="lineNum">     997 </span>            :  * an error, so we skip sending a reply in that case.
+<a name="998"><span class="lineNum">     998 </span>            :  */</a>
+<span class="lineNum">     999 </span>            : static void
+<span class="lineNum">    1000 </span><span class="lineNoCov">          0 : XLogWalRcvFlush(bool dying)</span>
+<span class="lineNum">    1001 </span>            : {
+<span class="lineNum">    1002 </span><span class="lineNoCov">          0 :     if (LogstreamResult.Flush &lt; LogstreamResult.Write)</span>
+<span class="lineNum">    1003 </span>            :     {
+<span class="lineNum">    1004 </span><span class="lineNoCov">          0 :         WalRcvData *walrcv = WalRcv;</span>
+<span class="lineNum">    1005 </span>            : 
+<span class="lineNum">    1006 </span><span class="lineNoCov">          0 :         issue_xlog_fsync(recvFile, recvSegNo);</span>
+<span class="lineNum">    1007 </span>            : 
+<span class="lineNum">    1008 </span><span class="lineNoCov">          0 :         LogstreamResult.Flush = LogstreamResult.Write;</span>
+<span class="lineNum">    1009 </span>            : 
+<span class="lineNum">    1010 </span>            :         /* Update shared-memory status */
+<span class="lineNum">    1011 </span><span class="lineNoCov">          0 :         SpinLockAcquire(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">    1012 </span><span class="lineNoCov">          0 :         if (walrcv-&gt;receivedUpto &lt; LogstreamResult.Flush)</span>
+<span class="lineNum">    1013 </span>            :         {
+<span class="lineNum">    1014 </span><span class="lineNoCov">          0 :             walrcv-&gt;latestChunkStart = walrcv-&gt;receivedUpto;</span>
+<span class="lineNum">    1015 </span><span class="lineNoCov">          0 :             walrcv-&gt;receivedUpto = LogstreamResult.Flush;</span>
+<span class="lineNum">    1016 </span><span class="lineNoCov">          0 :             walrcv-&gt;receivedTLI = ThisTimeLineID;</span>
+<span class="lineNum">    1017 </span>            :         }
+<span class="lineNum">    1018 </span><span class="lineNoCov">          0 :         SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">    1019 </span>            : 
+<span class="lineNum">    1020 </span>            :         /* Signal the startup process and walsender that new WAL has arrived */
+<span class="lineNum">    1021 </span><span class="lineNoCov">          0 :         WakeupRecovery();</span>
+<span class="lineNum">    1022 </span><span class="lineNoCov">          0 :         if (AllowCascadeReplication())</span>
+<span class="lineNum">    1023 </span><span class="lineNoCov">          0 :             WalSndWakeup();</span>
+<span class="lineNum">    1024 </span>            : 
+<span class="lineNum">    1025 </span>            :         /* Report XLOG streaming progress in PS display */
+<span class="lineNum">    1026 </span><span class="lineNoCov">          0 :         if (update_process_title)</span>
+<span class="lineNum">    1027 </span>            :         {
+<span class="lineNum">    1028 </span>            :             char        activitymsg[50];
+<span class="lineNum">    1029 </span>            : 
+<span class="lineNum">    1030 </span><span class="lineNoCov">          0 :             snprintf(activitymsg, sizeof(activitymsg), &quot;streaming %X/%X&quot;,</span>
+<span class="lineNum">    1031 </span><span class="lineNoCov">          0 :                      (uint32) (LogstreamResult.Write &gt;&gt; 32),</span>
+<span class="lineNum">    1032 </span><span class="lineNoCov">          0 :                      (uint32) LogstreamResult.Write);</span>
+<span class="lineNum">    1033 </span><span class="lineNoCov">          0 :             set_ps_display(activitymsg, false);</span>
+<span class="lineNum">    1034 </span>            :         }
+<span class="lineNum">    1035 </span>            : 
+<span class="lineNum">    1036 </span>            :         /* Also let the master know that we made some progress */
+<span class="lineNum">    1037 </span><span class="lineNoCov">          0 :         if (!dying)</span>
+<span class="lineNum">    1038 </span>            :         {
+<span class="lineNum">    1039 </span><span class="lineNoCov">          0 :             XLogWalRcvSendReply(false, false);</span>
+<span class="lineNum">    1040 </span><span class="lineNoCov">          0 :             XLogWalRcvSendHSFeedback(false);</span>
+<span class="lineNum">    1041 </span>            :         }
+<span class="lineNum">    1042 </span>            :     }
+<span class="lineNum">    1043 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1044 </span>            : 
+<span class="lineNum">    1045 </span>            : /*
+<span class="lineNum">    1046 </span>            :  * Send reply message to primary, indicating our current WAL locations, oldest
+<span class="lineNum">    1047 </span>            :  * xmin and the current time.
+<span class="lineNum">    1048 </span>            :  *
+<span class="lineNum">    1049 </span>            :  * If 'force' is not set, the message is only sent if enough time has
+<span class="lineNum">    1050 </span>            :  * passed since last status update to reach wal_receiver_status_interval.
+<span class="lineNum">    1051 </span>            :  * If wal_receiver_status_interval is disabled altogether and 'force' is
+<span class="lineNum">    1052 </span>            :  * false, this is a no-op.
+<span class="lineNum">    1053 </span>            :  *
+<span class="lineNum">    1054 </span>            :  * If 'requestReply' is true, requests the server to reply immediately upon
+<span class="lineNum">    1055 </span>            :  * receiving this message. This is used for heartbeats, when approaching
+<span class="lineNum">    1056 </span>            :  * wal_receiver_timeout.
+<a name="1057"><span class="lineNum">    1057 </span>            :  */</a>
+<span class="lineNum">    1058 </span>            : static void
+<span class="lineNum">    1059 </span><span class="lineNoCov">          0 : XLogWalRcvSendReply(bool force, bool requestReply)</span>
+<span class="lineNum">    1060 </span>            : {
+<span class="lineNum">    1061 </span>            :     static XLogRecPtr writePtr = 0;
+<span class="lineNum">    1062 </span>            :     static XLogRecPtr flushPtr = 0;
+<span class="lineNum">    1063 </span>            :     XLogRecPtr  applyPtr;
+<span class="lineNum">    1064 </span>            :     static TimestampTz sendTime = 0;
+<span class="lineNum">    1065 </span>            :     TimestampTz now;
+<span class="lineNum">    1066 </span>            : 
+<span class="lineNum">    1067 </span>            :     /*
+<span class="lineNum">    1068 </span>            :      * If the user doesn't want status to be reported to the master, be sure
+<span class="lineNum">    1069 </span>            :      * to exit before doing anything at all.
+<span class="lineNum">    1070 </span>            :      */
+<span class="lineNum">    1071 </span><span class="lineNoCov">          0 :     if (!force &amp;&amp; wal_receiver_status_interval &lt;= 0)</span>
+<span class="lineNum">    1072 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1073 </span>            : 
+<span class="lineNum">    1074 </span>            :     /* Get current timestamp. */
+<span class="lineNum">    1075 </span><span class="lineNoCov">          0 :     now = GetCurrentTimestamp();</span>
+<span class="lineNum">    1076 </span>            : 
+<span class="lineNum">    1077 </span>            :     /*
+<span class="lineNum">    1078 </span>            :      * We can compare the write and flush positions to the last message we
+<span class="lineNum">    1079 </span>            :      * sent without taking any lock, but the apply position requires a spin
+<span class="lineNum">    1080 </span>            :      * lock, so we don't check that unless something else has changed or 10
+<span class="lineNum">    1081 </span>            :      * seconds have passed.  This means that the apply WAL location will
+<span class="lineNum">    1082 </span>            :      * appear, from the master's point of view, to lag slightly, but since
+<span class="lineNum">    1083 </span>            :      * this is only for reporting purposes and only on idle systems, that's
+<span class="lineNum">    1084 </span>            :      * probably OK.
+<span class="lineNum">    1085 </span>            :      */
+<span class="lineNum">    1086 </span><span class="lineNoCov">          0 :     if (!force</span>
+<span class="lineNum">    1087 </span><span class="lineNoCov">          0 :         &amp;&amp; writePtr == LogstreamResult.Write</span>
+<span class="lineNum">    1088 </span><span class="lineNoCov">          0 :         &amp;&amp; flushPtr == LogstreamResult.Flush</span>
+<span class="lineNum">    1089 </span><span class="lineNoCov">          0 :         &amp;&amp; !TimestampDifferenceExceeds(sendTime, now,</span>
+<span class="lineNum">    1090 </span>            :                                        wal_receiver_status_interval * 1000))
+<span class="lineNum">    1091 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1092 </span><span class="lineNoCov">          0 :     sendTime = now;</span>
+<span class="lineNum">    1093 </span>            : 
+<span class="lineNum">    1094 </span>            :     /* Construct a new message */
+<span class="lineNum">    1095 </span><span class="lineNoCov">          0 :     writePtr = LogstreamResult.Write;</span>
+<span class="lineNum">    1096 </span><span class="lineNoCov">          0 :     flushPtr = LogstreamResult.Flush;</span>
+<span class="lineNum">    1097 </span><span class="lineNoCov">          0 :     applyPtr = GetXLogReplayRecPtr(NULL);</span>
+<span class="lineNum">    1098 </span>            : 
+<span class="lineNum">    1099 </span><span class="lineNoCov">          0 :     resetStringInfo(&amp;reply_message);</span>
+<span class="lineNum">    1100 </span><span class="lineNoCov">          0 :     pq_sendbyte(&amp;reply_message, 'r');</span>
+<span class="lineNum">    1101 </span><span class="lineNoCov">          0 :     pq_sendint64(&amp;reply_message, writePtr);</span>
+<span class="lineNum">    1102 </span><span class="lineNoCov">          0 :     pq_sendint64(&amp;reply_message, flushPtr);</span>
+<span class="lineNum">    1103 </span><span class="lineNoCov">          0 :     pq_sendint64(&amp;reply_message, applyPtr);</span>
+<span class="lineNum">    1104 </span><span class="lineNoCov">          0 :     pq_sendint64(&amp;reply_message, GetCurrentTimestamp());</span>
+<span class="lineNum">    1105 </span><span class="lineNoCov">          0 :     pq_sendbyte(&amp;reply_message, requestReply ? 1 : 0);</span>
+<span class="lineNum">    1106 </span>            : 
+<span class="lineNum">    1107 </span>            :     /* Send it */
+<span class="lineNum">    1108 </span><span class="lineNoCov">          0 :     elog(DEBUG2, &quot;sending write %X/%X flush %X/%X apply %X/%X%s&quot;,</span>
+<span class="lineNum">    1109 </span>            :          (uint32) (writePtr &gt;&gt; 32), (uint32) writePtr,
+<span class="lineNum">    1110 </span>            :          (uint32) (flushPtr &gt;&gt; 32), (uint32) flushPtr,
+<span class="lineNum">    1111 </span>            :          (uint32) (applyPtr &gt;&gt; 32), (uint32) applyPtr,
+<span class="lineNum">    1112 </span>            :          requestReply ? &quot; (reply requested)&quot; : &quot;&quot;);
+<span class="lineNum">    1113 </span>            : 
+<span class="lineNum">    1114 </span><span class="lineNoCov">          0 :     walrcv_send(wrconn, reply_message.data, reply_message.len);</span>
+<span class="lineNum">    1115 </span>            : }
+<span class="lineNum">    1116 </span>            : 
+<span class="lineNum">    1117 </span>            : /*
+<span class="lineNum">    1118 </span>            :  * Send hot standby feedback message to primary, plus the current time,
+<span class="lineNum">    1119 </span>            :  * in case they don't have a watch.
+<span class="lineNum">    1120 </span>            :  *
+<span class="lineNum">    1121 </span>            :  * If the user disables feedback, send one final message to tell sender
+<span class="lineNum">    1122 </span>            :  * to forget about the xmin on this standby. We also send this message
+<span class="lineNum">    1123 </span>            :  * on first connect because a previous connection might have set xmin
+<span class="lineNum">    1124 </span>            :  * on a replication slot. (If we're not using a slot it's harmless to
+<span class="lineNum">    1125 </span>            :  * send a feedback message explicitly setting InvalidTransactionId).
+<a name="1126"><span class="lineNum">    1126 </span>            :  */</a>
+<span class="lineNum">    1127 </span>            : static void
+<span class="lineNum">    1128 </span><span class="lineNoCov">          0 : XLogWalRcvSendHSFeedback(bool immed)</span>
+<span class="lineNum">    1129 </span>            : {
+<span class="lineNum">    1130 </span>            :     TimestampTz now;
+<span class="lineNum">    1131 </span>            :     FullTransactionId nextFullXid;
+<span class="lineNum">    1132 </span>            :     TransactionId nextXid;
+<span class="lineNum">    1133 </span>            :     uint32      xmin_epoch,
+<span class="lineNum">    1134 </span>            :                 catalog_xmin_epoch;
+<span class="lineNum">    1135 </span>            :     TransactionId xmin,
+<span class="lineNum">    1136 </span>            :                 catalog_xmin;
+<span class="lineNum">    1137 </span>            :     static TimestampTz sendTime = 0;
+<span class="lineNum">    1138 </span>            : 
+<span class="lineNum">    1139 </span>            :     /* initially true so we always send at least one feedback message */
+<span class="lineNum">    1140 </span>            :     static bool master_has_standby_xmin = true;
+<span class="lineNum">    1141 </span>            : 
+<span class="lineNum">    1142 </span>            :     /*
+<span class="lineNum">    1143 </span>            :      * If the user doesn't want status to be reported to the master, be sure
+<span class="lineNum">    1144 </span>            :      * to exit before doing anything at all.
+<span class="lineNum">    1145 </span>            :      */
+<span class="lineNum">    1146 </span><span class="lineNoCov">          0 :     if ((wal_receiver_status_interval &lt;= 0 || !hot_standby_feedback) &amp;&amp;</span>
+<span class="lineNum">    1147 </span><span class="lineNoCov">          0 :         !master_has_standby_xmin)</span>
+<span class="lineNum">    1148 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1149 </span>            : 
+<span class="lineNum">    1150 </span>            :     /* Get current timestamp. */
+<span class="lineNum">    1151 </span><span class="lineNoCov">          0 :     now = GetCurrentTimestamp();</span>
+<span class="lineNum">    1152 </span>            : 
+<span class="lineNum">    1153 </span><span class="lineNoCov">          0 :     if (!immed)</span>
+<span class="lineNum">    1154 </span>            :     {
+<span class="lineNum">    1155 </span>            :         /*
+<span class="lineNum">    1156 </span>            :          * Send feedback at most once per wal_receiver_status_interval.
+<span class="lineNum">    1157 </span>            :          */
+<span class="lineNum">    1158 </span><span class="lineNoCov">          0 :         if (!TimestampDifferenceExceeds(sendTime, now,</span>
+<span class="lineNum">    1159 </span>            :                                         wal_receiver_status_interval * 1000))
+<span class="lineNum">    1160 </span><span class="lineNoCov">          0 :             return;</span>
+<span class="lineNum">    1161 </span><span class="lineNoCov">          0 :         sendTime = now;</span>
+<span class="lineNum">    1162 </span>            :     }
+<span class="lineNum">    1163 </span>            : 
+<span class="lineNum">    1164 </span>            :     /*
+<span class="lineNum">    1165 </span>            :      * If Hot Standby is not yet accepting connections there is nothing to
+<span class="lineNum">    1166 </span>            :      * send. Check this after the interval has expired to reduce number of
+<span class="lineNum">    1167 </span>            :      * calls.
+<span class="lineNum">    1168 </span>            :      *
+<span class="lineNum">    1169 </span>            :      * Bailing out here also ensures that we don't send feedback until we've
+<span class="lineNum">    1170 </span>            :      * read our own replication slot state, so we don't tell the master to
+<span class="lineNum">    1171 </span>            :      * discard needed xmin or catalog_xmin from any slots that may exist on
+<span class="lineNum">    1172 </span>            :      * this replica.
+<span class="lineNum">    1173 </span>            :      */
+<span class="lineNum">    1174 </span><span class="lineNoCov">          0 :     if (!HotStandbyActive())</span>
+<span class="lineNum">    1175 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1176 </span>            : 
+<span class="lineNum">    1177 </span>            :     /*
+<span class="lineNum">    1178 </span>            :      * Make the expensive call to get the oldest xmin once we are certain
+<span class="lineNum">    1179 </span>            :      * everything else has been checked.
+<span class="lineNum">    1180 </span>            :      */
+<span class="lineNum">    1181 </span><span class="lineNoCov">          0 :     if (hot_standby_feedback)</span>
+<span class="lineNum">    1182 </span>            :     {
+<span class="lineNum">    1183 </span>            :         TransactionId slot_xmin;
+<span class="lineNum">    1184 </span>            : 
+<span class="lineNum">    1185 </span>            :         /*
+<span class="lineNum">    1186 </span>            :          * Usually GetOldestXmin() would include both global replication slot
+<span class="lineNum">    1187 </span>            :          * xmin and catalog_xmin in its calculations, but we want to derive
+<span class="lineNum">    1188 </span>            :          * separate values for each of those. So we ask for an xmin that
+<span class="lineNum">    1189 </span>            :          * excludes the catalog_xmin.
+<span class="lineNum">    1190 </span>            :          */
+<span class="lineNum">    1191 </span><span class="lineNoCov">          0 :         xmin = GetOldestXmin(NULL,</span>
+<span class="lineNum">    1192 </span>            :                              PROCARRAY_FLAGS_DEFAULT | PROCARRAY_SLOTS_XMIN);
+<span class="lineNum">    1193 </span>            : 
+<span class="lineNum">    1194 </span><span class="lineNoCov">          0 :         ProcArrayGetReplicationSlotXmin(&amp;slot_xmin, &amp;catalog_xmin);</span>
+<span class="lineNum">    1195 </span>            : 
+<span class="lineNum">    1196 </span><span class="lineNoCov">          0 :         if (TransactionIdIsValid(slot_xmin) &amp;&amp;</span>
+<span class="lineNum">    1197 </span><span class="lineNoCov">          0 :             TransactionIdPrecedes(slot_xmin, xmin))</span>
+<span class="lineNum">    1198 </span><span class="lineNoCov">          0 :             xmin = slot_xmin;</span>
+<span class="lineNum">    1199 </span>            :     }
+<span class="lineNum">    1200 </span>            :     else
+<span class="lineNum">    1201 </span>            :     {
+<span class="lineNum">    1202 </span><span class="lineNoCov">          0 :         xmin = InvalidTransactionId;</span>
+<span class="lineNum">    1203 </span><span class="lineNoCov">          0 :         catalog_xmin = InvalidTransactionId;</span>
+<span class="lineNum">    1204 </span>            :     }
+<span class="lineNum">    1205 </span>            : 
+<span class="lineNum">    1206 </span>            :     /*
+<span class="lineNum">    1207 </span>            :      * Get epoch and adjust if nextXid and oldestXmin are different sides of
+<span class="lineNum">    1208 </span>            :      * the epoch boundary.
+<span class="lineNum">    1209 </span>            :      */
+<span class="lineNum">    1210 </span><span class="lineNoCov">          0 :     nextFullXid = ReadNextFullTransactionId();</span>
+<span class="lineNum">    1211 </span><span class="lineNoCov">          0 :     nextXid = XidFromFullTransactionId(nextFullXid);</span>
+<span class="lineNum">    1212 </span><span class="lineNoCov">          0 :     xmin_epoch = EpochFromFullTransactionId(nextFullXid);</span>
+<span class="lineNum">    1213 </span><span class="lineNoCov">          0 :     catalog_xmin_epoch = xmin_epoch;</span>
+<span class="lineNum">    1214 </span><span class="lineNoCov">          0 :     if (nextXid &lt; xmin)</span>
+<span class="lineNum">    1215 </span><span class="lineNoCov">          0 :         xmin_epoch--;</span>
+<span class="lineNum">    1216 </span><span class="lineNoCov">          0 :     if (nextXid &lt; catalog_xmin)</span>
+<span class="lineNum">    1217 </span><span class="lineNoCov">          0 :         catalog_xmin_epoch--;</span>
+<span class="lineNum">    1218 </span>            : 
+<span class="lineNum">    1219 </span><span class="lineNoCov">          0 :     elog(DEBUG2, &quot;sending hot standby feedback xmin %u epoch %u catalog_xmin %u catalog_xmin_epoch %u&quot;,</span>
+<span class="lineNum">    1220 </span>            :          xmin, xmin_epoch, catalog_xmin, catalog_xmin_epoch);
+<span class="lineNum">    1221 </span>            : 
+<span class="lineNum">    1222 </span>            :     /* Construct the message and send it. */
+<span class="lineNum">    1223 </span><span class="lineNoCov">          0 :     resetStringInfo(&amp;reply_message);</span>
+<span class="lineNum">    1224 </span><span class="lineNoCov">          0 :     pq_sendbyte(&amp;reply_message, 'h');</span>
+<span class="lineNum">    1225 </span><span class="lineNoCov">          0 :     pq_sendint64(&amp;reply_message, GetCurrentTimestamp());</span>
+<span class="lineNum">    1226 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;reply_message, xmin);</span>
+<span class="lineNum">    1227 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;reply_message, xmin_epoch);</span>
+<span class="lineNum">    1228 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;reply_message, catalog_xmin);</span>
+<span class="lineNum">    1229 </span><span class="lineNoCov">          0 :     pq_sendint32(&amp;reply_message, catalog_xmin_epoch);</span>
+<span class="lineNum">    1230 </span><span class="lineNoCov">          0 :     walrcv_send(wrconn, reply_message.data, reply_message.len);</span>
+<span class="lineNum">    1231 </span><span class="lineNoCov">          0 :     if (TransactionIdIsValid(xmin) || TransactionIdIsValid(catalog_xmin))</span>
+<span class="lineNum">    1232 </span><span class="lineNoCov">          0 :         master_has_standby_xmin = true;</span>
+<span class="lineNum">    1233 </span>            :     else
+<span class="lineNum">    1234 </span><span class="lineNoCov">          0 :         master_has_standby_xmin = false;</span>
+<span class="lineNum">    1235 </span>            : }
+<span class="lineNum">    1236 </span>            : 
+<span class="lineNum">    1237 </span>            : /*
+<span class="lineNum">    1238 </span>            :  * Update shared memory status upon receiving a message from primary.
+<span class="lineNum">    1239 </span>            :  *
+<span class="lineNum">    1240 </span>            :  * 'walEnd' and 'sendTime' are the end-of-WAL and timestamp of the latest
+<span class="lineNum">    1241 </span>            :  * message, reported by primary.
+<a name="1242"><span class="lineNum">    1242 </span>            :  */</a>
+<span class="lineNum">    1243 </span>            : static void
+<span class="lineNum">    1244 </span><span class="lineNoCov">          0 : ProcessWalSndrMessage(XLogRecPtr walEnd, TimestampTz sendTime)</span>
+<span class="lineNum">    1245 </span>            : {
+<span class="lineNum">    1246 </span><span class="lineNoCov">          0 :     WalRcvData *walrcv = WalRcv;</span>
+<span class="lineNum">    1247 </span>            : 
+<span class="lineNum">    1248 </span><span class="lineNoCov">          0 :     TimestampTz lastMsgReceiptTime = GetCurrentTimestamp();</span>
+<span class="lineNum">    1249 </span>            : 
+<span class="lineNum">    1250 </span>            :     /* Update shared-memory status */
+<span class="lineNum">    1251 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">    1252 </span><span class="lineNoCov">          0 :     if (walrcv-&gt;latestWalEnd &lt; walEnd)</span>
+<span class="lineNum">    1253 </span><span class="lineNoCov">          0 :         walrcv-&gt;latestWalEndTime = sendTime;</span>
+<span class="lineNum">    1254 </span><span class="lineNoCov">          0 :     walrcv-&gt;latestWalEnd = walEnd;</span>
+<span class="lineNum">    1255 </span><span class="lineNoCov">          0 :     walrcv-&gt;lastMsgSendTime = sendTime;</span>
+<span class="lineNum">    1256 </span><span class="lineNoCov">          0 :     walrcv-&gt;lastMsgReceiptTime = lastMsgReceiptTime;</span>
+<span class="lineNum">    1257 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;walrcv-&gt;mutex);</span>
+<span class="lineNum">    1258 </span>            : 
+<span class="lineNum">    1259 </span><span class="lineNoCov">          0 :     if (log_min_messages &lt;= DEBUG2)</span>
+<span class="lineNum">    1260 </span>            :     {
+<span class="lineNum">    1261 </span>            :         char       *sendtime;
+<span class="lineNum">    1262 </span>            :         char       *receipttime;
+<span class="lineNum">    1263 </span>            :         int         applyDelay;
+<span class="lineNum">    1264 </span>            : 
+<span class="lineNum">    1265 </span>            :         /* Copy because timestamptz_to_str returns a static buffer */
+<span class="lineNum">    1266 </span><span class="lineNoCov">          0 :         sendtime = pstrdup(timestamptz_to_str(sendTime));</span>
+<span class="lineNum">    1267 </span><span class="lineNoCov">          0 :         receipttime = pstrdup(timestamptz_to_str(lastMsgReceiptTime));</span>
+<span class="lineNum">    1268 </span><span class="lineNoCov">          0 :         applyDelay = GetReplicationApplyDelay();</span>
+<span class="lineNum">    1269 </span>            : 
+<span class="lineNum">    1270 </span>            :         /* apply delay is not available */
+<span class="lineNum">    1271 </span><span class="lineNoCov">          0 :         if (applyDelay == -1)</span>
+<span class="lineNum">    1272 </span><span class="lineNoCov">          0 :             elog(DEBUG2, &quot;sendtime %s receipttime %s replication apply delay (N/A) transfer latency %d ms&quot;,</span>
+<span class="lineNum">    1273 </span>            :                  sendtime,
+<span class="lineNum">    1274 </span>            :                  receipttime,
+<span class="lineNum">    1275 </span>            :                  GetReplicationTransferLatency());
+<span class="lineNum">    1276 </span>            :         else
+<span class="lineNum">    1277 </span><span class="lineNoCov">          0 :             elog(DEBUG2, &quot;sendtime %s receipttime %s replication apply delay %d ms transfer latency %d ms&quot;,</span>
+<span class="lineNum">    1278 </span>            :                  sendtime,
+<span class="lineNum">    1279 </span>            :                  receipttime,
+<span class="lineNum">    1280 </span>            :                  applyDelay,
+<span class="lineNum">    1281 </span>            :                  GetReplicationTransferLatency());
+<span class="lineNum">    1282 </span>            : 
+<span class="lineNum">    1283 </span><span class="lineNoCov">          0 :         pfree(sendtime);</span>
+<span class="lineNum">    1284 </span><span class="lineNoCov">          0 :         pfree(receipttime);</span>
+<span class="lineNum">    1285 </span>            :     }
+<span class="lineNum">    1286 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1287 </span>            : 
+<span class="lineNum">    1288 </span>            : /*
+<span class="lineNum">    1289 </span>            :  * Wake up the walreceiver main loop.
+<span class="lineNum">    1290 </span>            :  *
+<span class="lineNum">    1291 </span>            :  * This is called by the startup process whenever interesting xlog records
+<span class="lineNum">    1292 </span>            :  * are applied, so that walreceiver can check if it needs to send an apply
+<span class="lineNum">    1293 </span>            :  * notification back to the master which may be waiting in a COMMIT with
+<span class="lineNum">    1294 </span>            :  * synchronous_commit = remote_apply.
+<a name="1295"><span class="lineNum">    1295 </span>            :  */</a>
+<span class="lineNum">    1296 </span>            : void
+<span class="lineNum">    1297 </span><span class="lineNoCov">          0 : WalRcvForceReply(void)</span>
+<span class="lineNum">    1298 </span>            : {
+<span class="lineNum">    1299 </span>            :     Latch      *latch;
+<span class="lineNum">    1300 </span>            : 
+<span class="lineNum">    1301 </span><span class="lineNoCov">          0 :     WalRcv-&gt;force_reply = true;</span>
+<span class="lineNum">    1302 </span>            :     /* fetching the latch pointer might not be atomic, so use spinlock */
+<span class="lineNum">    1303 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;WalRcv-&gt;mutex);</span>
+<span class="lineNum">    1304 </span><span class="lineNoCov">          0 :     latch = WalRcv-&gt;latch;</span>
+<span class="lineNum">    1305 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;WalRcv-&gt;mutex);</span>
+<span class="lineNum">    1306 </span><span class="lineNoCov">          0 :     if (latch)</span>
+<span class="lineNum">    1307 </span><span class="lineNoCov">          0 :         SetLatch(latch);</span>
+<span class="lineNum">    1308 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1309 </span>            : 
+<span class="lineNum">    1310 </span>            : /*
+<span class="lineNum">    1311 </span>            :  * Return a string constant representing the state. This is used
+<span class="lineNum">    1312 </span>            :  * in system functions and views, and should *not* be translated.
+<a name="1313"><span class="lineNum">    1313 </span>            :  */</a>
+<span class="lineNum">    1314 </span>            : static const char *
+<span class="lineNum">    1315 </span><span class="lineNoCov">          0 : WalRcvGetStateString(WalRcvState state)</span>
+<span class="lineNum">    1316 </span>            : {
+<span class="lineNum">    1317 </span><span class="lineNoCov">          0 :     switch (state)</span>
+<span class="lineNum">    1318 </span>            :     {
+<span class="lineNum">    1319 </span>            :         case WALRCV_STOPPED:
+<span class="lineNum">    1320 </span><span class="lineNoCov">          0 :             return &quot;stopped&quot;;</span>
+<span class="lineNum">    1321 </span>            :         case WALRCV_STARTING:
+<span class="lineNum">    1322 </span><span class="lineNoCov">          0 :             return &quot;starting&quot;;</span>
+<span class="lineNum">    1323 </span>            :         case WALRCV_STREAMING:
+<span class="lineNum">    1324 </span><span class="lineNoCov">          0 :             return &quot;streaming&quot;;</span>
+<span class="lineNum">    1325 </span>            :         case WALRCV_WAITING:
+<span class="lineNum">    1326 </span><span class="lineNoCov">          0 :             return &quot;waiting&quot;;</span>
+<span class="lineNum">    1327 </span>            :         case WALRCV_RESTARTING:
+<span class="lineNum">    1328 </span><span class="lineNoCov">          0 :             return &quot;restarting&quot;;</span>
+<span class="lineNum">    1329 </span>            :         case WALRCV_STOPPING:
+<span class="lineNum">    1330 </span><span class="lineNoCov">          0 :             return &quot;stopping&quot;;</span>
+<span class="lineNum">    1331 </span>            :     }
+<span class="lineNum">    1332 </span><span class="lineNoCov">          0 :     return &quot;UNKNOWN&quot;;</span>
+<span class="lineNum">    1333 </span>            : }
+<span class="lineNum">    1334 </span>            : 
+<span class="lineNum">    1335 </span>            : /*
+<span class="lineNum">    1336 </span>            :  * Returns activity of WAL receiver, including pid, state and xlog locations
+<span class="lineNum">    1337 </span>            :  * received from the WAL sender of another server.
+<a name="1338"><span class="lineNum">    1338 </span>            :  */</a>
+<span class="lineNum">    1339 </span>            : Datum
+<span class="lineNum">    1340 </span><span class="lineNoCov">          0 : pg_stat_get_wal_receiver(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1341 </span>            : {
+<span class="lineNum">    1342 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">    1343 </span>            :     Datum      *values;
+<span class="lineNum">    1344 </span>            :     bool       *nulls;
+<span class="lineNum">    1345 </span>            :     int         pid;
+<span class="lineNum">    1346 </span>            :     bool        ready_to_display;
+<span class="lineNum">    1347 </span>            :     WalRcvState state;
+<span class="lineNum">    1348 </span>            :     XLogRecPtr  receive_start_lsn;
+<span class="lineNum">    1349 </span>            :     TimeLineID  receive_start_tli;
+<span class="lineNum">    1350 </span>            :     XLogRecPtr  received_lsn;
+<span class="lineNum">    1351 </span>            :     TimeLineID  received_tli;
+<span class="lineNum">    1352 </span>            :     TimestampTz last_send_time;
+<span class="lineNum">    1353 </span>            :     TimestampTz last_receipt_time;
+<span class="lineNum">    1354 </span>            :     XLogRecPtr  latest_end_lsn;
+<span class="lineNum">    1355 </span>            :     TimestampTz latest_end_time;
+<span class="lineNum">    1356 </span>            :     char        sender_host[NI_MAXHOST];
+<span class="lineNum">    1357 </span><span class="lineNoCov">          0 :     int         sender_port = 0;</span>
+<span class="lineNum">    1358 </span>            :     char        slotname[NAMEDATALEN];
+<span class="lineNum">    1359 </span>            :     char        conninfo[MAXCONNINFO];
+<span class="lineNum">    1360 </span>            : 
+<span class="lineNum">    1361 </span>            :     /* Take a lock to ensure value consistency */
+<span class="lineNum">    1362 </span><span class="lineNoCov">          0 :     SpinLockAcquire(&amp;WalRcv-&gt;mutex);</span>
+<span class="lineNum">    1363 </span><span class="lineNoCov">          0 :     pid = (int) WalRcv-&gt;pid;</span>
+<span class="lineNum">    1364 </span><span class="lineNoCov">          0 :     ready_to_display = WalRcv-&gt;ready_to_display;</span>
+<span class="lineNum">    1365 </span><span class="lineNoCov">          0 :     state = WalRcv-&gt;walRcvState;</span>
+<span class="lineNum">    1366 </span><span class="lineNoCov">          0 :     receive_start_lsn = WalRcv-&gt;receiveStart;</span>
+<span class="lineNum">    1367 </span><span class="lineNoCov">          0 :     receive_start_tli = WalRcv-&gt;receiveStartTLI;</span>
+<span class="lineNum">    1368 </span><span class="lineNoCov">          0 :     received_lsn = WalRcv-&gt;receivedUpto;</span>
+<span class="lineNum">    1369 </span><span class="lineNoCov">          0 :     received_tli = WalRcv-&gt;receivedTLI;</span>
+<span class="lineNum">    1370 </span><span class="lineNoCov">          0 :     last_send_time = WalRcv-&gt;lastMsgSendTime;</span>
+<span class="lineNum">    1371 </span><span class="lineNoCov">          0 :     last_receipt_time = WalRcv-&gt;lastMsgReceiptTime;</span>
+<span class="lineNum">    1372 </span><span class="lineNoCov">          0 :     latest_end_lsn = WalRcv-&gt;latestWalEnd;</span>
+<span class="lineNum">    1373 </span><span class="lineNoCov">          0 :     latest_end_time = WalRcv-&gt;latestWalEndTime;</span>
+<span class="lineNum">    1374 </span><span class="lineNoCov">          0 :     strlcpy(slotname, (char *) WalRcv-&gt;slotname, sizeof(slotname));</span>
+<span class="lineNum">    1375 </span><span class="lineNoCov">          0 :     strlcpy(sender_host, (char *) WalRcv-&gt;sender_host, sizeof(sender_host));</span>
+<span class="lineNum">    1376 </span><span class="lineNoCov">          0 :     sender_port = WalRcv-&gt;sender_port;</span>
+<span class="lineNum">    1377 </span><span class="lineNoCov">          0 :     strlcpy(conninfo, (char *) WalRcv-&gt;conninfo, sizeof(conninfo));</span>
+<span class="lineNum">    1378 </span><span class="lineNoCov">          0 :     SpinLockRelease(&amp;WalRcv-&gt;mutex);</span>
+<span class="lineNum">    1379 </span>            : 
+<span class="lineNum">    1380 </span>            :     /*
+<span class="lineNum">    1381 </span>            :      * No WAL receiver (or not ready yet), just return a tuple with NULL
+<span class="lineNum">    1382 </span>            :      * values
+<span class="lineNum">    1383 </span>            :      */
+<span class="lineNum">    1384 </span><span class="lineNoCov">          0 :     if (pid == 0 || !ready_to_display)</span>
+<span class="lineNum">    1385 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">    1386 </span>            : 
+<span class="lineNum">    1387 </span>            :     /* determine result type */
+<span class="lineNum">    1388 </span><span class="lineNoCov">          0 :     if (get_call_result_type(fcinfo, NULL, &amp;tupdesc) != TYPEFUNC_COMPOSITE)</span>
+<span class="lineNum">    1389 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;return type must be a row type&quot;);</span>
+<span class="lineNum">    1390 </span>            : 
+<span class="lineNum">    1391 </span><span class="lineNoCov">          0 :     values = palloc0(sizeof(Datum) * tupdesc-&gt;natts);</span>
+<span class="lineNum">    1392 </span><span class="lineNoCov">          0 :     nulls = palloc0(sizeof(bool) * tupdesc-&gt;natts);</span>
+<span class="lineNum">    1393 </span>            : 
+<span class="lineNum">    1394 </span>            :     /* Fetch values */
+<span class="lineNum">    1395 </span><span class="lineNoCov">          0 :     values[0] = Int32GetDatum(pid);</span>
+<span class="lineNum">    1396 </span>            : 
+<span class="lineNum">    1397 </span><span class="lineNoCov">          0 :     if (!is_member_of_role(GetUserId(), DEFAULT_ROLE_READ_ALL_STATS))</span>
+<span class="lineNum">    1398 </span>            :     {
+<span class="lineNum">    1399 </span>            :         /*
+<span class="lineNum">    1400 </span>            :          * Only superusers and members of pg_read_all_stats can see details.
+<span class="lineNum">    1401 </span>            :          * Other users only get the pid value to know whether it is a WAL
+<span class="lineNum">    1402 </span>            :          * receiver, but no details.
+<span class="lineNum">    1403 </span>            :          */
+<span class="lineNum">    1404 </span><span class="lineNoCov">          0 :         MemSet(&amp;nulls[1], true, sizeof(bool) * (tupdesc-&gt;natts - 1));</span>
+<span class="lineNum">    1405 </span>            :     }
+<span class="lineNum">    1406 </span>            :     else
+<span class="lineNum">    1407 </span>            :     {
+<span class="lineNum">    1408 </span><span class="lineNoCov">          0 :         values[1] = CStringGetTextDatum(WalRcvGetStateString(state));</span>
+<span class="lineNum">    1409 </span>            : 
+<span class="lineNum">    1410 </span><span class="lineNoCov">          0 :         if (XLogRecPtrIsInvalid(receive_start_lsn))</span>
+<span class="lineNum">    1411 </span><span class="lineNoCov">          0 :             nulls[2] = true;</span>
+<span class="lineNum">    1412 </span>            :         else
+<span class="lineNum">    1413 </span><span class="lineNoCov">          0 :             values[2] = LSNGetDatum(receive_start_lsn);</span>
+<span class="lineNum">    1414 </span><span class="lineNoCov">          0 :         values[3] = Int32GetDatum(receive_start_tli);</span>
+<span class="lineNum">    1415 </span><span class="lineNoCov">          0 :         if (XLogRecPtrIsInvalid(received_lsn))</span>
+<span class="lineNum">    1416 </span><span class="lineNoCov">          0 :             nulls[4] = true;</span>
+<span class="lineNum">    1417 </span>            :         else
+<span class="lineNum">    1418 </span><span class="lineNoCov">          0 :             values[4] = LSNGetDatum(received_lsn);</span>
+<span class="lineNum">    1419 </span><span class="lineNoCov">          0 :         values[5] = Int32GetDatum(received_tli);</span>
+<span class="lineNum">    1420 </span><span class="lineNoCov">          0 :         if (last_send_time == 0)</span>
+<span class="lineNum">    1421 </span><span class="lineNoCov">          0 :             nulls[6] = true;</span>
+<span class="lineNum">    1422 </span>            :         else
+<span class="lineNum">    1423 </span><span class="lineNoCov">          0 :             values[6] = TimestampTzGetDatum(last_send_time);</span>
+<span class="lineNum">    1424 </span><span class="lineNoCov">          0 :         if (last_receipt_time == 0)</span>
+<span class="lineNum">    1425 </span><span class="lineNoCov">          0 :             nulls[7] = true;</span>
+<span class="lineNum">    1426 </span>            :         else
+<span class="lineNum">    1427 </span><span class="lineNoCov">          0 :             values[7] = TimestampTzGetDatum(last_receipt_time);</span>
+<span class="lineNum">    1428 </span><span class="lineNoCov">          0 :         if (XLogRecPtrIsInvalid(latest_end_lsn))</span>
+<span class="lineNum">    1429 </span><span class="lineNoCov">          0 :             nulls[8] = true;</span>
+<span class="lineNum">    1430 </span>            :         else
+<span class="lineNum">    1431 </span><span class="lineNoCov">          0 :             values[8] = LSNGetDatum(latest_end_lsn);</span>
+<span class="lineNum">    1432 </span><span class="lineNoCov">          0 :         if (latest_end_time == 0)</span>
+<span class="lineNum">    1433 </span><span class="lineNoCov">          0 :             nulls[9] = true;</span>
+<span class="lineNum">    1434 </span>            :         else
+<span class="lineNum">    1435 </span><span class="lineNoCov">          0 :             values[9] = TimestampTzGetDatum(latest_end_time);</span>
+<span class="lineNum">    1436 </span><span class="lineNoCov">          0 :         if (*slotname == '\0')</span>
+<span class="lineNum">    1437 </span><span class="lineNoCov">          0 :             nulls[10] = true;</span>
+<span class="lineNum">    1438 </span>            :         else
+<span class="lineNum">    1439 </span><span class="lineNoCov">          0 :             values[10] = CStringGetTextDatum(slotname);</span>
+<span class="lineNum">    1440 </span><span class="lineNoCov">          0 :         if (*sender_host == '\0')</span>
+<span class="lineNum">    1441 </span><span class="lineNoCov">          0 :             nulls[11] = true;</span>
+<span class="lineNum">    1442 </span>            :         else
+<span class="lineNum">    1443 </span><span class="lineNoCov">          0 :             values[11] = CStringGetTextDatum(sender_host);</span>
+<span class="lineNum">    1444 </span><span class="lineNoCov">          0 :         if (sender_port == 0)</span>
+<span class="lineNum">    1445 </span><span class="lineNoCov">          0 :             nulls[12] = true;</span>
+<span class="lineNum">    1446 </span>            :         else
+<span class="lineNum">    1447 </span><span class="lineNoCov">          0 :             values[12] = Int32GetDatum(sender_port);</span>
+<span class="lineNum">    1448 </span><span class="lineNoCov">          0 :         if (*conninfo == '\0')</span>
+<span class="lineNum">    1449 </span><span class="lineNoCov">          0 :             nulls[13] = true;</span>
+<span class="lineNum">    1450 </span>            :         else
+<span class="lineNum">    1451 </span><span class="lineNoCov">          0 :             values[13] = CStringGetTextDatum(conninfo);</span>
+<span class="lineNum">    1452 </span>            :     }
+<span class="lineNum">    1453 </span>            : 
+<span class="lineNum">    1454 </span>            :     /* Returns the record as Datum */
+<span class="lineNum">    1455 </span><span class="lineNoCov">          0 :     PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));</span>
+<span class="lineNum">    1456 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

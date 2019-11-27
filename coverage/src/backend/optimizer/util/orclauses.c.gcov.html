@@ -1,0 +1,443 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/optimizer/util/orclauses.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/optimizer/util</a> - orclauses.c<span style="font-size: 80%;"> (source / <a href="orclauses.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">76</td>
+            <td class="headerCovTableEntry">80</td>
+            <td class="headerCovTableEntryHi">95.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">4</td>
+            <td class="headerCovTableEntry">4</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * orclauses.c
+<span class="lineNum">       4 </span>            :  *    Routines to extract restriction OR clauses from join OR clauses
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/optimizer/util/orclauses.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      17 </span>            : 
+<span class="lineNum">      18 </span>            : #include &quot;nodes/makefuncs.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;optimizer/clauses.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;optimizer/cost.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;optimizer/optimizer.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;optimizer/orclauses.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;optimizer/restrictinfo.h&quot;
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : static bool is_safe_restriction_clause_for(RestrictInfo *rinfo, RelOptInfo *rel);
+<span class="lineNum">      28 </span>            : static Expr *extract_or_clause(RestrictInfo *or_rinfo, RelOptInfo *rel);
+<span class="lineNum">      29 </span>            : static void consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,
+<span class="lineNum">      30 </span>            :                                    Expr *orclause, RestrictInfo *join_or_rinfo);
+<span class="lineNum">      31 </span>            : 
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /*
+<span class="lineNum">      34 </span>            :  * extract_restriction_or_clauses
+<span class="lineNum">      35 </span>            :  *    Examine join OR-of-AND clauses to see if any useful restriction OR
+<span class="lineNum">      36 </span>            :  *    clauses can be extracted.  If so, add them to the query.
+<span class="lineNum">      37 </span>            :  *
+<span class="lineNum">      38 </span>            :  * Although a join clause must reference multiple relations overall,
+<span class="lineNum">      39 </span>            :  * an OR of ANDs clause might contain sub-clauses that reference just one
+<span class="lineNum">      40 </span>            :  * relation and can be used to build a restriction clause for that rel.
+<span class="lineNum">      41 </span>            :  * For example consider
+<span class="lineNum">      42 </span>            :  *      WHERE ((a.x = 42 AND b.y = 43) OR (a.x = 44 AND b.z = 45));
+<span class="lineNum">      43 </span>            :  * We can transform this into
+<span class="lineNum">      44 </span>            :  *      WHERE ((a.x = 42 AND b.y = 43) OR (a.x = 44 AND b.z = 45))
+<span class="lineNum">      45 </span>            :  *          AND (a.x = 42 OR a.x = 44)
+<span class="lineNum">      46 </span>            :  *          AND (b.y = 43 OR b.z = 45);
+<span class="lineNum">      47 </span>            :  * which allows the latter clauses to be applied during the scans of a and b,
+<span class="lineNum">      48 </span>            :  * perhaps as index qualifications, and in any case reducing the number of
+<span class="lineNum">      49 </span>            :  * rows arriving at the join.  In essence this is a partial transformation to
+<span class="lineNum">      50 </span>            :  * CNF (AND of ORs format).  It is not complete, however, because we do not
+<span class="lineNum">      51 </span>            :  * unravel the original OR --- doing so would usually bloat the qualification
+<span class="lineNum">      52 </span>            :  * expression to little gain.
+<span class="lineNum">      53 </span>            :  *
+<span class="lineNum">      54 </span>            :  * The added quals are partially redundant with the original OR, and therefore
+<span class="lineNum">      55 </span>            :  * would cause the size of the joinrel to be underestimated when it is finally
+<span class="lineNum">      56 </span>            :  * formed.  (This would be true of a full transformation to CNF as well; the
+<span class="lineNum">      57 </span>            :  * fault is not really in the transformation, but in clauselist_selectivity's
+<span class="lineNum">      58 </span>            :  * inability to recognize redundant conditions.)  We can compensate for this
+<span class="lineNum">      59 </span>            :  * redundancy by changing the cached selectivity of the original OR clause,
+<span class="lineNum">      60 </span>            :  * canceling out the (valid) reduction in the estimated sizes of the base
+<span class="lineNum">      61 </span>            :  * relations so that the estimated joinrel size remains the same.  This is
+<span class="lineNum">      62 </span>            :  * a MAJOR HACK: it depends on the fact that clause selectivities are cached
+<span class="lineNum">      63 </span>            :  * and on the fact that the same RestrictInfo node will appear in every
+<span class="lineNum">      64 </span>            :  * joininfo list that might be used when the joinrel is formed.
+<span class="lineNum">      65 </span>            :  * And it doesn't work in cases where the size estimation is nonlinear
+<span class="lineNum">      66 </span>            :  * (i.e., outer and IN joins).  But it beats not doing anything.
+<span class="lineNum">      67 </span>            :  *
+<span class="lineNum">      68 </span>            :  * We examine each base relation to see if join clauses associated with it
+<span class="lineNum">      69 </span>            :  * contain extractable restriction conditions.  If so, add those conditions
+<span class="lineNum">      70 </span>            :  * to the rel's baserestrictinfo and update the cached selectivities of the
+<span class="lineNum">      71 </span>            :  * join clauses.  Note that the same join clause will be examined afresh
+<span class="lineNum">      72 </span>            :  * from the point of view of each baserel that participates in it, so its
+<span class="lineNum">      73 </span>            :  * cached selectivity may get updated multiple times.
+<a name="74"><span class="lineNum">      74 </span>            :  */</a>
+<span class="lineNum">      75 </span>            : void
+<span class="lineNum">      76 </span><span class="lineCov">      45166 : extract_restriction_or_clauses(PlannerInfo *root)</span>
+<span class="lineNum">      77 </span>            : {
+<span class="lineNum">      78 </span>            :     Index       rti;
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            :     /* Examine each baserel for potential join OR clauses */
+<span class="lineNum">      81 </span><span class="lineCov">     146352 :     for (rti = 1; rti &lt; root-&gt;simple_rel_array_size; rti++)</span>
+<span class="lineNum">      82 </span>            :     {
+<span class="lineNum">      83 </span><span class="lineCov">     101186 :         RelOptInfo *rel = root-&gt;simple_rel_array[rti];</span>
+<span class="lineNum">      84 </span>            :         ListCell   *lc;
+<span class="lineNum">      85 </span>            : 
+<span class="lineNum">      86 </span>            :         /* there may be empty slots corresponding to non-baserel RTEs */
+<span class="lineNum">      87 </span><span class="lineCov">     101186 :         if (rel == NULL)</span>
+<span class="lineNum">      88 </span><span class="lineCov">      36980 :             continue;</span>
+<span class="lineNum">      89 </span>            : 
+<span class="lineNum">      90 </span><span class="lineCov">      64206 :         Assert(rel-&gt;relid == rti);   /* sanity check on array */</span>
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span>            :         /* ignore RTEs that are &quot;other rels&quot; */
+<span class="lineNum">      93 </span><span class="lineCov">      64206 :         if (rel-&gt;reloptkind != RELOPT_BASEREL)</span>
+<span class="lineNum">      94 </span><span class="lineCov">       1294 :             continue;</span>
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span>            :         /*
+<span class="lineNum">      97 </span>            :          * Find potentially interesting OR joinclauses.  We can use any
+<span class="lineNum">      98 </span>            :          * joinclause that is considered safe to move to this rel by the
+<span class="lineNum">      99 </span>            :          * parameterized-path machinery, even though what we are going to do
+<span class="lineNum">     100 </span>            :          * with it is not exactly a parameterized path.
+<span class="lineNum">     101 </span>            :          *
+<span class="lineNum">     102 </span>            :          * However, it seems best to ignore clauses that have been marked
+<span class="lineNum">     103 </span>            :          * redundant (by setting norm_selec &gt; 1).  That likely can't happen
+<span class="lineNum">     104 </span>            :          * for OR clauses, but let's be safe.
+<span class="lineNum">     105 </span>            :          */
+<span class="lineNum">     106 </span><span class="lineCov">      82672 :         foreach(lc, rel-&gt;joininfo)</span>
+<span class="lineNum">     107 </span>            :         {
+<span class="lineNum">     108 </span><span class="lineCov">      19760 :             RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);</span>
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span><span class="lineCov">      24758 :             if (restriction_is_or_clause(rinfo) &amp;&amp;</span>
+<span class="lineNum">     111 </span><span class="lineCov">       9890 :                 join_clause_is_movable_to(rinfo, rel) &amp;&amp;</span>
+<span class="lineNum">     112 </span><span class="lineCov">       4892 :                 rinfo-&gt;norm_selec &lt;= 1)</span>
+<span class="lineNum">     113 </span>            :             {
+<span class="lineNum">     114 </span>            :                 /* Try to extract a qual for this rel only */
+<span class="lineNum">     115 </span><span class="lineCov">       4892 :                 Expr       *orclause = extract_or_clause(rinfo, rel);</span>
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span>            :                 /*
+<span class="lineNum">     118 </span>            :                  * If successful, decide whether we want to use the clause,
+<span class="lineNum">     119 </span>            :                  * and insert it into the rel's restrictinfo list if so.
+<span class="lineNum">     120 </span>            :                  */
+<span class="lineNum">     121 </span><span class="lineCov">       4892 :                 if (orclause)</span>
+<span class="lineNum">     122 </span><span class="lineCov">         22 :                     consider_new_or_clause(root, rel, orclause, rinfo);</span>
+<span class="lineNum">     123 </span>            :             }
+<span class="lineNum">     124 </span>            :         }
+<span class="lineNum">     125 </span>            :     }
+<span class="lineNum">     126 </span><span class="lineCov">      45166 : }</span>
+<span class="lineNum">     127 </span>            : 
+<span class="lineNum">     128 </span>            : /*
+<span class="lineNum">     129 </span>            :  * Is the given primitive (non-OR) RestrictInfo safe to move to the rel?
+<a name="130"><span class="lineNum">     130 </span>            :  */</a>
+<span class="lineNum">     131 </span>            : static bool
+<span class="lineNum">     132 </span><span class="lineCov">       5128 : is_safe_restriction_clause_for(RestrictInfo *rinfo, RelOptInfo *rel)</span>
+<span class="lineNum">     133 </span>            : {
+<span class="lineNum">     134 </span>            :     /*
+<span class="lineNum">     135 </span>            :      * We want clauses that mention the rel, and only the rel.  So in
+<span class="lineNum">     136 </span>            :      * particular pseudoconstant clauses can be rejected quickly.  Then check
+<span class="lineNum">     137 </span>            :      * the clause's Var membership.
+<span class="lineNum">     138 </span>            :      */
+<span class="lineNum">     139 </span><span class="lineCov">       5128 :     if (rinfo-&gt;pseudoconstant)</span>
+<span class="lineNum">     140 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     141 </span><span class="lineCov">       5128 :     if (!bms_equal(rinfo-&gt;clause_relids, rel-&gt;relids))</span>
+<span class="lineNum">     142 </span><span class="lineCov">       4924 :         return false;</span>
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span>            :     /* We don't want extra evaluations of any volatile functions */
+<span class="lineNum">     145 </span><span class="lineCov">        204 :     if (contain_volatile_functions((Node *) rinfo-&gt;clause))</span>
+<span class="lineNum">     146 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     147 </span>            : 
+<span class="lineNum">     148 </span><span class="lineCov">        204 :     return true;</span>
+<span class="lineNum">     149 </span>            : }
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span>            : /*
+<span class="lineNum">     152 </span>            :  * Try to extract a restriction clause mentioning only &quot;rel&quot; from the given
+<span class="lineNum">     153 </span>            :  * join OR-clause.
+<span class="lineNum">     154 </span>            :  *
+<span class="lineNum">     155 </span>            :  * We must be able to extract at least one qual for this rel from each of
+<span class="lineNum">     156 </span>            :  * the arms of the OR, else we can't use it.
+<span class="lineNum">     157 </span>            :  *
+<span class="lineNum">     158 </span>            :  * Returns an OR clause (not a RestrictInfo!) pertaining to rel, or NULL
+<span class="lineNum">     159 </span>            :  * if no OR clause could be extracted.
+<a name="160"><span class="lineNum">     160 </span>            :  */</a>
+<span class="lineNum">     161 </span>            : static Expr *
+<span class="lineNum">     162 </span><span class="lineCov">       4904 : extract_or_clause(RestrictInfo *or_rinfo, RelOptInfo *rel)</span>
+<span class="lineNum">     163 </span>            : {
+<span class="lineNum">     164 </span><span class="lineCov">       4904 :     List       *clauselist = NIL;</span>
+<span class="lineNum">     165 </span>            :     ListCell   *lc;
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span>            :     /*
+<span class="lineNum">     168 </span>            :      * Scan each arm of the input OR clause.  Notice we descend into
+<span class="lineNum">     169 </span>            :      * or_rinfo-&gt;orclause, which has RestrictInfo nodes embedded below the
+<span class="lineNum">     170 </span>            :      * toplevel OR/AND structure.  This is useful because we can use the info
+<span class="lineNum">     171 </span>            :      * in those nodes to make is_safe_restriction_clause_for()'s checks
+<span class="lineNum">     172 </span>            :      * cheaper.  We'll strip those nodes from the returned tree, though,
+<span class="lineNum">     173 </span>            :      * meaning that fresh ones will be built if the clause is accepted as a
+<span class="lineNum">     174 </span>            :      * restriction clause.  This might seem wasteful --- couldn't we re-use
+<span class="lineNum">     175 </span>            :      * the existing RestrictInfos?  But that'd require assuming that
+<span class="lineNum">     176 </span>            :      * selectivity and other cached data is computed exactly the same way for
+<span class="lineNum">     177 </span>            :      * a restriction clause as for a join clause, which seems undesirable.
+<span class="lineNum">     178 </span>            :      */
+<span class="lineNum">     179 </span><span class="lineCov">       4904 :     Assert(is_orclause(or_rinfo-&gt;orclause));</span>
+<span class="lineNum">     180 </span><span class="lineCov">       5110 :     foreach(lc, ((BoolExpr *) or_rinfo-&gt;orclause)-&gt;args)</span>
+<span class="lineNum">     181 </span>            :     {
+<span class="lineNum">     182 </span><span class="lineCov">       5086 :         Node       *orarg = (Node *) lfirst(lc);</span>
+<span class="lineNum">     183 </span><span class="lineCov">       5086 :         List       *subclauses = NIL;</span>
+<span class="lineNum">     184 </span>            :         Node       *subclause;
+<span class="lineNum">     185 </span>            : 
+<span class="lineNum">     186 </span>            :         /* OR arguments should be ANDs or sub-RestrictInfos */
+<span class="lineNum">     187 </span><span class="lineCov">       5086 :         if (is_andclause(orarg))</span>
+<span class="lineNum">     188 </span>            :         {
+<span class="lineNum">     189 </span><span class="lineCov">         54 :             List       *andargs = ((BoolExpr *) orarg)-&gt;args;</span>
+<span class="lineNum">     190 </span>            :             ListCell   *lc2;
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span><span class="lineCov">        162 :             foreach(lc2, andargs)</span>
+<span class="lineNum">     193 </span>            :             {
+<span class="lineNum">     194 </span><span class="lineCov">        108 :                 RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc2);</span>
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span><span class="lineCov">        108 :                 if (restriction_is_or_clause(rinfo))</span>
+<span class="lineNum">     197 </span>            :                 {
+<span class="lineNum">     198 </span>            :                     /*
+<span class="lineNum">     199 </span>            :                      * Recurse to deal with nested OR.  Note we *must* recurse
+<span class="lineNum">     200 </span>            :                      * here, this isn't just overly-tense optimization: we
+<span class="lineNum">     201 </span>            :                      * have to descend far enough to find and strip all
+<span class="lineNum">     202 </span>            :                      * RestrictInfos in the expression.
+<span class="lineNum">     203 </span>            :                      */
+<span class="lineNum">     204 </span>            :                     Expr       *suborclause;
+<span class="lineNum">     205 </span>            : 
+<span class="lineNum">     206 </span><span class="lineCov">         12 :                     suborclause = extract_or_clause(rinfo, rel);</span>
+<span class="lineNum">     207 </span><span class="lineCov">         12 :                     if (suborclause)</span>
+<span class="lineNum">     208 </span><span class="lineCov">          2 :                         subclauses = lappend(subclauses, suborclause);</span>
+<span class="lineNum">     209 </span>            :                 }
+<span class="lineNum">     210 </span><span class="lineCov">         96 :                 else if (is_safe_restriction_clause_for(rinfo, rel))</span>
+<span class="lineNum">     211 </span><span class="lineCov">         34 :                     subclauses = lappend(subclauses, rinfo-&gt;clause);</span>
+<span class="lineNum">     212 </span>            :             }
+<span class="lineNum">     213 </span>            :         }
+<span class="lineNum">     214 </span>            :         else
+<span class="lineNum">     215 </span>            :         {
+<span class="lineNum">     216 </span><span class="lineCov">       5032 :             RestrictInfo *rinfo = castNode(RestrictInfo, orarg);</span>
+<span class="lineNum">     217 </span>            : 
+<span class="lineNum">     218 </span><span class="lineCov">       5032 :             Assert(!restriction_is_or_clause(rinfo));</span>
+<span class="lineNum">     219 </span><span class="lineCov">       5032 :             if (is_safe_restriction_clause_for(rinfo, rel))</span>
+<span class="lineNum">     220 </span><span class="lineCov">        170 :                 subclauses = lappend(subclauses, rinfo-&gt;clause);</span>
+<span class="lineNum">     221 </span>            :         }
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span>            :         /*
+<span class="lineNum">     224 </span>            :          * If nothing could be extracted from this arm, we can't do anything
+<span class="lineNum">     225 </span>            :          * with this OR clause.
+<span class="lineNum">     226 </span>            :          */
+<span class="lineNum">     227 </span><span class="lineCov">       5086 :         if (subclauses == NIL)</span>
+<span class="lineNum">     228 </span><span class="lineCov">       4880 :             return NULL;</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span>            :         /*
+<span class="lineNum">     231 </span>            :          * OK, add subclause(s) to the result OR.  If we found more than one,
+<span class="lineNum">     232 </span>            :          * we need an AND node.  But if we found only one, and it is itself an
+<span class="lineNum">     233 </span>            :          * OR node, add its subclauses to the result instead; this is needed
+<span class="lineNum">     234 </span>            :          * to preserve AND/OR flatness (ie, no OR directly underneath OR).
+<span class="lineNum">     235 </span>            :          */
+<span class="lineNum">     236 </span><span class="lineCov">        206 :         subclause = (Node *) make_ands_explicit(subclauses);</span>
+<span class="lineNum">     237 </span><span class="lineCov">        206 :         if (is_orclause(subclause))</span>
+<span class="lineNum">     238 </span><span class="lineCov">          2 :             clauselist = list_concat(clauselist,</span>
+<span class="lineNum">     239 </span><span class="lineCov">          2 :                                      ((BoolExpr *) subclause)-&gt;args);</span>
+<span class="lineNum">     240 </span>            :         else
+<span class="lineNum">     241 </span><span class="lineCov">        204 :             clauselist = lappend(clauselist, subclause);</span>
+<span class="lineNum">     242 </span>            :     }
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            :     /*
+<span class="lineNum">     245 </span>            :      * If we got a restriction clause from every arm, wrap them up in an OR
+<span class="lineNum">     246 </span>            :      * node.  (In theory the OR node might be unnecessary, if there was only
+<span class="lineNum">     247 </span>            :      * one arm --- but then the input OR node was also redundant.)
+<span class="lineNum">     248 </span>            :      */
+<span class="lineNum">     249 </span><span class="lineCov">         24 :     if (clauselist != NIL)</span>
+<span class="lineNum">     250 </span><span class="lineCov">         24 :         return make_orclause(clauselist);</span>
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :     return NULL;</span>
+<span class="lineNum">     252 </span>            : }
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span>            : /*
+<span class="lineNum">     255 </span>            :  * Consider whether a successfully-extracted restriction OR clause is
+<span class="lineNum">     256 </span>            :  * actually worth using.  If so, add it to the planner's data structures,
+<span class="lineNum">     257 </span>            :  * and adjust the original join clause (join_or_rinfo) to compensate.
+<a name="258"><span class="lineNum">     258 </span>            :  */</a>
+<span class="lineNum">     259 </span>            : static void
+<span class="lineNum">     260 </span><span class="lineCov">         22 : consider_new_or_clause(PlannerInfo *root, RelOptInfo *rel,</span>
+<span class="lineNum">     261 </span>            :                        Expr *orclause, RestrictInfo *join_or_rinfo)
+<span class="lineNum">     262 </span>            : {
+<span class="lineNum">     263 </span>            :     RestrictInfo *or_rinfo;
+<span class="lineNum">     264 </span>            :     Selectivity or_selec,
+<span class="lineNum">     265 </span>            :                 orig_selec;
+<span class="lineNum">     266 </span>            : 
+<span class="lineNum">     267 </span>            :     /*
+<span class="lineNum">     268 </span>            :      * Build a RestrictInfo from the new OR clause.  We can assume it's valid
+<span class="lineNum">     269 </span>            :      * as a base restriction clause.
+<span class="lineNum">     270 </span>            :      */
+<span class="lineNum">     271 </span><span class="lineCov">         22 :     or_rinfo = make_restrictinfo(orclause,</span>
+<span class="lineNum">     272 </span>            :                                  true,
+<span class="lineNum">     273 </span>            :                                  false,
+<span class="lineNum">     274 </span>            :                                  false,
+<span class="lineNum">     275 </span>            :                                  join_or_rinfo-&gt;security_level,
+<span class="lineNum">     276 </span>            :                                  NULL,
+<span class="lineNum">     277 </span>            :                                  NULL,
+<span class="lineNum">     278 </span>            :                                  NULL);
+<span class="lineNum">     279 </span>            : 
+<span class="lineNum">     280 </span>            :     /*
+<span class="lineNum">     281 </span>            :      * Estimate its selectivity.  (We could have done this earlier, but doing
+<span class="lineNum">     282 </span>            :      * it on the RestrictInfo representation allows the result to get cached,
+<span class="lineNum">     283 </span>            :      * saving work later.)
+<span class="lineNum">     284 </span>            :      */
+<span class="lineNum">     285 </span><span class="lineCov">         22 :     or_selec = clause_selectivity(root, (Node *) or_rinfo,</span>
+<span class="lineNum">     286 </span>            :                                   0, JOIN_INNER, NULL);
+<span class="lineNum">     287 </span>            : 
+<span class="lineNum">     288 </span>            :     /*
+<span class="lineNum">     289 </span>            :      * The clause is only worth adding to the query if it rejects a useful
+<span class="lineNum">     290 </span>            :      * fraction of the base relation's rows; otherwise, it's just going to
+<span class="lineNum">     291 </span>            :      * cause duplicate computation (since we will still have to check the
+<span class="lineNum">     292 </span>            :      * original OR clause when the join is formed).  Somewhat arbitrarily, we
+<span class="lineNum">     293 </span>            :      * set the selectivity threshold at 0.9.
+<span class="lineNum">     294 </span>            :      */
+<span class="lineNum">     295 </span><span class="lineCov">         22 :     if (or_selec &gt; 0.9)</span>
+<span class="lineNum">     296 </span><span class="lineCov">         22 :         return;                 /* forget it */</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span>            :     /*
+<span class="lineNum">     299 </span>            :      * OK, add it to the rel's restriction-clause list.
+<span class="lineNum">     300 </span>            :      */
+<span class="lineNum">     301 </span><span class="lineCov">         22 :     rel-&gt;baserestrictinfo = lappend(rel-&gt;baserestrictinfo, or_rinfo);</span>
+<span class="lineNum">     302 </span><span class="lineCov">         22 :     rel-&gt;baserestrict_min_security = Min(rel-&gt;baserestrict_min_security,</span>
+<span class="lineNum">     303 </span>            :                                          or_rinfo-&gt;security_level);
+<span class="lineNum">     304 </span>            : 
+<span class="lineNum">     305 </span>            :     /*
+<span class="lineNum">     306 </span>            :      * Adjust the original join OR clause's cached selectivity to compensate
+<span class="lineNum">     307 </span>            :      * for the selectivity of the added (but redundant) lower-level qual. This
+<span class="lineNum">     308 </span>            :      * should result in the join rel getting approximately the same rows
+<span class="lineNum">     309 </span>            :      * estimate as it would have gotten without all these shenanigans.
+<span class="lineNum">     310 </span>            :      *
+<span class="lineNum">     311 </span>            :      * XXX major hack alert: this depends on the assumption that the
+<span class="lineNum">     312 </span>            :      * selectivity will stay cached.
+<span class="lineNum">     313 </span>            :      *
+<span class="lineNum">     314 </span>            :      * XXX another major hack: we adjust only norm_selec, the cached
+<span class="lineNum">     315 </span>            :      * selectivity for JOIN_INNER semantics, even though the join clause
+<span class="lineNum">     316 </span>            :      * might've been an outer-join clause.  This is partly because we can't
+<span class="lineNum">     317 </span>            :      * easily identify the relevant SpecialJoinInfo here, and partly because
+<span class="lineNum">     318 </span>            :      * the linearity assumption we're making would fail anyway.  (If it is an
+<span class="lineNum">     319 </span>            :      * outer-join clause, &quot;rel&quot; must be on the nullable side, else we'd not
+<span class="lineNum">     320 </span>            :      * have gotten here.  So the computation of the join size is going to be
+<span class="lineNum">     321 </span>            :      * quite nonlinear with respect to the size of &quot;rel&quot;, so it's not clear
+<span class="lineNum">     322 </span>            :      * how we ought to adjust outer_selec even if we could compute its
+<span class="lineNum">     323 </span>            :      * original value correctly.)
+<span class="lineNum">     324 </span>            :      */
+<span class="lineNum">     325 </span><span class="lineCov">         22 :     if (or_selec &gt; 0)</span>
+<span class="lineNum">     326 </span>            :     {
+<span class="lineNum">     327 </span>            :         SpecialJoinInfo sjinfo;
+<span class="lineNum">     328 </span>            : 
+<span class="lineNum">     329 </span>            :         /*
+<span class="lineNum">     330 </span>            :          * Make up a SpecialJoinInfo for JOIN_INNER semantics.  (Compare
+<span class="lineNum">     331 </span>            :          * approx_tuple_count() in costsize.c.)
+<span class="lineNum">     332 </span>            :          */
+<span class="lineNum">     333 </span><span class="lineCov">         22 :         sjinfo.type = T_SpecialJoinInfo;</span>
+<span class="lineNum">     334 </span><span class="lineCov">         22 :         sjinfo.min_lefthand = bms_difference(join_or_rinfo-&gt;clause_relids,</span>
+<span class="lineNum">     335 </span><span class="lineCov">         22 :                                              rel-&gt;relids);</span>
+<span class="lineNum">     336 </span><span class="lineCov">         22 :         sjinfo.min_righthand = rel-&gt;relids;</span>
+<span class="lineNum">     337 </span><span class="lineCov">         22 :         sjinfo.syn_lefthand = sjinfo.min_lefthand;</span>
+<span class="lineNum">     338 </span><span class="lineCov">         22 :         sjinfo.syn_righthand = sjinfo.min_righthand;</span>
+<span class="lineNum">     339 </span><span class="lineCov">         22 :         sjinfo.jointype = JOIN_INNER;</span>
+<span class="lineNum">     340 </span>            :         /* we don't bother trying to make the remaining fields valid */
+<span class="lineNum">     341 </span><span class="lineCov">         22 :         sjinfo.lhs_strict = false;</span>
+<span class="lineNum">     342 </span><span class="lineCov">         22 :         sjinfo.delay_upper_joins = false;</span>
+<span class="lineNum">     343 </span><span class="lineCov">         22 :         sjinfo.semi_can_btree = false;</span>
+<span class="lineNum">     344 </span><span class="lineCov">         22 :         sjinfo.semi_can_hash = false;</span>
+<span class="lineNum">     345 </span><span class="lineCov">         22 :         sjinfo.semi_operators = NIL;</span>
+<span class="lineNum">     346 </span><span class="lineCov">         22 :         sjinfo.semi_rhs_exprs = NIL;</span>
+<span class="lineNum">     347 </span>            : 
+<span class="lineNum">     348 </span>            :         /* Compute inner-join size */
+<span class="lineNum">     349 </span><span class="lineCov">         22 :         orig_selec = clause_selectivity(root, (Node *) join_or_rinfo,</span>
+<span class="lineNum">     350 </span>            :                                         0, JOIN_INNER, &amp;sjinfo);
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span>            :         /* And hack cached selectivity so join size remains the same */
+<span class="lineNum">     353 </span><span class="lineCov">         22 :         join_or_rinfo-&gt;norm_selec = orig_selec / or_selec;</span>
+<span class="lineNum">     354 </span>            :         /* ensure result stays in sane range, in particular not &quot;redundant&quot; */
+<span class="lineNum">     355 </span><span class="lineCov">         22 :         if (join_or_rinfo-&gt;norm_selec &gt; 1)</span>
+<span class="lineNum">     356 </span><span class="lineNoCov">          0 :             join_or_rinfo-&gt;norm_selec = 1;</span>
+<span class="lineNum">     357 </span>            :         /* as explained above, we don't touch outer_selec */
+<span class="lineNum">     358 </span>            :     }
+<span class="lineNum">     359 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

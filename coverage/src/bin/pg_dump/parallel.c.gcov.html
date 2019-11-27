@@ -1,0 +1,1912 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/bin/pg_dump/parallel.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/bin/pg_dump</a> - parallel.c<span style="font-size: 80%;"> (source / <a href="parallel.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">341</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">32</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * parallel.c
+<span class="lineNum">       4 </span>            :  *
+<span class="lineNum">       5 </span>            :  *  Parallel support for pg_dump and pg_restore
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *      src/bin/pg_dump/parallel.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : /*
+<span class="lineNum">      17 </span>            :  * Parallel operation works like this:
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  * The original, master process calls ParallelBackupStart(), which forks off
+<span class="lineNum">      20 </span>            :  * the desired number of worker processes, which each enter WaitForCommands().
+<span class="lineNum">      21 </span>            :  *
+<span class="lineNum">      22 </span>            :  * The master process dispatches an individual work item to one of the worker
+<span class="lineNum">      23 </span>            :  * processes in DispatchJobForTocEntry().  We send a command string such as
+<span class="lineNum">      24 </span>            :  * &quot;DUMP 1234&quot; or &quot;RESTORE 1234&quot;, where 1234 is the TocEntry ID.
+<span class="lineNum">      25 </span>            :  * The worker process receives and decodes the command and passes it to the
+<span class="lineNum">      26 </span>            :  * routine pointed to by AH-&gt;WorkerJobDumpPtr or AH-&gt;WorkerJobRestorePtr,
+<span class="lineNum">      27 </span>            :  * which are routines of the current archive format.  That routine performs
+<span class="lineNum">      28 </span>            :  * the required action (dump or restore) and returns an integer status code.
+<span class="lineNum">      29 </span>            :  * This is passed back to the master where we pass it to the
+<span class="lineNum">      30 </span>            :  * ParallelCompletionPtr callback function that was passed to
+<span class="lineNum">      31 </span>            :  * DispatchJobForTocEntry().  The callback function does state updating
+<span class="lineNum">      32 </span>            :  * for the master control logic in pg_backup_archiver.c.
+<span class="lineNum">      33 </span>            :  *
+<span class="lineNum">      34 </span>            :  * In principle additional archive-format-specific information might be needed
+<span class="lineNum">      35 </span>            :  * in commands or worker status responses, but so far that hasn't proved
+<span class="lineNum">      36 </span>            :  * necessary, since workers have full copies of the ArchiveHandle/TocEntry
+<span class="lineNum">      37 </span>            :  * data structures.  Remember that we have forked off the workers only after
+<span class="lineNum">      38 </span>            :  * we have read in the catalog.  That's why our worker processes can also
+<span class="lineNum">      39 </span>            :  * access the catalog information.  (In the Windows case, the workers are
+<span class="lineNum">      40 </span>            :  * threads in the same process.  To avoid problems, they work with cloned
+<span class="lineNum">      41 </span>            :  * copies of the Archive data structure; see RunWorker().)
+<span class="lineNum">      42 </span>            :  *
+<span class="lineNum">      43 </span>            :  * In the master process, the workerStatus field for each worker has one of
+<span class="lineNum">      44 </span>            :  * the following values:
+<span class="lineNum">      45 </span>            :  *      WRKR_IDLE: it's waiting for a command
+<span class="lineNum">      46 </span>            :  *      WRKR_WORKING: it's working on a command
+<span class="lineNum">      47 </span>            :  *      WRKR_TERMINATED: process ended
+<span class="lineNum">      48 </span>            :  * The pstate-&gt;te[] entry for each worker is valid when it's in WRKR_WORKING
+<span class="lineNum">      49 </span>            :  * state, and must be NULL in other states.
+<span class="lineNum">      50 </span>            :  */
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            : #include &quot;postgres_fe.h&quot;
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            : #ifndef WIN32
+<span class="lineNum">      55 </span>            : #include &lt;sys/wait.h&gt;
+<span class="lineNum">      56 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      57 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      58 </span>            : #include &lt;fcntl.h&gt;
+<span class="lineNum">      59 </span>            : #endif
+<span class="lineNum">      60 </span>            : #ifdef HAVE_SYS_SELECT_H
+<span class="lineNum">      61 </span>            : #include &lt;sys/select.h&gt;
+<span class="lineNum">      62 </span>            : #endif
+<span class="lineNum">      63 </span>            : 
+<span class="lineNum">      64 </span>            : #include &quot;fe_utils/string_utils.h&quot;
+<span class="lineNum">      65 </span>            : #include &quot;parallel.h&quot;
+<span class="lineNum">      66 </span>            : #include &quot;pg_backup_utils.h&quot;
+<span class="lineNum">      67 </span>            : #include &quot;port/pg_bswap.h&quot;
+<span class="lineNum">      68 </span>            : 
+<span class="lineNum">      69 </span>            : /* Mnemonic macros for indexing the fd array returned by pipe(2) */
+<span class="lineNum">      70 </span>            : #define PIPE_READ                           0
+<span class="lineNum">      71 </span>            : #define PIPE_WRITE                          1
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            : #define NO_SLOT (-1)            /* Failure result for GetIdleWorker() */
+<span class="lineNum">      74 </span>            : 
+<span class="lineNum">      75 </span>            : /* Worker process statuses */
+<span class="lineNum">      76 </span>            : typedef enum
+<span class="lineNum">      77 </span>            : {
+<span class="lineNum">      78 </span>            :     WRKR_IDLE,
+<span class="lineNum">      79 </span>            :     WRKR_WORKING,
+<span class="lineNum">      80 </span>            :     WRKR_TERMINATED
+<span class="lineNum">      81 </span>            : } T_WorkerStatus;
+<span class="lineNum">      82 </span>            : 
+<span class="lineNum">      83 </span>            : /*
+<span class="lineNum">      84 </span>            :  * Private per-parallel-worker state (typedef for this is in parallel.h).
+<span class="lineNum">      85 </span>            :  *
+<span class="lineNum">      86 </span>            :  * Much of this is valid only in the master process (or, on Windows, should
+<span class="lineNum">      87 </span>            :  * be touched only by the master thread).  But the AH field should be touched
+<span class="lineNum">      88 </span>            :  * only by workers.  The pipe descriptors are valid everywhere.
+<span class="lineNum">      89 </span>            :  */
+<span class="lineNum">      90 </span>            : struct ParallelSlot
+<span class="lineNum">      91 </span>            : {
+<span class="lineNum">      92 </span>            :     T_WorkerStatus workerStatus;    /* see enum above */
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span>            :     /* These fields are valid if workerStatus == WRKR_WORKING: */
+<span class="lineNum">      95 </span>            :     ParallelCompletionPtr callback; /* function to call on completion */
+<span class="lineNum">      96 </span>            :     void       *callback_data;  /* passthrough data for it */
+<span class="lineNum">      97 </span>            : 
+<span class="lineNum">      98 </span>            :     ArchiveHandle *AH;          /* Archive data worker is using */
+<span class="lineNum">      99 </span>            : 
+<span class="lineNum">     100 </span>            :     int         pipeRead;       /* master's end of the pipes */
+<span class="lineNum">     101 </span>            :     int         pipeWrite;
+<span class="lineNum">     102 </span>            :     int         pipeRevRead;    /* child's end of the pipes */
+<span class="lineNum">     103 </span>            :     int         pipeRevWrite;
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span>            :     /* Child process/thread identity info: */
+<span class="lineNum">     106 </span>            : #ifdef WIN32
+<span class="lineNum">     107 </span>            :     uintptr_t   hThread;
+<span class="lineNum">     108 </span>            :     unsigned int threadId;
+<span class="lineNum">     109 </span>            : #else
+<span class="lineNum">     110 </span>            :     pid_t       pid;
+<span class="lineNum">     111 </span>            : #endif
+<span class="lineNum">     112 </span>            : };
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span>            : #ifdef WIN32
+<span class="lineNum">     115 </span>            : 
+<span class="lineNum">     116 </span>            : /*
+<span class="lineNum">     117 </span>            :  * Structure to hold info passed by _beginthreadex() to the function it calls
+<span class="lineNum">     118 </span>            :  * via its single allowed argument.
+<span class="lineNum">     119 </span>            :  */
+<span class="lineNum">     120 </span>            : typedef struct
+<span class="lineNum">     121 </span>            : {
+<span class="lineNum">     122 </span>            :     ArchiveHandle *AH;          /* master database connection */
+<span class="lineNum">     123 </span>            :     ParallelSlot *slot;         /* this worker's parallel slot */
+<span class="lineNum">     124 </span>            : } WorkerInfo;
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span>            : /* Windows implementation of pipe access */
+<span class="lineNum">     127 </span>            : static int  pgpipe(int handles[2]);
+<span class="lineNum">     128 </span>            : static int  piperead(int s, char *buf, int len);
+<span class="lineNum">     129 </span>            : #define pipewrite(a,b,c)    send(a,b,c,0)
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span>            : #else                           /* !WIN32 */
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span>            : /* Non-Windows implementation of pipe access */
+<span class="lineNum">     134 </span>            : #define pgpipe(a)           pipe(a)
+<span class="lineNum">     135 </span>            : #define piperead(a,b,c)     read(a,b,c)
+<span class="lineNum">     136 </span>            : #define pipewrite(a,b,c)    write(a,b,c)
+<span class="lineNum">     137 </span>            : 
+<span class="lineNum">     138 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     139 </span>            : 
+<span class="lineNum">     140 </span>            : /*
+<span class="lineNum">     141 </span>            :  * State info for archive_close_connection() shutdown callback.
+<span class="lineNum">     142 </span>            :  */
+<span class="lineNum">     143 </span>            : typedef struct ShutdownInformation
+<span class="lineNum">     144 </span>            : {
+<span class="lineNum">     145 </span>            :     ParallelState *pstate;
+<span class="lineNum">     146 </span>            :     Archive    *AHX;
+<span class="lineNum">     147 </span>            : } ShutdownInformation;
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            : static ShutdownInformation shutdown_info;
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span>            : /*
+<span class="lineNum">     152 </span>            :  * State info for signal handling.
+<span class="lineNum">     153 </span>            :  * We assume signal_info initializes to zeroes.
+<span class="lineNum">     154 </span>            :  *
+<span class="lineNum">     155 </span>            :  * On Unix, myAH is the master DB connection in the master process, and the
+<span class="lineNum">     156 </span>            :  * worker's own connection in worker processes.  On Windows, we have only one
+<span class="lineNum">     157 </span>            :  * instance of signal_info, so myAH is the master connection and the worker
+<span class="lineNum">     158 </span>            :  * connections must be dug out of pstate-&gt;parallelSlot[].
+<span class="lineNum">     159 </span>            :  */
+<span class="lineNum">     160 </span>            : typedef struct DumpSignalInformation
+<span class="lineNum">     161 </span>            : {
+<span class="lineNum">     162 </span>            :     ArchiveHandle *myAH;        /* database connection to issue cancel for */
+<span class="lineNum">     163 </span>            :     ParallelState *pstate;      /* parallel state, if any */
+<span class="lineNum">     164 </span>            :     bool        handler_set;    /* signal handler set up in this process? */
+<span class="lineNum">     165 </span>            : #ifndef WIN32
+<span class="lineNum">     166 </span>            :     bool        am_worker;      /* am I a worker process? */
+<span class="lineNum">     167 </span>            : #endif
+<span class="lineNum">     168 </span>            : } DumpSignalInformation;
+<span class="lineNum">     169 </span>            : 
+<span class="lineNum">     170 </span>            : static volatile DumpSignalInformation signal_info;
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span>            : #ifdef WIN32
+<span class="lineNum">     173 </span>            : static CRITICAL_SECTION signal_info_lock;
+<span class="lineNum">     174 </span>            : #endif
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span>            : /*
+<span class="lineNum">     177 </span>            :  * Write a simple string to stderr --- must be safe in a signal handler.
+<span class="lineNum">     178 </span>            :  * We ignore the write() result since there's not much we could do about it.
+<span class="lineNum">     179 </span>            :  * Certain compilers make that harder than it ought to be.
+<span class="lineNum">     180 </span>            :  */
+<span class="lineNum">     181 </span>            : #define write_stderr(str) \
+<span class="lineNum">     182 </span>            :     do { \
+<span class="lineNum">     183 </span>            :         const char *str_ = (str); \
+<span class="lineNum">     184 </span>            :         int     rc_; \
+<span class="lineNum">     185 </span>            :         rc_ = write(fileno(stderr), str_, strlen(str_)); \
+<span class="lineNum">     186 </span>            :         (void) rc_; \
+<span class="lineNum">     187 </span>            :     } while (0)
+<span class="lineNum">     188 </span>            : 
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span>            : #ifdef WIN32
+<span class="lineNum">     191 </span>            : /* file-scope variables */
+<span class="lineNum">     192 </span>            : static DWORD tls_index;
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span>            : /* globally visible variables (needed by exit_nicely) */
+<span class="lineNum">     195 </span>            : bool        parallel_init_done = false;
+<span class="lineNum">     196 </span>            : DWORD       mainThreadId;
+<span class="lineNum">     197 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     198 </span>            : 
+<span class="lineNum">     199 </span>            : /* Local function prototypes */
+<span class="lineNum">     200 </span>            : static ParallelSlot *GetMyPSlot(ParallelState *pstate);
+<span class="lineNum">     201 </span>            : static void archive_close_connection(int code, void *arg);
+<span class="lineNum">     202 </span>            : static void ShutdownWorkersHard(ParallelState *pstate);
+<span class="lineNum">     203 </span>            : static void WaitForTerminatingWorkers(ParallelState *pstate);
+<span class="lineNum">     204 </span>            : static void setup_cancel_handler(void);
+<span class="lineNum">     205 </span>            : static void set_cancel_pstate(ParallelState *pstate);
+<span class="lineNum">     206 </span>            : static void set_cancel_slot_archive(ParallelSlot *slot, ArchiveHandle *AH);
+<span class="lineNum">     207 </span>            : static void RunWorker(ArchiveHandle *AH, ParallelSlot *slot);
+<span class="lineNum">     208 </span>            : static int  GetIdleWorker(ParallelState *pstate);
+<span class="lineNum">     209 </span>            : static bool HasEveryWorkerTerminated(ParallelState *pstate);
+<span class="lineNum">     210 </span>            : static void lockTableForWorker(ArchiveHandle *AH, TocEntry *te);
+<span class="lineNum">     211 </span>            : static void WaitForCommands(ArchiveHandle *AH, int pipefd[2]);
+<span class="lineNum">     212 </span>            : static bool ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate,
+<span class="lineNum">     213 </span>            :                             bool do_wait);
+<span class="lineNum">     214 </span>            : static char *getMessageFromMaster(int pipefd[2]);
+<span class="lineNum">     215 </span>            : static void sendMessageToMaster(int pipefd[2], const char *str);
+<span class="lineNum">     216 </span>            : static int  select_loop(int maxFd, fd_set *workerset);
+<span class="lineNum">     217 </span>            : static char *getMessageFromWorker(ParallelState *pstate,
+<span class="lineNum">     218 </span>            :                                   bool do_wait, int *worker);
+<span class="lineNum">     219 </span>            : static void sendMessageToWorker(ParallelState *pstate,
+<span class="lineNum">     220 </span>            :                                 int worker, const char *str);
+<span class="lineNum">     221 </span>            : static char *readMessageFromPipe(int fd);
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span>            : #define messageStartsWith(msg, prefix) \
+<span class="lineNum">     224 </span>            :     (strncmp(msg, prefix, strlen(prefix)) == 0)
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span>            : /*
+<span class="lineNum">     228 </span>            :  * Shutdown callback to clean up socket access
+<span class="lineNum">     229 </span>            :  */
+<span class="lineNum">     230 </span>            : #ifdef WIN32
+<span class="lineNum">     231 </span>            : static void
+<span class="lineNum">     232 </span>            : shutdown_parallel_dump_utils(int code, void *unused)
+<span class="lineNum">     233 </span>            : {
+<span class="lineNum">     234 </span>            :     /* Call the cleanup function only from the main thread */
+<span class="lineNum">     235 </span>            :     if (mainThreadId == GetCurrentThreadId())
+<span class="lineNum">     236 </span>            :         WSACleanup();
+<span class="lineNum">     237 </span>            : }
+<span class="lineNum">     238 </span>            : #endif
+<span class="lineNum">     239 </span>            : 
+<span class="lineNum">     240 </span>            : /*
+<span class="lineNum">     241 </span>            :  * Initialize parallel dump support --- should be called early in process
+<span class="lineNum">     242 </span>            :  * startup.  (Currently, this is called whether or not we intend parallel
+<span class="lineNum">     243 </span>            :  * activity.)
+<a name="244"><span class="lineNum">     244 </span>            :  */</a>
+<span class="lineNum">     245 </span>            : void
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 : init_parallel_dump_utils(void)</span>
+<span class="lineNum">     247 </span>            : {
+<span class="lineNum">     248 </span>            : #ifdef WIN32
+<span class="lineNum">     249 </span>            :     if (!parallel_init_done)
+<span class="lineNum">     250 </span>            :     {
+<span class="lineNum">     251 </span>            :         WSADATA     wsaData;
+<span class="lineNum">     252 </span>            :         int         err;
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span>            :         /* Prepare for threaded operation */
+<span class="lineNum">     255 </span>            :         tls_index = TlsAlloc();
+<span class="lineNum">     256 </span>            :         mainThreadId = GetCurrentThreadId();
+<span class="lineNum">     257 </span>            : 
+<span class="lineNum">     258 </span>            :         /* Initialize socket access */
+<span class="lineNum">     259 </span>            :         err = WSAStartup(MAKEWORD(2, 2), &amp;wsaData);
+<span class="lineNum">     260 </span>            :         if (err != 0)
+<span class="lineNum">     261 </span>            :         {
+<span class="lineNum">     262 </span>            :             pg_log_error(&quot;WSAStartup failed: %d&quot;, err);
+<span class="lineNum">     263 </span>            :             exit_nicely(1);
+<span class="lineNum">     264 </span>            :         }
+<span class="lineNum">     265 </span>            :         /* ... and arrange to shut it down at exit */
+<span class="lineNum">     266 </span>            :         on_exit_nicely(shutdown_parallel_dump_utils, NULL);
+<span class="lineNum">     267 </span>            :         parallel_init_done = true;
+<span class="lineNum">     268 </span>            :     }
+<span class="lineNum">     269 </span>            : #endif
+<span class="lineNum">     270 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     271 </span>            : 
+<span class="lineNum">     272 </span>            : /*
+<span class="lineNum">     273 </span>            :  * Find the ParallelSlot for the current worker process or thread.
+<span class="lineNum">     274 </span>            :  *
+<span class="lineNum">     275 </span>            :  * Returns NULL if no matching slot is found (this implies we're the master).
+<a name="276"><span class="lineNum">     276 </span>            :  */</a>
+<span class="lineNum">     277 </span>            : static ParallelSlot *
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 : GetMyPSlot(ParallelState *pstate)</span>
+<span class="lineNum">     279 </span>            : {
+<span class="lineNum">     280 </span>            :     int         i;
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">     283 </span>            :     {
+<span class="lineNum">     284 </span>            : #ifdef WIN32
+<span class="lineNum">     285 </span>            :         if (pstate-&gt;parallelSlot[i].threadId == GetCurrentThreadId())
+<span class="lineNum">     286 </span>            : #else
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :         if (pstate-&gt;parallelSlot[i].pid == getpid())</span>
+<span class="lineNum">     288 </span>            : #endif
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :             return &amp;(pstate-&gt;parallelSlot[i]);</span>
+<span class="lineNum">     290 </span>            :     }
+<span class="lineNum">     291 </span>            : 
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :     return NULL;</span>
+<span class="lineNum">     293 </span>            : }
+<span class="lineNum">     294 </span>            : 
+<span class="lineNum">     295 </span>            : /*
+<span class="lineNum">     296 </span>            :  * A thread-local version of getLocalPQExpBuffer().
+<span class="lineNum">     297 </span>            :  *
+<span class="lineNum">     298 </span>            :  * Non-reentrant but reduces memory leakage: we'll consume one buffer per
+<span class="lineNum">     299 </span>            :  * thread, which is much better than one per fmtId/fmtQualifiedId call.
+<span class="lineNum">     300 </span>            :  */
+<span class="lineNum">     301 </span>            : #ifdef WIN32
+<span class="lineNum">     302 </span>            : static PQExpBuffer
+<span class="lineNum">     303 </span>            : getThreadLocalPQExpBuffer(void)
+<span class="lineNum">     304 </span>            : {
+<span class="lineNum">     305 </span>            :     /*
+<span class="lineNum">     306 </span>            :      * The Tls code goes awry if we use a static var, so we provide for both
+<span class="lineNum">     307 </span>            :      * static and auto, and omit any use of the static var when using Tls. We
+<span class="lineNum">     308 </span>            :      * rely on TlsGetValue() to return 0 if the value is not yet set.
+<span class="lineNum">     309 </span>            :      */
+<span class="lineNum">     310 </span>            :     static PQExpBuffer s_id_return = NULL;
+<span class="lineNum">     311 </span>            :     PQExpBuffer id_return;
+<span class="lineNum">     312 </span>            : 
+<span class="lineNum">     313 </span>            :     if (parallel_init_done)
+<span class="lineNum">     314 </span>            :         id_return = (PQExpBuffer) TlsGetValue(tls_index);
+<span class="lineNum">     315 </span>            :     else
+<span class="lineNum">     316 </span>            :         id_return = s_id_return;
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span>            :     if (id_return)              /* first time through? */
+<span class="lineNum">     319 </span>            :     {
+<span class="lineNum">     320 </span>            :         /* same buffer, just wipe contents */
+<span class="lineNum">     321 </span>            :         resetPQExpBuffer(id_return);
+<span class="lineNum">     322 </span>            :     }
+<span class="lineNum">     323 </span>            :     else
+<span class="lineNum">     324 </span>            :     {
+<span class="lineNum">     325 </span>            :         /* new buffer */
+<span class="lineNum">     326 </span>            :         id_return = createPQExpBuffer();
+<span class="lineNum">     327 </span>            :         if (parallel_init_done)
+<span class="lineNum">     328 </span>            :             TlsSetValue(tls_index, id_return);
+<span class="lineNum">     329 </span>            :         else
+<span class="lineNum">     330 </span>            :             s_id_return = id_return;
+<span class="lineNum">     331 </span>            :     }
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span>            :     return id_return;
+<span class="lineNum">     334 </span>            : }
+<span class="lineNum">     335 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span>            : /*
+<span class="lineNum">     338 </span>            :  * pg_dump and pg_restore call this to register the cleanup handler
+<span class="lineNum">     339 </span>            :  * as soon as they've created the ArchiveHandle.
+<a name="340"><span class="lineNum">     340 </span>            :  */</a>
+<span class="lineNum">     341 </span>            : void
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 : on_exit_close_archive(Archive *AHX)</span>
+<span class="lineNum">     343 </span>            : {
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :     shutdown_info.AHX = AHX;</span>
+<span class="lineNum">     345 </span><span class="lineNoCov">          0 :     on_exit_nicely(archive_close_connection, &amp;shutdown_info);</span>
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     347 </span>            : 
+<span class="lineNum">     348 </span>            : /*
+<span class="lineNum">     349 </span>            :  * on_exit_nicely handler for shutting down database connections and
+<span class="lineNum">     350 </span>            :  * worker processes cleanly.
+<a name="351"><span class="lineNum">     351 </span>            :  */</a>
+<span class="lineNum">     352 </span>            : static void
+<span class="lineNum">     353 </span><span class="lineNoCov">          0 : archive_close_connection(int code, void *arg)</span>
+<span class="lineNum">     354 </span>            : {
+<span class="lineNum">     355 </span><span class="lineNoCov">          0 :     ShutdownInformation *si = (ShutdownInformation *) arg;</span>
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span><span class="lineNoCov">          0 :     if (si-&gt;pstate)</span>
+<span class="lineNum">     358 </span>            :     {
+<span class="lineNum">     359 </span>            :         /* In parallel mode, must figure out who we are */
+<span class="lineNum">     360 </span><span class="lineNoCov">          0 :         ParallelSlot *slot = GetMyPSlot(si-&gt;pstate);</span>
+<span class="lineNum">     361 </span>            : 
+<span class="lineNum">     362 </span><span class="lineNoCov">          0 :         if (!slot)</span>
+<span class="lineNum">     363 </span>            :         {
+<span class="lineNum">     364 </span>            :             /*
+<span class="lineNum">     365 </span>            :              * We're the master.  Forcibly shut down workers, then close our
+<span class="lineNum">     366 </span>            :              * own database connection, if any.
+<span class="lineNum">     367 </span>            :              */
+<span class="lineNum">     368 </span><span class="lineNoCov">          0 :             ShutdownWorkersHard(si-&gt;pstate);</span>
+<span class="lineNum">     369 </span>            : 
+<span class="lineNum">     370 </span><span class="lineNoCov">          0 :             if (si-&gt;AHX)</span>
+<span class="lineNum">     371 </span><span class="lineNoCov">          0 :                 DisconnectDatabase(si-&gt;AHX);</span>
+<span class="lineNum">     372 </span>            :         }
+<span class="lineNum">     373 </span>            :         else
+<span class="lineNum">     374 </span>            :         {
+<span class="lineNum">     375 </span>            :             /*
+<span class="lineNum">     376 </span>            :              * We're a worker.  Shut down our own DB connection if any.  On
+<span class="lineNum">     377 </span>            :              * Windows, we also have to close our communication sockets, to
+<span class="lineNum">     378 </span>            :              * emulate what will happen on Unix when the worker process exits.
+<span class="lineNum">     379 </span>            :              * (Without this, if this is a premature exit, the master would
+<span class="lineNum">     380 </span>            :              * fail to detect it because there would be no EOF condition on
+<span class="lineNum">     381 </span>            :              * the other end of the pipe.)
+<span class="lineNum">     382 </span>            :              */
+<span class="lineNum">     383 </span><span class="lineNoCov">          0 :             if (slot-&gt;AH)</span>
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :                 DisconnectDatabase(&amp;(slot-&gt;AH-&gt;public));</span>
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span>            : #ifdef WIN32
+<span class="lineNum">     387 </span>            :             closesocket(slot-&gt;pipeRevRead);
+<span class="lineNum">     388 </span>            :             closesocket(slot-&gt;pipeRevWrite);
+<span class="lineNum">     389 </span>            : #endif
+<span class="lineNum">     390 </span>            :         }
+<span class="lineNum">     391 </span>            :     }
+<span class="lineNum">     392 </span>            :     else
+<span class="lineNum">     393 </span>            :     {
+<span class="lineNum">     394 </span>            :         /* Non-parallel operation: just kill the master DB connection */
+<span class="lineNum">     395 </span><span class="lineNoCov">          0 :         if (si-&gt;AHX)</span>
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :             DisconnectDatabase(si-&gt;AHX);</span>
+<span class="lineNum">     397 </span>            :     }
+<span class="lineNum">     398 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     399 </span>            : 
+<span class="lineNum">     400 </span>            : /*
+<span class="lineNum">     401 </span>            :  * Forcibly shut down any remaining workers, waiting for them to finish.
+<span class="lineNum">     402 </span>            :  *
+<span class="lineNum">     403 </span>            :  * Note that we don't expect to come here during normal exit (the workers
+<span class="lineNum">     404 </span>            :  * should be long gone, and the ParallelState too).  We're only here in a
+<span class="lineNum">     405 </span>            :  * fatal() situation, so intervening to cancel active commands is
+<span class="lineNum">     406 </span>            :  * appropriate.
+<a name="407"><span class="lineNum">     407 </span>            :  */</a>
+<span class="lineNum">     408 </span>            : static void
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 : ShutdownWorkersHard(ParallelState *pstate)</span>
+<span class="lineNum">     410 </span>            : {
+<span class="lineNum">     411 </span>            :     int         i;
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            :     /*
+<span class="lineNum">     414 </span>            :      * Close our write end of the sockets so that any workers waiting for
+<span class="lineNum">     415 </span>            :      * commands know they can exit.
+<span class="lineNum">     416 </span>            :      */
+<span class="lineNum">     417 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">     418 </span><span class="lineNoCov">          0 :         closesocket(pstate-&gt;parallelSlot[i].pipeWrite);</span>
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span>            :     /*
+<span class="lineNum">     421 </span>            :      * Force early termination of any commands currently in progress.
+<span class="lineNum">     422 </span>            :      */
+<span class="lineNum">     423 </span>            : #ifndef WIN32
+<span class="lineNum">     424 </span>            :     /* On non-Windows, send SIGTERM to each worker process. */
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">     426 </span>            :     {
+<span class="lineNum">     427 </span><span class="lineNoCov">          0 :         pid_t       pid = pstate-&gt;parallelSlot[i].pid;</span>
+<span class="lineNum">     428 </span>            : 
+<span class="lineNum">     429 </span><span class="lineNoCov">          0 :         if (pid != 0)</span>
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :             kill(pid, SIGTERM);</span>
+<span class="lineNum">     431 </span>            :     }
+<span class="lineNum">     432 </span>            : #else
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span>            :     /*
+<span class="lineNum">     435 </span>            :      * On Windows, send query cancels directly to the workers' backends.  Use
+<span class="lineNum">     436 </span>            :      * a critical section to ensure worker threads don't change state.
+<span class="lineNum">     437 </span>            :      */
+<span class="lineNum">     438 </span>            :     EnterCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     439 </span>            :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)
+<span class="lineNum">     440 </span>            :     {
+<span class="lineNum">     441 </span>            :         ArchiveHandle *AH = pstate-&gt;parallelSlot[i].AH;
+<span class="lineNum">     442 </span>            :         char        errbuf[1];
+<span class="lineNum">     443 </span>            : 
+<span class="lineNum">     444 </span>            :         if (AH != NULL &amp;&amp; AH-&gt;connCancel != NULL)
+<span class="lineNum">     445 </span>            :             (void) PQcancel(AH-&gt;connCancel, errbuf, sizeof(errbuf));
+<span class="lineNum">     446 </span>            :     }
+<span class="lineNum">     447 </span>            :     LeaveCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     448 </span>            : #endif
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span>            :     /* Now wait for them to terminate. */
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :     WaitForTerminatingWorkers(pstate);</span>
+<span class="lineNum">     452 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     453 </span>            : 
+<span class="lineNum">     454 </span>            : /*
+<span class="lineNum">     455 </span>            :  * Wait for all workers to terminate.
+<a name="456"><span class="lineNum">     456 </span>            :  */</a>
+<span class="lineNum">     457 </span>            : static void
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 : WaitForTerminatingWorkers(ParallelState *pstate)</span>
+<span class="lineNum">     459 </span>            : {
+<span class="lineNum">     460 </span><span class="lineNoCov">          0 :     while (!HasEveryWorkerTerminated(pstate))</span>
+<span class="lineNum">     461 </span>            :     {
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :         ParallelSlot *slot = NULL;</span>
+<span class="lineNum">     463 </span>            :         int         j;
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span>            : #ifndef WIN32
+<span class="lineNum">     466 </span>            :         /* On non-Windows, use wait() to wait for next worker to end */
+<span class="lineNum">     467 </span>            :         int         status;
+<span class="lineNum">     468 </span><span class="lineNoCov">          0 :         pid_t       pid = wait(&amp;status);</span>
+<span class="lineNum">     469 </span>            : 
+<span class="lineNum">     470 </span>            :         /* Find dead worker's slot, and clear the PID field */
+<span class="lineNum">     471 </span><span class="lineNoCov">          0 :         for (j = 0; j &lt; pstate-&gt;numWorkers; j++)</span>
+<span class="lineNum">     472 </span>            :         {
+<span class="lineNum">     473 </span><span class="lineNoCov">          0 :             slot = &amp;(pstate-&gt;parallelSlot[j]);</span>
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :             if (slot-&gt;pid == pid)</span>
+<span class="lineNum">     475 </span>            :             {
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 :                 slot-&gt;pid = 0;</span>
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     478 </span>            :             }
+<span class="lineNum">     479 </span>            :         }
+<span class="lineNum">     480 </span>            : #else                           /* WIN32 */
+<span class="lineNum">     481 </span>            :         /* On Windows, we must use WaitForMultipleObjects() */
+<span class="lineNum">     482 </span>            :         HANDLE     *lpHandles = pg_malloc(sizeof(HANDLE) * pstate-&gt;numWorkers);
+<span class="lineNum">     483 </span>            :         int         nrun = 0;
+<span class="lineNum">     484 </span>            :         DWORD       ret;
+<span class="lineNum">     485 </span>            :         uintptr_t   hThread;
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            :         for (j = 0; j &lt; pstate-&gt;numWorkers; j++)
+<span class="lineNum">     488 </span>            :         {
+<span class="lineNum">     489 </span>            :             if (pstate-&gt;parallelSlot[j].workerStatus != WRKR_TERMINATED)
+<span class="lineNum">     490 </span>            :             {
+<span class="lineNum">     491 </span>            :                 lpHandles[nrun] = (HANDLE) pstate-&gt;parallelSlot[j].hThread;
+<span class="lineNum">     492 </span>            :                 nrun++;
+<span class="lineNum">     493 </span>            :             }
+<span class="lineNum">     494 </span>            :         }
+<span class="lineNum">     495 </span>            :         ret = WaitForMultipleObjects(nrun, lpHandles, false, INFINITE);
+<span class="lineNum">     496 </span>            :         Assert(ret != WAIT_FAILED);
+<span class="lineNum">     497 </span>            :         hThread = (uintptr_t) lpHandles[ret - WAIT_OBJECT_0];
+<span class="lineNum">     498 </span>            :         free(lpHandles);
+<span class="lineNum">     499 </span>            : 
+<span class="lineNum">     500 </span>            :         /* Find dead worker's slot, and clear the hThread field */
+<span class="lineNum">     501 </span>            :         for (j = 0; j &lt; pstate-&gt;numWorkers; j++)
+<span class="lineNum">     502 </span>            :         {
+<span class="lineNum">     503 </span>            :             slot = &amp;(pstate-&gt;parallelSlot[j]);
+<span class="lineNum">     504 </span>            :             if (slot-&gt;hThread == hThread)
+<span class="lineNum">     505 </span>            :             {
+<span class="lineNum">     506 </span>            :                 /* For cleanliness, close handles for dead threads */
+<span class="lineNum">     507 </span>            :                 CloseHandle((HANDLE) slot-&gt;hThread);
+<span class="lineNum">     508 </span>            :                 slot-&gt;hThread = (uintptr_t) INVALID_HANDLE_VALUE;
+<span class="lineNum">     509 </span>            :                 break;
+<span class="lineNum">     510 </span>            :             }
+<span class="lineNum">     511 </span>            :         }
+<span class="lineNum">     512 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     513 </span>            : 
+<span class="lineNum">     514 </span>            :         /* On all platforms, update workerStatus and te[] as well */
+<span class="lineNum">     515 </span><span class="lineNoCov">          0 :         Assert(j &lt; pstate-&gt;numWorkers);</span>
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :         slot-&gt;workerStatus = WRKR_TERMINATED;</span>
+<span class="lineNum">     517 </span><span class="lineNoCov">          0 :         pstate-&gt;te[j] = NULL;</span>
+<span class="lineNum">     518 </span>            :     }
+<span class="lineNum">     519 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     520 </span>            : 
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            : /*
+<span class="lineNum">     523 </span>            :  * Code for responding to cancel interrupts (SIGINT, control-C, etc)
+<span class="lineNum">     524 </span>            :  *
+<span class="lineNum">     525 </span>            :  * This doesn't quite belong in this module, but it needs access to the
+<span class="lineNum">     526 </span>            :  * ParallelState data, so there's not really a better place either.
+<span class="lineNum">     527 </span>            :  *
+<span class="lineNum">     528 </span>            :  * When we get a cancel interrupt, we could just die, but in pg_restore that
+<span class="lineNum">     529 </span>            :  * could leave a SQL command (e.g., CREATE INDEX on a large table) running
+<span class="lineNum">     530 </span>            :  * for a long time.  Instead, we try to send a cancel request and then die.
+<span class="lineNum">     531 </span>            :  * pg_dump probably doesn't really need this, but we might as well use it
+<span class="lineNum">     532 </span>            :  * there too.  Note that sending the cancel directly from the signal handler
+<span class="lineNum">     533 </span>            :  * is safe because PQcancel() is written to make it so.
+<span class="lineNum">     534 </span>            :  *
+<span class="lineNum">     535 </span>            :  * In parallel operation on Unix, each process is responsible for canceling
+<span class="lineNum">     536 </span>            :  * its own connection (this must be so because nobody else has access to it).
+<span class="lineNum">     537 </span>            :  * Furthermore, the master process should attempt to forward its signal to
+<span class="lineNum">     538 </span>            :  * each child.  In simple manual use of pg_dump/pg_restore, forwarding isn't
+<span class="lineNum">     539 </span>            :  * needed because typing control-C at the console would deliver SIGINT to
+<span class="lineNum">     540 </span>            :  * every member of the terminal process group --- but in other scenarios it
+<span class="lineNum">     541 </span>            :  * might be that only the master gets signaled.
+<span class="lineNum">     542 </span>            :  *
+<span class="lineNum">     543 </span>            :  * On Windows, the cancel handler runs in a separate thread, because that's
+<span class="lineNum">     544 </span>            :  * how SetConsoleCtrlHandler works.  We make it stop worker threads, send
+<span class="lineNum">     545 </span>            :  * cancels on all active connections, and then return FALSE, which will allow
+<span class="lineNum">     546 </span>            :  * the process to die.  For safety's sake, we use a critical section to
+<span class="lineNum">     547 </span>            :  * protect the PGcancel structures against being changed while the signal
+<span class="lineNum">     548 </span>            :  * thread runs.
+<span class="lineNum">     549 </span>            :  */
+<span class="lineNum">     550 </span>            : 
+<span class="lineNum">     551 </span>            : #ifndef WIN32
+<span class="lineNum">     552 </span>            : 
+<span class="lineNum">     553 </span>            : /*
+<span class="lineNum">     554 </span>            :  * Signal handler (Unix only)
+<a name="555"><span class="lineNum">     555 </span>            :  */</a>
+<span class="lineNum">     556 </span>            : static void
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 : sigTermHandler(SIGNAL_ARGS)</span>
+<span class="lineNum">     558 </span>            : {
+<span class="lineNum">     559 </span>            :     int         i;
+<span class="lineNum">     560 </span>            :     char        errbuf[1];
+<span class="lineNum">     561 </span>            : 
+<span class="lineNum">     562 </span>            :     /*
+<span class="lineNum">     563 </span>            :      * Some platforms allow delivery of new signals to interrupt an active
+<span class="lineNum">     564 </span>            :      * signal handler.  That could muck up our attempt to send PQcancel, so
+<span class="lineNum">     565 </span>            :      * disable the signals that setup_cancel_handler enabled.
+<span class="lineNum">     566 </span>            :      */
+<span class="lineNum">     567 </span><span class="lineNoCov">          0 :     pqsignal(SIGINT, SIG_IGN);</span>
+<span class="lineNum">     568 </span><span class="lineNoCov">          0 :     pqsignal(SIGTERM, SIG_IGN);</span>
+<span class="lineNum">     569 </span><span class="lineNoCov">          0 :     pqsignal(SIGQUIT, SIG_IGN);</span>
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span>            :     /*
+<span class="lineNum">     572 </span>            :      * If we're in the master, forward signal to all workers.  (It seems best
+<span class="lineNum">     573 </span>            :      * to do this before PQcancel; killing the master transaction will result
+<span class="lineNum">     574 </span>            :      * in invalid-snapshot errors from active workers, which maybe we can
+<span class="lineNum">     575 </span>            :      * quiet by killing workers first.)  Ignore any errors.
+<span class="lineNum">     576 </span>            :      */
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 :     if (signal_info.pstate != NULL)</span>
+<span class="lineNum">     578 </span>            :     {
+<span class="lineNum">     579 </span><span class="lineNoCov">          0 :         for (i = 0; i &lt; signal_info.pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">     580 </span>            :         {
+<span class="lineNum">     581 </span><span class="lineNoCov">          0 :             pid_t       pid = signal_info.pstate-&gt;parallelSlot[i].pid;</span>
+<span class="lineNum">     582 </span>            : 
+<span class="lineNum">     583 </span><span class="lineNoCov">          0 :             if (pid != 0)</span>
+<span class="lineNum">     584 </span><span class="lineNoCov">          0 :                 kill(pid, SIGTERM);</span>
+<span class="lineNum">     585 </span>            :         }
+<span class="lineNum">     586 </span>            :     }
+<span class="lineNum">     587 </span>            : 
+<span class="lineNum">     588 </span>            :     /*
+<span class="lineNum">     589 </span>            :      * Send QueryCancel if we have a connection to send to.  Ignore errors,
+<span class="lineNum">     590 </span>            :      * there's not much we can do about them anyway.
+<span class="lineNum">     591 </span>            :      */
+<span class="lineNum">     592 </span><span class="lineNoCov">          0 :     if (signal_info.myAH != NULL &amp;&amp; signal_info.myAH-&gt;connCancel != NULL)</span>
+<span class="lineNum">     593 </span><span class="lineNoCov">          0 :         (void) PQcancel(signal_info.myAH-&gt;connCancel, errbuf, sizeof(errbuf));</span>
+<span class="lineNum">     594 </span>            : 
+<span class="lineNum">     595 </span>            :     /*
+<span class="lineNum">     596 </span>            :      * Report we're quitting, using nothing more complicated than write(2).
+<span class="lineNum">     597 </span>            :      * When in parallel operation, only the master process should do this.
+<span class="lineNum">     598 </span>            :      */
+<span class="lineNum">     599 </span><span class="lineNoCov">          0 :     if (!signal_info.am_worker)</span>
+<span class="lineNum">     600 </span>            :     {
+<span class="lineNum">     601 </span><span class="lineNoCov">          0 :         if (progname)</span>
+<span class="lineNum">     602 </span>            :         {
+<span class="lineNum">     603 </span><span class="lineNoCov">          0 :             write_stderr(progname);</span>
+<span class="lineNum">     604 </span><span class="lineNoCov">          0 :             write_stderr(&quot;: &quot;);</span>
+<span class="lineNum">     605 </span>            :         }
+<span class="lineNum">     606 </span><span class="lineNoCov">          0 :         write_stderr(&quot;terminated by user\n&quot;);</span>
+<span class="lineNum">     607 </span>            :     }
+<span class="lineNum">     608 </span>            : 
+<span class="lineNum">     609 </span>            :     /* And die. */
+<span class="lineNum">     610 </span><span class="lineNoCov">          0 :     exit(1);</span>
+<span class="lineNum">     611 </span>            : }
+<span class="lineNum">     612 </span>            : 
+<span class="lineNum">     613 </span>            : /*
+<span class="lineNum">     614 </span>            :  * Enable cancel interrupt handler, if not already done.
+<a name="615"><span class="lineNum">     615 </span>            :  */</a>
+<span class="lineNum">     616 </span>            : static void
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 : setup_cancel_handler(void)</span>
+<span class="lineNum">     618 </span>            : {
+<span class="lineNum">     619 </span>            :     /*
+<span class="lineNum">     620 </span>            :      * When forking, signal_info.handler_set will propagate into the new
+<span class="lineNum">     621 </span>            :      * process, but that's fine because the signal handler state does too.
+<span class="lineNum">     622 </span>            :      */
+<span class="lineNum">     623 </span><span class="lineNoCov">          0 :     if (!signal_info.handler_set)</span>
+<span class="lineNum">     624 </span>            :     {
+<span class="lineNum">     625 </span><span class="lineNoCov">          0 :         signal_info.handler_set = true;</span>
+<span class="lineNum">     626 </span>            : 
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :         pqsignal(SIGINT, sigTermHandler);</span>
+<span class="lineNum">     628 </span><span class="lineNoCov">          0 :         pqsignal(SIGTERM, sigTermHandler);</span>
+<span class="lineNum">     629 </span><span class="lineNoCov">          0 :         pqsignal(SIGQUIT, sigTermHandler);</span>
+<span class="lineNum">     630 </span>            :     }
+<span class="lineNum">     631 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     632 </span>            : 
+<span class="lineNum">     633 </span>            : #else                           /* WIN32 */
+<span class="lineNum">     634 </span>            : 
+<span class="lineNum">     635 </span>            : /*
+<span class="lineNum">     636 </span>            :  * Console interrupt handler --- runs in a newly-started thread.
+<span class="lineNum">     637 </span>            :  *
+<span class="lineNum">     638 </span>            :  * After stopping other threads and sending cancel requests on all open
+<span class="lineNum">     639 </span>            :  * connections, we return FALSE which will allow the default ExitProcess()
+<span class="lineNum">     640 </span>            :  * action to be taken.
+<span class="lineNum">     641 </span>            :  */
+<span class="lineNum">     642 </span>            : static BOOL WINAPI
+<span class="lineNum">     643 </span>            : consoleHandler(DWORD dwCtrlType)
+<span class="lineNum">     644 </span>            : {
+<span class="lineNum">     645 </span>            :     int         i;
+<span class="lineNum">     646 </span>            :     char        errbuf[1];
+<span class="lineNum">     647 </span>            : 
+<span class="lineNum">     648 </span>            :     if (dwCtrlType == CTRL_C_EVENT ||
+<span class="lineNum">     649 </span>            :         dwCtrlType == CTRL_BREAK_EVENT)
+<span class="lineNum">     650 </span>            :     {
+<span class="lineNum">     651 </span>            :         /* Critical section prevents changing data we look at here */
+<span class="lineNum">     652 </span>            :         EnterCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span>            :         /*
+<span class="lineNum">     655 </span>            :          * If in parallel mode, stop worker threads and send QueryCancel to
+<span class="lineNum">     656 </span>            :          * their connected backends.  The main point of stopping the worker
+<span class="lineNum">     657 </span>            :          * threads is to keep them from reporting the query cancels as errors,
+<span class="lineNum">     658 </span>            :          * which would clutter the user's screen.  We needn't stop the master
+<span class="lineNum">     659 </span>            :          * thread since it won't be doing much anyway.  Do this before
+<span class="lineNum">     660 </span>            :          * canceling the main transaction, else we might get invalid-snapshot
+<span class="lineNum">     661 </span>            :          * errors reported before we can stop the workers.  Ignore errors,
+<span class="lineNum">     662 </span>            :          * there's not much we can do about them anyway.
+<span class="lineNum">     663 </span>            :          */
+<span class="lineNum">     664 </span>            :         if (signal_info.pstate != NULL)
+<span class="lineNum">     665 </span>            :         {
+<span class="lineNum">     666 </span>            :             for (i = 0; i &lt; signal_info.pstate-&gt;numWorkers; i++)
+<span class="lineNum">     667 </span>            :             {
+<span class="lineNum">     668 </span>            :                 ParallelSlot *slot = &amp;(signal_info.pstate-&gt;parallelSlot[i]);
+<span class="lineNum">     669 </span>            :                 ArchiveHandle *AH = slot-&gt;AH;
+<span class="lineNum">     670 </span>            :                 HANDLE      hThread = (HANDLE) slot-&gt;hThread;
+<span class="lineNum">     671 </span>            : 
+<span class="lineNum">     672 </span>            :                 /*
+<span class="lineNum">     673 </span>            :                  * Using TerminateThread here may leave some resources leaked,
+<span class="lineNum">     674 </span>            :                  * but it doesn't matter since we're about to end the whole
+<span class="lineNum">     675 </span>            :                  * process.
+<span class="lineNum">     676 </span>            :                  */
+<span class="lineNum">     677 </span>            :                 if (hThread != INVALID_HANDLE_VALUE)
+<span class="lineNum">     678 </span>            :                     TerminateThread(hThread, 0);
+<span class="lineNum">     679 </span>            : 
+<span class="lineNum">     680 </span>            :                 if (AH != NULL &amp;&amp; AH-&gt;connCancel != NULL)
+<span class="lineNum">     681 </span>            :                     (void) PQcancel(AH-&gt;connCancel, errbuf, sizeof(errbuf));
+<span class="lineNum">     682 </span>            :             }
+<span class="lineNum">     683 </span>            :         }
+<span class="lineNum">     684 </span>            : 
+<span class="lineNum">     685 </span>            :         /*
+<span class="lineNum">     686 </span>            :          * Send QueryCancel to master connection, if enabled.  Ignore errors,
+<span class="lineNum">     687 </span>            :          * there's not much we can do about them anyway.
+<span class="lineNum">     688 </span>            :          */
+<span class="lineNum">     689 </span>            :         if (signal_info.myAH != NULL &amp;&amp; signal_info.myAH-&gt;connCancel != NULL)
+<span class="lineNum">     690 </span>            :             (void) PQcancel(signal_info.myAH-&gt;connCancel,
+<span class="lineNum">     691 </span>            :                             errbuf, sizeof(errbuf));
+<span class="lineNum">     692 </span>            : 
+<span class="lineNum">     693 </span>            :         LeaveCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     694 </span>            : 
+<span class="lineNum">     695 </span>            :         /*
+<span class="lineNum">     696 </span>            :          * Report we're quitting, using nothing more complicated than
+<span class="lineNum">     697 </span>            :          * write(2).  (We might be able to get away with using pg_log_*()
+<span class="lineNum">     698 </span>            :          * here, but since we terminated other threads uncleanly above, it
+<span class="lineNum">     699 </span>            :          * seems better to assume as little as possible.)
+<span class="lineNum">     700 </span>            :          */
+<span class="lineNum">     701 </span>            :         if (progname)
+<span class="lineNum">     702 </span>            :         {
+<span class="lineNum">     703 </span>            :             write_stderr(progname);
+<span class="lineNum">     704 </span>            :             write_stderr(&quot;: &quot;);
+<span class="lineNum">     705 </span>            :         }
+<span class="lineNum">     706 </span>            :         write_stderr(&quot;terminated by user\n&quot;);
+<span class="lineNum">     707 </span>            :     }
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span>            :     /* Always return FALSE to allow signal handling to continue */
+<span class="lineNum">     710 </span>            :     return FALSE;
+<span class="lineNum">     711 </span>            : }
+<span class="lineNum">     712 </span>            : 
+<span class="lineNum">     713 </span>            : /*
+<span class="lineNum">     714 </span>            :  * Enable cancel interrupt handler, if not already done.
+<span class="lineNum">     715 </span>            :  */
+<span class="lineNum">     716 </span>            : static void
+<span class="lineNum">     717 </span>            : setup_cancel_handler(void)
+<span class="lineNum">     718 </span>            : {
+<span class="lineNum">     719 </span>            :     if (!signal_info.handler_set)
+<span class="lineNum">     720 </span>            :     {
+<span class="lineNum">     721 </span>            :         signal_info.handler_set = true;
+<span class="lineNum">     722 </span>            : 
+<span class="lineNum">     723 </span>            :         InitializeCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     724 </span>            : 
+<span class="lineNum">     725 </span>            :         SetConsoleCtrlHandler(consoleHandler, TRUE);
+<span class="lineNum">     726 </span>            :     }
+<span class="lineNum">     727 </span>            : }
+<span class="lineNum">     728 </span>            : 
+<span class="lineNum">     729 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     730 </span>            : 
+<span class="lineNum">     731 </span>            : 
+<span class="lineNum">     732 </span>            : /*
+<span class="lineNum">     733 </span>            :  * set_archive_cancel_info
+<span class="lineNum">     734 </span>            :  *
+<span class="lineNum">     735 </span>            :  * Fill AH-&gt;connCancel with cancellation info for the specified database
+<span class="lineNum">     736 </span>            :  * connection; or clear it if conn is NULL.
+<a name="737"><span class="lineNum">     737 </span>            :  */</a>
+<span class="lineNum">     738 </span>            : void
+<span class="lineNum">     739 </span><span class="lineNoCov">          0 : set_archive_cancel_info(ArchiveHandle *AH, PGconn *conn)</span>
+<span class="lineNum">     740 </span>            : {
+<span class="lineNum">     741 </span>            :     PGcancel   *oldConnCancel;
+<span class="lineNum">     742 </span>            : 
+<span class="lineNum">     743 </span>            :     /*
+<span class="lineNum">     744 </span>            :      * Activate the interrupt handler if we didn't yet in this process.  On
+<span class="lineNum">     745 </span>            :      * Windows, this also initializes signal_info_lock; therefore it's
+<span class="lineNum">     746 </span>            :      * important that this happen at least once before we fork off any
+<span class="lineNum">     747 </span>            :      * threads.
+<span class="lineNum">     748 </span>            :      */
+<span class="lineNum">     749 </span><span class="lineNoCov">          0 :     setup_cancel_handler();</span>
+<span class="lineNum">     750 </span>            : 
+<span class="lineNum">     751 </span>            :     /*
+<span class="lineNum">     752 </span>            :      * On Unix, we assume that storing a pointer value is atomic with respect
+<span class="lineNum">     753 </span>            :      * to any possible signal interrupt.  On Windows, use a critical section.
+<span class="lineNum">     754 </span>            :      */
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span>            : #ifdef WIN32
+<span class="lineNum">     757 </span>            :     EnterCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     758 </span>            : #endif
+<span class="lineNum">     759 </span>            : 
+<span class="lineNum">     760 </span>            :     /* Free the old one if we have one */
+<span class="lineNum">     761 </span><span class="lineNoCov">          0 :     oldConnCancel = AH-&gt;connCancel;</span>
+<span class="lineNum">     762 </span>            :     /* be sure interrupt handler doesn't use pointer while freeing */
+<span class="lineNum">     763 </span><span class="lineNoCov">          0 :     AH-&gt;connCancel = NULL;</span>
+<span class="lineNum">     764 </span>            : 
+<span class="lineNum">     765 </span><span class="lineNoCov">          0 :     if (oldConnCancel != NULL)</span>
+<span class="lineNum">     766 </span><span class="lineNoCov">          0 :         PQfreeCancel(oldConnCancel);</span>
+<span class="lineNum">     767 </span>            : 
+<span class="lineNum">     768 </span>            :     /* Set the new one if specified */
+<span class="lineNum">     769 </span><span class="lineNoCov">          0 :     if (conn)</span>
+<span class="lineNum">     770 </span><span class="lineNoCov">          0 :         AH-&gt;connCancel = PQgetCancel(conn);</span>
+<span class="lineNum">     771 </span>            : 
+<span class="lineNum">     772 </span>            :     /*
+<span class="lineNum">     773 </span>            :      * On Unix, there's only ever one active ArchiveHandle per process, so we
+<span class="lineNum">     774 </span>            :      * can just set signal_info.myAH unconditionally.  On Windows, do that
+<span class="lineNum">     775 </span>            :      * only in the main thread; worker threads have to make sure their
+<span class="lineNum">     776 </span>            :      * ArchiveHandle appears in the pstate data, which is dealt with in
+<span class="lineNum">     777 </span>            :      * RunWorker().
+<span class="lineNum">     778 </span>            :      */
+<span class="lineNum">     779 </span>            : #ifndef WIN32
+<span class="lineNum">     780 </span><span class="lineNoCov">          0 :     signal_info.myAH = AH;</span>
+<span class="lineNum">     781 </span>            : #else
+<span class="lineNum">     782 </span>            :     if (mainThreadId == GetCurrentThreadId())
+<span class="lineNum">     783 </span>            :         signal_info.myAH = AH;
+<span class="lineNum">     784 </span>            : #endif
+<span class="lineNum">     785 </span>            : 
+<span class="lineNum">     786 </span>            : #ifdef WIN32
+<span class="lineNum">     787 </span>            :     LeaveCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     788 </span>            : #endif
+<span class="lineNum">     789 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     790 </span>            : 
+<span class="lineNum">     791 </span>            : /*
+<span class="lineNum">     792 </span>            :  * set_cancel_pstate
+<span class="lineNum">     793 </span>            :  *
+<span class="lineNum">     794 </span>            :  * Set signal_info.pstate to point to the specified ParallelState, if any.
+<span class="lineNum">     795 </span>            :  * We need this mainly to have an interlock against Windows signal thread.
+<a name="796"><span class="lineNum">     796 </span>            :  */</a>
+<span class="lineNum">     797 </span>            : static void
+<span class="lineNum">     798 </span><span class="lineNoCov">          0 : set_cancel_pstate(ParallelState *pstate)</span>
+<span class="lineNum">     799 </span>            : {
+<span class="lineNum">     800 </span>            : #ifdef WIN32
+<span class="lineNum">     801 </span>            :     EnterCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     802 </span>            : #endif
+<span class="lineNum">     803 </span>            : 
+<span class="lineNum">     804 </span><span class="lineNoCov">          0 :     signal_info.pstate = pstate;</span>
+<span class="lineNum">     805 </span>            : 
+<span class="lineNum">     806 </span>            : #ifdef WIN32
+<span class="lineNum">     807 </span>            :     LeaveCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     808 </span>            : #endif
+<span class="lineNum">     809 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     810 </span>            : 
+<span class="lineNum">     811 </span>            : /*
+<span class="lineNum">     812 </span>            :  * set_cancel_slot_archive
+<span class="lineNum">     813 </span>            :  *
+<span class="lineNum">     814 </span>            :  * Set ParallelSlot's AH field to point to the specified archive, if any.
+<span class="lineNum">     815 </span>            :  * We need this mainly to have an interlock against Windows signal thread.
+<a name="816"><span class="lineNum">     816 </span>            :  */</a>
+<span class="lineNum">     817 </span>            : static void
+<span class="lineNum">     818 </span><span class="lineNoCov">          0 : set_cancel_slot_archive(ParallelSlot *slot, ArchiveHandle *AH)</span>
+<span class="lineNum">     819 </span>            : {
+<span class="lineNum">     820 </span>            : #ifdef WIN32
+<span class="lineNum">     821 </span>            :     EnterCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     822 </span>            : #endif
+<span class="lineNum">     823 </span>            : 
+<span class="lineNum">     824 </span><span class="lineNoCov">          0 :     slot-&gt;AH = AH;</span>
+<span class="lineNum">     825 </span>            : 
+<span class="lineNum">     826 </span>            : #ifdef WIN32
+<span class="lineNum">     827 </span>            :     LeaveCriticalSection(&amp;signal_info_lock);
+<span class="lineNum">     828 </span>            : #endif
+<span class="lineNum">     829 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     830 </span>            : 
+<span class="lineNum">     831 </span>            : 
+<span class="lineNum">     832 </span>            : /*
+<span class="lineNum">     833 </span>            :  * This function is called by both Unix and Windows variants to set up
+<span class="lineNum">     834 </span>            :  * and run a worker process.  Caller should exit the process (or thread)
+<span class="lineNum">     835 </span>            :  * upon return.
+<a name="836"><span class="lineNum">     836 </span>            :  */</a>
+<span class="lineNum">     837 </span>            : static void
+<span class="lineNum">     838 </span><span class="lineNoCov">          0 : RunWorker(ArchiveHandle *AH, ParallelSlot *slot)</span>
+<span class="lineNum">     839 </span>            : {
+<span class="lineNum">     840 </span>            :     int         pipefd[2];
+<span class="lineNum">     841 </span>            : 
+<span class="lineNum">     842 </span>            :     /* fetch child ends of pipes */
+<span class="lineNum">     843 </span><span class="lineNoCov">          0 :     pipefd[PIPE_READ] = slot-&gt;pipeRevRead;</span>
+<span class="lineNum">     844 </span><span class="lineNoCov">          0 :     pipefd[PIPE_WRITE] = slot-&gt;pipeRevWrite;</span>
+<span class="lineNum">     845 </span>            : 
+<span class="lineNum">     846 </span>            :     /*
+<span class="lineNum">     847 </span>            :      * Clone the archive so that we have our own state to work with, and in
+<span class="lineNum">     848 </span>            :      * particular our own database connection.
+<span class="lineNum">     849 </span>            :      *
+<span class="lineNum">     850 </span>            :      * We clone on Unix as well as Windows, even though technically we don't
+<span class="lineNum">     851 </span>            :      * need to because fork() gives us a copy in our own address space
+<span class="lineNum">     852 </span>            :      * already.  But CloneArchive resets the state information and also clones
+<span class="lineNum">     853 </span>            :      * the database connection which both seem kinda helpful.
+<span class="lineNum">     854 </span>            :      */
+<span class="lineNum">     855 </span><span class="lineNoCov">          0 :     AH = CloneArchive(AH);</span>
+<span class="lineNum">     856 </span>            : 
+<span class="lineNum">     857 </span>            :     /* Remember cloned archive where signal handler can find it */
+<span class="lineNum">     858 </span><span class="lineNoCov">          0 :     set_cancel_slot_archive(slot, AH);</span>
+<span class="lineNum">     859 </span>            : 
+<span class="lineNum">     860 </span>            :     /*
+<span class="lineNum">     861 </span>            :      * Call the setup worker function that's defined in the ArchiveHandle.
+<span class="lineNum">     862 </span>            :      */
+<span class="lineNum">     863 </span><span class="lineNoCov">          0 :     (AH-&gt;SetupWorkerPtr) ((Archive *) AH);</span>
+<span class="lineNum">     864 </span>            : 
+<span class="lineNum">     865 </span>            :     /*
+<span class="lineNum">     866 </span>            :      * Execute commands until done.
+<span class="lineNum">     867 </span>            :      */
+<span class="lineNum">     868 </span><span class="lineNoCov">          0 :     WaitForCommands(AH, pipefd);</span>
+<span class="lineNum">     869 </span>            : 
+<span class="lineNum">     870 </span>            :     /*
+<span class="lineNum">     871 </span>            :      * Disconnect from database and clean up.
+<span class="lineNum">     872 </span>            :      */
+<span class="lineNum">     873 </span><span class="lineNoCov">          0 :     set_cancel_slot_archive(slot, NULL);</span>
+<span class="lineNum">     874 </span><span class="lineNoCov">          0 :     DisconnectDatabase(&amp;(AH-&gt;public));</span>
+<span class="lineNum">     875 </span><span class="lineNoCov">          0 :     DeCloneArchive(AH);</span>
+<span class="lineNum">     876 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     877 </span>            : 
+<span class="lineNum">     878 </span>            : /*
+<span class="lineNum">     879 </span>            :  * Thread base function for Windows
+<span class="lineNum">     880 </span>            :  */
+<span class="lineNum">     881 </span>            : #ifdef WIN32
+<span class="lineNum">     882 </span>            : static unsigned __stdcall
+<span class="lineNum">     883 </span>            : init_spawned_worker_win32(WorkerInfo *wi)
+<span class="lineNum">     884 </span>            : {
+<span class="lineNum">     885 </span>            :     ArchiveHandle *AH = wi-&gt;AH;
+<span class="lineNum">     886 </span>            :     ParallelSlot *slot = wi-&gt;slot;
+<span class="lineNum">     887 </span>            : 
+<span class="lineNum">     888 </span>            :     /* Don't need WorkerInfo anymore */
+<span class="lineNum">     889 </span>            :     free(wi);
+<span class="lineNum">     890 </span>            : 
+<span class="lineNum">     891 </span>            :     /* Run the worker ... */
+<span class="lineNum">     892 </span>            :     RunWorker(AH, slot);
+<span class="lineNum">     893 </span>            : 
+<span class="lineNum">     894 </span>            :     /* Exit the thread */
+<span class="lineNum">     895 </span>            :     _endthreadex(0);
+<span class="lineNum">     896 </span>            :     return 0;
+<span class="lineNum">     897 </span>            : }
+<span class="lineNum">     898 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     899 </span>            : 
+<span class="lineNum">     900 </span>            : /*
+<span class="lineNum">     901 </span>            :  * This function starts a parallel dump or restore by spawning off the worker
+<span class="lineNum">     902 </span>            :  * processes.  For Windows, it creates a number of threads; on Unix the
+<span class="lineNum">     903 </span>            :  * workers are created with fork().
+<a name="904"><span class="lineNum">     904 </span>            :  */</a>
+<span class="lineNum">     905 </span>            : ParallelState *
+<span class="lineNum">     906 </span><span class="lineNoCov">          0 : ParallelBackupStart(ArchiveHandle *AH)</span>
+<span class="lineNum">     907 </span>            : {
+<span class="lineNum">     908 </span>            :     ParallelState *pstate;
+<span class="lineNum">     909 </span>            :     int         i;
+<span class="lineNum">     910 </span>            : 
+<span class="lineNum">     911 </span><span class="lineNoCov">          0 :     Assert(AH-&gt;public.numWorkers &gt; 0);</span>
+<span class="lineNum">     912 </span>            : 
+<span class="lineNum">     913 </span><span class="lineNoCov">          0 :     pstate = (ParallelState *) pg_malloc(sizeof(ParallelState));</span>
+<span class="lineNum">     914 </span>            : 
+<span class="lineNum">     915 </span><span class="lineNoCov">          0 :     pstate-&gt;numWorkers = AH-&gt;public.numWorkers;</span>
+<span class="lineNum">     916 </span><span class="lineNoCov">          0 :     pstate-&gt;te = NULL;</span>
+<span class="lineNum">     917 </span><span class="lineNoCov">          0 :     pstate-&gt;parallelSlot = NULL;</span>
+<span class="lineNum">     918 </span>            : 
+<span class="lineNum">     919 </span><span class="lineNoCov">          0 :     if (AH-&gt;public.numWorkers == 1)</span>
+<span class="lineNum">     920 </span><span class="lineNoCov">          0 :         return pstate;</span>
+<span class="lineNum">     921 </span>            : 
+<span class="lineNum">     922 </span><span class="lineNoCov">          0 :     pstate-&gt;te = (TocEntry **)</span>
+<span class="lineNum">     923 </span><span class="lineNoCov">          0 :         pg_malloc0(pstate-&gt;numWorkers * sizeof(TocEntry *));</span>
+<span class="lineNum">     924 </span><span class="lineNoCov">          0 :     pstate-&gt;parallelSlot = (ParallelSlot *)</span>
+<span class="lineNum">     925 </span><span class="lineNoCov">          0 :         pg_malloc0(pstate-&gt;numWorkers * sizeof(ParallelSlot));</span>
+<span class="lineNum">     926 </span>            : 
+<span class="lineNum">     927 </span>            : #ifdef WIN32
+<span class="lineNum">     928 </span>            :     /* Make fmtId() and fmtQualifiedId() use thread-local storage */
+<span class="lineNum">     929 </span>            :     getLocalPQExpBuffer = getThreadLocalPQExpBuffer;
+<span class="lineNum">     930 </span>            : #endif
+<span class="lineNum">     931 </span>            : 
+<span class="lineNum">     932 </span>            :     /*
+<span class="lineNum">     933 </span>            :      * Set the pstate in shutdown_info, to tell the exit handler that it must
+<span class="lineNum">     934 </span>            :      * clean up workers as well as the main database connection.  But we don't
+<span class="lineNum">     935 </span>            :      * set this in signal_info yet, because we don't want child processes to
+<span class="lineNum">     936 </span>            :      * inherit non-NULL signal_info.pstate.
+<span class="lineNum">     937 </span>            :      */
+<span class="lineNum">     938 </span><span class="lineNoCov">          0 :     shutdown_info.pstate = pstate;</span>
+<span class="lineNum">     939 </span>            : 
+<span class="lineNum">     940 </span>            :     /*
+<span class="lineNum">     941 </span>            :      * Temporarily disable query cancellation on the master connection.  This
+<span class="lineNum">     942 </span>            :      * ensures that child processes won't inherit valid AH-&gt;connCancel
+<span class="lineNum">     943 </span>            :      * settings and thus won't try to issue cancels against the master's
+<span class="lineNum">     944 </span>            :      * connection.  No harm is done if we fail while it's disabled, because
+<span class="lineNum">     945 </span>            :      * the master connection is idle at this point anyway.
+<span class="lineNum">     946 </span>            :      */
+<span class="lineNum">     947 </span><span class="lineNoCov">          0 :     set_archive_cancel_info(AH, NULL);</span>
+<span class="lineNum">     948 </span>            : 
+<span class="lineNum">     949 </span>            :     /* Ensure stdio state is quiesced before forking */
+<span class="lineNum">     950 </span><span class="lineNoCov">          0 :     fflush(NULL);</span>
+<span class="lineNum">     951 </span>            : 
+<span class="lineNum">     952 </span>            :     /* Create desired number of workers */
+<span class="lineNum">     953 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">     954 </span>            :     {
+<span class="lineNum">     955 </span>            : #ifdef WIN32
+<span class="lineNum">     956 </span>            :         WorkerInfo *wi;
+<span class="lineNum">     957 </span>            :         uintptr_t   handle;
+<span class="lineNum">     958 </span>            : #else
+<span class="lineNum">     959 </span>            :         pid_t       pid;
+<span class="lineNum">     960 </span>            : #endif
+<span class="lineNum">     961 </span><span class="lineNoCov">          0 :         ParallelSlot *slot = &amp;(pstate-&gt;parallelSlot[i]);</span>
+<span class="lineNum">     962 </span>            :         int         pipeMW[2],
+<span class="lineNum">     963 </span>            :                     pipeWM[2];
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span>            :         /* Create communication pipes for this worker */
+<span class="lineNum">     966 </span><span class="lineNoCov">          0 :         if (pgpipe(pipeMW) &lt; 0 || pgpipe(pipeWM) &lt; 0)</span>
+<span class="lineNum">     967 </span><span class="lineNoCov">          0 :             fatal(&quot;could not create communication channels: %m&quot;);</span>
+<span class="lineNum">     968 </span>            : 
+<span class="lineNum">     969 </span><span class="lineNoCov">          0 :         pstate-&gt;te[i] = NULL;    /* just for safety */</span>
+<span class="lineNum">     970 </span>            : 
+<span class="lineNum">     971 </span><span class="lineNoCov">          0 :         slot-&gt;workerStatus = WRKR_IDLE;</span>
+<span class="lineNum">     972 </span><span class="lineNoCov">          0 :         slot-&gt;AH = NULL;</span>
+<span class="lineNum">     973 </span><span class="lineNoCov">          0 :         slot-&gt;callback = NULL;</span>
+<span class="lineNum">     974 </span><span class="lineNoCov">          0 :         slot-&gt;callback_data = NULL;</span>
+<span class="lineNum">     975 </span>            : 
+<span class="lineNum">     976 </span>            :         /* master's ends of the pipes */
+<span class="lineNum">     977 </span><span class="lineNoCov">          0 :         slot-&gt;pipeRead = pipeWM[PIPE_READ];</span>
+<span class="lineNum">     978 </span><span class="lineNoCov">          0 :         slot-&gt;pipeWrite = pipeMW[PIPE_WRITE];</span>
+<span class="lineNum">     979 </span>            :         /* child's ends of the pipes */
+<span class="lineNum">     980 </span><span class="lineNoCov">          0 :         slot-&gt;pipeRevRead = pipeMW[PIPE_READ];</span>
+<span class="lineNum">     981 </span><span class="lineNoCov">          0 :         slot-&gt;pipeRevWrite = pipeWM[PIPE_WRITE];</span>
+<span class="lineNum">     982 </span>            : 
+<span class="lineNum">     983 </span>            : #ifdef WIN32
+<span class="lineNum">     984 </span>            :         /* Create transient structure to pass args to worker function */
+<span class="lineNum">     985 </span>            :         wi = (WorkerInfo *) pg_malloc(sizeof(WorkerInfo));
+<span class="lineNum">     986 </span>            : 
+<span class="lineNum">     987 </span>            :         wi-&gt;AH = AH;
+<span class="lineNum">     988 </span>            :         wi-&gt;slot = slot;
+<span class="lineNum">     989 </span>            : 
+<span class="lineNum">     990 </span>            :         handle = _beginthreadex(NULL, 0, (void *) &amp;init_spawned_worker_win32,
+<span class="lineNum">     991 </span>            :                                 wi, 0, &amp;(slot-&gt;threadId));
+<span class="lineNum">     992 </span>            :         slot-&gt;hThread = handle;
+<span class="lineNum">     993 </span>            : #else                           /* !WIN32 */
+<span class="lineNum">     994 </span><span class="lineNoCov">          0 :         pid = fork();</span>
+<span class="lineNum">     995 </span><span class="lineNoCov">          0 :         if (pid == 0)</span>
+<span class="lineNum">     996 </span>            :         {
+<span class="lineNum">     997 </span>            :             /* we are the worker */
+<span class="lineNum">     998 </span>            :             int         j;
+<span class="lineNum">     999 </span>            : 
+<span class="lineNum">    1000 </span>            :             /* this is needed for GetMyPSlot() */
+<span class="lineNum">    1001 </span><span class="lineNoCov">          0 :             slot-&gt;pid = getpid();</span>
+<span class="lineNum">    1002 </span>            : 
+<span class="lineNum">    1003 </span>            :             /* instruct signal handler that we're in a worker now */
+<span class="lineNum">    1004 </span><span class="lineNoCov">          0 :             signal_info.am_worker = true;</span>
+<span class="lineNum">    1005 </span>            : 
+<span class="lineNum">    1006 </span>            :             /* close read end of Worker -&gt; Master */
+<span class="lineNum">    1007 </span><span class="lineNoCov">          0 :             closesocket(pipeWM[PIPE_READ]);</span>
+<span class="lineNum">    1008 </span>            :             /* close write end of Master -&gt; Worker */
+<span class="lineNum">    1009 </span><span class="lineNoCov">          0 :             closesocket(pipeMW[PIPE_WRITE]);</span>
+<span class="lineNum">    1010 </span>            : 
+<span class="lineNum">    1011 </span>            :             /*
+<span class="lineNum">    1012 </span>            :              * Close all inherited fds for communication of the master with
+<span class="lineNum">    1013 </span>            :              * previously-forked workers.
+<span class="lineNum">    1014 </span>            :              */
+<span class="lineNum">    1015 </span><span class="lineNoCov">          0 :             for (j = 0; j &lt; i; j++)</span>
+<span class="lineNum">    1016 </span>            :             {
+<span class="lineNum">    1017 </span><span class="lineNoCov">          0 :                 closesocket(pstate-&gt;parallelSlot[j].pipeRead);</span>
+<span class="lineNum">    1018 </span><span class="lineNoCov">          0 :                 closesocket(pstate-&gt;parallelSlot[j].pipeWrite);</span>
+<span class="lineNum">    1019 </span>            :             }
+<span class="lineNum">    1020 </span>            : 
+<span class="lineNum">    1021 </span>            :             /* Run the worker ... */
+<span class="lineNum">    1022 </span><span class="lineNoCov">          0 :             RunWorker(AH, slot);</span>
+<span class="lineNum">    1023 </span>            : 
+<span class="lineNum">    1024 </span>            :             /* We can just exit(0) when done */
+<span class="lineNum">    1025 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">    1026 </span>            :         }
+<span class="lineNum">    1027 </span><span class="lineNoCov">          0 :         else if (pid &lt; 0)</span>
+<span class="lineNum">    1028 </span>            :         {
+<span class="lineNum">    1029 </span>            :             /* fork failed */
+<span class="lineNum">    1030 </span><span class="lineNoCov">          0 :             fatal(&quot;could not create worker process: %m&quot;);</span>
+<span class="lineNum">    1031 </span>            :         }
+<span class="lineNum">    1032 </span>            : 
+<span class="lineNum">    1033 </span>            :         /* In Master after successful fork */
+<span class="lineNum">    1034 </span><span class="lineNoCov">          0 :         slot-&gt;pid = pid;</span>
+<span class="lineNum">    1035 </span>            : 
+<span class="lineNum">    1036 </span>            :         /* close read end of Master -&gt; Worker */
+<span class="lineNum">    1037 </span><span class="lineNoCov">          0 :         closesocket(pipeMW[PIPE_READ]);</span>
+<span class="lineNum">    1038 </span>            :         /* close write end of Worker -&gt; Master */
+<span class="lineNum">    1039 </span><span class="lineNoCov">          0 :         closesocket(pipeWM[PIPE_WRITE]);</span>
+<span class="lineNum">    1040 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">    1041 </span>            :     }
+<span class="lineNum">    1042 </span>            : 
+<span class="lineNum">    1043 </span>            :     /*
+<span class="lineNum">    1044 </span>            :      * Having forked off the workers, disable SIGPIPE so that master isn't
+<span class="lineNum">    1045 </span>            :      * killed if it tries to send a command to a dead worker.  We don't want
+<span class="lineNum">    1046 </span>            :      * the workers to inherit this setting, though.
+<span class="lineNum">    1047 </span>            :      */
+<span class="lineNum">    1048 </span>            : #ifndef WIN32
+<span class="lineNum">    1049 </span><span class="lineNoCov">          0 :     pqsignal(SIGPIPE, SIG_IGN);</span>
+<span class="lineNum">    1050 </span>            : #endif
+<span class="lineNum">    1051 </span>            : 
+<span class="lineNum">    1052 </span>            :     /*
+<span class="lineNum">    1053 </span>            :      * Re-establish query cancellation on the master connection.
+<span class="lineNum">    1054 </span>            :      */
+<span class="lineNum">    1055 </span><span class="lineNoCov">          0 :     set_archive_cancel_info(AH, AH-&gt;connection);</span>
+<span class="lineNum">    1056 </span>            : 
+<span class="lineNum">    1057 </span>            :     /*
+<span class="lineNum">    1058 </span>            :      * Tell the cancel signal handler to forward signals to worker processes,
+<span class="lineNum">    1059 </span>            :      * too.  (As with query cancel, we did not need this earlier because the
+<span class="lineNum">    1060 </span>            :      * workers have not yet been given anything to do; if we die before this
+<span class="lineNum">    1061 </span>            :      * point, any already-started workers will see EOF and quit promptly.)
+<span class="lineNum">    1062 </span>            :      */
+<span class="lineNum">    1063 </span><span class="lineNoCov">          0 :     set_cancel_pstate(pstate);</span>
+<span class="lineNum">    1064 </span>            : 
+<span class="lineNum">    1065 </span><span class="lineNoCov">          0 :     return pstate;</span>
+<span class="lineNum">    1066 </span>            : }
+<span class="lineNum">    1067 </span>            : 
+<span class="lineNum">    1068 </span>            : /*
+<span class="lineNum">    1069 </span>            :  * Close down a parallel dump or restore.
+<a name="1070"><span class="lineNum">    1070 </span>            :  */</a>
+<span class="lineNum">    1071 </span>            : void
+<span class="lineNum">    1072 </span><span class="lineNoCov">          0 : ParallelBackupEnd(ArchiveHandle *AH, ParallelState *pstate)</span>
+<span class="lineNum">    1073 </span>            : {
+<span class="lineNum">    1074 </span>            :     int         i;
+<span class="lineNum">    1075 </span>            : 
+<span class="lineNum">    1076 </span>            :     /* No work if non-parallel */
+<span class="lineNum">    1077 </span><span class="lineNoCov">          0 :     if (pstate-&gt;numWorkers == 1)</span>
+<span class="lineNum">    1078 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1079 </span>            : 
+<span class="lineNum">    1080 </span>            :     /* There should not be any unfinished jobs */
+<span class="lineNum">    1081 </span><span class="lineNoCov">          0 :     Assert(IsEveryWorkerIdle(pstate));</span>
+<span class="lineNum">    1082 </span>            : 
+<span class="lineNum">    1083 </span>            :     /* Close the sockets so that the workers know they can exit */
+<span class="lineNum">    1084 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">    1085 </span>            :     {
+<span class="lineNum">    1086 </span><span class="lineNoCov">          0 :         closesocket(pstate-&gt;parallelSlot[i].pipeRead);</span>
+<span class="lineNum">    1087 </span><span class="lineNoCov">          0 :         closesocket(pstate-&gt;parallelSlot[i].pipeWrite);</span>
+<span class="lineNum">    1088 </span>            :     }
+<span class="lineNum">    1089 </span>            : 
+<span class="lineNum">    1090 </span>            :     /* Wait for them to exit */
+<span class="lineNum">    1091 </span><span class="lineNoCov">          0 :     WaitForTerminatingWorkers(pstate);</span>
+<span class="lineNum">    1092 </span>            : 
+<span class="lineNum">    1093 </span>            :     /*
+<span class="lineNum">    1094 </span>            :      * Unlink pstate from shutdown_info, so the exit handler will not try to
+<span class="lineNum">    1095 </span>            :      * use it; and likewise unlink from signal_info.
+<span class="lineNum">    1096 </span>            :      */
+<span class="lineNum">    1097 </span><span class="lineNoCov">          0 :     shutdown_info.pstate = NULL;</span>
+<span class="lineNum">    1098 </span><span class="lineNoCov">          0 :     set_cancel_pstate(NULL);</span>
+<span class="lineNum">    1099 </span>            : 
+<span class="lineNum">    1100 </span>            :     /* Release state (mere neatnik-ism, since we're about to terminate) */
+<span class="lineNum">    1101 </span><span class="lineNoCov">          0 :     free(pstate-&gt;te);</span>
+<span class="lineNum">    1102 </span><span class="lineNoCov">          0 :     free(pstate-&gt;parallelSlot);</span>
+<span class="lineNum">    1103 </span><span class="lineNoCov">          0 :     free(pstate);</span>
+<span class="lineNum">    1104 </span>            : }
+<span class="lineNum">    1105 </span>            : 
+<span class="lineNum">    1106 </span>            : /*
+<span class="lineNum">    1107 </span>            :  * These next four functions handle construction and parsing of the command
+<span class="lineNum">    1108 </span>            :  * strings and response strings for parallel workers.
+<span class="lineNum">    1109 </span>            :  *
+<span class="lineNum">    1110 </span>            :  * Currently, these can be the same regardless of which archive format we are
+<span class="lineNum">    1111 </span>            :  * processing.  In future, we might want to let format modules override these
+<span class="lineNum">    1112 </span>            :  * functions to add format-specific data to a command or response.
+<span class="lineNum">    1113 </span>            :  */
+<span class="lineNum">    1114 </span>            : 
+<span class="lineNum">    1115 </span>            : /*
+<span class="lineNum">    1116 </span>            :  * buildWorkerCommand: format a command string to send to a worker.
+<span class="lineNum">    1117 </span>            :  *
+<span class="lineNum">    1118 </span>            :  * The string is built in the caller-supplied buffer of size buflen.
+<a name="1119"><span class="lineNum">    1119 </span>            :  */</a>
+<span class="lineNum">    1120 </span>            : static void
+<span class="lineNum">    1121 </span><span class="lineNoCov">          0 : buildWorkerCommand(ArchiveHandle *AH, TocEntry *te, T_Action act,</span>
+<span class="lineNum">    1122 </span>            :                    char *buf, int buflen)
+<span class="lineNum">    1123 </span>            : {
+<span class="lineNum">    1124 </span><span class="lineNoCov">          0 :     if (act == ACT_DUMP)</span>
+<span class="lineNum">    1125 </span><span class="lineNoCov">          0 :         snprintf(buf, buflen, &quot;DUMP %d&quot;, te-&gt;dumpId);</span>
+<span class="lineNum">    1126 </span><span class="lineNoCov">          0 :     else if (act == ACT_RESTORE)</span>
+<span class="lineNum">    1127 </span><span class="lineNoCov">          0 :         snprintf(buf, buflen, &quot;RESTORE %d&quot;, te-&gt;dumpId);</span>
+<span class="lineNum">    1128 </span>            :     else
+<span class="lineNum">    1129 </span><span class="lineNoCov">          0 :         Assert(false);</span>
+<span class="lineNum">    1130 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1131 </span>            : 
+<span class="lineNum">    1132 </span>            : /*
+<span class="lineNum">    1133 </span>            :  * parseWorkerCommand: interpret a command string in a worker.
+<a name="1134"><span class="lineNum">    1134 </span>            :  */</a>
+<span class="lineNum">    1135 </span>            : static void
+<span class="lineNum">    1136 </span><span class="lineNoCov">          0 : parseWorkerCommand(ArchiveHandle *AH, TocEntry **te, T_Action *act,</span>
+<span class="lineNum">    1137 </span>            :                    const char *msg)
+<span class="lineNum">    1138 </span>            : {
+<span class="lineNum">    1139 </span>            :     DumpId      dumpId;
+<span class="lineNum">    1140 </span>            :     int         nBytes;
+<span class="lineNum">    1141 </span>            : 
+<span class="lineNum">    1142 </span><span class="lineNoCov">          0 :     if (messageStartsWith(msg, &quot;DUMP &quot;))</span>
+<span class="lineNum">    1143 </span>            :     {
+<span class="lineNum">    1144 </span><span class="lineNoCov">          0 :         *act = ACT_DUMP;</span>
+<span class="lineNum">    1145 </span><span class="lineNoCov">          0 :         sscanf(msg, &quot;DUMP %d%n&quot;, &amp;dumpId, &amp;nBytes);</span>
+<span class="lineNum">    1146 </span><span class="lineNoCov">          0 :         Assert(nBytes == strlen(msg));</span>
+<span class="lineNum">    1147 </span><span class="lineNoCov">          0 :         *te = getTocEntryByDumpId(AH, dumpId);</span>
+<span class="lineNum">    1148 </span><span class="lineNoCov">          0 :         Assert(*te != NULL);</span>
+<span class="lineNum">    1149 </span>            :     }
+<span class="lineNum">    1150 </span><span class="lineNoCov">          0 :     else if (messageStartsWith(msg, &quot;RESTORE &quot;))</span>
+<span class="lineNum">    1151 </span>            :     {
+<span class="lineNum">    1152 </span><span class="lineNoCov">          0 :         *act = ACT_RESTORE;</span>
+<span class="lineNum">    1153 </span><span class="lineNoCov">          0 :         sscanf(msg, &quot;RESTORE %d%n&quot;, &amp;dumpId, &amp;nBytes);</span>
+<span class="lineNum">    1154 </span><span class="lineNoCov">          0 :         Assert(nBytes == strlen(msg));</span>
+<span class="lineNum">    1155 </span><span class="lineNoCov">          0 :         *te = getTocEntryByDumpId(AH, dumpId);</span>
+<span class="lineNum">    1156 </span><span class="lineNoCov">          0 :         Assert(*te != NULL);</span>
+<span class="lineNum">    1157 </span>            :     }
+<span class="lineNum">    1158 </span>            :     else
+<span class="lineNum">    1159 </span><span class="lineNoCov">          0 :         fatal(&quot;unrecognized command received from master: \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">    1160 </span>            :               msg);
+<span class="lineNum">    1161 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1162 </span>            : 
+<span class="lineNum">    1163 </span>            : /*
+<span class="lineNum">    1164 </span>            :  * buildWorkerResponse: format a response string to send to the master.
+<span class="lineNum">    1165 </span>            :  *
+<span class="lineNum">    1166 </span>            :  * The string is built in the caller-supplied buffer of size buflen.
+<a name="1167"><span class="lineNum">    1167 </span>            :  */</a>
+<span class="lineNum">    1168 </span>            : static void
+<span class="lineNum">    1169 </span><span class="lineNoCov">          0 : buildWorkerResponse(ArchiveHandle *AH, TocEntry *te, T_Action act, int status,</span>
+<span class="lineNum">    1170 </span>            :                     char *buf, int buflen)
+<span class="lineNum">    1171 </span>            : {
+<span class="lineNum">    1172 </span><span class="lineNoCov">          0 :     snprintf(buf, buflen, &quot;OK %d %d %d&quot;,</span>
+<span class="lineNum">    1173 </span>            :              te-&gt;dumpId,
+<span class="lineNum">    1174 </span>            :              status,
+<span class="lineNum">    1175 </span>            :              status == WORKER_IGNORED_ERRORS ? AH-&gt;public.n_errors : 0);
+<span class="lineNum">    1176 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1177 </span>            : 
+<span class="lineNum">    1178 </span>            : /*
+<span class="lineNum">    1179 </span>            :  * parseWorkerResponse: parse the status message returned by a worker.
+<span class="lineNum">    1180 </span>            :  *
+<span class="lineNum">    1181 </span>            :  * Returns the integer status code, and may update fields of AH and/or te.
+<a name="1182"><span class="lineNum">    1182 </span>            :  */</a>
+<span class="lineNum">    1183 </span>            : static int
+<span class="lineNum">    1184 </span><span class="lineNoCov">          0 : parseWorkerResponse(ArchiveHandle *AH, TocEntry *te,</span>
+<span class="lineNum">    1185 </span>            :                     const char *msg)
+<span class="lineNum">    1186 </span>            : {
+<span class="lineNum">    1187 </span>            :     DumpId      dumpId;
+<span class="lineNum">    1188 </span>            :     int         nBytes,
+<span class="lineNum">    1189 </span>            :                 n_errors;
+<span class="lineNum">    1190 </span><span class="lineNoCov">          0 :     int         status = 0;</span>
+<span class="lineNum">    1191 </span>            : 
+<span class="lineNum">    1192 </span><span class="lineNoCov">          0 :     if (messageStartsWith(msg, &quot;OK &quot;))</span>
+<span class="lineNum">    1193 </span>            :     {
+<span class="lineNum">    1194 </span><span class="lineNoCov">          0 :         sscanf(msg, &quot;OK %d %d %d%n&quot;, &amp;dumpId, &amp;status, &amp;n_errors, &amp;nBytes);</span>
+<span class="lineNum">    1195 </span>            : 
+<span class="lineNum">    1196 </span><span class="lineNoCov">          0 :         Assert(dumpId == te-&gt;dumpId);</span>
+<span class="lineNum">    1197 </span><span class="lineNoCov">          0 :         Assert(nBytes == strlen(msg));</span>
+<span class="lineNum">    1198 </span>            : 
+<span class="lineNum">    1199 </span><span class="lineNoCov">          0 :         AH-&gt;public.n_errors += n_errors;</span>
+<span class="lineNum">    1200 </span>            :     }
+<span class="lineNum">    1201 </span>            :     else
+<span class="lineNum">    1202 </span><span class="lineNoCov">          0 :         fatal(&quot;invalid message received from worker: \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">    1203 </span>            :               msg);
+<span class="lineNum">    1204 </span>            : 
+<span class="lineNum">    1205 </span><span class="lineNoCov">          0 :     return status;</span>
+<span class="lineNum">    1206 </span>            : }
+<span class="lineNum">    1207 </span>            : 
+<span class="lineNum">    1208 </span>            : /*
+<span class="lineNum">    1209 </span>            :  * Dispatch a job to some free worker.
+<span class="lineNum">    1210 </span>            :  *
+<span class="lineNum">    1211 </span>            :  * te is the TocEntry to be processed, act is the action to be taken on it.
+<span class="lineNum">    1212 </span>            :  * callback is the function to call on completion of the job.
+<span class="lineNum">    1213 </span>            :  *
+<span class="lineNum">    1214 </span>            :  * If no worker is currently available, this will block, and previously
+<span class="lineNum">    1215 </span>            :  * registered callback functions may be called.
+<a name="1216"><span class="lineNum">    1216 </span>            :  */</a>
+<span class="lineNum">    1217 </span>            : void
+<span class="lineNum">    1218 </span><span class="lineNoCov">          0 : DispatchJobForTocEntry(ArchiveHandle *AH,</span>
+<span class="lineNum">    1219 </span>            :                        ParallelState *pstate,
+<span class="lineNum">    1220 </span>            :                        TocEntry *te,
+<span class="lineNum">    1221 </span>            :                        T_Action act,
+<span class="lineNum">    1222 </span>            :                        ParallelCompletionPtr callback,
+<span class="lineNum">    1223 </span>            :                        void *callback_data)
+<span class="lineNum">    1224 </span>            : {
+<span class="lineNum">    1225 </span>            :     int         worker;
+<span class="lineNum">    1226 </span>            :     char        buf[256];
+<span class="lineNum">    1227 </span>            : 
+<span class="lineNum">    1228 </span>            :     /* Get a worker, waiting if none are idle */
+<span class="lineNum">    1229 </span><span class="lineNoCov">          0 :     while ((worker = GetIdleWorker(pstate)) == NO_SLOT)</span>
+<span class="lineNum">    1230 </span><span class="lineNoCov">          0 :         WaitForWorkers(AH, pstate, WFW_ONE_IDLE);</span>
+<span class="lineNum">    1231 </span>            : 
+<span class="lineNum">    1232 </span>            :     /* Construct and send command string */
+<span class="lineNum">    1233 </span><span class="lineNoCov">          0 :     buildWorkerCommand(AH, te, act, buf, sizeof(buf));</span>
+<span class="lineNum">    1234 </span>            : 
+<span class="lineNum">    1235 </span><span class="lineNoCov">          0 :     sendMessageToWorker(pstate, worker, buf);</span>
+<span class="lineNum">    1236 </span>            : 
+<span class="lineNum">    1237 </span>            :     /* Remember worker is busy, and which TocEntry it's working on */
+<span class="lineNum">    1238 </span><span class="lineNoCov">          0 :     pstate-&gt;parallelSlot[worker].workerStatus = WRKR_WORKING;</span>
+<span class="lineNum">    1239 </span><span class="lineNoCov">          0 :     pstate-&gt;parallelSlot[worker].callback = callback;</span>
+<span class="lineNum">    1240 </span><span class="lineNoCov">          0 :     pstate-&gt;parallelSlot[worker].callback_data = callback_data;</span>
+<span class="lineNum">    1241 </span><span class="lineNoCov">          0 :     pstate-&gt;te[worker] = te;</span>
+<span class="lineNum">    1242 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1243 </span>            : 
+<span class="lineNum">    1244 </span>            : /*
+<span class="lineNum">    1245 </span>            :  * Find an idle worker and return its slot number.
+<span class="lineNum">    1246 </span>            :  * Return NO_SLOT if none are idle.
+<a name="1247"><span class="lineNum">    1247 </span>            :  */</a>
+<span class="lineNum">    1248 </span>            : static int
+<span class="lineNum">    1249 </span><span class="lineNoCov">          0 : GetIdleWorker(ParallelState *pstate)</span>
+<span class="lineNum">    1250 </span>            : {
+<span class="lineNum">    1251 </span>            :     int         i;
+<span class="lineNum">    1252 </span>            : 
+<span class="lineNum">    1253 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">    1254 </span>            :     {
+<span class="lineNum">    1255 </span><span class="lineNoCov">          0 :         if (pstate-&gt;parallelSlot[i].workerStatus == WRKR_IDLE)</span>
+<span class="lineNum">    1256 </span><span class="lineNoCov">          0 :             return i;</span>
+<span class="lineNum">    1257 </span>            :     }
+<span class="lineNum">    1258 </span><span class="lineNoCov">          0 :     return NO_SLOT;</span>
+<span class="lineNum">    1259 </span>            : }
+<span class="lineNum">    1260 </span>            : 
+<span class="lineNum">    1261 </span>            : /*
+<span class="lineNum">    1262 </span>            :  * Return true iff every worker is in the WRKR_TERMINATED state.
+<a name="1263"><span class="lineNum">    1263 </span>            :  */</a>
+<span class="lineNum">    1264 </span>            : static bool
+<span class="lineNum">    1265 </span><span class="lineNoCov">          0 : HasEveryWorkerTerminated(ParallelState *pstate)</span>
+<span class="lineNum">    1266 </span>            : {
+<span class="lineNum">    1267 </span>            :     int         i;
+<span class="lineNum">    1268 </span>            : 
+<span class="lineNum">    1269 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">    1270 </span>            :     {
+<span class="lineNum">    1271 </span><span class="lineNoCov">          0 :         if (pstate-&gt;parallelSlot[i].workerStatus != WRKR_TERMINATED)</span>
+<span class="lineNum">    1272 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">    1273 </span>            :     }
+<span class="lineNum">    1274 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">    1275 </span>            : }
+<span class="lineNum">    1276 </span>            : 
+<span class="lineNum">    1277 </span>            : /*
+<span class="lineNum">    1278 </span>            :  * Return true iff every worker is in the WRKR_IDLE state.
+<a name="1279"><span class="lineNum">    1279 </span>            :  */</a>
+<span class="lineNum">    1280 </span>            : bool
+<span class="lineNum">    1281 </span><span class="lineNoCov">          0 : IsEveryWorkerIdle(ParallelState *pstate)</span>
+<span class="lineNum">    1282 </span>            : {
+<span class="lineNum">    1283 </span>            :     int         i;
+<span class="lineNum">    1284 </span>            : 
+<span class="lineNum">    1285 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">    1286 </span>            :     {
+<span class="lineNum">    1287 </span><span class="lineNoCov">          0 :         if (pstate-&gt;parallelSlot[i].workerStatus != WRKR_IDLE)</span>
+<span class="lineNum">    1288 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">    1289 </span>            :     }
+<span class="lineNum">    1290 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">    1291 </span>            : }
+<span class="lineNum">    1292 </span>            : 
+<span class="lineNum">    1293 </span>            : /*
+<span class="lineNum">    1294 </span>            :  * Acquire lock on a table to be dumped by a worker process.
+<span class="lineNum">    1295 </span>            :  *
+<span class="lineNum">    1296 </span>            :  * The master process is already holding an ACCESS SHARE lock.  Ordinarily
+<span class="lineNum">    1297 </span>            :  * it's no problem for a worker to get one too, but if anything else besides
+<span class="lineNum">    1298 </span>            :  * pg_dump is running, there's a possible deadlock:
+<span class="lineNum">    1299 </span>            :  *
+<span class="lineNum">    1300 </span>            :  * 1) Master dumps the schema and locks all tables in ACCESS SHARE mode.
+<span class="lineNum">    1301 </span>            :  * 2) Another process requests an ACCESS EXCLUSIVE lock (which is not granted
+<span class="lineNum">    1302 </span>            :  *    because the master holds a conflicting ACCESS SHARE lock).
+<span class="lineNum">    1303 </span>            :  * 3) A worker process also requests an ACCESS SHARE lock to read the table.
+<span class="lineNum">    1304 </span>            :  *    The worker is enqueued behind the ACCESS EXCLUSIVE lock request.
+<span class="lineNum">    1305 </span>            :  * 4) Now we have a deadlock, since the master is effectively waiting for
+<span class="lineNum">    1306 </span>            :  *    the worker.  The server cannot detect that, however.
+<span class="lineNum">    1307 </span>            :  *
+<span class="lineNum">    1308 </span>            :  * To prevent an infinite wait, prior to touching a table in a worker, request
+<span class="lineNum">    1309 </span>            :  * a lock in ACCESS SHARE mode but with NOWAIT.  If we don't get the lock,
+<span class="lineNum">    1310 </span>            :  * then we know that somebody else has requested an ACCESS EXCLUSIVE lock and
+<span class="lineNum">    1311 </span>            :  * so we have a deadlock.  We must fail the backup in that case.
+<a name="1312"><span class="lineNum">    1312 </span>            :  */</a>
+<span class="lineNum">    1313 </span>            : static void
+<span class="lineNum">    1314 </span><span class="lineNoCov">          0 : lockTableForWorker(ArchiveHandle *AH, TocEntry *te)</span>
+<span class="lineNum">    1315 </span>            : {
+<span class="lineNum">    1316 </span>            :     const char *qualId;
+<span class="lineNum">    1317 </span>            :     PQExpBuffer query;
+<span class="lineNum">    1318 </span>            :     PGresult   *res;
+<span class="lineNum">    1319 </span>            : 
+<span class="lineNum">    1320 </span>            :     /* Nothing to do for BLOBS */
+<span class="lineNum">    1321 </span><span class="lineNoCov">          0 :     if (strcmp(te-&gt;desc, &quot;BLOBS&quot;) == 0)</span>
+<span class="lineNum">    1322 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1323 </span>            : 
+<span class="lineNum">    1324 </span><span class="lineNoCov">          0 :     query = createPQExpBuffer();</span>
+<span class="lineNum">    1325 </span>            : 
+<span class="lineNum">    1326 </span><span class="lineNoCov">          0 :     qualId = fmtQualifiedId(te-&gt;namespace, te-&gt;tag);</span>
+<span class="lineNum">    1327 </span>            : 
+<span class="lineNum">    1328 </span><span class="lineNoCov">          0 :     appendPQExpBuffer(query, &quot;LOCK TABLE %s IN ACCESS SHARE MODE NOWAIT&quot;,</span>
+<span class="lineNum">    1329 </span>            :                       qualId);
+<span class="lineNum">    1330 </span>            : 
+<span class="lineNum">    1331 </span><span class="lineNoCov">          0 :     res = PQexec(AH-&gt;connection, query-&gt;data);</span>
+<span class="lineNum">    1332 </span>            : 
+<span class="lineNum">    1333 </span><span class="lineNoCov">          0 :     if (!res || PQresultStatus(res) != PGRES_COMMAND_OK)</span>
+<span class="lineNum">    1334 </span><span class="lineNoCov">          0 :         fatal(&quot;could not obtain lock on relation \&quot;%s\&quot;\n&quot;</span>
+<span class="lineNum">    1335 </span>            :               &quot;This usually means that someone requested an ACCESS EXCLUSIVE lock &quot;
+<span class="lineNum">    1336 </span>            :               &quot;on the table after the pg_dump parent process had gotten the &quot;
+<span class="lineNum">    1337 </span>            :               &quot;initial ACCESS SHARE lock on the table.&quot;, qualId);
+<span class="lineNum">    1338 </span>            : 
+<span class="lineNum">    1339 </span><span class="lineNoCov">          0 :     PQclear(res);</span>
+<span class="lineNum">    1340 </span><span class="lineNoCov">          0 :     destroyPQExpBuffer(query);</span>
+<span class="lineNum">    1341 </span>            : }
+<span class="lineNum">    1342 </span>            : 
+<span class="lineNum">    1343 </span>            : /*
+<span class="lineNum">    1344 </span>            :  * WaitForCommands: main routine for a worker process.
+<span class="lineNum">    1345 </span>            :  *
+<span class="lineNum">    1346 </span>            :  * Read and execute commands from the master until we see EOF on the pipe.
+<a name="1347"><span class="lineNum">    1347 </span>            :  */</a>
+<span class="lineNum">    1348 </span>            : static void
+<span class="lineNum">    1349 </span><span class="lineNoCov">          0 : WaitForCommands(ArchiveHandle *AH, int pipefd[2])</span>
+<span class="lineNum">    1350 </span>            : {
+<span class="lineNum">    1351 </span>            :     char       *command;
+<span class="lineNum">    1352 </span>            :     TocEntry   *te;
+<span class="lineNum">    1353 </span>            :     T_Action    act;
+<span class="lineNum">    1354 </span><span class="lineNoCov">          0 :     int         status = 0;</span>
+<span class="lineNum">    1355 </span>            :     char        buf[256];
+<span class="lineNum">    1356 </span>            : 
+<span class="lineNum">    1357 </span>            :     for (;;)
+<span class="lineNum">    1358 </span>            :     {
+<span class="lineNum">    1359 </span><span class="lineNoCov">          0 :         if (!(command = getMessageFromMaster(pipefd)))</span>
+<span class="lineNum">    1360 </span>            :         {
+<span class="lineNum">    1361 </span>            :             /* EOF, so done */
+<span class="lineNum">    1362 </span><span class="lineNoCov">          0 :             return;</span>
+<span class="lineNum">    1363 </span>            :         }
+<span class="lineNum">    1364 </span>            : 
+<span class="lineNum">    1365 </span>            :         /* Decode the command */
+<span class="lineNum">    1366 </span><span class="lineNoCov">          0 :         parseWorkerCommand(AH, &amp;te, &amp;act, command);</span>
+<span class="lineNum">    1367 </span>            : 
+<span class="lineNum">    1368 </span><span class="lineNoCov">          0 :         if (act == ACT_DUMP)</span>
+<span class="lineNum">    1369 </span>            :         {
+<span class="lineNum">    1370 </span>            :             /* Acquire lock on this table within the worker's session */
+<span class="lineNum">    1371 </span><span class="lineNoCov">          0 :             lockTableForWorker(AH, te);</span>
+<span class="lineNum">    1372 </span>            : 
+<span class="lineNum">    1373 </span>            :             /* Perform the dump command */
+<span class="lineNum">    1374 </span><span class="lineNoCov">          0 :             status = (AH-&gt;WorkerJobDumpPtr) (AH, te);</span>
+<span class="lineNum">    1375 </span>            :         }
+<span class="lineNum">    1376 </span><span class="lineNoCov">          0 :         else if (act == ACT_RESTORE)</span>
+<span class="lineNum">    1377 </span>            :         {
+<span class="lineNum">    1378 </span>            :             /* Perform the restore command */
+<span class="lineNum">    1379 </span><span class="lineNoCov">          0 :             status = (AH-&gt;WorkerJobRestorePtr) (AH, te);</span>
+<span class="lineNum">    1380 </span>            :         }
+<span class="lineNum">    1381 </span>            :         else
+<span class="lineNum">    1382 </span><span class="lineNoCov">          0 :             Assert(false);</span>
+<span class="lineNum">    1383 </span>            : 
+<span class="lineNum">    1384 </span>            :         /* Return status to master */
+<span class="lineNum">    1385 </span><span class="lineNoCov">          0 :         buildWorkerResponse(AH, te, act, status, buf, sizeof(buf));</span>
+<span class="lineNum">    1386 </span>            : 
+<span class="lineNum">    1387 </span><span class="lineNoCov">          0 :         sendMessageToMaster(pipefd, buf);</span>
+<span class="lineNum">    1388 </span>            : 
+<span class="lineNum">    1389 </span>            :         /* command was pg_malloc'd and we are responsible for free()ing it. */
+<span class="lineNum">    1390 </span><span class="lineNoCov">          0 :         free(command);</span>
+<span class="lineNum">    1391 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1392 </span>            : }
+<span class="lineNum">    1393 </span>            : 
+<span class="lineNum">    1394 </span>            : /*
+<span class="lineNum">    1395 </span>            :  * Check for status messages from workers.
+<span class="lineNum">    1396 </span>            :  *
+<span class="lineNum">    1397 </span>            :  * If do_wait is true, wait to get a status message; otherwise, just return
+<span class="lineNum">    1398 </span>            :  * immediately if there is none available.
+<span class="lineNum">    1399 </span>            :  *
+<span class="lineNum">    1400 </span>            :  * When we get a status message, we pass the status code to the callback
+<span class="lineNum">    1401 </span>            :  * function that was specified to DispatchJobForTocEntry, then reset the
+<span class="lineNum">    1402 </span>            :  * worker status to IDLE.
+<span class="lineNum">    1403 </span>            :  *
+<span class="lineNum">    1404 </span>            :  * Returns true if we collected a status message, else false.
+<span class="lineNum">    1405 </span>            :  *
+<span class="lineNum">    1406 </span>            :  * XXX is it worth checking for more than one status message per call?
+<span class="lineNum">    1407 </span>            :  * It seems somewhat unlikely that multiple workers would finish at exactly
+<span class="lineNum">    1408 </span>            :  * the same time.
+<a name="1409"><span class="lineNum">    1409 </span>            :  */</a>
+<span class="lineNum">    1410 </span>            : static bool
+<span class="lineNum">    1411 </span><span class="lineNoCov">          0 : ListenToWorkers(ArchiveHandle *AH, ParallelState *pstate, bool do_wait)</span>
+<span class="lineNum">    1412 </span>            : {
+<span class="lineNum">    1413 </span>            :     int         worker;
+<span class="lineNum">    1414 </span>            :     char       *msg;
+<span class="lineNum">    1415 </span>            : 
+<span class="lineNum">    1416 </span>            :     /* Try to collect a status message */
+<span class="lineNum">    1417 </span><span class="lineNoCov">          0 :     msg = getMessageFromWorker(pstate, do_wait, &amp;worker);</span>
+<span class="lineNum">    1418 </span>            : 
+<span class="lineNum">    1419 </span><span class="lineNoCov">          0 :     if (!msg)</span>
+<span class="lineNum">    1420 </span>            :     {
+<span class="lineNum">    1421 </span>            :         /* If do_wait is true, we must have detected EOF on some socket */
+<span class="lineNum">    1422 </span><span class="lineNoCov">          0 :         if (do_wait)</span>
+<span class="lineNum">    1423 </span><span class="lineNoCov">          0 :             fatal(&quot;a worker process died unexpectedly&quot;);</span>
+<span class="lineNum">    1424 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1425 </span>            :     }
+<span class="lineNum">    1426 </span>            : 
+<span class="lineNum">    1427 </span>            :     /* Process it and update our idea of the worker's status */
+<span class="lineNum">    1428 </span><span class="lineNoCov">          0 :     if (messageStartsWith(msg, &quot;OK &quot;))</span>
+<span class="lineNum">    1429 </span>            :     {
+<span class="lineNum">    1430 </span><span class="lineNoCov">          0 :         ParallelSlot *slot = &amp;pstate-&gt;parallelSlot[worker];</span>
+<span class="lineNum">    1431 </span><span class="lineNoCov">          0 :         TocEntry   *te = pstate-&gt;te[worker];</span>
+<span class="lineNum">    1432 </span>            :         int         status;
+<span class="lineNum">    1433 </span>            : 
+<span class="lineNum">    1434 </span><span class="lineNoCov">          0 :         status = parseWorkerResponse(AH, te, msg);</span>
+<span class="lineNum">    1435 </span><span class="lineNoCov">          0 :         slot-&gt;callback(AH, te, status, slot-&gt;callback_data);</span>
+<span class="lineNum">    1436 </span><span class="lineNoCov">          0 :         slot-&gt;workerStatus = WRKR_IDLE;</span>
+<span class="lineNum">    1437 </span><span class="lineNoCov">          0 :         pstate-&gt;te[worker] = NULL;</span>
+<span class="lineNum">    1438 </span>            :     }
+<span class="lineNum">    1439 </span>            :     else
+<span class="lineNum">    1440 </span><span class="lineNoCov">          0 :         fatal(&quot;invalid message received from worker: \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">    1441 </span>            :               msg);
+<span class="lineNum">    1442 </span>            : 
+<span class="lineNum">    1443 </span>            :     /* Free the string returned from getMessageFromWorker */
+<span class="lineNum">    1444 </span><span class="lineNoCov">          0 :     free(msg);</span>
+<span class="lineNum">    1445 </span>            : 
+<span class="lineNum">    1446 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">    1447 </span>            : }
+<span class="lineNum">    1448 </span>            : 
+<span class="lineNum">    1449 </span>            : /*
+<span class="lineNum">    1450 </span>            :  * Check for status results from workers, waiting if necessary.
+<span class="lineNum">    1451 </span>            :  *
+<span class="lineNum">    1452 </span>            :  * Available wait modes are:
+<span class="lineNum">    1453 </span>            :  * WFW_NO_WAIT: reap any available status, but don't block
+<span class="lineNum">    1454 </span>            :  * WFW_GOT_STATUS: wait for at least one more worker to finish
+<span class="lineNum">    1455 </span>            :  * WFW_ONE_IDLE: wait for at least one worker to be idle
+<span class="lineNum">    1456 </span>            :  * WFW_ALL_IDLE: wait for all workers to be idle
+<span class="lineNum">    1457 </span>            :  *
+<span class="lineNum">    1458 </span>            :  * Any received results are passed to the callback specified to
+<span class="lineNum">    1459 </span>            :  * DispatchJobForTocEntry.
+<span class="lineNum">    1460 </span>            :  *
+<span class="lineNum">    1461 </span>            :  * This function is executed in the master process.
+<a name="1462"><span class="lineNum">    1462 </span>            :  */</a>
+<span class="lineNum">    1463 </span>            : void
+<span class="lineNum">    1464 </span><span class="lineNoCov">          0 : WaitForWorkers(ArchiveHandle *AH, ParallelState *pstate, WFW_WaitOption mode)</span>
+<span class="lineNum">    1465 </span>            : {
+<span class="lineNum">    1466 </span><span class="lineNoCov">          0 :     bool        do_wait = false;</span>
+<span class="lineNum">    1467 </span>            : 
+<span class="lineNum">    1468 </span>            :     /*
+<span class="lineNum">    1469 </span>            :      * In GOT_STATUS mode, always block waiting for a message, since we can't
+<span class="lineNum">    1470 </span>            :      * return till we get something.  In other modes, we don't block the first
+<span class="lineNum">    1471 </span>            :      * time through the loop.
+<span class="lineNum">    1472 </span>            :      */
+<span class="lineNum">    1473 </span><span class="lineNoCov">          0 :     if (mode == WFW_GOT_STATUS)</span>
+<span class="lineNum">    1474 </span>            :     {
+<span class="lineNum">    1475 </span>            :         /* Assert that caller knows what it's doing */
+<span class="lineNum">    1476 </span><span class="lineNoCov">          0 :         Assert(!IsEveryWorkerIdle(pstate));</span>
+<span class="lineNum">    1477 </span><span class="lineNoCov">          0 :         do_wait = true;</span>
+<span class="lineNum">    1478 </span>            :     }
+<span class="lineNum">    1479 </span>            : 
+<span class="lineNum">    1480 </span>            :     for (;;)
+<span class="lineNum">    1481 </span>            :     {
+<span class="lineNum">    1482 </span>            :         /*
+<span class="lineNum">    1483 </span>            :          * Check for status messages, even if we don't need to block.  We do
+<span class="lineNum">    1484 </span>            :          * not try very hard to reap all available messages, though, since
+<span class="lineNum">    1485 </span>            :          * there's unlikely to be more than one.
+<span class="lineNum">    1486 </span>            :          */
+<span class="lineNum">    1487 </span><span class="lineNoCov">          0 :         if (ListenToWorkers(AH, pstate, do_wait))</span>
+<span class="lineNum">    1488 </span>            :         {
+<span class="lineNum">    1489 </span>            :             /*
+<span class="lineNum">    1490 </span>            :              * If we got a message, we are done by definition for GOT_STATUS
+<span class="lineNum">    1491 </span>            :              * mode, and we can also be certain that there's at least one idle
+<span class="lineNum">    1492 </span>            :              * worker.  So we're done in all but ALL_IDLE mode.
+<span class="lineNum">    1493 </span>            :              */
+<span class="lineNum">    1494 </span><span class="lineNoCov">          0 :             if (mode != WFW_ALL_IDLE)</span>
+<span class="lineNum">    1495 </span><span class="lineNoCov">          0 :                 return;</span>
+<span class="lineNum">    1496 </span>            :         }
+<span class="lineNum">    1497 </span>            : 
+<span class="lineNum">    1498 </span>            :         /* Check whether we must wait for new status messages */
+<span class="lineNum">    1499 </span><span class="lineNoCov">          0 :         switch (mode)</span>
+<span class="lineNum">    1500 </span>            :         {
+<span class="lineNum">    1501 </span>            :             case WFW_NO_WAIT:
+<span class="lineNum">    1502 </span><span class="lineNoCov">          0 :                 return;         /* never wait */</span>
+<span class="lineNum">    1503 </span>            :             case WFW_GOT_STATUS:
+<span class="lineNum">    1504 </span><span class="lineNoCov">          0 :                 Assert(false);  /* can't get here, because we waited */</span>
+<span class="lineNum">    1505 </span>            :                 break;
+<span class="lineNum">    1506 </span>            :             case WFW_ONE_IDLE:
+<span class="lineNum">    1507 </span><span class="lineNoCov">          0 :                 if (GetIdleWorker(pstate) != NO_SLOT)</span>
+<span class="lineNum">    1508 </span><span class="lineNoCov">          0 :                     return;</span>
+<span class="lineNum">    1509 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1510 </span>            :             case WFW_ALL_IDLE:
+<span class="lineNum">    1511 </span><span class="lineNoCov">          0 :                 if (IsEveryWorkerIdle(pstate))</span>
+<span class="lineNum">    1512 </span><span class="lineNoCov">          0 :                     return;</span>
+<span class="lineNum">    1513 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1514 </span>            :         }
+<span class="lineNum">    1515 </span>            : 
+<span class="lineNum">    1516 </span>            :         /* Loop back, and this time wait for something to happen */
+<span class="lineNum">    1517 </span><span class="lineNoCov">          0 :         do_wait = true;</span>
+<span class="lineNum">    1518 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1519 </span>            : }
+<span class="lineNum">    1520 </span>            : 
+<span class="lineNum">    1521 </span>            : /*
+<span class="lineNum">    1522 </span>            :  * Read one command message from the master, blocking if necessary
+<span class="lineNum">    1523 </span>            :  * until one is available, and return it as a malloc'd string.
+<span class="lineNum">    1524 </span>            :  * On EOF, return NULL.
+<span class="lineNum">    1525 </span>            :  *
+<span class="lineNum">    1526 </span>            :  * This function is executed in worker processes.
+<a name="1527"><span class="lineNum">    1527 </span>            :  */</a>
+<span class="lineNum">    1528 </span>            : static char *
+<span class="lineNum">    1529 </span><span class="lineNoCov">          0 : getMessageFromMaster(int pipefd[2])</span>
+<span class="lineNum">    1530 </span>            : {
+<span class="lineNum">    1531 </span><span class="lineNoCov">          0 :     return readMessageFromPipe(pipefd[PIPE_READ]);</span>
+<span class="lineNum">    1532 </span>            : }
+<span class="lineNum">    1533 </span>            : 
+<span class="lineNum">    1534 </span>            : /*
+<span class="lineNum">    1535 </span>            :  * Send a status message to the master.
+<span class="lineNum">    1536 </span>            :  *
+<span class="lineNum">    1537 </span>            :  * This function is executed in worker processes.
+<a name="1538"><span class="lineNum">    1538 </span>            :  */</a>
+<span class="lineNum">    1539 </span>            : static void
+<span class="lineNum">    1540 </span><span class="lineNoCov">          0 : sendMessageToMaster(int pipefd[2], const char *str)</span>
+<span class="lineNum">    1541 </span>            : {
+<span class="lineNum">    1542 </span><span class="lineNoCov">          0 :     int         len = strlen(str) + 1;</span>
+<span class="lineNum">    1543 </span>            : 
+<span class="lineNum">    1544 </span><span class="lineNoCov">          0 :     if (pipewrite(pipefd[PIPE_WRITE], str, len) != len)</span>
+<span class="lineNum">    1545 </span><span class="lineNoCov">          0 :         fatal(&quot;could not write to the communication channel: %m&quot;);</span>
+<span class="lineNum">    1546 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1547 </span>            : 
+<span class="lineNum">    1548 </span>            : /*
+<span class="lineNum">    1549 </span>            :  * Wait until some descriptor in &quot;workerset&quot; becomes readable.
+<span class="lineNum">    1550 </span>            :  * Returns -1 on error, else the number of readable descriptors.
+<a name="1551"><span class="lineNum">    1551 </span>            :  */</a>
+<span class="lineNum">    1552 </span>            : static int
+<span class="lineNum">    1553 </span><span class="lineNoCov">          0 : select_loop(int maxFd, fd_set *workerset)</span>
+<span class="lineNum">    1554 </span>            : {
+<span class="lineNum">    1555 </span>            :     int         i;
+<span class="lineNum">    1556 </span><span class="lineNoCov">          0 :     fd_set      saveSet = *workerset;</span>
+<span class="lineNum">    1557 </span>            : 
+<span class="lineNum">    1558 </span>            :     for (;;)
+<span class="lineNum">    1559 </span>            :     {
+<span class="lineNum">    1560 </span><span class="lineNoCov">          0 :         *workerset = saveSet;</span>
+<span class="lineNum">    1561 </span><span class="lineNoCov">          0 :         i = select(maxFd + 1, workerset, NULL, NULL, NULL);</span>
+<span class="lineNum">    1562 </span>            : 
+<span class="lineNum">    1563 </span>            : #ifndef WIN32
+<span class="lineNum">    1564 </span><span class="lineNoCov">          0 :         if (i &lt; 0 &amp;&amp; errno == EINTR)</span>
+<span class="lineNum">    1565 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1566 </span>            : #else
+<span class="lineNum">    1567 </span>            :         if (i == SOCKET_ERROR &amp;&amp; WSAGetLastError() == WSAEINTR)
+<span class="lineNum">    1568 </span>            :             continue;
+<span class="lineNum">    1569 </span>            : #endif
+<span class="lineNum">    1570 </span><span class="lineNoCov">          0 :         break;</span>
+<span class="lineNum">    1571 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1572 </span>            : 
+<span class="lineNum">    1573 </span><span class="lineNoCov">          0 :     return i;</span>
+<span class="lineNum">    1574 </span>            : }
+<span class="lineNum">    1575 </span>            : 
+<span class="lineNum">    1576 </span>            : 
+<span class="lineNum">    1577 </span>            : /*
+<span class="lineNum">    1578 </span>            :  * Check for messages from worker processes.
+<span class="lineNum">    1579 </span>            :  *
+<span class="lineNum">    1580 </span>            :  * If a message is available, return it as a malloc'd string, and put the
+<span class="lineNum">    1581 </span>            :  * index of the sending worker in *worker.
+<span class="lineNum">    1582 </span>            :  *
+<span class="lineNum">    1583 </span>            :  * If nothing is available, wait if &quot;do_wait&quot; is true, else return NULL.
+<span class="lineNum">    1584 </span>            :  *
+<span class="lineNum">    1585 </span>            :  * If we detect EOF on any socket, we'll return NULL.  It's not great that
+<span class="lineNum">    1586 </span>            :  * that's hard to distinguish from the no-data-available case, but for now
+<span class="lineNum">    1587 </span>            :  * our one caller is okay with that.
+<span class="lineNum">    1588 </span>            :  *
+<span class="lineNum">    1589 </span>            :  * This function is executed in the master process.
+<a name="1590"><span class="lineNum">    1590 </span>            :  */</a>
+<span class="lineNum">    1591 </span>            : static char *
+<span class="lineNum">    1592 </span><span class="lineNoCov">          0 : getMessageFromWorker(ParallelState *pstate, bool do_wait, int *worker)</span>
+<span class="lineNum">    1593 </span>            : {
+<span class="lineNum">    1594 </span>            :     int         i;
+<span class="lineNum">    1595 </span>            :     fd_set      workerset;
+<span class="lineNum">    1596 </span><span class="lineNoCov">          0 :     int         maxFd = -1;</span>
+<span class="lineNum">    1597 </span><span class="lineNoCov">          0 :     struct timeval nowait = {0, 0};</span>
+<span class="lineNum">    1598 </span>            : 
+<span class="lineNum">    1599 </span>            :     /* construct bitmap of socket descriptors for select() */
+<span class="lineNum">    1600 </span><span class="lineNoCov">          0 :     FD_ZERO(&amp;workerset);</span>
+<span class="lineNum">    1601 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">    1602 </span>            :     {
+<span class="lineNum">    1603 </span><span class="lineNoCov">          0 :         if (pstate-&gt;parallelSlot[i].workerStatus == WRKR_TERMINATED)</span>
+<span class="lineNum">    1604 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1605 </span><span class="lineNoCov">          0 :         FD_SET(pstate-&gt;parallelSlot[i].pipeRead, &amp;workerset);</span>
+<span class="lineNum">    1606 </span><span class="lineNoCov">          0 :         if (pstate-&gt;parallelSlot[i].pipeRead &gt; maxFd)</span>
+<span class="lineNum">    1607 </span><span class="lineNoCov">          0 :             maxFd = pstate-&gt;parallelSlot[i].pipeRead;</span>
+<span class="lineNum">    1608 </span>            :     }
+<span class="lineNum">    1609 </span>            : 
+<span class="lineNum">    1610 </span><span class="lineNoCov">          0 :     if (do_wait)</span>
+<span class="lineNum">    1611 </span>            :     {
+<span class="lineNum">    1612 </span><span class="lineNoCov">          0 :         i = select_loop(maxFd, &amp;workerset);</span>
+<span class="lineNum">    1613 </span><span class="lineNoCov">          0 :         Assert(i != 0);</span>
+<span class="lineNum">    1614 </span>            :     }
+<span class="lineNum">    1615 </span>            :     else
+<span class="lineNum">    1616 </span>            :     {
+<span class="lineNum">    1617 </span><span class="lineNoCov">          0 :         if ((i = select(maxFd + 1, &amp;workerset, NULL, NULL, &amp;nowait)) == 0)</span>
+<span class="lineNum">    1618 </span><span class="lineNoCov">          0 :             return NULL;</span>
+<span class="lineNum">    1619 </span>            :     }
+<span class="lineNum">    1620 </span>            : 
+<span class="lineNum">    1621 </span><span class="lineNoCov">          0 :     if (i &lt; 0)</span>
+<span class="lineNum">    1622 </span><span class="lineNoCov">          0 :         fatal(&quot;select() failed: %m&quot;);</span>
+<span class="lineNum">    1623 </span>            : 
+<span class="lineNum">    1624 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; pstate-&gt;numWorkers; i++)</span>
+<span class="lineNum">    1625 </span>            :     {
+<span class="lineNum">    1626 </span>            :         char       *msg;
+<span class="lineNum">    1627 </span>            : 
+<span class="lineNum">    1628 </span><span class="lineNoCov">          0 :         if (!FD_ISSET(pstate-&gt;parallelSlot[i].pipeRead, &amp;workerset))</span>
+<span class="lineNum">    1629 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1630 </span>            : 
+<span class="lineNum">    1631 </span>            :         /*
+<span class="lineNum">    1632 </span>            :          * Read the message if any.  If the socket is ready because of EOF,
+<span class="lineNum">    1633 </span>            :          * we'll return NULL instead (and the socket will stay ready, so the
+<span class="lineNum">    1634 </span>            :          * condition will persist).
+<span class="lineNum">    1635 </span>            :          *
+<span class="lineNum">    1636 </span>            :          * Note: because this is a blocking read, we'll wait if only part of
+<span class="lineNum">    1637 </span>            :          * the message is available.  Waiting a long time would be bad, but
+<span class="lineNum">    1638 </span>            :          * since worker status messages are short and are always sent in one
+<span class="lineNum">    1639 </span>            :          * operation, it shouldn't be a problem in practice.
+<span class="lineNum">    1640 </span>            :          */
+<span class="lineNum">    1641 </span><span class="lineNoCov">          0 :         msg = readMessageFromPipe(pstate-&gt;parallelSlot[i].pipeRead);</span>
+<span class="lineNum">    1642 </span><span class="lineNoCov">          0 :         *worker = i;</span>
+<span class="lineNum">    1643 </span><span class="lineNoCov">          0 :         return msg;</span>
+<span class="lineNum">    1644 </span>            :     }
+<span class="lineNum">    1645 </span><span class="lineNoCov">          0 :     Assert(false);</span>
+<span class="lineNum">    1646 </span>            :     return NULL;
+<span class="lineNum">    1647 </span>            : }
+<span class="lineNum">    1648 </span>            : 
+<span class="lineNum">    1649 </span>            : /*
+<span class="lineNum">    1650 </span>            :  * Send a command message to the specified worker process.
+<span class="lineNum">    1651 </span>            :  *
+<span class="lineNum">    1652 </span>            :  * This function is executed in the master process.
+<a name="1653"><span class="lineNum">    1653 </span>            :  */</a>
+<span class="lineNum">    1654 </span>            : static void
+<span class="lineNum">    1655 </span><span class="lineNoCov">          0 : sendMessageToWorker(ParallelState *pstate, int worker, const char *str)</span>
+<span class="lineNum">    1656 </span>            : {
+<span class="lineNum">    1657 </span><span class="lineNoCov">          0 :     int         len = strlen(str) + 1;</span>
+<span class="lineNum">    1658 </span>            : 
+<span class="lineNum">    1659 </span><span class="lineNoCov">          0 :     if (pipewrite(pstate-&gt;parallelSlot[worker].pipeWrite, str, len) != len)</span>
+<span class="lineNum">    1660 </span>            :     {
+<span class="lineNum">    1661 </span><span class="lineNoCov">          0 :         fatal(&quot;could not write to the communication channel: %m&quot;);</span>
+<span class="lineNum">    1662 </span>            :     }
+<span class="lineNum">    1663 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1664 </span>            : 
+<span class="lineNum">    1665 </span>            : /*
+<span class="lineNum">    1666 </span>            :  * Read one message from the specified pipe (fd), blocking if necessary
+<span class="lineNum">    1667 </span>            :  * until one is available, and return it as a malloc'd string.
+<span class="lineNum">    1668 </span>            :  * On EOF, return NULL.
+<span class="lineNum">    1669 </span>            :  *
+<span class="lineNum">    1670 </span>            :  * A &quot;message&quot; on the channel is just a null-terminated string.
+<a name="1671"><span class="lineNum">    1671 </span>            :  */</a>
+<span class="lineNum">    1672 </span>            : static char *
+<span class="lineNum">    1673 </span><span class="lineNoCov">          0 : readMessageFromPipe(int fd)</span>
+<span class="lineNum">    1674 </span>            : {
+<span class="lineNum">    1675 </span>            :     char       *msg;
+<span class="lineNum">    1676 </span>            :     int         msgsize,
+<span class="lineNum">    1677 </span>            :                 bufsize;
+<span class="lineNum">    1678 </span>            :     int         ret;
+<span class="lineNum">    1679 </span>            : 
+<span class="lineNum">    1680 </span>            :     /*
+<span class="lineNum">    1681 </span>            :      * In theory, if we let piperead() read multiple bytes, it might give us
+<span class="lineNum">    1682 </span>            :      * back fragments of multiple messages.  (That can't actually occur, since
+<span class="lineNum">    1683 </span>            :      * neither master nor workers send more than one message without waiting
+<span class="lineNum">    1684 </span>            :      * for a reply, but we don't wish to assume that here.)  For simplicity,
+<span class="lineNum">    1685 </span>            :      * read a byte at a time until we get the terminating '\0'.  This method
+<span class="lineNum">    1686 </span>            :      * is a bit inefficient, but since this is only used for relatively short
+<span class="lineNum">    1687 </span>            :      * command and status strings, it shouldn't matter.
+<span class="lineNum">    1688 </span>            :      */
+<span class="lineNum">    1689 </span><span class="lineNoCov">          0 :     bufsize = 64;               /* could be any number */</span>
+<span class="lineNum">    1690 </span><span class="lineNoCov">          0 :     msg = (char *) pg_malloc(bufsize);</span>
+<span class="lineNum">    1691 </span><span class="lineNoCov">          0 :     msgsize = 0;</span>
+<span class="lineNum">    1692 </span>            :     for (;;)
+<span class="lineNum">    1693 </span>            :     {
+<span class="lineNum">    1694 </span><span class="lineNoCov">          0 :         Assert(msgsize &lt; bufsize);</span>
+<span class="lineNum">    1695 </span><span class="lineNoCov">          0 :         ret = piperead(fd, msg + msgsize, 1);</span>
+<span class="lineNum">    1696 </span><span class="lineNoCov">          0 :         if (ret &lt;= 0)</span>
+<span class="lineNum">    1697 </span><span class="lineNoCov">          0 :             break;              /* error or connection closure */</span>
+<span class="lineNum">    1698 </span>            : 
+<span class="lineNum">    1699 </span><span class="lineNoCov">          0 :         Assert(ret == 1);</span>
+<span class="lineNum">    1700 </span>            : 
+<span class="lineNum">    1701 </span><span class="lineNoCov">          0 :         if (msg[msgsize] == '\0')</span>
+<span class="lineNum">    1702 </span><span class="lineNoCov">          0 :             return msg;         /* collected whole message */</span>
+<span class="lineNum">    1703 </span>            : 
+<span class="lineNum">    1704 </span><span class="lineNoCov">          0 :         msgsize++;</span>
+<span class="lineNum">    1705 </span><span class="lineNoCov">          0 :         if (msgsize == bufsize) /* enlarge buffer if needed */</span>
+<span class="lineNum">    1706 </span>            :         {
+<span class="lineNum">    1707 </span><span class="lineNoCov">          0 :             bufsize += 16;      /* could be any number */</span>
+<span class="lineNum">    1708 </span><span class="lineNoCov">          0 :             msg = (char *) pg_realloc(msg, bufsize);</span>
+<span class="lineNum">    1709 </span>            :         }
+<span class="lineNum">    1710 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1711 </span>            : 
+<span class="lineNum">    1712 </span>            :     /* Other end has closed the connection */
+<span class="lineNum">    1713 </span><span class="lineNoCov">          0 :     pg_free(msg);</span>
+<span class="lineNum">    1714 </span><span class="lineNoCov">          0 :     return NULL;</span>
+<span class="lineNum">    1715 </span>            : }
+<span class="lineNum">    1716 </span>            : 
+<span class="lineNum">    1717 </span>            : #ifdef WIN32
+<span class="lineNum">    1718 </span>            : 
+<span class="lineNum">    1719 </span>            : /*
+<span class="lineNum">    1720 </span>            :  * This is a replacement version of pipe(2) for Windows which allows the pipe
+<span class="lineNum">    1721 </span>            :  * handles to be used in select().
+<span class="lineNum">    1722 </span>            :  *
+<span class="lineNum">    1723 </span>            :  * Reads and writes on the pipe must go through piperead()/pipewrite().
+<span class="lineNum">    1724 </span>            :  *
+<span class="lineNum">    1725 </span>            :  * For consistency with Unix we declare the returned handles as &quot;int&quot;.
+<span class="lineNum">    1726 </span>            :  * This is okay even on WIN64 because system handles are not more than
+<span class="lineNum">    1727 </span>            :  * 32 bits wide, but we do have to do some casting.
+<span class="lineNum">    1728 </span>            :  */
+<span class="lineNum">    1729 </span>            : static int
+<span class="lineNum">    1730 </span>            : pgpipe(int handles[2])
+<span class="lineNum">    1731 </span>            : {
+<span class="lineNum">    1732 </span>            :     pgsocket    s,
+<span class="lineNum">    1733 </span>            :                 tmp_sock;
+<span class="lineNum">    1734 </span>            :     struct sockaddr_in serv_addr;
+<span class="lineNum">    1735 </span>            :     int         len = sizeof(serv_addr);
+<span class="lineNum">    1736 </span>            : 
+<span class="lineNum">    1737 </span>            :     /* We have to use the Unix socket invalid file descriptor value here. */
+<span class="lineNum">    1738 </span>            :     handles[0] = handles[1] = -1;
+<span class="lineNum">    1739 </span>            : 
+<span class="lineNum">    1740 </span>            :     /*
+<span class="lineNum">    1741 </span>            :      * setup listen socket
+<span class="lineNum">    1742 </span>            :      */
+<span class="lineNum">    1743 </span>            :     if ((s = socket(AF_INET, SOCK_STREAM, 0)) == PGINVALID_SOCKET)
+<span class="lineNum">    1744 </span>            :     {
+<span class="lineNum">    1745 </span>            :         pg_log_error(&quot;pgpipe: could not create socket: error code %d&quot;,
+<span class="lineNum">    1746 </span>            :                      WSAGetLastError());
+<span class="lineNum">    1747 </span>            :         return -1;
+<span class="lineNum">    1748 </span>            :     }
+<span class="lineNum">    1749 </span>            : 
+<span class="lineNum">    1750 </span>            :     memset((void *) &amp;serv_addr, 0, sizeof(serv_addr));
+<span class="lineNum">    1751 </span>            :     serv_addr.sin_family = AF_INET;
+<span class="lineNum">    1752 </span>            :     serv_addr.sin_port = pg_hton16(0);
+<span class="lineNum">    1753 </span>            :     serv_addr.sin_addr.s_addr = pg_hton32(INADDR_LOOPBACK);
+<span class="lineNum">    1754 </span>            :     if (bind(s, (SOCKADDR *) &amp;serv_addr, len) == SOCKET_ERROR)
+<span class="lineNum">    1755 </span>            :     {
+<span class="lineNum">    1756 </span>            :         pg_log_error(&quot;pgpipe: could not bind: error code %d&quot;,
+<span class="lineNum">    1757 </span>            :                      WSAGetLastError());
+<span class="lineNum">    1758 </span>            :         closesocket(s);
+<span class="lineNum">    1759 </span>            :         return -1;
+<span class="lineNum">    1760 </span>            :     }
+<span class="lineNum">    1761 </span>            :     if (listen(s, 1) == SOCKET_ERROR)
+<span class="lineNum">    1762 </span>            :     {
+<span class="lineNum">    1763 </span>            :         pg_log_error(&quot;pgpipe: could not listen: error code %d&quot;,
+<span class="lineNum">    1764 </span>            :                      WSAGetLastError());
+<span class="lineNum">    1765 </span>            :         closesocket(s);
+<span class="lineNum">    1766 </span>            :         return -1;
+<span class="lineNum">    1767 </span>            :     }
+<span class="lineNum">    1768 </span>            :     if (getsockname(s, (SOCKADDR *) &amp;serv_addr, &amp;len) == SOCKET_ERROR)
+<span class="lineNum">    1769 </span>            :     {
+<span class="lineNum">    1770 </span>            :         pg_log_error(&quot;pgpipe: getsockname() failed: error code %d&quot;,
+<span class="lineNum">    1771 </span>            :                      WSAGetLastError());
+<span class="lineNum">    1772 </span>            :         closesocket(s);
+<span class="lineNum">    1773 </span>            :         return -1;
+<span class="lineNum">    1774 </span>            :     }
+<span class="lineNum">    1775 </span>            : 
+<span class="lineNum">    1776 </span>            :     /*
+<span class="lineNum">    1777 </span>            :      * setup pipe handles
+<span class="lineNum">    1778 </span>            :      */
+<span class="lineNum">    1779 </span>            :     if ((tmp_sock = socket(AF_INET, SOCK_STREAM, 0)) == PGINVALID_SOCKET)
+<span class="lineNum">    1780 </span>            :     {
+<span class="lineNum">    1781 </span>            :         pg_log_error(&quot;pgpipe: could not create second socket: error code %d&quot;,
+<span class="lineNum">    1782 </span>            :                      WSAGetLastError());
+<span class="lineNum">    1783 </span>            :         closesocket(s);
+<span class="lineNum">    1784 </span>            :         return -1;
+<span class="lineNum">    1785 </span>            :     }
+<span class="lineNum">    1786 </span>            :     handles[1] = (int) tmp_sock;
+<span class="lineNum">    1787 </span>            : 
+<span class="lineNum">    1788 </span>            :     if (connect(handles[1], (SOCKADDR *) &amp;serv_addr, len) == SOCKET_ERROR)
+<span class="lineNum">    1789 </span>            :     {
+<span class="lineNum">    1790 </span>            :         pg_log_error(&quot;pgpipe: could not connect socket: error code %d&quot;,
+<span class="lineNum">    1791 </span>            :                      WSAGetLastError());
+<span class="lineNum">    1792 </span>            :         closesocket(handles[1]);
+<span class="lineNum">    1793 </span>            :         handles[1] = -1;
+<span class="lineNum">    1794 </span>            :         closesocket(s);
+<span class="lineNum">    1795 </span>            :         return -1;
+<span class="lineNum">    1796 </span>            :     }
+<span class="lineNum">    1797 </span>            :     if ((tmp_sock = accept(s, (SOCKADDR *) &amp;serv_addr, &amp;len)) == PGINVALID_SOCKET)
+<span class="lineNum">    1798 </span>            :     {
+<span class="lineNum">    1799 </span>            :         pg_log_error(&quot;pgpipe: could not accept connection: error code %d&quot;,
+<span class="lineNum">    1800 </span>            :                      WSAGetLastError());
+<span class="lineNum">    1801 </span>            :         closesocket(handles[1]);
+<span class="lineNum">    1802 </span>            :         handles[1] = -1;
+<span class="lineNum">    1803 </span>            :         closesocket(s);
+<span class="lineNum">    1804 </span>            :         return -1;
+<span class="lineNum">    1805 </span>            :     }
+<span class="lineNum">    1806 </span>            :     handles[0] = (int) tmp_sock;
+<span class="lineNum">    1807 </span>            : 
+<span class="lineNum">    1808 </span>            :     closesocket(s);
+<span class="lineNum">    1809 </span>            :     return 0;
+<span class="lineNum">    1810 </span>            : }
+<span class="lineNum">    1811 </span>            : 
+<span class="lineNum">    1812 </span>            : /*
+<span class="lineNum">    1813 </span>            :  * Windows implementation of reading from a pipe.
+<span class="lineNum">    1814 </span>            :  */
+<span class="lineNum">    1815 </span>            : static int
+<span class="lineNum">    1816 </span>            : piperead(int s, char *buf, int len)
+<span class="lineNum">    1817 </span>            : {
+<span class="lineNum">    1818 </span>            :     int         ret = recv(s, buf, len, 0);
+<span class="lineNum">    1819 </span>            : 
+<span class="lineNum">    1820 </span>            :     if (ret &lt; 0 &amp;&amp; WSAGetLastError() == WSAECONNRESET)
+<span class="lineNum">    1821 </span>            :     {
+<span class="lineNum">    1822 </span>            :         /* EOF on the pipe! */
+<span class="lineNum">    1823 </span>            :         ret = 0;
+<span class="lineNum">    1824 </span>            :     }
+<span class="lineNum">    1825 </span>            :     return ret;
+<span class="lineNum">    1826 </span>            : }
+<span class="lineNum">    1827 </span>            : 
+<span class="lineNum">    1828 </span>            : #endif                          /* WIN32 */
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

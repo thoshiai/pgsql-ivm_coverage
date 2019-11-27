@@ -1,0 +1,643 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/nodeTidscan.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - nodeTidscan.c<span style="font-size: 80%;"> (source / <a href="nodeTidscan.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">163</td>
+            <td class="headerCovTableEntry">180</td>
+            <td class="headerCovTableEntryHi">90.6 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">8</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntryMed">88.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * nodeTidscan.c
+<span class="lineNum">       4 </span>            :  *    Routines to support direct tid scans of relations
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/executor/nodeTidscan.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : /*
+<span class="lineNum">      16 </span>            :  * INTERFACE ROUTINES
+<span class="lineNum">      17 </span>            :  *
+<span class="lineNum">      18 </span>            :  *      ExecTidScan         scans a relation using tids
+<span class="lineNum">      19 </span>            :  *      ExecInitTidScan     creates and initializes state info.
+<span class="lineNum">      20 </span>            :  *      ExecReScanTidScan   rescans the tid relation.
+<span class="lineNum">      21 </span>            :  *      ExecEndTidScan      releases all storage.
+<span class="lineNum">      22 </span>            :  */
+<span class="lineNum">      23 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : #include &quot;access/sysattr.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;access/tableam.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;executor/execdebug.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;executor/nodeTidscan.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;lib/qunique.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;storage/bufmgr.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;utils/array.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      36 </span>            : 
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : #define IsCTIDVar(node)  \
+<span class="lineNum">      39 </span>            :     ((node) != NULL &amp;&amp; \
+<span class="lineNum">      40 </span>            :      IsA((node), Var) &amp;&amp; \
+<span class="lineNum">      41 </span>            :      ((Var *) (node))-&gt;varattno == SelfItemPointerAttributeNumber &amp;&amp; \
+<span class="lineNum">      42 </span>            :      ((Var *) (node))-&gt;varlevelsup == 0)
+<span class="lineNum">      43 </span>            : 
+<span class="lineNum">      44 </span>            : /* one element in tss_tidexprs */
+<span class="lineNum">      45 </span>            : typedef struct TidExpr
+<span class="lineNum">      46 </span>            : {
+<span class="lineNum">      47 </span>            :     ExprState  *exprstate;      /* ExprState for a TID-yielding subexpr */
+<span class="lineNum">      48 </span>            :     bool        isarray;        /* if true, it yields tid[] not just tid */
+<span class="lineNum">      49 </span>            :     CurrentOfExpr *cexpr;       /* alternatively, we can have CURRENT OF */
+<span class="lineNum">      50 </span>            : } TidExpr;
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            : static void TidExprListCreate(TidScanState *tidstate);
+<span class="lineNum">      53 </span>            : static void TidListEval(TidScanState *tidstate);
+<span class="lineNum">      54 </span>            : static int  itemptr_comparator(const void *a, const void *b);
+<span class="lineNum">      55 </span>            : static TupleTableSlot *TidNext(TidScanState *node);
+<span class="lineNum">      56 </span>            : 
+<span class="lineNum">      57 </span>            : 
+<span class="lineNum">      58 </span>            : /*
+<span class="lineNum">      59 </span>            :  * Extract the qual subexpressions that yield TIDs to search for,
+<span class="lineNum">      60 </span>            :  * and compile them into ExprStates if they're ordinary expressions.
+<span class="lineNum">      61 </span>            :  *
+<span class="lineNum">      62 </span>            :  * CURRENT OF is a special case that we can't compile usefully;
+<span class="lineNum">      63 </span>            :  * just drop it into the TidExpr list as-is.
+<a name="64"><span class="lineNum">      64 </span>            :  */</a>
+<span class="lineNum">      65 </span>            : static void
+<span class="lineNum">      66 </span><span class="lineCov">        878 : TidExprListCreate(TidScanState *tidstate)</span>
+<span class="lineNum">      67 </span>            : {
+<span class="lineNum">      68 </span><span class="lineCov">        878 :     TidScan    *node = (TidScan *) tidstate-&gt;ss.ps.plan;</span>
+<span class="lineNum">      69 </span>            :     ListCell   *l;
+<span class="lineNum">      70 </span>            : 
+<span class="lineNum">      71 </span><span class="lineCov">        878 :     tidstate-&gt;tss_tidexprs = NIL;</span>
+<span class="lineNum">      72 </span><span class="lineCov">        878 :     tidstate-&gt;tss_isCurrentOf = false;</span>
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span><span class="lineCov">       1764 :     foreach(l, node-&gt;tidquals)</span>
+<span class="lineNum">      75 </span>            :     {
+<span class="lineNum">      76 </span><span class="lineCov">        886 :         Expr       *expr = (Expr *) lfirst(l);</span>
+<span class="lineNum">      77 </span><span class="lineCov">        886 :         TidExpr    *tidexpr = (TidExpr *) palloc0(sizeof(TidExpr));</span>
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span><span class="lineCov">        886 :         if (is_opclause(expr))</span>
+<span class="lineNum">      80 </span>            :         {
+<span class="lineNum">      81 </span>            :             Node       *arg1;
+<span class="lineNum">      82 </span>            :             Node       *arg2;
+<span class="lineNum">      83 </span>            : 
+<span class="lineNum">      84 </span><span class="lineCov">        732 :             arg1 = get_leftop(expr);</span>
+<span class="lineNum">      85 </span><span class="lineCov">        732 :             arg2 = get_rightop(expr);</span>
+<span class="lineNum">      86 </span><span class="lineCov">        732 :             if (IsCTIDVar(arg1))</span>
+<span class="lineNum">      87 </span><span class="lineCov">        720 :                 tidexpr-&gt;exprstate = ExecInitExpr((Expr *) arg2,</span>
+<span class="lineNum">      88 </span>            :                                                   &amp;tidstate-&gt;ss.ps);
+<span class="lineNum">      89 </span><span class="lineCov">         12 :             else if (IsCTIDVar(arg2))</span>
+<span class="lineNum">      90 </span><span class="lineCov">         12 :                 tidexpr-&gt;exprstate = ExecInitExpr((Expr *) arg1,</span>
+<span class="lineNum">      91 </span>            :                                                   &amp;tidstate-&gt;ss.ps);
+<span class="lineNum">      92 </span>            :             else
+<span class="lineNum">      93 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;could not identify CTID variable&quot;);</span>
+<span class="lineNum">      94 </span><span class="lineCov">        732 :             tidexpr-&gt;isarray = false;</span>
+<span class="lineNum">      95 </span>            :         }
+<span class="lineNum">      96 </span><span class="lineCov">        154 :         else if (expr &amp;&amp; IsA(expr, ScalarArrayOpExpr))</span>
+<span class="lineNum">      97 </span><span class="lineCov">         10 :         {</span>
+<span class="lineNum">      98 </span><span class="lineCov">         10 :             ScalarArrayOpExpr *saex = (ScalarArrayOpExpr *) expr;</span>
+<span class="lineNum">      99 </span>            : 
+<span class="lineNum">     100 </span><span class="lineCov">         10 :             Assert(IsCTIDVar(linitial(saex-&gt;args)));</span>
+<span class="lineNum">     101 </span><span class="lineCov">         10 :             tidexpr-&gt;exprstate = ExecInitExpr(lsecond(saex-&gt;args),</span>
+<span class="lineNum">     102 </span>            :                                               &amp;tidstate-&gt;ss.ps);
+<span class="lineNum">     103 </span><span class="lineCov">         10 :             tidexpr-&gt;isarray = true;</span>
+<span class="lineNum">     104 </span>            :         }
+<span class="lineNum">     105 </span><span class="lineCov">        144 :         else if (expr &amp;&amp; IsA(expr, CurrentOfExpr))</span>
+<span class="lineNum">     106 </span><span class="lineCov">        144 :         {</span>
+<span class="lineNum">     107 </span><span class="lineCov">        144 :             CurrentOfExpr *cexpr = (CurrentOfExpr *) expr;</span>
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span><span class="lineCov">        144 :             tidexpr-&gt;cexpr = cexpr;</span>
+<span class="lineNum">     110 </span><span class="lineCov">        144 :             tidstate-&gt;tss_isCurrentOf = true;</span>
+<span class="lineNum">     111 </span>            :         }
+<span class="lineNum">     112 </span>            :         else
+<span class="lineNum">     113 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;could not identify CTID expression&quot;);</span>
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span><span class="lineCov">        886 :         tidstate-&gt;tss_tidexprs = lappend(tidstate-&gt;tss_tidexprs, tidexpr);</span>
+<span class="lineNum">     116 </span>            :     }
+<span class="lineNum">     117 </span>            : 
+<span class="lineNum">     118 </span>            :     /* CurrentOfExpr could never appear OR'd with something else */
+<span class="lineNum">     119 </span><span class="lineCov">        878 :     Assert(list_length(tidstate-&gt;tss_tidexprs) == 1 ||</span>
+<span class="lineNum">     120 </span>            :            !tidstate-&gt;tss_isCurrentOf);
+<span class="lineNum">     121 </span><span class="lineCov">        878 : }</span>
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span>            : /*
+<span class="lineNum">     124 </span>            :  * Compute the list of TIDs to be visited, by evaluating the expressions
+<span class="lineNum">     125 </span>            :  * for them.
+<span class="lineNum">     126 </span>            :  *
+<span class="lineNum">     127 </span>            :  * (The result is actually an array, not a list.)
+<a name="128"><span class="lineNum">     128 </span>            :  */</a>
+<span class="lineNum">     129 </span>            : static void
+<span class="lineNum">     130 </span><span class="lineCov">        484 : TidListEval(TidScanState *tidstate)</span>
+<span class="lineNum">     131 </span>            : {
+<span class="lineNum">     132 </span><span class="lineCov">        484 :     ExprContext *econtext = tidstate-&gt;ss.ps.ps_ExprContext;</span>
+<span class="lineNum">     133 </span>            :     TableScanDesc scan;
+<span class="lineNum">     134 </span>            :     ItemPointerData *tidList;
+<span class="lineNum">     135 </span>            :     int         numAllocTids;
+<span class="lineNum">     136 </span>            :     int         numTids;
+<span class="lineNum">     137 </span>            :     ListCell   *l;
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span>            :     /*
+<span class="lineNum">     140 </span>            :      * Start scan on-demand - initializing a scan isn't free (e.g. heap stats
+<span class="lineNum">     141 </span>            :      * the size of the table), so it makes sense to delay that until needed -
+<span class="lineNum">     142 </span>            :      * the node might never get executed.
+<span class="lineNum">     143 </span>            :      */
+<span class="lineNum">     144 </span><span class="lineCov">        484 :     if (tidstate-&gt;ss.ss_currentScanDesc == NULL)</span>
+<span class="lineNum">     145 </span><span class="lineCov">        410 :         tidstate-&gt;ss.ss_currentScanDesc =</span>
+<span class="lineNum">     146 </span><span class="lineCov">        410 :             table_beginscan(tidstate-&gt;ss.ss_currentRelation,</span>
+<span class="lineNum">     147 </span><span class="lineCov">        410 :                             tidstate-&gt;ss.ps.state-&gt;es_snapshot,</span>
+<span class="lineNum">     148 </span>            :                             0, NULL);
+<span class="lineNum">     149 </span><span class="lineCov">        484 :     scan = tidstate-&gt;ss.ss_currentScanDesc;</span>
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span>            :     /*
+<span class="lineNum">     152 </span>            :      * We initialize the array with enough slots for the case that all quals
+<span class="lineNum">     153 </span>            :      * are simple OpExprs or CurrentOfExprs.  If there are any
+<span class="lineNum">     154 </span>            :      * ScalarArrayOpExprs, we may have to enlarge the array.
+<span class="lineNum">     155 </span>            :      */
+<span class="lineNum">     156 </span><span class="lineCov">        484 :     numAllocTids = list_length(tidstate-&gt;tss_tidexprs);</span>
+<span class="lineNum">     157 </span><span class="lineCov">        484 :     tidList = (ItemPointerData *)</span>
+<span class="lineNum">     158 </span><span class="lineCov">        484 :         palloc(numAllocTids * sizeof(ItemPointerData));</span>
+<span class="lineNum">     159 </span><span class="lineCov">        484 :     numTids = 0;</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span><span class="lineCov">        952 :     foreach(l, tidstate-&gt;tss_tidexprs)</span>
+<span class="lineNum">     162 </span>            :     {
+<span class="lineNum">     163 </span><span class="lineCov">        488 :         TidExpr    *tidexpr = (TidExpr *) lfirst(l);</span>
+<span class="lineNum">     164 </span>            :         ItemPointer itemptr;
+<span class="lineNum">     165 </span>            :         bool        isNull;
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span><span class="lineCov">        488 :         if (tidexpr-&gt;exprstate &amp;&amp; !tidexpr-&gt;isarray)</span>
+<span class="lineNum">     168 </span>            :         {
+<span class="lineNum">     169 </span><span class="lineCov">        354 :             itemptr = (ItemPointer)</span>
+<span class="lineNum">     170 </span><span class="lineCov">        354 :                 DatumGetPointer(ExecEvalExprSwitchContext(tidexpr-&gt;exprstate,</span>
+<span class="lineNum">     171 </span>            :                                                           econtext,
+<span class="lineNum">     172 </span>            :                                                           &amp;isNull));
+<span class="lineNum">     173 </span><span class="lineCov">        354 :             if (isNull)</span>
+<span class="lineNum">     174 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span>            :             /*
+<span class="lineNum">     177 </span>            :              * We silently discard any TIDs that the AM considers invalid
+<span class="lineNum">     178 </span>            :              * (E.g. for heap, they could be out of range at the time of scan
+<span class="lineNum">     179 </span>            :              * start.  Since we hold at least AccessShareLock on the table, it
+<span class="lineNum">     180 </span>            :              * won't be possible for someone to truncate away the blocks we
+<span class="lineNum">     181 </span>            :              * intend to visit.).
+<span class="lineNum">     182 </span>            :              */
+<span class="lineNum">     183 </span><span class="lineCov">        354 :             if (!table_tuple_tid_valid(scan, itemptr))</span>
+<span class="lineNum">     184 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     185 </span>            : 
+<span class="lineNum">     186 </span><span class="lineCov">        354 :             if (numTids &gt;= numAllocTids)</span>
+<span class="lineNum">     187 </span>            :             {
+<span class="lineNum">     188 </span><span class="lineCov">          2 :                 numAllocTids *= 2;</span>
+<span class="lineNum">     189 </span><span class="lineCov">          2 :                 tidList = (ItemPointerData *)</span>
+<span class="lineNum">     190 </span><span class="lineCov">          2 :                     repalloc(tidList,</span>
+<span class="lineNum">     191 </span>            :                              numAllocTids * sizeof(ItemPointerData));
+<span class="lineNum">     192 </span>            :             }
+<span class="lineNum">     193 </span><span class="lineCov">        354 :             tidList[numTids++] = *itemptr;</span>
+<span class="lineNum">     194 </span>            :         }
+<span class="lineNum">     195 </span><span class="lineCov">        134 :         else if (tidexpr-&gt;exprstate &amp;&amp; tidexpr-&gt;isarray)</span>
+<span class="lineNum">     196 </span><span class="lineCov">          8 :         {</span>
+<span class="lineNum">     197 </span>            :             Datum       arraydatum;
+<span class="lineNum">     198 </span>            :             ArrayType  *itemarray;
+<span class="lineNum">     199 </span>            :             Datum      *ipdatums;
+<span class="lineNum">     200 </span>            :             bool       *ipnulls;
+<span class="lineNum">     201 </span>            :             int         ndatums;
+<span class="lineNum">     202 </span>            :             int         i;
+<span class="lineNum">     203 </span>            : 
+<span class="lineNum">     204 </span><span class="lineCov">          8 :             arraydatum = ExecEvalExprSwitchContext(tidexpr-&gt;exprstate,</span>
+<span class="lineNum">     205 </span>            :                                                    econtext,
+<span class="lineNum">     206 </span>            :                                                    &amp;isNull);
+<span class="lineNum">     207 </span><span class="lineCov">          8 :             if (isNull)</span>
+<span class="lineNum">     208 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     209 </span><span class="lineCov">          8 :             itemarray = DatumGetArrayTypeP(arraydatum);</span>
+<span class="lineNum">     210 </span><span class="lineCov">          8 :             deconstruct_array(itemarray,</span>
+<span class="lineNum">     211 </span>            :                               TIDOID, sizeof(ItemPointerData), false, 's',
+<span class="lineNum">     212 </span>            :                               &amp;ipdatums, &amp;ipnulls, &amp;ndatums);
+<span class="lineNum">     213 </span><span class="lineCov">          8 :             if (numTids + ndatums &gt; numAllocTids)</span>
+<span class="lineNum">     214 </span>            :             {
+<span class="lineNum">     215 </span><span class="lineCov">          6 :                 numAllocTids = numTids + ndatums;</span>
+<span class="lineNum">     216 </span><span class="lineCov">          6 :                 tidList = (ItemPointerData *)</span>
+<span class="lineNum">     217 </span><span class="lineCov">          6 :                     repalloc(tidList,</span>
+<span class="lineNum">     218 </span>            :                              numAllocTids * sizeof(ItemPointerData));
+<span class="lineNum">     219 </span>            :             }
+<span class="lineNum">     220 </span><span class="lineCov">         24 :             for (i = 0; i &lt; ndatums; i++)</span>
+<span class="lineNum">     221 </span>            :             {
+<span class="lineNum">     222 </span><span class="lineCov">         16 :                 if (ipnulls[i])</span>
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 :                     continue;</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span><span class="lineCov">         16 :                 itemptr = (ItemPointer) DatumGetPointer(ipdatums[i]);</span>
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span><span class="lineCov">         16 :                 if (!table_tuple_tid_valid(scan, itemptr))</span>
+<span class="lineNum">     228 </span><span class="lineNoCov">          0 :                     continue;</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span><span class="lineCov">         16 :                 tidList[numTids++] = *itemptr;</span>
+<span class="lineNum">     231 </span>            :             }
+<span class="lineNum">     232 </span><span class="lineCov">          8 :             pfree(ipdatums);</span>
+<span class="lineNum">     233 </span><span class="lineCov">          8 :             pfree(ipnulls);</span>
+<span class="lineNum">     234 </span>            :         }
+<span class="lineNum">     235 </span>            :         else
+<span class="lineNum">     236 </span>            :         {
+<span class="lineNum">     237 </span>            :             ItemPointerData cursor_tid;
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span><span class="lineCov">        126 :             Assert(tidexpr-&gt;cexpr);</span>
+<span class="lineNum">     240 </span><span class="lineCov">        126 :             if (execCurrentOf(tidexpr-&gt;cexpr, econtext,</span>
+<span class="lineNum">     241 </span><span class="lineCov">        126 :                               RelationGetRelid(tidstate-&gt;ss.ss_currentRelation),</span>
+<span class="lineNum">     242 </span>            :                               &amp;cursor_tid))
+<span class="lineNum">     243 </span>            :             {
+<span class="lineNum">     244 </span><span class="lineCov">         90 :                 if (numTids &gt;= numAllocTids)</span>
+<span class="lineNum">     245 </span>            :                 {
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 :                     numAllocTids *= 2;</span>
+<span class="lineNum">     247 </span><span class="lineNoCov">          0 :                     tidList = (ItemPointerData *)</span>
+<span class="lineNum">     248 </span><span class="lineNoCov">          0 :                         repalloc(tidList,</span>
+<span class="lineNum">     249 </span>            :                                  numAllocTids * sizeof(ItemPointerData));
+<span class="lineNum">     250 </span>            :                 }
+<span class="lineNum">     251 </span><span class="lineCov">         90 :                 tidList[numTids++] = cursor_tid;</span>
+<span class="lineNum">     252 </span>            :             }
+<span class="lineNum">     253 </span>            :         }
+<span class="lineNum">     254 </span>            :     }
+<span class="lineNum">     255 </span>            : 
+<span class="lineNum">     256 </span>            :     /*
+<span class="lineNum">     257 </span>            :      * Sort the array of TIDs into order, and eliminate duplicates.
+<span class="lineNum">     258 </span>            :      * Eliminating duplicates is necessary since we want OR semantics across
+<span class="lineNum">     259 </span>            :      * the list.  Sorting makes it easier to detect duplicates, and as a bonus
+<span class="lineNum">     260 </span>            :      * ensures that we will visit the heap in the most efficient way.
+<span class="lineNum">     261 </span>            :      */
+<span class="lineNum">     262 </span><span class="lineCov">        464 :     if (numTids &gt; 1)</span>
+<span class="lineNum">     263 </span>            :     {
+<span class="lineNum">     264 </span>            :         /* CurrentOfExpr could never appear OR'd with something else */
+<span class="lineNum">     265 </span><span class="lineCov">         10 :         Assert(!tidstate-&gt;tss_isCurrentOf);</span>
+<span class="lineNum">     266 </span>            : 
+<span class="lineNum">     267 </span><span class="lineCov">         10 :         qsort((void *) tidList, numTids, sizeof(ItemPointerData),</span>
+<span class="lineNum">     268 </span>            :               itemptr_comparator);
+<span class="lineNum">     269 </span><span class="lineCov">         10 :         numTids = qunique(tidList, numTids, sizeof(ItemPointerData),</span>
+<span class="lineNum">     270 </span>            :                           itemptr_comparator);
+<span class="lineNum">     271 </span>            :     }
+<span class="lineNum">     272 </span>            : 
+<span class="lineNum">     273 </span><span class="lineCov">        464 :     tidstate-&gt;tss_TidList = tidList;</span>
+<span class="lineNum">     274 </span><span class="lineCov">        464 :     tidstate-&gt;tss_NumTids = numTids;</span>
+<span class="lineNum">     275 </span><span class="lineCov">        464 :     tidstate-&gt;tss_TidPtr = -1;</span>
+<span class="lineNum">     276 </span><span class="lineCov">        464 : }</span>
+<span class="lineNum">     277 </span>            : 
+<span class="lineNum">     278 </span>            : /*
+<span class="lineNum">     279 </span>            :  * qsort comparator for ItemPointerData items
+<a name="280"><span class="lineNum">     280 </span>            :  */</a>
+<span class="lineNum">     281 </span>            : static int
+<span class="lineNum">     282 </span><span class="lineCov">         26 : itemptr_comparator(const void *a, const void *b)</span>
+<span class="lineNum">     283 </span>            : {
+<span class="lineNum">     284 </span><span class="lineCov">         26 :     const ItemPointerData *ipa = (const ItemPointerData *) a;</span>
+<span class="lineNum">     285 </span><span class="lineCov">         26 :     const ItemPointerData *ipb = (const ItemPointerData *) b;</span>
+<span class="lineNum">     286 </span><span class="lineCov">         26 :     BlockNumber ba = ItemPointerGetBlockNumber(ipa);</span>
+<span class="lineNum">     287 </span><span class="lineCov">         26 :     BlockNumber bb = ItemPointerGetBlockNumber(ipb);</span>
+<span class="lineNum">     288 </span><span class="lineCov">         26 :     OffsetNumber oa = ItemPointerGetOffsetNumber(ipa);</span>
+<span class="lineNum">     289 </span><span class="lineCov">         26 :     OffsetNumber ob = ItemPointerGetOffsetNumber(ipb);</span>
+<span class="lineNum">     290 </span>            : 
+<span class="lineNum">     291 </span><span class="lineCov">         26 :     if (ba &lt; bb)</span>
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     293 </span><span class="lineCov">         26 :     if (ba &gt; bb)</span>
+<span class="lineNum">     294 </span><span class="lineNoCov">          0 :         return 1;</span>
+<span class="lineNum">     295 </span><span class="lineCov">         26 :     if (oa &lt; ob)</span>
+<span class="lineNum">     296 </span><span class="lineCov">          8 :         return -1;</span>
+<span class="lineNum">     297 </span><span class="lineCov">         18 :     if (oa &gt; ob)</span>
+<span class="lineNum">     298 </span><span class="lineCov">         18 :         return 1;</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :     return 0;</span>
+<span class="lineNum">     300 </span>            : }
+<span class="lineNum">     301 </span>            : 
+<span class="lineNum">     302 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     303 </span>            :  *      TidNext
+<span class="lineNum">     304 </span>            :  *
+<span class="lineNum">     305 </span>            :  *      Retrieve a tuple from the TidScan node's currentRelation
+<span class="lineNum">     306 </span>            :  *      using the tids in the TidScanState information.
+<span class="lineNum">     307 </span>            :  *
+<span class="lineNum">     308 </span>            :  * ----------------------------------------------------------------
+<a name="309"><span class="lineNum">     309 </span>            :  */</a>
+<span class="lineNum">     310 </span>            : static TupleTableSlot *
+<span class="lineNum">     311 </span><span class="lineCov">        934 : TidNext(TidScanState *node)</span>
+<span class="lineNum">     312 </span>            : {
+<span class="lineNum">     313 </span>            :     EState     *estate;
+<span class="lineNum">     314 </span>            :     ScanDirection direction;
+<span class="lineNum">     315 </span>            :     Snapshot    snapshot;
+<span class="lineNum">     316 </span>            :     TableScanDesc scan;
+<span class="lineNum">     317 </span>            :     Relation    heapRelation;
+<span class="lineNum">     318 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     319 </span>            :     ItemPointerData *tidList;
+<span class="lineNum">     320 </span>            :     int         numTids;
+<span class="lineNum">     321 </span>            :     bool        bBackward;
+<span class="lineNum">     322 </span>            : 
+<span class="lineNum">     323 </span>            :     /*
+<span class="lineNum">     324 </span>            :      * extract necessary information from tid scan node
+<span class="lineNum">     325 </span>            :      */
+<span class="lineNum">     326 </span><span class="lineCov">        934 :     estate = node-&gt;ss.ps.state;</span>
+<span class="lineNum">     327 </span><span class="lineCov">        934 :     direction = estate-&gt;es_direction;</span>
+<span class="lineNum">     328 </span><span class="lineCov">        934 :     snapshot = estate-&gt;es_snapshot;</span>
+<span class="lineNum">     329 </span><span class="lineCov">        934 :     heapRelation = node-&gt;ss.ss_currentRelation;</span>
+<span class="lineNum">     330 </span><span class="lineCov">        934 :     slot = node-&gt;ss.ss_ScanTupleSlot;</span>
+<span class="lineNum">     331 </span>            : 
+<span class="lineNum">     332 </span>            :     /*
+<span class="lineNum">     333 </span>            :      * First time through, compute the list of TIDs to be visited
+<span class="lineNum">     334 </span>            :      */
+<span class="lineNum">     335 </span><span class="lineCov">        934 :     if (node-&gt;tss_TidList == NULL)</span>
+<span class="lineNum">     336 </span><span class="lineCov">        484 :         TidListEval(node);</span>
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span><span class="lineCov">        914 :     scan = node-&gt;ss.ss_currentScanDesc;</span>
+<span class="lineNum">     339 </span><span class="lineCov">        914 :     tidList = node-&gt;tss_TidList;</span>
+<span class="lineNum">     340 </span><span class="lineCov">        914 :     numTids = node-&gt;tss_NumTids;</span>
+<span class="lineNum">     341 </span>            : 
+<span class="lineNum">     342 </span>            :     /*
+<span class="lineNum">     343 </span>            :      * Initialize or advance scan position, depending on direction.
+<span class="lineNum">     344 </span>            :      */
+<span class="lineNum">     345 </span><span class="lineCov">        914 :     bBackward = ScanDirectionIsBackward(direction);</span>
+<span class="lineNum">     346 </span><span class="lineCov">        914 :     if (bBackward)</span>
+<span class="lineNum">     347 </span>            :     {
+<span class="lineNum">     348 </span><span class="lineCov">          2 :         if (node-&gt;tss_TidPtr &lt; 0)</span>
+<span class="lineNum">     349 </span>            :         {
+<span class="lineNum">     350 </span>            :             /* initialize for backward scan */
+<span class="lineNum">     351 </span><span class="lineNoCov">          0 :             node-&gt;tss_TidPtr = numTids - 1;</span>
+<span class="lineNum">     352 </span>            :         }
+<span class="lineNum">     353 </span>            :         else
+<span class="lineNum">     354 </span><span class="lineCov">          2 :             node-&gt;tss_TidPtr--;</span>
+<span class="lineNum">     355 </span>            :     }
+<span class="lineNum">     356 </span>            :     else
+<span class="lineNum">     357 </span>            :     {
+<span class="lineNum">     358 </span><span class="lineCov">        912 :         if (node-&gt;tss_TidPtr &lt; 0)</span>
+<span class="lineNum">     359 </span>            :         {
+<span class="lineNum">     360 </span>            :             /* initialize for forward scan */
+<span class="lineNum">     361 </span><span class="lineCov">        464 :             node-&gt;tss_TidPtr = 0;</span>
+<span class="lineNum">     362 </span>            :         }
+<span class="lineNum">     363 </span>            :         else
+<span class="lineNum">     364 </span><span class="lineCov">        448 :             node-&gt;tss_TidPtr++;</span>
+<span class="lineNum">     365 </span>            :     }
+<span class="lineNum">     366 </span>            : 
+<span class="lineNum">     367 </span><span class="lineCov">       1836 :     while (node-&gt;tss_TidPtr &gt;= 0 &amp;&amp; node-&gt;tss_TidPtr &lt; numTids)</span>
+<span class="lineNum">     368 </span>            :     {
+<span class="lineNum">     369 </span><span class="lineCov">        460 :         ItemPointerData tid = tidList[node-&gt;tss_TidPtr];</span>
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span>            :         /*
+<span class="lineNum">     372 </span>            :          * For WHERE CURRENT OF, the tuple retrieved from the cursor might
+<span class="lineNum">     373 </span>            :          * since have been updated; if so, we should fetch the version that is
+<span class="lineNum">     374 </span>            :          * current according to our snapshot.
+<span class="lineNum">     375 </span>            :          */
+<span class="lineNum">     376 </span><span class="lineCov">        460 :         if (node-&gt;tss_isCurrentOf)</span>
+<span class="lineNum">     377 </span><span class="lineCov">         90 :             table_tuple_get_latest_tid(scan, &amp;tid);</span>
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span><span class="lineCov">        460 :         if (table_tuple_fetch_row_version(heapRelation, &amp;tid, snapshot, slot))</span>
+<span class="lineNum">     380 </span><span class="lineCov">        452 :             return slot;</span>
+<span class="lineNum">     381 </span>            : 
+<span class="lineNum">     382 </span>            :         /* Bad TID or failed snapshot qual; try next */
+<span class="lineNum">     383 </span><span class="lineCov">          8 :         if (bBackward)</span>
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :             node-&gt;tss_TidPtr--;</span>
+<span class="lineNum">     385 </span>            :         else
+<span class="lineNum">     386 </span><span class="lineCov">          8 :             node-&gt;tss_TidPtr++;</span>
+<span class="lineNum">     387 </span>            : 
+<span class="lineNum">     388 </span><span class="lineCov">          8 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     389 </span>            :     }
+<span class="lineNum">     390 </span>            : 
+<span class="lineNum">     391 </span>            :     /*
+<span class="lineNum">     392 </span>            :      * if we get here it means the tid scan failed so we are at the end of the
+<span class="lineNum">     393 </span>            :      * scan..
+<span class="lineNum">     394 </span>            :      */
+<span class="lineNum">     395 </span><span class="lineCov">        462 :     return ExecClearTuple(slot);</span>
+<span class="lineNum">     396 </span>            : }
+<span class="lineNum">     397 </span>            : 
+<span class="lineNum">     398 </span>            : /*
+<span class="lineNum">     399 </span>            :  * TidRecheck -- access method routine to recheck a tuple in EvalPlanQual
+<a name="400"><span class="lineNum">     400 </span>            :  */</a>
+<span class="lineNum">     401 </span>            : static bool
+<span class="lineNum">     402 </span><span class="lineNoCov">          0 : TidRecheck(TidScanState *node, TupleTableSlot *slot)</span>
+<span class="lineNum">     403 </span>            : {
+<span class="lineNum">     404 </span>            :     /*
+<span class="lineNum">     405 </span>            :      * XXX shouldn't we check here to make sure tuple matches TID list? In
+<span class="lineNum">     406 </span>            :      * runtime-key case this is not certain, is it?  However, in the WHERE
+<span class="lineNum">     407 </span>            :      * CURRENT OF case it might not match anyway ...
+<span class="lineNum">     408 </span>            :      */
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     410 </span>            : }
+<span class="lineNum">     411 </span>            : 
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     414 </span>            :  *      ExecTidScan(node)
+<span class="lineNum">     415 </span>            :  *
+<span class="lineNum">     416 </span>            :  *      Scans the relation using tids and returns
+<span class="lineNum">     417 </span>            :  *         the next qualifying tuple in the direction specified.
+<span class="lineNum">     418 </span>            :  *      We call the ExecScan() routine and pass it the appropriate
+<span class="lineNum">     419 </span>            :  *      access method functions.
+<span class="lineNum">     420 </span>            :  *
+<span class="lineNum">     421 </span>            :  *      Conditions:
+<span class="lineNum">     422 </span>            :  *        -- the &quot;cursor&quot; maintained by the AMI is positioned at the tuple
+<span class="lineNum">     423 </span>            :  *           returned previously.
+<span class="lineNum">     424 </span>            :  *
+<span class="lineNum">     425 </span>            :  *      Initial States:
+<span class="lineNum">     426 </span>            :  *        -- the relation indicated is opened for scanning so that the
+<span class="lineNum">     427 </span>            :  *           &quot;cursor&quot; is positioned before the first qualifying tuple.
+<span class="lineNum">     428 </span>            :  *        -- tss_TidPtr is -1.
+<span class="lineNum">     429 </span>            :  * ----------------------------------------------------------------
+<a name="430"><span class="lineNum">     430 </span>            :  */</a>
+<span class="lineNum">     431 </span>            : static TupleTableSlot *
+<span class="lineNum">     432 </span><span class="lineCov">        928 : ExecTidScan(PlanState *pstate)</span>
+<span class="lineNum">     433 </span>            : {
+<span class="lineNum">     434 </span><span class="lineCov">        928 :     TidScanState *node = castNode(TidScanState, pstate);</span>
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span><span class="lineCov">        928 :     return ExecScan(&amp;node-&gt;ss,</span>
+<span class="lineNum">     437 </span>            :                     (ExecScanAccessMtd) TidNext,
+<span class="lineNum">     438 </span>            :                     (ExecScanRecheckMtd) TidRecheck);
+<span class="lineNum">     439 </span>            : }
+<span class="lineNum">     440 </span>            : 
+<span class="lineNum">     441 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     442 </span>            :  *      ExecReScanTidScan(node)
+<span class="lineNum">     443 </span>            :  * ----------------------------------------------------------------
+<a name="444"><span class="lineNum">     444 </span>            :  */</a>
+<span class="lineNum">     445 </span>            : void
+<span class="lineNum">     446 </span><span class="lineCov">        342 : ExecReScanTidScan(TidScanState *node)</span>
+<span class="lineNum">     447 </span>            : {
+<span class="lineNum">     448 </span><span class="lineCov">        342 :     if (node-&gt;tss_TidList)</span>
+<span class="lineNum">     449 </span><span class="lineCov">         74 :         pfree(node-&gt;tss_TidList);</span>
+<span class="lineNum">     450 </span><span class="lineCov">        342 :     node-&gt;tss_TidList = NULL;</span>
+<span class="lineNum">     451 </span><span class="lineCov">        342 :     node-&gt;tss_NumTids = 0;</span>
+<span class="lineNum">     452 </span><span class="lineCov">        342 :     node-&gt;tss_TidPtr = -1;</span>
+<span class="lineNum">     453 </span>            : 
+<span class="lineNum">     454 </span>            :     /* not really necessary, but seems good form */
+<span class="lineNum">     455 </span><span class="lineCov">        342 :     if (node-&gt;ss.ss_currentScanDesc)</span>
+<span class="lineNum">     456 </span><span class="lineCov">         74 :         table_rescan(node-&gt;ss.ss_currentScanDesc, NULL);</span>
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span><span class="lineCov">        342 :     ExecScanReScan(&amp;node-&gt;ss);</span>
+<span class="lineNum">     459 </span><span class="lineCov">        342 : }</span>
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     462 </span>            :  *      ExecEndTidScan
+<span class="lineNum">     463 </span>            :  *
+<span class="lineNum">     464 </span>            :  *      Releases any storage allocated through C routines.
+<span class="lineNum">     465 </span>            :  *      Returns nothing.
+<span class="lineNum">     466 </span>            :  * ----------------------------------------------------------------
+<a name="467"><span class="lineNum">     467 </span>            :  */</a>
+<span class="lineNum">     468 </span>            : void
+<span class="lineNum">     469 </span><span class="lineCov">        840 : ExecEndTidScan(TidScanState *node)</span>
+<span class="lineNum">     470 </span>            : {
+<span class="lineNum">     471 </span><span class="lineCov">        840 :     if (node-&gt;ss.ss_currentScanDesc)</span>
+<span class="lineNum">     472 </span><span class="lineCov">        388 :         table_endscan(node-&gt;ss.ss_currentScanDesc);</span>
+<span class="lineNum">     473 </span>            : 
+<span class="lineNum">     474 </span>            :     /*
+<span class="lineNum">     475 </span>            :      * Free the exprcontext
+<span class="lineNum">     476 </span>            :      */
+<span class="lineNum">     477 </span><span class="lineCov">        840 :     ExecFreeExprContext(&amp;node-&gt;ss.ps);</span>
+<span class="lineNum">     478 </span>            : 
+<span class="lineNum">     479 </span>            :     /*
+<span class="lineNum">     480 </span>            :      * clear out tuple table slots
+<span class="lineNum">     481 </span>            :      */
+<span class="lineNum">     482 </span><span class="lineCov">        840 :     if (node-&gt;ss.ps.ps_ResultTupleSlot)</span>
+<span class="lineNum">     483 </span><span class="lineCov">        840 :         ExecClearTuple(node-&gt;ss.ps.ps_ResultTupleSlot);</span>
+<span class="lineNum">     484 </span><span class="lineCov">        840 :     ExecClearTuple(node-&gt;ss.ss_ScanTupleSlot);</span>
+<span class="lineNum">     485 </span><span class="lineCov">        840 : }</span>
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     488 </span>            :  *      ExecInitTidScan
+<span class="lineNum">     489 </span>            :  *
+<span class="lineNum">     490 </span>            :  *      Initializes the tid scan's state information, creates
+<span class="lineNum">     491 </span>            :  *      scan keys, and opens the base and tid relations.
+<span class="lineNum">     492 </span>            :  *
+<span class="lineNum">     493 </span>            :  *      Parameters:
+<span class="lineNum">     494 </span>            :  *        node: TidScan node produced by the planner.
+<span class="lineNum">     495 </span>            :  *        estate: the execution state initialized in InitPlan.
+<span class="lineNum">     496 </span>            :  * ----------------------------------------------------------------
+<a name="497"><span class="lineNum">     497 </span>            :  */</a>
+<span class="lineNum">     498 </span>            : TidScanState *
+<span class="lineNum">     499 </span><span class="lineCov">        878 : ExecInitTidScan(TidScan *node, EState *estate, int eflags)</span>
+<span class="lineNum">     500 </span>            : {
+<span class="lineNum">     501 </span>            :     TidScanState *tidstate;
+<span class="lineNum">     502 </span>            :     Relation    currentRelation;
+<span class="lineNum">     503 </span>            : 
+<span class="lineNum">     504 </span>            :     /*
+<span class="lineNum">     505 </span>            :      * create state structure
+<span class="lineNum">     506 </span>            :      */
+<span class="lineNum">     507 </span><span class="lineCov">        878 :     tidstate = makeNode(TidScanState);</span>
+<span class="lineNum">     508 </span><span class="lineCov">        878 :     tidstate-&gt;ss.ps.plan = (Plan *) node;</span>
+<span class="lineNum">     509 </span><span class="lineCov">        878 :     tidstate-&gt;ss.ps.state = estate;</span>
+<span class="lineNum">     510 </span><span class="lineCov">        878 :     tidstate-&gt;ss.ps.ExecProcNode = ExecTidScan;</span>
+<span class="lineNum">     511 </span>            : 
+<span class="lineNum">     512 </span>            :     /*
+<span class="lineNum">     513 </span>            :      * Miscellaneous initialization
+<span class="lineNum">     514 </span>            :      *
+<span class="lineNum">     515 </span>            :      * create expression context for node
+<span class="lineNum">     516 </span>            :      */
+<span class="lineNum">     517 </span><span class="lineCov">        878 :     ExecAssignExprContext(estate, &amp;tidstate-&gt;ss.ps);</span>
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span>            :     /*
+<span class="lineNum">     520 </span>            :      * mark tid list as not computed yet
+<span class="lineNum">     521 </span>            :      */
+<span class="lineNum">     522 </span><span class="lineCov">        878 :     tidstate-&gt;tss_TidList = NULL;</span>
+<span class="lineNum">     523 </span><span class="lineCov">        878 :     tidstate-&gt;tss_NumTids = 0;</span>
+<span class="lineNum">     524 </span><span class="lineCov">        878 :     tidstate-&gt;tss_TidPtr = -1;</span>
+<span class="lineNum">     525 </span>            : 
+<span class="lineNum">     526 </span>            :     /*
+<span class="lineNum">     527 </span>            :      * open the scan relation
+<span class="lineNum">     528 </span>            :      */
+<span class="lineNum">     529 </span><span class="lineCov">        878 :     currentRelation = ExecOpenScanRelation(estate, node-&gt;scan.scanrelid, eflags);</span>
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span><span class="lineCov">        878 :     tidstate-&gt;ss.ss_currentRelation = currentRelation;</span>
+<span class="lineNum">     532 </span><span class="lineCov">        878 :     tidstate-&gt;ss.ss_currentScanDesc = NULL; /* no heap scan here */</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span>            :     /*
+<span class="lineNum">     535 </span>            :      * get the scan type from the relation descriptor.
+<span class="lineNum">     536 </span>            :      */
+<span class="lineNum">     537 </span><span class="lineCov">        878 :     ExecInitScanTupleSlot(estate, &amp;tidstate-&gt;ss,</span>
+<span class="lineNum">     538 </span>            :                           RelationGetDescr(currentRelation),
+<span class="lineNum">     539 </span>            :                           table_slot_callbacks(currentRelation));
+<span class="lineNum">     540 </span>            : 
+<span class="lineNum">     541 </span>            :     /*
+<span class="lineNum">     542 </span>            :      * Initialize result type and projection.
+<span class="lineNum">     543 </span>            :      */
+<span class="lineNum">     544 </span><span class="lineCov">        878 :     ExecInitResultTypeTL(&amp;tidstate-&gt;ss.ps);</span>
+<span class="lineNum">     545 </span><span class="lineCov">        878 :     ExecAssignScanProjectionInfo(&amp;tidstate-&gt;ss);</span>
+<span class="lineNum">     546 </span>            : 
+<span class="lineNum">     547 </span>            :     /*
+<span class="lineNum">     548 </span>            :      * initialize child expressions
+<span class="lineNum">     549 </span>            :      */
+<span class="lineNum">     550 </span><span class="lineCov">        878 :     tidstate-&gt;ss.ps.qual =</span>
+<span class="lineNum">     551 </span><span class="lineCov">        878 :         ExecInitQual(node-&gt;scan.plan.qual, (PlanState *) tidstate);</span>
+<span class="lineNum">     552 </span>            : 
+<span class="lineNum">     553 </span><span class="lineCov">        878 :     TidExprListCreate(tidstate);</span>
+<span class="lineNum">     554 </span>            : 
+<span class="lineNum">     555 </span>            :     /*
+<span class="lineNum">     556 </span>            :      * all done.
+<span class="lineNum">     557 </span>            :      */
+<span class="lineNum">     558 </span><span class="lineCov">        878 :     return tidstate;</span>
+<span class="lineNum">     559 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

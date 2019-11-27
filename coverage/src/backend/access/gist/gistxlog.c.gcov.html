@@ -1,0 +1,780 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/gist/gistxlog.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/gist</a> - gistxlog.c<span style="font-size: 80%;"> (source / <a href="gistxlog.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">43</td>
+            <td class="headerCovTableEntry">251</td>
+            <td class="headerCovTableEntryLo">17.1 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">3</td>
+            <td class="headerCovTableEntry">16</td>
+            <td class="headerCovTableEntryLo">18.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * gistxlog.c
+<span class="lineNum">       4 </span>            :  *    WAL replay logic for GiST.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *           src/backend/access/gist/gistxlog.c
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : #include &quot;access/bufmask.h&quot;
+<span class="lineNum">      17 </span>            : #include &quot;access/gist_private.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;access/gistxlog.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;access/heapam_xlog.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;access/transam.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;access/xloginsert.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;access/xlogutils.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;storage/procarray.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : static MemoryContext opCtx;     /* working memory for operations */
+<span class="lineNum">      29 </span>            : 
+<span class="lineNum">      30 </span>            : /*
+<span class="lineNum">      31 </span>            :  * Replay the clearing of F_FOLLOW_RIGHT flag on a child page.
+<span class="lineNum">      32 </span>            :  *
+<span class="lineNum">      33 </span>            :  * Even if the WAL record includes a full-page image, we have to update the
+<span class="lineNum">      34 </span>            :  * follow-right flag, because that change is not included in the full-page
+<span class="lineNum">      35 </span>            :  * image.  To be sure that the intermediate state with the wrong flag value is
+<span class="lineNum">      36 </span>            :  * not visible to concurrent Hot Standby queries, this function handles
+<span class="lineNum">      37 </span>            :  * restoring the full-page image as well as updating the flag.  (Note that
+<span class="lineNum">      38 </span>            :  * we never need to do anything else to the child page in the current WAL
+<span class="lineNum">      39 </span>            :  * action.)
+<a name="40"><span class="lineNum">      40 </span>            :  */</a>
+<span class="lineNum">      41 </span>            : static void
+<span class="lineNum">      42 </span><span class="lineNoCov">          0 : gistRedoClearFollowRight(XLogReaderState *record, uint8 block_id)</span>
+<span class="lineNum">      43 </span>            : {
+<span class="lineNum">      44 </span><span class="lineNoCov">          0 :     XLogRecPtr  lsn = record-&gt;EndRecPtr;</span>
+<span class="lineNum">      45 </span>            :     Buffer      buffer;
+<span class="lineNum">      46 </span>            :     Page        page;
+<span class="lineNum">      47 </span>            :     XLogRedoAction action;
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            :     /*
+<span class="lineNum">      50 </span>            :      * Note that we still update the page even if it was restored from a full
+<span class="lineNum">      51 </span>            :      * page image, because the updated NSN is not included in the image.
+<span class="lineNum">      52 </span>            :      */
+<span class="lineNum">      53 </span><span class="lineNoCov">          0 :     action = XLogReadBufferForRedo(record, block_id, &amp;buffer);</span>
+<span class="lineNum">      54 </span><span class="lineNoCov">          0 :     if (action == BLK_NEEDS_REDO || action == BLK_RESTORED)</span>
+<span class="lineNum">      55 </span>            :     {
+<span class="lineNum">      56 </span><span class="lineNoCov">          0 :         page = BufferGetPage(buffer);</span>
+<span class="lineNum">      57 </span>            : 
+<span class="lineNum">      58 </span><span class="lineNoCov">          0 :         GistPageSetNSN(page, lsn);</span>
+<span class="lineNum">      59 </span><span class="lineNoCov">          0 :         GistClearFollowRight(page);</span>
+<span class="lineNum">      60 </span>            : 
+<span class="lineNum">      61 </span><span class="lineNoCov">          0 :         PageSetLSN(page, lsn);</span>
+<span class="lineNum">      62 </span><span class="lineNoCov">          0 :         MarkBufferDirty(buffer);</span>
+<span class="lineNum">      63 </span>            :     }
+<span class="lineNum">      64 </span><span class="lineNoCov">          0 :     if (BufferIsValid(buffer))</span>
+<span class="lineNum">      65 </span><span class="lineNoCov">          0 :         UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">      66 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">      67 </span>            : 
+<span class="lineNum">      68 </span>            : /*
+<span class="lineNum">      69 </span>            :  * redo any page update (except page split)
+<a name="70"><span class="lineNum">      70 </span>            :  */</a>
+<span class="lineNum">      71 </span>            : static void
+<span class="lineNum">      72 </span><span class="lineNoCov">          0 : gistRedoPageUpdateRecord(XLogReaderState *record)</span>
+<span class="lineNum">      73 </span>            : {
+<span class="lineNum">      74 </span><span class="lineNoCov">          0 :     XLogRecPtr  lsn = record-&gt;EndRecPtr;</span>
+<span class="lineNum">      75 </span><span class="lineNoCov">          0 :     gistxlogPageUpdate *xldata = (gistxlogPageUpdate *) XLogRecGetData(record);</span>
+<span class="lineNum">      76 </span>            :     Buffer      buffer;
+<span class="lineNum">      77 </span>            :     Page        page;
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span><span class="lineNoCov">          0 :     if (XLogReadBufferForRedo(record, 0, &amp;buffer) == BLK_NEEDS_REDO)</span>
+<span class="lineNum">      80 </span>            :     {
+<span class="lineNum">      81 </span>            :         char       *begin;
+<span class="lineNum">      82 </span>            :         char       *data;
+<span class="lineNum">      83 </span>            :         Size        datalen;
+<span class="lineNum">      84 </span><span class="lineNoCov">          0 :         int         ninserted = 0;</span>
+<span class="lineNum">      85 </span>            : 
+<span class="lineNum">      86 </span><span class="lineNoCov">          0 :         data = begin = XLogRecGetBlockData(record, 0, &amp;datalen);</span>
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span><span class="lineNoCov">          0 :         page = (Page) BufferGetPage(buffer);</span>
+<span class="lineNum">      89 </span>            : 
+<span class="lineNum">      90 </span><span class="lineNoCov">          0 :         if (xldata-&gt;ntodelete == 1 &amp;&amp; xldata-&gt;ntoinsert == 1)</span>
+<span class="lineNum">      91 </span><span class="lineNoCov">          0 :         {</span>
+<span class="lineNum">      92 </span>            :             /*
+<span class="lineNum">      93 </span>            :              * When replacing one tuple with one other tuple, we must use
+<span class="lineNum">      94 </span>            :              * PageIndexTupleOverwrite for consistency with gistplacetopage.
+<span class="lineNum">      95 </span>            :              */
+<span class="lineNum">      96 </span><span class="lineNoCov">          0 :             OffsetNumber offnum = *((OffsetNumber *) data);</span>
+<span class="lineNum">      97 </span>            :             IndexTuple  itup;
+<span class="lineNum">      98 </span>            :             Size        itupsize;
+<span class="lineNum">      99 </span>            : 
+<span class="lineNum">     100 </span><span class="lineNoCov">          0 :             data += sizeof(OffsetNumber);</span>
+<span class="lineNum">     101 </span><span class="lineNoCov">          0 :             itup = (IndexTuple) data;</span>
+<span class="lineNum">     102 </span><span class="lineNoCov">          0 :             itupsize = IndexTupleSize(itup);</span>
+<span class="lineNum">     103 </span><span class="lineNoCov">          0 :             if (!PageIndexTupleOverwrite(page, offnum, (Item) itup, itupsize))</span>
+<span class="lineNum">     104 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;failed to add item to GiST index page, size %d bytes&quot;,</span>
+<span class="lineNum">     105 </span>            :                      (int) itupsize);
+<span class="lineNum">     106 </span><span class="lineNoCov">          0 :             data += itupsize;</span>
+<span class="lineNum">     107 </span>            :             /* should be nothing left after consuming 1 tuple */
+<span class="lineNum">     108 </span><span class="lineNoCov">          0 :             Assert(data - begin == datalen);</span>
+<span class="lineNum">     109 </span>            :             /* update insertion count for assert check below */
+<span class="lineNum">     110 </span><span class="lineNoCov">          0 :             ninserted++;</span>
+<span class="lineNum">     111 </span>            :         }
+<span class="lineNum">     112 </span><span class="lineNoCov">          0 :         else if (xldata-&gt;ntodelete &gt; 0)</span>
+<span class="lineNum">     113 </span>            :         {
+<span class="lineNum">     114 </span>            :             /* Otherwise, delete old tuples if any */
+<span class="lineNum">     115 </span><span class="lineNoCov">          0 :             OffsetNumber *todelete = (OffsetNumber *) data;</span>
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span><span class="lineNoCov">          0 :             data += sizeof(OffsetNumber) * xldata-&gt;ntodelete;</span>
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span><span class="lineNoCov">          0 :             PageIndexMultiDelete(page, todelete, xldata-&gt;ntodelete);</span>
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :             if (GistPageIsLeaf(page))</span>
+<span class="lineNum">     121 </span><span class="lineNoCov">          0 :                 GistMarkTuplesDeleted(page);</span>
+<span class="lineNum">     122 </span>            :         }
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span>            :         /* Add new tuples if any */
+<span class="lineNum">     125 </span><span class="lineNoCov">          0 :         if (data - begin &lt; datalen)</span>
+<span class="lineNum">     126 </span>            :         {
+<span class="lineNum">     127 </span><span class="lineNoCov">          0 :             OffsetNumber off = (PageIsEmpty(page)) ? FirstOffsetNumber :</span>
+<span class="lineNum">     128 </span><span class="lineNoCov">          0 :             OffsetNumberNext(PageGetMaxOffsetNumber(page));</span>
+<span class="lineNum">     129 </span>            : 
+<span class="lineNum">     130 </span><span class="lineNoCov">          0 :             while (data - begin &lt; datalen)</span>
+<span class="lineNum">     131 </span>            :             {
+<span class="lineNum">     132 </span><span class="lineNoCov">          0 :                 IndexTuple  itup = (IndexTuple) data;</span>
+<span class="lineNum">     133 </span><span class="lineNoCov">          0 :                 Size        sz = IndexTupleSize(itup);</span>
+<span class="lineNum">     134 </span>            :                 OffsetNumber l;
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span><span class="lineNoCov">          0 :                 data += sz;</span>
+<span class="lineNum">     137 </span>            : 
+<span class="lineNum">     138 </span><span class="lineNoCov">          0 :                 l = PageAddItem(page, (Item) itup, sz, off, false, false);</span>
+<span class="lineNum">     139 </span><span class="lineNoCov">          0 :                 if (l == InvalidOffsetNumber)</span>
+<span class="lineNum">     140 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;failed to add item to GiST index page, size %d bytes&quot;,</span>
+<span class="lineNum">     141 </span>            :                          (int) sz);
+<span class="lineNum">     142 </span><span class="lineNoCov">          0 :                 off++;</span>
+<span class="lineNum">     143 </span><span class="lineNoCov">          0 :                 ninserted++;</span>
+<span class="lineNum">     144 </span>            :             }
+<span class="lineNum">     145 </span>            :         }
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            :         /* Check that XLOG record contained expected number of tuples */
+<span class="lineNum">     148 </span><span class="lineNoCov">          0 :         Assert(ninserted == xldata-&gt;ntoinsert);</span>
+<span class="lineNum">     149 </span>            : 
+<span class="lineNum">     150 </span><span class="lineNoCov">          0 :         PageSetLSN(page, lsn);</span>
+<span class="lineNum">     151 </span><span class="lineNoCov">          0 :         MarkBufferDirty(buffer);</span>
+<span class="lineNum">     152 </span>            :     }
+<span class="lineNum">     153 </span>            : 
+<span class="lineNum">     154 </span>            :     /*
+<span class="lineNum">     155 </span>            :      * Fix follow-right data on left child page
+<span class="lineNum">     156 </span>            :      *
+<span class="lineNum">     157 </span>            :      * This must be done while still holding the lock on the target page. Note
+<span class="lineNum">     158 </span>            :      * that even if the target page no longer exists, we still attempt to
+<span class="lineNum">     159 </span>            :      * replay the change on the child page.
+<span class="lineNum">     160 </span>            :      */
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :     if (XLogRecHasBlockRef(record, 1))</span>
+<span class="lineNum">     162 </span><span class="lineNoCov">          0 :         gistRedoClearFollowRight(record, 1);</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span><span class="lineNoCov">          0 :     if (BufferIsValid(buffer))</span>
+<span class="lineNum">     165 </span><span class="lineNoCov">          0 :         UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">     166 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            : 
+<span class="lineNum">     169 </span>            : /*
+<span class="lineNum">     170 </span>            :  * redo delete on gist index page to remove tuples marked as DEAD during index
+<span class="lineNum">     171 </span>            :  * tuple insertion
+<a name="172"><span class="lineNum">     172 </span>            :  */</a>
+<span class="lineNum">     173 </span>            : static void
+<span class="lineNum">     174 </span><span class="lineNoCov">          0 : gistRedoDeleteRecord(XLogReaderState *record)</span>
+<span class="lineNum">     175 </span>            : {
+<span class="lineNum">     176 </span><span class="lineNoCov">          0 :     XLogRecPtr  lsn = record-&gt;EndRecPtr;</span>
+<span class="lineNum">     177 </span><span class="lineNoCov">          0 :     gistxlogDelete *xldata = (gistxlogDelete *) XLogRecGetData(record);</span>
+<span class="lineNum">     178 </span>            :     Buffer      buffer;
+<span class="lineNum">     179 </span>            :     Page        page;
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span>            :     /*
+<span class="lineNum">     182 </span>            :      * If we have any conflict processing to do, it must happen before we
+<span class="lineNum">     183 </span>            :      * update the page.
+<span class="lineNum">     184 </span>            :      *
+<span class="lineNum">     185 </span>            :      * GiST delete records can conflict with standby queries.  You might think
+<span class="lineNum">     186 </span>            :      * that vacuum records would conflict as well, but we've handled that
+<span class="lineNum">     187 </span>            :      * already.  XLOG_HEAP2_CLEANUP_INFO records provide the highest xid
+<span class="lineNum">     188 </span>            :      * cleaned by the vacuum of the heap and so we can resolve any conflicts
+<span class="lineNum">     189 </span>            :      * just once when that arrives.  After that we know that no conflicts
+<span class="lineNum">     190 </span>            :      * exist from individual gist vacuum records on that index.
+<span class="lineNum">     191 </span>            :      */
+<span class="lineNum">     192 </span><span class="lineNoCov">          0 :     if (InHotStandby)</span>
+<span class="lineNum">     193 </span>            :     {
+<span class="lineNum">     194 </span>            :         RelFileNode rnode;
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span><span class="lineNoCov">          0 :         XLogRecGetBlockTag(record, 0, &amp;rnode, NULL, NULL);</span>
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span><span class="lineNoCov">          0 :         ResolveRecoveryConflictWithSnapshot(xldata-&gt;latestRemovedXid, rnode);</span>
+<span class="lineNum">     199 </span>            :     }
+<span class="lineNum">     200 </span>            : 
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :     if (XLogReadBufferForRedo(record, 0, &amp;buffer) == BLK_NEEDS_REDO)</span>
+<span class="lineNum">     202 </span>            :     {
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :         page = (Page) BufferGetPage(buffer);</span>
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 :         if (XLogRecGetDataLen(record) &gt; SizeOfGistxlogDelete)</span>
+<span class="lineNum">     206 </span>            :         {
+<span class="lineNum">     207 </span>            :             OffsetNumber *todelete;
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :             todelete = (OffsetNumber *) ((char *) xldata + SizeOfGistxlogDelete);</span>
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span><span class="lineNoCov">          0 :             PageIndexMultiDelete(page, todelete, xldata-&gt;ntodelete);</span>
+<span class="lineNum">     212 </span>            :         }
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 :         GistClearPageHasGarbage(page);</span>
+<span class="lineNum">     215 </span><span class="lineNoCov">          0 :         GistMarkTuplesDeleted(page);</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 :         PageSetLSN(page, lsn);</span>
+<span class="lineNum">     218 </span><span class="lineNoCov">          0 :         MarkBufferDirty(buffer);</span>
+<span class="lineNum">     219 </span>            :     }
+<span class="lineNum">     220 </span>            : 
+<span class="lineNum">     221 </span><span class="lineNoCov">          0 :     if (BufferIsValid(buffer))</span>
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :         UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span>            : /*
+<span class="lineNum">     226 </span>            :  * Returns an array of index pointers.
+<a name="227"><span class="lineNum">     227 </span>            :  */</a>
+<span class="lineNum">     228 </span>            : static IndexTuple *
+<span class="lineNum">     229 </span><span class="lineNoCov">          0 : decodePageSplitRecord(char *begin, int len, int *n)</span>
+<span class="lineNum">     230 </span>            : {
+<span class="lineNum">     231 </span>            :     char       *ptr;
+<span class="lineNum">     232 </span><span class="lineNoCov">          0 :     int         i = 0;</span>
+<span class="lineNum">     233 </span>            :     IndexTuple *tuples;
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span>            :     /* extract the number of tuples */
+<span class="lineNum">     236 </span><span class="lineNoCov">          0 :     memcpy(n, begin, sizeof(int));</span>
+<span class="lineNum">     237 </span><span class="lineNoCov">          0 :     ptr = begin + sizeof(int);</span>
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span><span class="lineNoCov">          0 :     tuples = palloc(*n * sizeof(IndexTuple));</span>
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; *n; i++)</span>
+<span class="lineNum">     242 </span>            :     {
+<span class="lineNum">     243 </span><span class="lineNoCov">          0 :         Assert(ptr - begin &lt; len);</span>
+<span class="lineNum">     244 </span><span class="lineNoCov">          0 :         tuples[i] = (IndexTuple) ptr;</span>
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :         ptr += IndexTupleSize((IndexTuple) ptr);</span>
+<span class="lineNum">     246 </span>            :     }
+<span class="lineNum">     247 </span><span class="lineNoCov">          0 :     Assert(ptr - begin == len);</span>
+<span class="lineNum">     248 </span>            : 
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :     return tuples;</span>
+<span class="lineNum">     250 </span>            : }
+<a name="251"><span class="lineNum">     251 </span>            : </a>
+<span class="lineNum">     252 </span>            : static void
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 : gistRedoPageSplitRecord(XLogReaderState *record)</span>
+<span class="lineNum">     254 </span>            : {
+<span class="lineNum">     255 </span><span class="lineNoCov">          0 :     XLogRecPtr  lsn = record-&gt;EndRecPtr;</span>
+<span class="lineNum">     256 </span><span class="lineNoCov">          0 :     gistxlogPageSplit *xldata = (gistxlogPageSplit *) XLogRecGetData(record);</span>
+<span class="lineNum">     257 </span><span class="lineNoCov">          0 :     Buffer      firstbuffer = InvalidBuffer;</span>
+<span class="lineNum">     258 </span>            :     Buffer      buffer;
+<span class="lineNum">     259 </span>            :     Page        page;
+<span class="lineNum">     260 </span>            :     int         i;
+<span class="lineNum">     261 </span><span class="lineNoCov">          0 :     bool        isrootsplit = false;</span>
+<span class="lineNum">     262 </span>            : 
+<span class="lineNum">     263 </span>            :     /*
+<span class="lineNum">     264 </span>            :      * We must hold lock on the first-listed page throughout the action,
+<span class="lineNum">     265 </span>            :      * including while updating the left child page (if any).  We can unlock
+<span class="lineNum">     266 </span>            :      * remaining pages in the list as soon as they've been written, because
+<span class="lineNum">     267 </span>            :      * there is no path for concurrent queries to reach those pages without
+<span class="lineNum">     268 </span>            :      * first visiting the first-listed page.
+<span class="lineNum">     269 </span>            :      */
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span>            :     /* loop around all pages */
+<span class="lineNum">     272 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; xldata-&gt;npage; i++)</span>
+<span class="lineNum">     273 </span>            :     {
+<span class="lineNum">     274 </span>            :         int         flags;
+<span class="lineNum">     275 </span>            :         char       *data;
+<span class="lineNum">     276 </span>            :         Size        datalen;
+<span class="lineNum">     277 </span>            :         int         num;
+<span class="lineNum">     278 </span>            :         BlockNumber blkno;
+<span class="lineNum">     279 </span>            :         IndexTuple *tuples;
+<span class="lineNum">     280 </span>            : 
+<span class="lineNum">     281 </span><span class="lineNoCov">          0 :         XLogRecGetBlockTag(record, i + 1, NULL, NULL, &amp;blkno);</span>
+<span class="lineNum">     282 </span><span class="lineNoCov">          0 :         if (blkno == GIST_ROOT_BLKNO)</span>
+<span class="lineNum">     283 </span>            :         {
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :             Assert(i == 0);</span>
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :             isrootsplit = true;</span>
+<span class="lineNum">     286 </span>            :         }
+<span class="lineNum">     287 </span>            : 
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :         buffer = XLogInitBufferForRedo(record, i + 1);</span>
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :         page = (Page) BufferGetPage(buffer);</span>
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :         data = XLogRecGetBlockData(record, i + 1, &amp;datalen);</span>
+<span class="lineNum">     291 </span>            : 
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :         tuples = decodePageSplitRecord(data, datalen, &amp;num);</span>
+<span class="lineNum">     293 </span>            : 
+<span class="lineNum">     294 </span>            :         /* ok, clear buffer */
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :         if (xldata-&gt;origleaf &amp;&amp; blkno != GIST_ROOT_BLKNO)</span>
+<span class="lineNum">     296 </span><span class="lineNoCov">          0 :             flags = F_LEAF;</span>
+<span class="lineNum">     297 </span>            :         else
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :             flags = 0;</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :         GISTInitBuffer(buffer, flags);</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            :         /* and fill it */
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :         gistfillbuffer(page, tuples, num, FirstOffsetNumber);</span>
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span><span class="lineNoCov">          0 :         if (blkno == GIST_ROOT_BLKNO)</span>
+<span class="lineNum">     305 </span>            :         {
+<span class="lineNum">     306 </span><span class="lineNoCov">          0 :             GistPageGetOpaque(page)-&gt;rightlink = InvalidBlockNumber;</span>
+<span class="lineNum">     307 </span><span class="lineNoCov">          0 :             GistPageSetNSN(page, xldata-&gt;orignsn);</span>
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :             GistClearFollowRight(page);</span>
+<span class="lineNum">     309 </span>            :         }
+<span class="lineNum">     310 </span>            :         else
+<span class="lineNum">     311 </span>            :         {
+<span class="lineNum">     312 </span><span class="lineNoCov">          0 :             if (i &lt; xldata-&gt;npage - 1)</span>
+<span class="lineNum">     313 </span>            :             {
+<span class="lineNum">     314 </span>            :                 BlockNumber nextblkno;
+<span class="lineNum">     315 </span>            : 
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :                 XLogRecGetBlockTag(record, i + 2, NULL, NULL, &amp;nextblkno);</span>
+<span class="lineNum">     317 </span><span class="lineNoCov">          0 :                 GistPageGetOpaque(page)-&gt;rightlink = nextblkno;</span>
+<span class="lineNum">     318 </span>            :             }
+<span class="lineNum">     319 </span>            :             else
+<span class="lineNum">     320 </span><span class="lineNoCov">          0 :                 GistPageGetOpaque(page)-&gt;rightlink = xldata-&gt;origrlink;</span>
+<span class="lineNum">     321 </span><span class="lineNoCov">          0 :             GistPageSetNSN(page, xldata-&gt;orignsn);</span>
+<span class="lineNum">     322 </span><span class="lineNoCov">          0 :             if (i &lt; xldata-&gt;npage - 1 &amp;&amp; !isrootsplit &amp;&amp;</span>
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :                 xldata-&gt;markfollowright)</span>
+<span class="lineNum">     324 </span><span class="lineNoCov">          0 :                 GistMarkFollowRight(page);</span>
+<span class="lineNum">     325 </span>            :             else
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :                 GistClearFollowRight(page);</span>
+<span class="lineNum">     327 </span>            :         }
+<span class="lineNum">     328 </span>            : 
+<span class="lineNum">     329 </span><span class="lineNoCov">          0 :         PageSetLSN(page, lsn);</span>
+<span class="lineNum">     330 </span><span class="lineNoCov">          0 :         MarkBufferDirty(buffer);</span>
+<span class="lineNum">     331 </span>            : 
+<span class="lineNum">     332 </span><span class="lineNoCov">          0 :         if (i == 0)</span>
+<span class="lineNum">     333 </span><span class="lineNoCov">          0 :             firstbuffer = buffer;</span>
+<span class="lineNum">     334 </span>            :         else
+<span class="lineNum">     335 </span><span class="lineNoCov">          0 :             UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">     336 </span>            :     }
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span>            :     /* Fix follow-right data on left child page, if any */
+<span class="lineNum">     339 </span><span class="lineNoCov">          0 :     if (XLogRecHasBlockRef(record, 0))</span>
+<span class="lineNum">     340 </span><span class="lineNoCov">          0 :         gistRedoClearFollowRight(record, 0);</span>
+<span class="lineNum">     341 </span>            : 
+<span class="lineNum">     342 </span>            :     /* Finally, release lock on the first page */
+<span class="lineNum">     343 </span><span class="lineNoCov">          0 :     UnlockReleaseBuffer(firstbuffer);</span>
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     345 </span>            : 
+<a name="346"><span class="lineNum">     346 </span>            : /* redo page deletion */</a>
+<span class="lineNum">     347 </span>            : static void
+<span class="lineNum">     348 </span><span class="lineNoCov">          0 : gistRedoPageDelete(XLogReaderState *record)</span>
+<span class="lineNum">     349 </span>            : {
+<span class="lineNum">     350 </span><span class="lineNoCov">          0 :     XLogRecPtr  lsn = record-&gt;EndRecPtr;</span>
+<span class="lineNum">     351 </span><span class="lineNoCov">          0 :     gistxlogPageDelete *xldata = (gistxlogPageDelete *) XLogRecGetData(record);</span>
+<span class="lineNum">     352 </span>            :     Buffer      parentBuffer;
+<span class="lineNum">     353 </span>            :     Buffer      leafBuffer;
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span><span class="lineNoCov">          0 :     if (XLogReadBufferForRedo(record, 0, &amp;leafBuffer) == BLK_NEEDS_REDO)</span>
+<span class="lineNum">     356 </span>            :     {
+<span class="lineNum">     357 </span><span class="lineNoCov">          0 :         Page        page = (Page) BufferGetPage(leafBuffer);</span>
+<span class="lineNum">     358 </span>            : 
+<span class="lineNum">     359 </span><span class="lineNoCov">          0 :         GistPageSetDeleted(page, xldata-&gt;deleteXid);</span>
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span><span class="lineNoCov">          0 :         PageSetLSN(page, lsn);</span>
+<span class="lineNum">     362 </span><span class="lineNoCov">          0 :         MarkBufferDirty(leafBuffer);</span>
+<span class="lineNum">     363 </span>            :     }
+<span class="lineNum">     364 </span>            : 
+<span class="lineNum">     365 </span><span class="lineNoCov">          0 :     if (XLogReadBufferForRedo(record, 1, &amp;parentBuffer) == BLK_NEEDS_REDO)</span>
+<span class="lineNum">     366 </span>            :     {
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :         Page        page = (Page) BufferGetPage(parentBuffer);</span>
+<span class="lineNum">     368 </span>            : 
+<span class="lineNum">     369 </span><span class="lineNoCov">          0 :         PageIndexTupleDelete(page, xldata-&gt;downlinkOffset);</span>
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineNoCov">          0 :         PageSetLSN(page, lsn);</span>
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :         MarkBufferDirty(parentBuffer);</span>
+<span class="lineNum">     373 </span>            :     }
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :     if (BufferIsValid(parentBuffer))</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :         UnlockReleaseBuffer(parentBuffer);</span>
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :     if (BufferIsValid(leafBuffer))</span>
+<span class="lineNum">     378 </span><span class="lineNoCov">          0 :         UnlockReleaseBuffer(leafBuffer);</span>
+<span class="lineNum">     379 </span><span class="lineNoCov">          0 : }</span>
+<a name="380"><span class="lineNum">     380 </span>            : </a>
+<span class="lineNum">     381 </span>            : static void
+<span class="lineNum">     382 </span><span class="lineNoCov">          0 : gistRedoPageReuse(XLogReaderState *record)</span>
+<span class="lineNum">     383 </span>            : {
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :     gistxlogPageReuse *xlrec = (gistxlogPageReuse *) XLogRecGetData(record);</span>
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span>            :     /*
+<span class="lineNum">     387 </span>            :      * PAGE_REUSE records exist to provide a conflict point when we reuse
+<span class="lineNum">     388 </span>            :      * pages in the index via the FSM.  That's all they do though.
+<span class="lineNum">     389 </span>            :      *
+<span class="lineNum">     390 </span>            :      * latestRemovedXid was the page's deleteXid.  The deleteXid &lt;
+<span class="lineNum">     391 </span>            :      * RecentGlobalXmin test in gistPageRecyclable() conceptually mirrors the
+<span class="lineNum">     392 </span>            :      * pgxact-&gt;xmin &gt; limitXmin test in GetConflictingVirtualXIDs().
+<span class="lineNum">     393 </span>            :      * Consequently, one XID value achieves the same exclusion effect on
+<span class="lineNum">     394 </span>            :      * master and standby.
+<span class="lineNum">     395 </span>            :      */
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :     if (InHotStandby)</span>
+<span class="lineNum">     397 </span>            :     {
+<span class="lineNum">     398 </span><span class="lineNoCov">          0 :         FullTransactionId latestRemovedFullXid = xlrec-&gt;latestRemovedFullXid;</span>
+<span class="lineNum">     399 </span><span class="lineNoCov">          0 :         FullTransactionId nextFullXid = ReadNextFullTransactionId();</span>
+<span class="lineNum">     400 </span>            :         uint64      diff;
+<span class="lineNum">     401 </span>            : 
+<span class="lineNum">     402 </span>            :         /*
+<span class="lineNum">     403 </span>            :          * ResolveRecoveryConflictWithSnapshot operates on 32-bit
+<span class="lineNum">     404 </span>            :          * TransactionIds, so truncate the logged FullTransactionId. If the
+<span class="lineNum">     405 </span>            :          * logged value is very old, so that XID wrap-around already happened
+<span class="lineNum">     406 </span>            :          * on it, there can't be any snapshots that still see it.
+<span class="lineNum">     407 </span>            :          */
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :         nextFullXid = ReadNextFullTransactionId();</span>
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :         diff = U64FromFullTransactionId(nextFullXid) -</span>
+<span class="lineNum">     410 </span><span class="lineNoCov">          0 :             U64FromFullTransactionId(latestRemovedFullXid);</span>
+<span class="lineNum">     411 </span><span class="lineNoCov">          0 :         if (diff &lt; MaxTransactionId / 2)</span>
+<span class="lineNum">     412 </span>            :         {
+<span class="lineNum">     413 </span>            :             TransactionId latestRemovedXid;
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span><span class="lineNoCov">          0 :             latestRemovedXid = XidFromFullTransactionId(latestRemovedFullXid);</span>
+<span class="lineNum">     416 </span><span class="lineNoCov">          0 :             ResolveRecoveryConflictWithSnapshot(latestRemovedXid,</span>
+<span class="lineNum">     417 </span>            :                                                 xlrec-&gt;node);
+<span class="lineNum">     418 </span>            :         }
+<span class="lineNum">     419 </span>            :     }
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 : }</span>
+<a name="421"><span class="lineNum">     421 </span>            : </a>
+<span class="lineNum">     422 </span>            : void
+<span class="lineNum">     423 </span><span class="lineNoCov">          0 : gist_redo(XLogReaderState *record)</span>
+<span class="lineNum">     424 </span>            : {
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :     uint8       info = XLogRecGetInfo(record) &amp; ~XLR_INFO_MASK;</span>
+<span class="lineNum">     426 </span>            :     MemoryContext oldCxt;
+<span class="lineNum">     427 </span>            : 
+<span class="lineNum">     428 </span>            :     /*
+<span class="lineNum">     429 </span>            :      * GiST indexes do not require any conflict processing. NB: If we ever
+<span class="lineNum">     430 </span>            :      * implement a similar optimization we have in b-tree, and remove killed
+<span class="lineNum">     431 </span>            :      * tuples outside VACUUM, we'll need to handle that here.
+<span class="lineNum">     432 </span>            :      */
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span><span class="lineNoCov">          0 :     oldCxt = MemoryContextSwitchTo(opCtx);</span>
+<span class="lineNum">     435 </span><span class="lineNoCov">          0 :     switch (info)</span>
+<span class="lineNum">     436 </span>            :     {
+<span class="lineNum">     437 </span>            :         case XLOG_GIST_PAGE_UPDATE:
+<span class="lineNum">     438 </span><span class="lineNoCov">          0 :             gistRedoPageUpdateRecord(record);</span>
+<span class="lineNum">     439 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     440 </span>            :         case XLOG_GIST_DELETE:
+<span class="lineNum">     441 </span><span class="lineNoCov">          0 :             gistRedoDeleteRecord(record);</span>
+<span class="lineNum">     442 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     443 </span>            :         case XLOG_GIST_PAGE_REUSE:
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :             gistRedoPageReuse(record);</span>
+<span class="lineNum">     445 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     446 </span>            :         case XLOG_GIST_PAGE_SPLIT:
+<span class="lineNum">     447 </span><span class="lineNoCov">          0 :             gistRedoPageSplitRecord(record);</span>
+<span class="lineNum">     448 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     449 </span>            :         case XLOG_GIST_PAGE_DELETE:
+<span class="lineNum">     450 </span><span class="lineNoCov">          0 :             gistRedoPageDelete(record);</span>
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     452 </span>            :         default:
+<span class="lineNum">     453 </span><span class="lineNoCov">          0 :             elog(PANIC, &quot;gist_redo: unknown op code %u&quot;, info);</span>
+<span class="lineNum">     454 </span>            :     }
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(oldCxt);</span>
+<span class="lineNum">     457 </span><span class="lineNoCov">          0 :     MemoryContextReset(opCtx);</span>
+<span class="lineNum">     458 </span><span class="lineNoCov">          0 : }</span>
+<a name="459"><span class="lineNum">     459 </span>            : </a>
+<span class="lineNum">     460 </span>            : void
+<span class="lineNum">     461 </span><span class="lineNoCov">          0 : gist_xlog_startup(void)</span>
+<span class="lineNum">     462 </span>            : {
+<span class="lineNum">     463 </span><span class="lineNoCov">          0 :     opCtx = createTempGistContext();</span>
+<span class="lineNum">     464 </span><span class="lineNoCov">          0 : }</span>
+<a name="465"><span class="lineNum">     465 </span>            : </a>
+<span class="lineNum">     466 </span>            : void
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 : gist_xlog_cleanup(void)</span>
+<span class="lineNum">     468 </span>            : {
+<span class="lineNum">     469 </span><span class="lineNoCov">          0 :     MemoryContextDelete(opCtx);</span>
+<span class="lineNum">     470 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     471 </span>            : 
+<span class="lineNum">     472 </span>            : /*
+<span class="lineNum">     473 </span>            :  * Mask a Gist page before running consistency checks on it.
+<a name="474"><span class="lineNum">     474 </span>            :  */</a>
+<span class="lineNum">     475 </span>            : void
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 : gist_mask(char *pagedata, BlockNumber blkno)</span>
+<span class="lineNum">     477 </span>            : {
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :     Page        page = (Page) pagedata;</span>
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span><span class="lineNoCov">          0 :     mask_page_lsn_and_checksum(page);</span>
+<span class="lineNum">     481 </span>            : 
+<span class="lineNum">     482 </span><span class="lineNoCov">          0 :     mask_page_hint_bits(page);</span>
+<span class="lineNum">     483 </span><span class="lineNoCov">          0 :     mask_unused_space(page);</span>
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span>            :     /*
+<span class="lineNum">     486 </span>            :      * NSN is nothing but a special purpose LSN. Hence, mask it for the same
+<span class="lineNum">     487 </span>            :      * reason as mask_page_lsn_and_checksum.
+<span class="lineNum">     488 </span>            :      */
+<span class="lineNum">     489 </span><span class="lineNoCov">          0 :     GistPageSetNSN(page, (uint64) MASK_MARKER);</span>
+<span class="lineNum">     490 </span>            : 
+<span class="lineNum">     491 </span>            :     /*
+<span class="lineNum">     492 </span>            :      * We update F_FOLLOW_RIGHT flag on the left child after writing WAL
+<span class="lineNum">     493 </span>            :      * record. Hence, mask this flag. See gistplacetopage() for details.
+<span class="lineNum">     494 </span>            :      */
+<span class="lineNum">     495 </span><span class="lineNoCov">          0 :     GistMarkFollowRight(page);</span>
+<span class="lineNum">     496 </span>            : 
+<span class="lineNum">     497 </span><span class="lineNoCov">          0 :     if (GistPageIsLeaf(page))</span>
+<span class="lineNum">     498 </span>            :     {
+<span class="lineNum">     499 </span>            :         /*
+<span class="lineNum">     500 </span>            :          * In gist leaf pages, it is possible to modify the LP_FLAGS without
+<span class="lineNum">     501 </span>            :          * emitting any WAL record. Hence, mask the line pointer flags. See
+<span class="lineNum">     502 </span>            :          * gistkillitems() for details.
+<span class="lineNum">     503 </span>            :          */
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :         mask_lp_flags(page);</span>
+<span class="lineNum">     505 </span>            :     }
+<span class="lineNum">     506 </span>            : 
+<span class="lineNum">     507 </span>            :     /*
+<span class="lineNum">     508 </span>            :      * During gist redo, we never mark a page as garbage. Hence, mask it to
+<span class="lineNum">     509 </span>            :      * ignore any differences.
+<span class="lineNum">     510 </span>            :      */
+<span class="lineNum">     511 </span><span class="lineNoCov">          0 :     GistClearPageHasGarbage(page);</span>
+<span class="lineNum">     512 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     513 </span>            : 
+<span class="lineNum">     514 </span>            : /*
+<span class="lineNum">     515 </span>            :  * Write WAL record of a page split.
+<a name="516"><span class="lineNum">     516 </span>            :  */</a>
+<span class="lineNum">     517 </span>            : XLogRecPtr
+<span class="lineNum">     518 </span><span class="lineCov">        878 : gistXLogSplit(bool page_is_leaf,</span>
+<span class="lineNum">     519 </span>            :               SplitedPageLayout *dist,
+<span class="lineNum">     520 </span>            :               BlockNumber origrlink, GistNSN orignsn,
+<span class="lineNum">     521 </span>            :               Buffer leftchildbuf, bool markfollowright)
+<span class="lineNum">     522 </span>            : {
+<span class="lineNum">     523 </span>            :     gistxlogPageSplit xlrec;
+<span class="lineNum">     524 </span>            :     SplitedPageLayout *ptr;
+<span class="lineNum">     525 </span><span class="lineCov">        878 :     int         npage = 0;</span>
+<span class="lineNum">     526 </span>            :     XLogRecPtr  recptr;
+<span class="lineNum">     527 </span>            :     int         i;
+<span class="lineNum">     528 </span>            : 
+<span class="lineNum">     529 </span><span class="lineCov">       2644 :     for (ptr = dist; ptr; ptr = ptr-&gt;next)</span>
+<span class="lineNum">     530 </span><span class="lineCov">       1766 :         npage++;</span>
+<span class="lineNum">     531 </span>            : 
+<span class="lineNum">     532 </span><span class="lineCov">        878 :     xlrec.origrlink = origrlink;</span>
+<span class="lineNum">     533 </span><span class="lineCov">        878 :     xlrec.orignsn = orignsn;</span>
+<span class="lineNum">     534 </span><span class="lineCov">        878 :     xlrec.origleaf = page_is_leaf;</span>
+<span class="lineNum">     535 </span><span class="lineCov">        878 :     xlrec.npage = (uint16) npage;</span>
+<span class="lineNum">     536 </span><span class="lineCov">        878 :     xlrec.markfollowright = markfollowright;</span>
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span><span class="lineCov">        878 :     XLogBeginInsert();</span>
+<span class="lineNum">     539 </span>            : 
+<span class="lineNum">     540 </span>            :     /*
+<span class="lineNum">     541 </span>            :      * Include a full page image of the child buf. (only necessary if a
+<span class="lineNum">     542 </span>            :      * checkpoint happened since the child page was split)
+<span class="lineNum">     543 </span>            :      */
+<span class="lineNum">     544 </span><span class="lineCov">        878 :     if (BufferIsValid(leftchildbuf))</span>
+<span class="lineNum">     545 </span><span class="lineCov">          4 :         XLogRegisterBuffer(0, leftchildbuf, REGBUF_STANDARD);</span>
+<span class="lineNum">     546 </span>            : 
+<span class="lineNum">     547 </span>            :     /*
+<span class="lineNum">     548 </span>            :      * NOTE: We register a lot of data. The caller must've called
+<span class="lineNum">     549 </span>            :      * XLogEnsureRecordSpace() to prepare for that. We cannot do it here,
+<span class="lineNum">     550 </span>            :      * because we're already in a critical section. If you change the number
+<span class="lineNum">     551 </span>            :      * of buffer or data registrations here, make sure you modify the
+<span class="lineNum">     552 </span>            :      * XLogEnsureRecordSpace() calls accordingly!
+<span class="lineNum">     553 </span>            :      */
+<span class="lineNum">     554 </span><span class="lineCov">        878 :     XLogRegisterData((char *) &amp;xlrec, sizeof(gistxlogPageSplit));</span>
+<span class="lineNum">     555 </span>            : 
+<span class="lineNum">     556 </span><span class="lineCov">        878 :     i = 1;</span>
+<span class="lineNum">     557 </span><span class="lineCov">       2644 :     for (ptr = dist; ptr; ptr = ptr-&gt;next)</span>
+<span class="lineNum">     558 </span>            :     {
+<span class="lineNum">     559 </span><span class="lineCov">       1766 :         XLogRegisterBuffer(i, ptr-&gt;buffer, REGBUF_WILL_INIT);</span>
+<span class="lineNum">     560 </span><span class="lineCov">       1766 :         XLogRegisterBufData(i, (char *) &amp;(ptr-&gt;block.num), sizeof(int));</span>
+<span class="lineNum">     561 </span><span class="lineCov">       1766 :         XLogRegisterBufData(i, (char *) ptr-&gt;list, ptr-&gt;lenlist);</span>
+<span class="lineNum">     562 </span><span class="lineCov">       1766 :         i++;</span>
+<span class="lineNum">     563 </span>            :     }
+<span class="lineNum">     564 </span>            : 
+<span class="lineNum">     565 </span><span class="lineCov">        878 :     recptr = XLogInsert(RM_GIST_ID, XLOG_GIST_PAGE_SPLIT);</span>
+<span class="lineNum">     566 </span>            : 
+<span class="lineNum">     567 </span><span class="lineCov">        878 :     return recptr;</span>
+<span class="lineNum">     568 </span>            : }
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span>            : /*
+<span class="lineNum">     571 </span>            :  * Write XLOG record describing a page deletion. This also includes removal of
+<span class="lineNum">     572 </span>            :  * downlink from the parent page.
+<a name="573"><span class="lineNum">     573 </span>            :  */</a>
+<span class="lineNum">     574 </span>            : XLogRecPtr
+<span class="lineNum">     575 </span><span class="lineCov">        526 : gistXLogPageDelete(Buffer buffer, FullTransactionId xid,</span>
+<span class="lineNum">     576 </span>            :                    Buffer parentBuffer, OffsetNumber downlinkOffset)
+<span class="lineNum">     577 </span>            : {
+<span class="lineNum">     578 </span>            :     gistxlogPageDelete xlrec;
+<span class="lineNum">     579 </span>            :     XLogRecPtr  recptr;
+<span class="lineNum">     580 </span>            : 
+<span class="lineNum">     581 </span><span class="lineCov">        526 :     xlrec.deleteXid = xid;</span>
+<span class="lineNum">     582 </span><span class="lineCov">        526 :     xlrec.downlinkOffset = downlinkOffset;</span>
+<span class="lineNum">     583 </span>            : 
+<span class="lineNum">     584 </span><span class="lineCov">        526 :     XLogBeginInsert();</span>
+<span class="lineNum">     585 </span><span class="lineCov">        526 :     XLogRegisterData((char *) &amp;xlrec, SizeOfGistxlogPageDelete);</span>
+<span class="lineNum">     586 </span>            : 
+<span class="lineNum">     587 </span><span class="lineCov">        526 :     XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);</span>
+<span class="lineNum">     588 </span><span class="lineCov">        526 :     XLogRegisterBuffer(1, parentBuffer, REGBUF_STANDARD);</span>
+<span class="lineNum">     589 </span>            : 
+<span class="lineNum">     590 </span><span class="lineCov">        526 :     recptr = XLogInsert(RM_GIST_ID, XLOG_GIST_PAGE_DELETE);</span>
+<span class="lineNum">     591 </span>            : 
+<span class="lineNum">     592 </span><span class="lineCov">        526 :     return recptr;</span>
+<span class="lineNum">     593 </span>            : }
+<span class="lineNum">     594 </span>            : 
+<span class="lineNum">     595 </span>            : /*
+<span class="lineNum">     596 </span>            :  * Write XLOG record about reuse of a deleted page.
+<a name="597"><span class="lineNum">     597 </span>            :  */</a>
+<span class="lineNum">     598 </span>            : void
+<span class="lineNum">     599 </span><span class="lineNoCov">          0 : gistXLogPageReuse(Relation rel, BlockNumber blkno, FullTransactionId latestRemovedXid)</span>
+<span class="lineNum">     600 </span>            : {
+<span class="lineNum">     601 </span>            :     gistxlogPageReuse xlrec_reuse;
+<span class="lineNum">     602 </span>            : 
+<span class="lineNum">     603 </span>            :     /*
+<span class="lineNum">     604 </span>            :      * Note that we don't register the buffer with the record, because this
+<span class="lineNum">     605 </span>            :      * operation doesn't modify the page. This record only exists to provide a
+<span class="lineNum">     606 </span>            :      * conflict point for Hot Standby.
+<span class="lineNum">     607 </span>            :      */
+<span class="lineNum">     608 </span>            : 
+<span class="lineNum">     609 </span>            :     /* XLOG stuff */
+<span class="lineNum">     610 </span><span class="lineNoCov">          0 :     xlrec_reuse.node = rel-&gt;rd_node;</span>
+<span class="lineNum">     611 </span><span class="lineNoCov">          0 :     xlrec_reuse.block = blkno;</span>
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :     xlrec_reuse.latestRemovedFullXid = latestRemovedXid;</span>
+<span class="lineNum">     613 </span>            : 
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :     XLogBeginInsert();</span>
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :     XLogRegisterData((char *) &amp;xlrec_reuse, SizeOfGistxlogPageReuse);</span>
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :     XLogInsert(RM_GIST_ID, XLOG_GIST_PAGE_REUSE);</span>
+<span class="lineNum">     618 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span>            : /*
+<span class="lineNum">     621 </span>            :  * Write XLOG record describing a page update. The update can include any
+<span class="lineNum">     622 </span>            :  * number of deletions and/or insertions of tuples on a single index page.
+<span class="lineNum">     623 </span>            :  *
+<span class="lineNum">     624 </span>            :  * If this update inserts a downlink for a split page, also record that
+<span class="lineNum">     625 </span>            :  * the F_FOLLOW_RIGHT flag on the child page is cleared and NSN set.
+<span class="lineNum">     626 </span>            :  *
+<span class="lineNum">     627 </span>            :  * Note that both the todelete array and the tuples are marked as belonging
+<span class="lineNum">     628 </span>            :  * to the target buffer; they need not be stored in XLOG if XLogInsert decides
+<span class="lineNum">     629 </span>            :  * to log the whole buffer contents instead.
+<a name="630"><span class="lineNum">     630 </span>            :  */</a>
+<span class="lineNum">     631 </span>            : XLogRecPtr
+<span class="lineNum">     632 </span><span class="lineCov">     111348 : gistXLogUpdate(Buffer buffer,</span>
+<span class="lineNum">     633 </span>            :                OffsetNumber *todelete, int ntodelete,
+<span class="lineNum">     634 </span>            :                IndexTuple *itup, int ituplen,
+<span class="lineNum">     635 </span>            :                Buffer leftchildbuf)
+<span class="lineNum">     636 </span>            : {
+<span class="lineNum">     637 </span>            :     gistxlogPageUpdate xlrec;
+<span class="lineNum">     638 </span>            :     int         i;
+<span class="lineNum">     639 </span>            :     XLogRecPtr  recptr;
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span><span class="lineCov">     111348 :     xlrec.ntodelete = ntodelete;</span>
+<span class="lineNum">     642 </span><span class="lineCov">     111348 :     xlrec.ntoinsert = ituplen;</span>
+<span class="lineNum">     643 </span>            : 
+<span class="lineNum">     644 </span><span class="lineCov">     111348 :     XLogBeginInsert();</span>
+<span class="lineNum">     645 </span><span class="lineCov">     111348 :     XLogRegisterData((char *) &amp;xlrec, sizeof(gistxlogPageUpdate));</span>
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span><span class="lineCov">     111348 :     XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);</span>
+<span class="lineNum">     648 </span><span class="lineCov">     111348 :     XLogRegisterBufData(0, (char *) todelete, sizeof(OffsetNumber) * ntodelete);</span>
+<span class="lineNum">     649 </span>            : 
+<span class="lineNum">     650 </span>            :     /* new tuples */
+<span class="lineNum">     651 </span><span class="lineCov">     222476 :     for (i = 0; i &lt; ituplen; i++)</span>
+<span class="lineNum">     652 </span><span class="lineCov">     111128 :         XLogRegisterBufData(0, (char *) (itup[i]), IndexTupleSize(itup[i]));</span>
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span>            :     /*
+<span class="lineNum">     655 </span>            :      * Include a full page image of the child buf. (only necessary if a
+<span class="lineNum">     656 </span>            :      * checkpoint happened since the child page was split)
+<span class="lineNum">     657 </span>            :      */
+<span class="lineNum">     658 </span><span class="lineCov">     111348 :     if (BufferIsValid(leftchildbuf))</span>
+<span class="lineNum">     659 </span><span class="lineCov">        864 :         XLogRegisterBuffer(1, leftchildbuf, REGBUF_STANDARD);</span>
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span><span class="lineCov">     111348 :     recptr = XLogInsert(RM_GIST_ID, XLOG_GIST_PAGE_UPDATE);</span>
+<span class="lineNum">     662 </span>            : 
+<span class="lineNum">     663 </span><span class="lineCov">     111348 :     return recptr;</span>
+<span class="lineNum">     664 </span>            : }
+<span class="lineNum">     665 </span>            : 
+<span class="lineNum">     666 </span>            : /*
+<span class="lineNum">     667 </span>            :  * Write XLOG record describing a delete of leaf index tuples marked as DEAD
+<span class="lineNum">     668 </span>            :  * during new tuple insertion.  One may think that this case is already covered
+<span class="lineNum">     669 </span>            :  * by gistXLogUpdate().  But deletion of index tuples might conflict with
+<span class="lineNum">     670 </span>            :  * standby queries and needs special handling.
+<a name="671"><span class="lineNum">     671 </span>            :  */</a>
+<span class="lineNum">     672 </span>            : XLogRecPtr
+<span class="lineNum">     673 </span><span class="lineNoCov">          0 : gistXLogDelete(Buffer buffer, OffsetNumber *todelete, int ntodelete,</span>
+<span class="lineNum">     674 </span>            :                TransactionId latestRemovedXid)
+<span class="lineNum">     675 </span>            : {
+<span class="lineNum">     676 </span>            :     gistxlogDelete xlrec;
+<span class="lineNum">     677 </span>            :     XLogRecPtr  recptr;
+<span class="lineNum">     678 </span>            : 
+<span class="lineNum">     679 </span><span class="lineNoCov">          0 :     xlrec.latestRemovedXid = latestRemovedXid;</span>
+<span class="lineNum">     680 </span><span class="lineNoCov">          0 :     xlrec.ntodelete = ntodelete;</span>
+<span class="lineNum">     681 </span>            : 
+<span class="lineNum">     682 </span><span class="lineNoCov">          0 :     XLogBeginInsert();</span>
+<span class="lineNum">     683 </span><span class="lineNoCov">          0 :     XLogRegisterData((char *) &amp;xlrec, SizeOfGistxlogDelete);</span>
+<span class="lineNum">     684 </span>            : 
+<span class="lineNum">     685 </span>            :     /*
+<span class="lineNum">     686 </span>            :      * We need the target-offsets array whether or not we store the whole
+<span class="lineNum">     687 </span>            :      * buffer, to allow us to find the latestRemovedXid on a standby server.
+<span class="lineNum">     688 </span>            :      */
+<span class="lineNum">     689 </span><span class="lineNoCov">          0 :     XLogRegisterData((char *) todelete, ntodelete * sizeof(OffsetNumber));</span>
+<span class="lineNum">     690 </span>            : 
+<span class="lineNum">     691 </span><span class="lineNoCov">          0 :     XLogRegisterBuffer(0, buffer, REGBUF_STANDARD);</span>
+<span class="lineNum">     692 </span>            : 
+<span class="lineNum">     693 </span><span class="lineNoCov">          0 :     recptr = XLogInsert(RM_GIST_ID, XLOG_GIST_DELETE);</span>
+<span class="lineNum">     694 </span>            : 
+<span class="lineNum">     695 </span><span class="lineNoCov">          0 :     return recptr;</span>
+<span class="lineNum">     696 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

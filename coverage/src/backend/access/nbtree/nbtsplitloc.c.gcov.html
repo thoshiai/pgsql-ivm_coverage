@@ -1,0 +1,1175 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/nbtree/nbtsplitloc.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/nbtree</a> - nbtsplitloc.c<span style="font-size: 80%;"> (source / <a href="nbtsplitloc.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">249</td>
+            <td class="headerCovTableEntry">263</td>
+            <td class="headerCovTableEntryHi">94.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * nbtsplitloc.c
+<span class="lineNum">       4 </span>            :  *    Choose split point code for Postgres btree implementation.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/access/nbtree/nbtsplitloc.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/nbtree.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;storage/lmgr.h&quot;
+<span class="lineNum">      19 </span>            : 
+<span class="lineNum">      20 </span>            : /* limits on split interval (default strategy only) */
+<span class="lineNum">      21 </span>            : #define MAX_LEAF_INTERVAL           9
+<span class="lineNum">      22 </span>            : #define MAX_INTERNAL_INTERVAL       18
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : typedef enum
+<span class="lineNum">      25 </span>            : {
+<span class="lineNum">      26 </span>            :     /* strategy for searching through materialized list of split points */
+<span class="lineNum">      27 </span>            :     SPLIT_DEFAULT,              /* give some weight to truncation */
+<span class="lineNum">      28 </span>            :     SPLIT_MANY_DUPLICATES,      /* find minimally distinguishing point */
+<span class="lineNum">      29 </span>            :     SPLIT_SINGLE_VALUE          /* leave left page almost full */
+<span class="lineNum">      30 </span>            : } FindSplitStrat;
+<span class="lineNum">      31 </span>            : 
+<span class="lineNum">      32 </span>            : typedef struct
+<span class="lineNum">      33 </span>            : {
+<span class="lineNum">      34 </span>            :     /* details of free space left by split */
+<span class="lineNum">      35 </span>            :     int16       curdelta;       /* current leftfree/rightfree delta */
+<span class="lineNum">      36 </span>            :     int16       leftfree;       /* space left on left page post-split */
+<span class="lineNum">      37 </span>            :     int16       rightfree;      /* space left on right page post-split */
+<span class="lineNum">      38 </span>            : 
+<span class="lineNum">      39 </span>            :     /* split point identifying fields (returned by _bt_findsplitloc) */
+<span class="lineNum">      40 </span>            :     OffsetNumber firstoldonright;   /* first item on new right page */
+<span class="lineNum">      41 </span>            :     bool        newitemonleft;  /* new item goes on left, or right? */
+<span class="lineNum">      42 </span>            : 
+<span class="lineNum">      43 </span>            : } SplitPoint;
+<span class="lineNum">      44 </span>            : 
+<span class="lineNum">      45 </span>            : typedef struct
+<span class="lineNum">      46 </span>            : {
+<span class="lineNum">      47 </span>            :     /* context data for _bt_recsplitloc */
+<span class="lineNum">      48 </span>            :     Relation    rel;            /* index relation */
+<span class="lineNum">      49 </span>            :     Page        page;           /* page undergoing split */
+<span class="lineNum">      50 </span>            :     IndexTuple  newitem;        /* new item (cause of page split) */
+<span class="lineNum">      51 </span>            :     Size        newitemsz;      /* size of newitem (includes line pointer) */
+<span class="lineNum">      52 </span>            :     bool        is_leaf;        /* T if splitting a leaf page */
+<span class="lineNum">      53 </span>            :     bool        is_rightmost;   /* T if splitting rightmost page on level */
+<span class="lineNum">      54 </span>            :     OffsetNumber newitemoff;    /* where the new item is to be inserted */
+<span class="lineNum">      55 </span>            :     int         leftspace;      /* space available for items on left page */
+<span class="lineNum">      56 </span>            :     int         rightspace;     /* space available for items on right page */
+<span class="lineNum">      57 </span>            :     int         olddataitemstotal;  /* space taken by old items */
+<span class="lineNum">      58 </span>            :     Size        minfirstrightsz;    /* smallest firstoldonright tuple size */
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            :     /* candidate split point data */
+<span class="lineNum">      61 </span>            :     int         maxsplits;      /* maximum number of splits */
+<span class="lineNum">      62 </span>            :     int         nsplits;        /* current number of splits */
+<span class="lineNum">      63 </span>            :     SplitPoint *splits;         /* all candidate split points for page */
+<span class="lineNum">      64 </span>            :     int         interval;       /* current range of acceptable split points */
+<span class="lineNum">      65 </span>            : } FindSplitData;
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : static void _bt_recsplitloc(FindSplitData *state,
+<span class="lineNum">      68 </span>            :                             OffsetNumber firstoldonright, bool newitemonleft,
+<span class="lineNum">      69 </span>            :                             int olddataitemstoleft, Size firstoldonrightsz);
+<span class="lineNum">      70 </span>            : static void _bt_deltasortsplits(FindSplitData *state, double fillfactormult,
+<span class="lineNum">      71 </span>            :                                 bool usemult);
+<span class="lineNum">      72 </span>            : static int  _bt_splitcmp(const void *arg1, const void *arg2);
+<span class="lineNum">      73 </span>            : static bool _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,
+<span class="lineNum">      74 </span>            :                                 int leaffillfactor, bool *usemult);
+<span class="lineNum">      75 </span>            : static bool _bt_adjacenthtid(ItemPointer lowhtid, ItemPointer highhtid);
+<span class="lineNum">      76 </span>            : static OffsetNumber _bt_bestsplitloc(FindSplitData *state, int perfectpenalty,
+<span class="lineNum">      77 </span>            :                                      bool *newitemonleft, FindSplitStrat strategy);
+<span class="lineNum">      78 </span>            : static int  _bt_strategy(FindSplitData *state, SplitPoint *leftpage,
+<span class="lineNum">      79 </span>            :                          SplitPoint *rightpage, FindSplitStrat *strategy);
+<span class="lineNum">      80 </span>            : static void _bt_interval_edges(FindSplitData *state,
+<span class="lineNum">      81 </span>            :                                SplitPoint **leftinterval, SplitPoint **rightinterval);
+<span class="lineNum">      82 </span>            : static inline int _bt_split_penalty(FindSplitData *state, SplitPoint *split);
+<span class="lineNum">      83 </span>            : static inline IndexTuple _bt_split_lastleft(FindSplitData *state,
+<span class="lineNum">      84 </span>            :                                             SplitPoint *split);
+<span class="lineNum">      85 </span>            : static inline IndexTuple _bt_split_firstright(FindSplitData *state,
+<span class="lineNum">      86 </span>            :                                               SplitPoint *split);
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span>            : /*
+<span class="lineNum">      90 </span>            :  *  _bt_findsplitloc() -- find an appropriate place to split a page.
+<span class="lineNum">      91 </span>            :  *
+<span class="lineNum">      92 </span>            :  * The main goal here is to equalize the free space that will be on each
+<span class="lineNum">      93 </span>            :  * split page, *after accounting for the inserted tuple*.  (If we fail to
+<span class="lineNum">      94 </span>            :  * account for it, we might find ourselves with too little room on the page
+<span class="lineNum">      95 </span>            :  * that it needs to go into!)
+<span class="lineNum">      96 </span>            :  *
+<span class="lineNum">      97 </span>            :  * If the page is the rightmost page on its level, we instead try to arrange
+<span class="lineNum">      98 </span>            :  * to leave the left split page fillfactor% full.  In this way, when we are
+<span class="lineNum">      99 </span>            :  * inserting successively increasing keys (consider sequences, timestamps,
+<span class="lineNum">     100 </span>            :  * etc) we will end up with a tree whose pages are about fillfactor% full,
+<span class="lineNum">     101 </span>            :  * instead of the 50% full result that we'd get without this special case.
+<span class="lineNum">     102 </span>            :  * This is the same as nbtsort.c produces for a newly-created tree.  Note
+<span class="lineNum">     103 </span>            :  * that leaf and nonleaf pages use different fillfactors.  Note also that
+<span class="lineNum">     104 </span>            :  * there are a number of further special cases where fillfactor is not
+<span class="lineNum">     105 </span>            :  * applied in the standard way.
+<span class="lineNum">     106 </span>            :  *
+<span class="lineNum">     107 </span>            :  * We are passed the intended insert position of the new tuple, expressed as
+<span class="lineNum">     108 </span>            :  * the offsetnumber of the tuple it must go in front of (this could be
+<span class="lineNum">     109 </span>            :  * maxoff+1 if the tuple is to go at the end).  The new tuple itself is also
+<span class="lineNum">     110 </span>            :  * passed, since it's needed to give some weight to how effective suffix
+<span class="lineNum">     111 </span>            :  * truncation will be.  The implementation picks the split point that
+<span class="lineNum">     112 </span>            :  * maximizes the effectiveness of suffix truncation from a small list of
+<span class="lineNum">     113 </span>            :  * alternative candidate split points that leave each side of the split with
+<span class="lineNum">     114 </span>            :  * about the same share of free space.  Suffix truncation is secondary to
+<span class="lineNum">     115 </span>            :  * equalizing free space, except in cases with large numbers of duplicates.
+<span class="lineNum">     116 </span>            :  * Note that it is always assumed that caller goes on to perform truncation,
+<span class="lineNum">     117 </span>            :  * even with pg_upgrade'd indexes where that isn't actually the case
+<span class="lineNum">     118 </span>            :  * (!heapkeyspace indexes).  See nbtree/README for more information about
+<span class="lineNum">     119 </span>            :  * suffix truncation.
+<span class="lineNum">     120 </span>            :  *
+<span class="lineNum">     121 </span>            :  * We return the index of the first existing tuple that should go on the
+<span class="lineNum">     122 </span>            :  * righthand page, plus a boolean indicating whether the new tuple goes on
+<span class="lineNum">     123 </span>            :  * the left or right page.  The bool is necessary to disambiguate the case
+<span class="lineNum">     124 </span>            :  * where firstright == newitemoff.
+<a name="125"><span class="lineNum">     125 </span>            :  */</a>
+<span class="lineNum">     126 </span>            : OffsetNumber
+<span class="lineNum">     127 </span><span class="lineCov">       2290 : _bt_findsplitloc(Relation rel,</span>
+<span class="lineNum">     128 </span>            :                  Page page,
+<span class="lineNum">     129 </span>            :                  OffsetNumber newitemoff,
+<span class="lineNum">     130 </span>            :                  Size newitemsz,
+<span class="lineNum">     131 </span>            :                  IndexTuple newitem,
+<span class="lineNum">     132 </span>            :                  bool *newitemonleft)
+<span class="lineNum">     133 </span>            : {
+<span class="lineNum">     134 </span>            :     BTPageOpaque opaque;
+<span class="lineNum">     135 </span>            :     int         leftspace,
+<span class="lineNum">     136 </span>            :                 rightspace,
+<span class="lineNum">     137 </span>            :                 olddataitemstotal,
+<span class="lineNum">     138 </span>            :                 olddataitemstoleft,
+<span class="lineNum">     139 </span>            :                 perfectpenalty,
+<span class="lineNum">     140 </span>            :                 leaffillfactor;
+<span class="lineNum">     141 </span>            :     FindSplitData state;
+<span class="lineNum">     142 </span>            :     FindSplitStrat strategy;
+<span class="lineNum">     143 </span>            :     ItemId      itemid;
+<span class="lineNum">     144 </span>            :     OffsetNumber offnum,
+<span class="lineNum">     145 </span>            :                 maxoff,
+<span class="lineNum">     146 </span>            :                 foundfirstright;
+<span class="lineNum">     147 </span>            :     double      fillfactormult;
+<span class="lineNum">     148 </span>            :     bool        usemult;
+<span class="lineNum">     149 </span>            :     SplitPoint  leftpage,
+<span class="lineNum">     150 </span>            :                 rightpage;
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineCov">       2290 :     opaque = (BTPageOpaque) PageGetSpecialPointer(page);</span>
+<span class="lineNum">     153 </span><span class="lineCov">       2290 :     maxoff = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            :     /* Total free space available on a btree page, after fixed overhead */
+<span class="lineNum">     156 </span><span class="lineCov">       2290 :     leftspace = rightspace =</span>
+<span class="lineNum">     157 </span><span class="lineCov">       2290 :         PageGetPageSize(page) - SizeOfPageHeaderData -</span>
+<span class="lineNum">     158 </span>            :         MAXALIGN(sizeof(BTPageOpaqueData));
+<span class="lineNum">     159 </span>            : 
+<span class="lineNum">     160 </span>            :     /* The right page will have the same high key as the old page */
+<span class="lineNum">     161 </span><span class="lineCov">       2290 :     if (!P_RIGHTMOST(opaque))</span>
+<span class="lineNum">     162 </span>            :     {
+<span class="lineNum">     163 </span><span class="lineCov">       1172 :         itemid = PageGetItemId(page, P_HIKEY);</span>
+<span class="lineNum">     164 </span><span class="lineCov">       1172 :         rightspace -= (int) (MAXALIGN(ItemIdGetLength(itemid)) +</span>
+<span class="lineNum">     165 </span>            :                              sizeof(ItemIdData));
+<span class="lineNum">     166 </span>            :     }
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            :     /* Count up total space in data items before actually scanning 'em */
+<span class="lineNum">     169 </span><span class="lineCov">       2290 :     olddataitemstotal = rightspace - (int) PageGetExactFreeSpace(page);</span>
+<span class="lineNum">     170 </span><span class="lineCov">       2290 :     leaffillfactor = RelationGetFillFactor(rel, BTREE_DEFAULT_FILLFACTOR);</span>
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span>            :     /* Passed-in newitemsz is MAXALIGNED but does not include line pointer */
+<span class="lineNum">     173 </span><span class="lineCov">       2290 :     newitemsz += sizeof(ItemIdData);</span>
+<span class="lineNum">     174 </span><span class="lineCov">       2290 :     state.rel = rel;</span>
+<span class="lineNum">     175 </span><span class="lineCov">       2290 :     state.page = page;</span>
+<span class="lineNum">     176 </span><span class="lineCov">       2290 :     state.newitem = newitem;</span>
+<span class="lineNum">     177 </span><span class="lineCov">       2290 :     state.newitemsz = newitemsz;</span>
+<span class="lineNum">     178 </span><span class="lineCov">       2290 :     state.is_leaf = P_ISLEAF(opaque);</span>
+<span class="lineNum">     179 </span><span class="lineCov">       2290 :     state.is_rightmost = P_RIGHTMOST(opaque);</span>
+<span class="lineNum">     180 </span><span class="lineCov">       2290 :     state.leftspace = leftspace;</span>
+<span class="lineNum">     181 </span><span class="lineCov">       2290 :     state.rightspace = rightspace;</span>
+<span class="lineNum">     182 </span><span class="lineCov">       2290 :     state.olddataitemstotal = olddataitemstotal;</span>
+<span class="lineNum">     183 </span><span class="lineCov">       2290 :     state.minfirstrightsz = SIZE_MAX;</span>
+<span class="lineNum">     184 </span><span class="lineCov">       2290 :     state.newitemoff = newitemoff;</span>
+<span class="lineNum">     185 </span>            : 
+<span class="lineNum">     186 </span>            :     /*
+<span class="lineNum">     187 </span>            :      * maxsplits should never exceed maxoff because there will be at most as
+<span class="lineNum">     188 </span>            :      * many candidate split points as there are points _between_ tuples, once
+<span class="lineNum">     189 </span>            :      * you imagine that the new item is already on the original page (the
+<span class="lineNum">     190 </span>            :      * final number of splits may be slightly lower because not all points
+<span class="lineNum">     191 </span>            :      * between tuples will be legal).
+<span class="lineNum">     192 </span>            :      */
+<span class="lineNum">     193 </span><span class="lineCov">       2290 :     state.maxsplits = maxoff;</span>
+<span class="lineNum">     194 </span><span class="lineCov">       2290 :     state.splits = palloc(sizeof(SplitPoint) * state.maxsplits);</span>
+<span class="lineNum">     195 </span><span class="lineCov">       2290 :     state.nsplits = 0;</span>
+<span class="lineNum">     196 </span>            : 
+<span class="lineNum">     197 </span>            :     /*
+<span class="lineNum">     198 </span>            :      * Scan through the data items and calculate space usage for a split at
+<span class="lineNum">     199 </span>            :      * each possible position
+<span class="lineNum">     200 </span>            :      */
+<span class="lineNum">     201 </span><span class="lineCov">       2290 :     olddataitemstoleft = 0;</span>
+<span class="lineNum">     202 </span>            : 
+<span class="lineNum">     203 </span><span class="lineCov">     723130 :     for (offnum = P_FIRSTDATAKEY(opaque);</span>
+<span class="lineNum">     204 </span>            :          offnum &lt;= maxoff;
+<span class="lineNum">     205 </span><span class="lineCov">     718550 :          offnum = OffsetNumberNext(offnum))</span>
+<span class="lineNum">     206 </span>            :     {
+<span class="lineNum">     207 </span>            :         Size        itemsz;
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineCov">     718550 :         itemid = PageGetItemId(page, offnum);</span>
+<span class="lineNum">     210 </span><span class="lineCov">     718550 :         itemsz = MAXALIGN(ItemIdGetLength(itemid)) + sizeof(ItemIdData);</span>
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span>            :         /*
+<span class="lineNum">     213 </span>            :          * When item offset number is not newitemoff, neither side of the
+<span class="lineNum">     214 </span>            :          * split can be newitem.  Record a split after the previous data item
+<span class="lineNum">     215 </span>            :          * from original page, but before the current data item from original
+<span class="lineNum">     216 </span>            :          * page. (_bt_recsplitloc() will reject the split when there are no
+<span class="lineNum">     217 </span>            :          * previous items, which we rely on.)
+<span class="lineNum">     218 </span>            :          */
+<span class="lineNum">     219 </span><span class="lineCov">     718550 :         if (offnum &lt; newitemoff)</span>
+<span class="lineNum">     220 </span><span class="lineCov">     628488 :             _bt_recsplitloc(&amp;state, offnum, false, olddataitemstoleft, itemsz);</span>
+<span class="lineNum">     221 </span><span class="lineCov">      90062 :         else if (offnum &gt; newitemoff)</span>
+<span class="lineNum">     222 </span><span class="lineCov">      88774 :             _bt_recsplitloc(&amp;state, offnum, true, olddataitemstoleft, itemsz);</span>
+<span class="lineNum">     223 </span>            :         else
+<span class="lineNum">     224 </span>            :         {
+<span class="lineNum">     225 </span>            :             /*
+<span class="lineNum">     226 </span>            :              * Record a split after all &quot;offnum &lt; newitemoff&quot; original page
+<span class="lineNum">     227 </span>            :              * data items, but before newitem
+<span class="lineNum">     228 </span>            :              */
+<span class="lineNum">     229 </span><span class="lineCov">       1288 :             _bt_recsplitloc(&amp;state, offnum, false, olddataitemstoleft, itemsz);</span>
+<span class="lineNum">     230 </span>            : 
+<span class="lineNum">     231 </span>            :             /*
+<span class="lineNum">     232 </span>            :              * Record a split after newitem, but before data item from
+<span class="lineNum">     233 </span>            :              * original page at offset newitemoff/current offset
+<span class="lineNum">     234 </span>            :              */
+<span class="lineNum">     235 </span><span class="lineCov">       1288 :             _bt_recsplitloc(&amp;state, offnum, true, olddataitemstoleft, itemsz);</span>
+<span class="lineNum">     236 </span>            :         }
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span><span class="lineCov">     718550 :         olddataitemstoleft += itemsz;</span>
+<span class="lineNum">     239 </span>            :     }
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span>            :     /*
+<span class="lineNum">     242 </span>            :      * Record a split after all original page data items, but before newitem.
+<span class="lineNum">     243 </span>            :      * (Though only when it's possible that newitem will end up alone on new
+<span class="lineNum">     244 </span>            :      * right page.)
+<span class="lineNum">     245 </span>            :      */
+<span class="lineNum">     246 </span><span class="lineCov">       2290 :     Assert(olddataitemstoleft == olddataitemstotal);</span>
+<span class="lineNum">     247 </span><span class="lineCov">       2290 :     if (newitemoff &gt; maxoff)</span>
+<span class="lineNum">     248 </span><span class="lineCov">       1002 :         _bt_recsplitloc(&amp;state, newitemoff, false, olddataitemstotal, 0);</span>
+<span class="lineNum">     249 </span>            : 
+<span class="lineNum">     250 </span>            :     /*
+<span class="lineNum">     251 </span>            :      * I believe it is not possible to fail to find a feasible split, but just
+<span class="lineNum">     252 </span>            :      * in case ...
+<span class="lineNum">     253 </span>            :      */
+<span class="lineNum">     254 </span><span class="lineCov">       2290 :     if (state.nsplits == 0)</span>
+<span class="lineNum">     255 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;could not find a feasible split point for index \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">     256 </span>            :              RelationGetRelationName(rel));
+<span class="lineNum">     257 </span>            : 
+<span class="lineNum">     258 </span>            :     /*
+<span class="lineNum">     259 </span>            :      * Start search for a split point among list of legal split points.  Give
+<span class="lineNum">     260 </span>            :      * primary consideration to equalizing available free space in each half
+<span class="lineNum">     261 </span>            :      * of the split initially (start with default strategy), while applying
+<span class="lineNum">     262 </span>            :      * rightmost and split-after-new-item optimizations where appropriate.
+<span class="lineNum">     263 </span>            :      * Either of the two other fallback strategies may be required for cases
+<span class="lineNum">     264 </span>            :      * with a large number of duplicates around the original/space-optimal
+<span class="lineNum">     265 </span>            :      * split point.
+<span class="lineNum">     266 </span>            :      *
+<span class="lineNum">     267 </span>            :      * Default strategy gives some weight to suffix truncation in deciding a
+<span class="lineNum">     268 </span>            :      * split point on leaf pages.  It attempts to select a split point where a
+<span class="lineNum">     269 </span>            :      * distinguishing attribute appears earlier in the new high key for the
+<span class="lineNum">     270 </span>            :      * left side of the split, in order to maximize the number of trailing
+<span class="lineNum">     271 </span>            :      * attributes that can be truncated away.  Only candidate split points
+<span class="lineNum">     272 </span>            :      * that imply an acceptable balance of free space on each side are
+<span class="lineNum">     273 </span>            :      * considered.
+<span class="lineNum">     274 </span>            :      */
+<span class="lineNum">     275 </span><span class="lineCov">       2290 :     if (!state.is_leaf)</span>
+<span class="lineNum">     276 </span>            :     {
+<span class="lineNum">     277 </span>            :         /* fillfactormult only used on rightmost page */
+<span class="lineNum">     278 </span><span class="lineCov">          2 :         usemult = state.is_rightmost;</span>
+<span class="lineNum">     279 </span><span class="lineCov">          2 :         fillfactormult = BTREE_NONLEAF_FILLFACTOR / 100.0;</span>
+<span class="lineNum">     280 </span>            :     }
+<span class="lineNum">     281 </span><span class="lineCov">       2288 :     else if (state.is_rightmost)</span>
+<span class="lineNum">     282 </span>            :     {
+<span class="lineNum">     283 </span>            :         /* Rightmost leaf page --  fillfactormult always used */
+<span class="lineNum">     284 </span><span class="lineCov">       1116 :         usemult = true;</span>
+<span class="lineNum">     285 </span><span class="lineCov">       1116 :         fillfactormult = leaffillfactor / 100.0;</span>
+<span class="lineNum">     286 </span>            :     }
+<span class="lineNum">     287 </span><span class="lineCov">       1172 :     else if (_bt_afternewitemoff(&amp;state, maxoff, leaffillfactor, &amp;usemult))</span>
+<span class="lineNum">     288 </span>            :     {
+<span class="lineNum">     289 </span>            :         /*
+<span class="lineNum">     290 </span>            :          * New item inserted at rightmost point among a localized grouping on
+<span class="lineNum">     291 </span>            :          * a leaf page -- apply &quot;split after new item&quot; optimization, either by
+<span class="lineNum">     292 </span>            :          * applying leaf fillfactor multiplier, or by choosing the exact split
+<span class="lineNum">     293 </span>            :          * point that leaves the new item as last on the left. (usemult is set
+<span class="lineNum">     294 </span>            :          * for us.)
+<span class="lineNum">     295 </span>            :          */
+<span class="lineNum">     296 </span><span class="lineCov">        382 :         if (usemult)</span>
+<span class="lineNum">     297 </span>            :         {
+<span class="lineNum">     298 </span>            :             /* fillfactormult should be set based on leaf fillfactor */
+<span class="lineNum">     299 </span><span class="lineCov">        326 :             fillfactormult = leaffillfactor / 100.0;</span>
+<span class="lineNum">     300 </span>            :         }
+<span class="lineNum">     301 </span>            :         else
+<span class="lineNum">     302 </span>            :         {
+<span class="lineNum">     303 </span>            :             /* find precise split point after newitemoff */
+<span class="lineNum">     304 </span><span class="lineCov">       9194 :             for (int i = 0; i &lt; state.nsplits; i++)</span>
+<span class="lineNum">     305 </span>            :             {
+<span class="lineNum">     306 </span><span class="lineCov">       9194 :                 SplitPoint *split = state.splits + i;</span>
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span><span class="lineCov">       9250 :                 if (split-&gt;newitemonleft &amp;&amp;</span>
+<span class="lineNum">     309 </span><span class="lineCov">         56 :                     newitemoff == split-&gt;firstoldonright)</span>
+<span class="lineNum">     310 </span>            :                 {
+<span class="lineNum">     311 </span><span class="lineCov">         56 :                     pfree(state.splits);</span>
+<span class="lineNum">     312 </span><span class="lineCov">         56 :                     *newitemonleft = true;</span>
+<span class="lineNum">     313 </span><span class="lineCov">         56 :                     return newitemoff;</span>
+<span class="lineNum">     314 </span>            :                 }
+<span class="lineNum">     315 </span>            :             }
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            :             /*
+<span class="lineNum">     318 </span>            :              * Cannot legally split after newitemoff; proceed with split
+<span class="lineNum">     319 </span>            :              * without using fillfactor multiplier.  This is defensive, and
+<span class="lineNum">     320 </span>            :              * should never be needed in practice.
+<span class="lineNum">     321 </span>            :              */
+<span class="lineNum">     322 </span><span class="lineNoCov">          0 :             fillfactormult = 0.50;</span>
+<span class="lineNum">     323 </span>            :         }
+<span class="lineNum">     324 </span>            :     }
+<span class="lineNum">     325 </span>            :     else
+<span class="lineNum">     326 </span>            :     {
+<span class="lineNum">     327 </span>            :         /* Other leaf page.  50:50 page split. */
+<span class="lineNum">     328 </span><span class="lineCov">        790 :         usemult = false;</span>
+<span class="lineNum">     329 </span>            :         /* fillfactormult not used, but be tidy */
+<span class="lineNum">     330 </span><span class="lineCov">        790 :         fillfactormult = 0.50;</span>
+<span class="lineNum">     331 </span>            :     }
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span>            :     /*
+<span class="lineNum">     334 </span>            :      * Set an initial limit on the split interval/number of candidate split
+<span class="lineNum">     335 </span>            :      * points as appropriate.  The &quot;Prefix B-Trees&quot; paper refers to this as
+<span class="lineNum">     336 </span>            :      * sigma l for leaf splits and sigma b for internal (&quot;branch&quot;) splits.
+<span class="lineNum">     337 </span>            :      * It's hard to provide a theoretical justification for the initial size
+<span class="lineNum">     338 </span>            :      * of the split interval, though it's clear that a small split interval
+<span class="lineNum">     339 </span>            :      * makes suffix truncation much more effective without noticeably
+<span class="lineNum">     340 </span>            :      * affecting space utilization over time.
+<span class="lineNum">     341 </span>            :      */
+<span class="lineNum">     342 </span><span class="lineCov">       2234 :     state.interval = Min(Max(1, state.nsplits * 0.05),</span>
+<span class="lineNum">     343 </span>            :                          state.is_leaf ? MAX_LEAF_INTERVAL :
+<span class="lineNum">     344 </span>            :                          MAX_INTERNAL_INTERVAL);
+<span class="lineNum">     345 </span>            : 
+<span class="lineNum">     346 </span>            :     /*
+<span class="lineNum">     347 </span>            :      * Save leftmost and rightmost splits for page before original ordinal
+<span class="lineNum">     348 </span>            :      * sort order is lost by delta/fillfactormult sort
+<span class="lineNum">     349 </span>            :      */
+<span class="lineNum">     350 </span><span class="lineCov">       2234 :     leftpage = state.splits[0];</span>
+<span class="lineNum">     351 </span><span class="lineCov">       2234 :     rightpage = state.splits[state.nsplits - 1];</span>
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span>            :     /* Give split points a fillfactormult-wise delta, and sort on deltas */
+<span class="lineNum">     354 </span><span class="lineCov">       2234 :     _bt_deltasortsplits(&amp;state, fillfactormult, usemult);</span>
+<span class="lineNum">     355 </span>            : 
+<span class="lineNum">     356 </span>            :     /*
+<span class="lineNum">     357 </span>            :      * Determine if default strategy/split interval will produce a
+<span class="lineNum">     358 </span>            :      * sufficiently distinguishing split, or if we should change strategies.
+<span class="lineNum">     359 </span>            :      * Alternative strategies change the range of split points that are
+<span class="lineNum">     360 </span>            :      * considered acceptable (split interval), and possibly change
+<span class="lineNum">     361 </span>            :      * fillfactormult, in order to deal with pages with a large number of
+<span class="lineNum">     362 </span>            :      * duplicates gracefully.
+<span class="lineNum">     363 </span>            :      *
+<span class="lineNum">     364 </span>            :      * Pass low and high splits for the entire page (actually, they're for an
+<span class="lineNum">     365 </span>            :      * imaginary version of the page that includes newitem).  These are used
+<span class="lineNum">     366 </span>            :      * when the initial split interval encloses split points that are full of
+<span class="lineNum">     367 </span>            :      * duplicates, and we need to consider if it's even possible to avoid
+<span class="lineNum">     368 </span>            :      * appending a heap TID.
+<span class="lineNum">     369 </span>            :      */
+<span class="lineNum">     370 </span><span class="lineCov">       2234 :     perfectpenalty = _bt_strategy(&amp;state, &amp;leftpage, &amp;rightpage, &amp;strategy);</span>
+<span class="lineNum">     371 </span>            : 
+<span class="lineNum">     372 </span><span class="lineCov">       2234 :     if (strategy == SPLIT_DEFAULT)</span>
+<span class="lineNum">     373 </span>            :     {
+<span class="lineNum">     374 </span>            :         /*
+<span class="lineNum">     375 </span>            :          * Default strategy worked out (always works out with internal page).
+<span class="lineNum">     376 </span>            :          * Original split interval still stands.
+<span class="lineNum">     377 </span>            :          */
+<span class="lineNum">     378 </span>            :     }
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span>            :     /*
+<span class="lineNum">     381 </span>            :      * Many duplicates strategy is used when a heap TID would otherwise be
+<span class="lineNum">     382 </span>            :      * appended, but the page isn't completely full of logical duplicates.
+<span class="lineNum">     383 </span>            :      *
+<span class="lineNum">     384 </span>            :      * The split interval is widened to include all legal candidate split
+<span class="lineNum">     385 </span>            :      * points.  There might be a few as two distinct values in the whole-page
+<span class="lineNum">     386 </span>            :      * split interval, though it's also possible that most of the values on
+<span class="lineNum">     387 </span>            :      * the page are unique.  The final split point will either be to the
+<span class="lineNum">     388 </span>            :      * immediate left or to the immediate right of the group of duplicate
+<span class="lineNum">     389 </span>            :      * tuples that enclose the first/delta-optimal split point (perfect
+<span class="lineNum">     390 </span>            :      * penalty was set so that the lowest delta split point that avoids
+<span class="lineNum">     391 </span>            :      * appending a heap TID will be chosen).  Maximizing the number of
+<span class="lineNum">     392 </span>            :      * attributes that can be truncated away is not a goal of the many
+<span class="lineNum">     393 </span>            :      * duplicates strategy.
+<span class="lineNum">     394 </span>            :      *
+<span class="lineNum">     395 </span>            :      * Single value strategy is used when it is impossible to avoid appending
+<span class="lineNum">     396 </span>            :      * a heap TID.  It arranges to leave the left page very full.  This
+<span class="lineNum">     397 </span>            :      * maximizes space utilization in cases where tuples with the same
+<span class="lineNum">     398 </span>            :      * attribute values span many pages.  Newly inserted duplicates will tend
+<span class="lineNum">     399 </span>            :      * to have higher heap TID values, so we'll end up splitting to the right
+<span class="lineNum">     400 </span>            :      * consistently.  (Single value strategy is harmless though not
+<span class="lineNum">     401 </span>            :      * particularly useful with !heapkeyspace indexes.)
+<span class="lineNum">     402 </span>            :      */
+<span class="lineNum">     403 </span><span class="lineCov">        146 :     else if (strategy == SPLIT_MANY_DUPLICATES)</span>
+<span class="lineNum">     404 </span>            :     {
+<span class="lineNum">     405 </span><span class="lineCov">         80 :         Assert(state.is_leaf);</span>
+<span class="lineNum">     406 </span>            :         /* Shouldn't try to truncate away extra user attributes */
+<span class="lineNum">     407 </span><span class="lineCov">         80 :         Assert(perfectpenalty ==</span>
+<span class="lineNum">     408 </span>            :                IndexRelationGetNumberOfKeyAttributes(state.rel));
+<span class="lineNum">     409 </span>            :         /* No need to resort splits -- no change in fillfactormult/deltas */
+<span class="lineNum">     410 </span><span class="lineCov">         80 :         state.interval = state.nsplits;</span>
+<span class="lineNum">     411 </span>            :     }
+<span class="lineNum">     412 </span><span class="lineCov">         66 :     else if (strategy == SPLIT_SINGLE_VALUE)</span>
+<span class="lineNum">     413 </span>            :     {
+<span class="lineNum">     414 </span><span class="lineCov">         66 :         Assert(state.is_leaf);</span>
+<span class="lineNum">     415 </span>            :         /* Split near the end of the page */
+<span class="lineNum">     416 </span><span class="lineCov">         66 :         usemult = true;</span>
+<span class="lineNum">     417 </span><span class="lineCov">         66 :         fillfactormult = BTREE_SINGLEVAL_FILLFACTOR / 100.0;</span>
+<span class="lineNum">     418 </span>            :         /* Resort split points with new delta */
+<span class="lineNum">     419 </span><span class="lineCov">         66 :         _bt_deltasortsplits(&amp;state, fillfactormult, usemult);</span>
+<span class="lineNum">     420 </span>            :         /* Appending a heap TID is unavoidable, so interval of 1 is fine */
+<span class="lineNum">     421 </span><span class="lineCov">         66 :         state.interval = 1;</span>
+<span class="lineNum">     422 </span>            :     }
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span>            :     /*
+<span class="lineNum">     425 </span>            :      * Search among acceptable split points (using final split interval) for
+<span class="lineNum">     426 </span>            :      * the entry that has the lowest penalty, and is therefore expected to
+<span class="lineNum">     427 </span>            :      * maximize fan-out.  Sets *newitemonleft for us.
+<span class="lineNum">     428 </span>            :      */
+<span class="lineNum">     429 </span><span class="lineCov">       2234 :     foundfirstright = _bt_bestsplitloc(&amp;state, perfectpenalty, newitemonleft,</span>
+<span class="lineNum">     430 </span>            :                                        strategy);
+<span class="lineNum">     431 </span><span class="lineCov">       2234 :     pfree(state.splits);</span>
+<span class="lineNum">     432 </span>            : 
+<span class="lineNum">     433 </span><span class="lineCov">       2234 :     return foundfirstright;</span>
+<span class="lineNum">     434 </span>            : }
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span>            : /*
+<span class="lineNum">     437 </span>            :  * Subroutine to record a particular point between two tuples (possibly the
+<span class="lineNum">     438 </span>            :  * new item) on page (ie, combination of firstright and newitemonleft
+<span class="lineNum">     439 </span>            :  * settings) in *state for later analysis.  This is also a convenient point
+<span class="lineNum">     440 </span>            :  * to check if the split is legal (if it isn't, it won't be recorded).
+<span class="lineNum">     441 </span>            :  *
+<span class="lineNum">     442 </span>            :  * firstoldonright is the offset of the first item on the original page that
+<span class="lineNum">     443 </span>            :  * goes to the right page, and firstoldonrightsz is the size of that tuple.
+<span class="lineNum">     444 </span>            :  * firstoldonright can be &gt; max offset, which means that all the old items go
+<span class="lineNum">     445 </span>            :  * to the left page and only the new item goes to the right page.  In that
+<span class="lineNum">     446 </span>            :  * case, firstoldonrightsz is not used.
+<span class="lineNum">     447 </span>            :  *
+<span class="lineNum">     448 </span>            :  * olddataitemstoleft is the total size of all old items to the left of the
+<span class="lineNum">     449 </span>            :  * split point that is recorded here when legal.  Should not include
+<span class="lineNum">     450 </span>            :  * newitemsz, since that is handled here.
+<a name="451"><span class="lineNum">     451 </span>            :  */</a>
+<span class="lineNum">     452 </span>            : static void
+<span class="lineNum">     453 </span><span class="lineCov">     720840 : _bt_recsplitloc(FindSplitData *state,</span>
+<span class="lineNum">     454 </span>            :                 OffsetNumber firstoldonright,
+<span class="lineNum">     455 </span>            :                 bool newitemonleft,
+<span class="lineNum">     456 </span>            :                 int olddataitemstoleft,
+<span class="lineNum">     457 </span>            :                 Size firstoldonrightsz)
+<span class="lineNum">     458 </span>            : {
+<span class="lineNum">     459 </span>            :     int16       leftfree,
+<span class="lineNum">     460 </span>            :                 rightfree;
+<span class="lineNum">     461 </span>            :     Size        firstrightitemsz;
+<span class="lineNum">     462 </span>            :     bool        newitemisfirstonright;
+<span class="lineNum">     463 </span>            : 
+<span class="lineNum">     464 </span>            :     /* Is the new item going to be the first item on the right page? */
+<span class="lineNum">     465 </span><span class="lineCov">    1441680 :     newitemisfirstonright = (firstoldonright == state-&gt;newitemoff</span>
+<span class="lineNum">     466 </span><span class="lineCov">     720840 :                              &amp;&amp; !newitemonleft);</span>
+<span class="lineNum">     467 </span>            : 
+<span class="lineNum">     468 </span><span class="lineCov">     720840 :     if (newitemisfirstonright)</span>
+<span class="lineNum">     469 </span><span class="lineCov">       2290 :         firstrightitemsz = state-&gt;newitemsz;</span>
+<span class="lineNum">     470 </span>            :     else
+<span class="lineNum">     471 </span><span class="lineCov">     718550 :         firstrightitemsz = firstoldonrightsz;</span>
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span>            :     /* Account for all the old tuples */
+<span class="lineNum">     474 </span><span class="lineCov">     720840 :     leftfree = state-&gt;leftspace - olddataitemstoleft;</span>
+<span class="lineNum">     475 </span><span class="lineCov">    1441680 :     rightfree = state-&gt;rightspace -</span>
+<span class="lineNum">     476 </span><span class="lineCov">     720840 :         (state-&gt;olddataitemstotal - olddataitemstoleft);</span>
+<span class="lineNum">     477 </span>            : 
+<span class="lineNum">     478 </span>            :     /*
+<span class="lineNum">     479 </span>            :      * The first item on the right page becomes the high key of the left page;
+<span class="lineNum">     480 </span>            :      * therefore it counts against left space as well as right space (we
+<span class="lineNum">     481 </span>            :      * cannot assume that suffix truncation will make it any smaller).  When
+<span class="lineNum">     482 </span>            :      * index has included attributes, then those attributes of left page high
+<span class="lineNum">     483 </span>            :      * key will be truncated leaving that page with slightly more free space.
+<span class="lineNum">     484 </span>            :      * However, that shouldn't affect our ability to find valid split
+<span class="lineNum">     485 </span>            :      * location, since we err in the direction of being pessimistic about free
+<span class="lineNum">     486 </span>            :      * space on the left half.  Besides, even when suffix truncation of
+<span class="lineNum">     487 </span>            :      * non-TID attributes occurs, the new high key often won't even be a
+<span class="lineNum">     488 </span>            :      * single MAXALIGN() quantum smaller than the firstright tuple it's based
+<span class="lineNum">     489 </span>            :      * on.
+<span class="lineNum">     490 </span>            :      *
+<span class="lineNum">     491 </span>            :      * If we are on the leaf level, assume that suffix truncation cannot avoid
+<span class="lineNum">     492 </span>            :      * adding a heap TID to the left half's new high key when splitting at the
+<span class="lineNum">     493 </span>            :      * leaf level.  In practice the new high key will often be smaller and
+<span class="lineNum">     494 </span>            :      * will rarely be larger, but conservatively assume the worst case.
+<span class="lineNum">     495 </span>            :      */
+<span class="lineNum">     496 </span><span class="lineCov">     720840 :     if (state-&gt;is_leaf)</span>
+<span class="lineNum">     497 </span><span class="lineCov">     720778 :         leftfree -= (int16) (firstrightitemsz +</span>
+<span class="lineNum">     498 </span>            :                              MAXALIGN(sizeof(ItemPointerData)));
+<span class="lineNum">     499 </span>            :     else
+<span class="lineNum">     500 </span><span class="lineCov">         62 :         leftfree -= (int16) firstrightitemsz;</span>
+<span class="lineNum">     501 </span>            : 
+<span class="lineNum">     502 </span>            :     /* account for the new item */
+<span class="lineNum">     503 </span><span class="lineCov">     720840 :     if (newitemonleft)</span>
+<span class="lineNum">     504 </span><span class="lineCov">      90062 :         leftfree -= (int16) state-&gt;newitemsz;</span>
+<span class="lineNum">     505 </span>            :     else
+<span class="lineNum">     506 </span><span class="lineCov">     630778 :         rightfree -= (int16) state-&gt;newitemsz;</span>
+<span class="lineNum">     507 </span>            : 
+<span class="lineNum">     508 </span>            :     /*
+<span class="lineNum">     509 </span>            :      * If we are not on the leaf level, we will be able to discard the key
+<span class="lineNum">     510 </span>            :      * data from the first item that winds up on the right page.
+<span class="lineNum">     511 </span>            :      */
+<span class="lineNum">     512 </span><span class="lineCov">     720840 :     if (!state-&gt;is_leaf)</span>
+<span class="lineNum">     513 </span><span class="lineCov">         62 :         rightfree += (int16) firstrightitemsz -</span>
+<span class="lineNum">     514 </span>            :             (int16) (MAXALIGN(sizeof(IndexTupleData)) + sizeof(ItemIdData));
+<span class="lineNum">     515 </span>            : 
+<span class="lineNum">     516 </span>            :     /* Record split if legal */
+<span class="lineNum">     517 </span><span class="lineCov">     720840 :     if (leftfree &gt;= 0 &amp;&amp; rightfree &gt;= 0)</span>
+<span class="lineNum">     518 </span>            :     {
+<span class="lineNum">     519 </span><span class="lineCov">     716360 :         Assert(state-&gt;nsplits &lt; state-&gt;maxsplits);</span>
+<span class="lineNum">     520 </span>            : 
+<span class="lineNum">     521 </span>            :         /* Determine smallest firstright item size on page */
+<span class="lineNum">     522 </span><span class="lineCov">     716360 :         state-&gt;minfirstrightsz = Min(state-&gt;minfirstrightsz, firstrightitemsz);</span>
+<span class="lineNum">     523 </span>            : 
+<span class="lineNum">     524 </span><span class="lineCov">     716360 :         state-&gt;splits[state-&gt;nsplits].curdelta = 0;</span>
+<span class="lineNum">     525 </span><span class="lineCov">     716360 :         state-&gt;splits[state-&gt;nsplits].leftfree = leftfree;</span>
+<span class="lineNum">     526 </span><span class="lineCov">     716360 :         state-&gt;splits[state-&gt;nsplits].rightfree = rightfree;</span>
+<span class="lineNum">     527 </span><span class="lineCov">     716360 :         state-&gt;splits[state-&gt;nsplits].firstoldonright = firstoldonright;</span>
+<span class="lineNum">     528 </span><span class="lineCov">     716360 :         state-&gt;splits[state-&gt;nsplits].newitemonleft = newitemonleft;</span>
+<span class="lineNum">     529 </span><span class="lineCov">     716360 :         state-&gt;nsplits++;</span>
+<span class="lineNum">     530 </span>            :     }
+<span class="lineNum">     531 </span><span class="lineCov">     720840 : }</span>
+<span class="lineNum">     532 </span>            : 
+<span class="lineNum">     533 </span>            : /*
+<span class="lineNum">     534 </span>            :  * Subroutine to assign space deltas to materialized array of candidate split
+<span class="lineNum">     535 </span>            :  * points based on current fillfactor, and to sort array using that fillfactor
+<a name="536"><span class="lineNum">     536 </span>            :  */</a>
+<span class="lineNum">     537 </span>            : static void
+<span class="lineNum">     538 </span><span class="lineCov">       2300 : _bt_deltasortsplits(FindSplitData *state, double fillfactormult,</span>
+<span class="lineNum">     539 </span>            :                     bool usemult)
+<span class="lineNum">     540 </span>            : {
+<span class="lineNum">     541 </span><span class="lineCov">     722486 :     for (int i = 0; i &lt; state-&gt;nsplits; i++)</span>
+<span class="lineNum">     542 </span>            :     {
+<span class="lineNum">     543 </span><span class="lineCov">     720186 :         SplitPoint *split = state-&gt;splits + i;</span>
+<span class="lineNum">     544 </span>            :         int16       delta;
+<span class="lineNum">     545 </span>            : 
+<span class="lineNum">     546 </span><span class="lineCov">     720186 :         if (usemult)</span>
+<span class="lineNum">     547 </span><span class="lineCov">     973776 :             delta = fillfactormult * split-&gt;leftfree -</span>
+<span class="lineNum">     548 </span><span class="lineCov">     486888 :                 (1.0 - fillfactormult) * split-&gt;rightfree;</span>
+<span class="lineNum">     549 </span>            :         else
+<span class="lineNum">     550 </span><span class="lineCov">     233298 :             delta = split-&gt;leftfree - split-&gt;rightfree;</span>
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span><span class="lineCov">     720186 :         if (delta &lt; 0)</span>
+<span class="lineNum">     553 </span><span class="lineCov">     165820 :             delta = -delta;</span>
+<span class="lineNum">     554 </span>            : 
+<span class="lineNum">     555 </span>            :         /* Save delta */
+<span class="lineNum">     556 </span><span class="lineCov">     720186 :         split-&gt;curdelta = delta;</span>
+<span class="lineNum">     557 </span>            :     }
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span><span class="lineCov">       2300 :     qsort(state-&gt;splits, state-&gt;nsplits, sizeof(SplitPoint), _bt_splitcmp);</span>
+<span class="lineNum">     560 </span><span class="lineCov">       2300 : }</span>
+<span class="lineNum">     561 </span>            : 
+<span class="lineNum">     562 </span>            : /*
+<span class="lineNum">     563 </span>            :  * qsort-style comparator used by _bt_deltasortsplits()
+<a name="564"><span class="lineNum">     564 </span>            :  */</a>
+<span class="lineNum">     565 </span>            : static int
+<span class="lineNum">     566 </span><span class="lineCov">    7895548 : _bt_splitcmp(const void *arg1, const void *arg2)</span>
+<span class="lineNum">     567 </span>            : {
+<span class="lineNum">     568 </span><span class="lineCov">    7895548 :     SplitPoint *split1 = (SplitPoint *) arg1;</span>
+<span class="lineNum">     569 </span><span class="lineCov">    7895548 :     SplitPoint *split2 = (SplitPoint *) arg2;</span>
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span><span class="lineCov">    7895548 :     if (split1-&gt;curdelta &gt; split2-&gt;curdelta)</span>
+<span class="lineNum">     572 </span><span class="lineCov">    2965448 :         return 1;</span>
+<span class="lineNum">     573 </span><span class="lineCov">    4930100 :     if (split1-&gt;curdelta &lt; split2-&gt;curdelta)</span>
+<span class="lineNum">     574 </span><span class="lineCov">    4922042 :         return -1;</span>
+<span class="lineNum">     575 </span>            : 
+<span class="lineNum">     576 </span><span class="lineCov">       8058 :     return 0;</span>
+<span class="lineNum">     577 </span>            : }
+<span class="lineNum">     578 </span>            : 
+<span class="lineNum">     579 </span>            : /*
+<span class="lineNum">     580 </span>            :  * Subroutine to determine whether or not a non-rightmost leaf page should be
+<span class="lineNum">     581 </span>            :  * split immediately after the would-be original page offset for the
+<span class="lineNum">     582 </span>            :  * new/incoming tuple (or should have leaf fillfactor applied when new item is
+<span class="lineNum">     583 </span>            :  * to the right on original page).  This is appropriate when there is a
+<span class="lineNum">     584 </span>            :  * pattern of localized monotonically increasing insertions into a composite
+<span class="lineNum">     585 </span>            :  * index, where leading attribute values form local groupings, and we
+<span class="lineNum">     586 </span>            :  * anticipate further insertions of the same/current grouping (new item's
+<span class="lineNum">     587 </span>            :  * grouping) in the near future.  This can be thought of as a variation on
+<span class="lineNum">     588 </span>            :  * applying leaf fillfactor during rightmost leaf page splits, since cases
+<span class="lineNum">     589 </span>            :  * that benefit will converge on packing leaf pages leaffillfactor% full over
+<span class="lineNum">     590 </span>            :  * time.
+<span class="lineNum">     591 </span>            :  *
+<span class="lineNum">     592 </span>            :  * We may leave extra free space remaining on the rightmost page of a &quot;most
+<span class="lineNum">     593 </span>            :  * significant column&quot; grouping of tuples if that grouping never ends up
+<span class="lineNum">     594 </span>            :  * having future insertions that use the free space.  That effect is
+<span class="lineNum">     595 </span>            :  * self-limiting; a future grouping that becomes the &quot;nearest on the right&quot;
+<span class="lineNum">     596 </span>            :  * grouping of the affected grouping usually puts the extra free space to good
+<span class="lineNum">     597 </span>            :  * use.
+<span class="lineNum">     598 </span>            :  *
+<span class="lineNum">     599 </span>            :  * Caller uses optimization when routine returns true, though the exact action
+<span class="lineNum">     600 </span>            :  * taken by caller varies.  Caller uses original leaf page fillfactor in
+<span class="lineNum">     601 </span>            :  * standard way rather than using the new item offset directly when *usemult
+<span class="lineNum">     602 </span>            :  * was also set to true here.  Otherwise, caller applies optimization by
+<span class="lineNum">     603 </span>            :  * locating the legal split point that makes the new tuple the very last tuple
+<span class="lineNum">     604 </span>            :  * on the left side of the split.
+<a name="605"><span class="lineNum">     605 </span>            :  */</a>
+<span class="lineNum">     606 </span>            : static bool
+<span class="lineNum">     607 </span><span class="lineCov">       1172 : _bt_afternewitemoff(FindSplitData *state, OffsetNumber maxoff,</span>
+<span class="lineNum">     608 </span>            :                     int leaffillfactor, bool *usemult)
+<span class="lineNum">     609 </span>            : {
+<span class="lineNum">     610 </span>            :     int16       nkeyatts;
+<span class="lineNum">     611 </span>            :     ItemId      itemid;
+<span class="lineNum">     612 </span>            :     IndexTuple  tup;
+<span class="lineNum">     613 </span>            :     int         keepnatts;
+<span class="lineNum">     614 </span>            : 
+<span class="lineNum">     615 </span><span class="lineCov">       1172 :     Assert(state-&gt;is_leaf &amp;&amp; !state-&gt;is_rightmost);</span>
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span><span class="lineCov">       1172 :     nkeyatts = IndexRelationGetNumberOfKeyAttributes(state-&gt;rel);</span>
+<span class="lineNum">     618 </span>            : 
+<span class="lineNum">     619 </span>            :     /* Single key indexes not considered here */
+<span class="lineNum">     620 </span><span class="lineCov">       1172 :     if (nkeyatts == 1)</span>
+<span class="lineNum">     621 </span><span class="lineCov">         90 :         return false;</span>
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span>            :     /* Ascending insertion pattern never inferred when new item is first */
+<span class="lineNum">     624 </span><span class="lineCov">       1082 :     if (state-&gt;newitemoff == P_FIRSTKEY)</span>
+<span class="lineNum">     625 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     626 </span>            : 
+<span class="lineNum">     627 </span>            :     /*
+<span class="lineNum">     628 </span>            :      * Only apply optimization on pages with equisized tuples, since ordinal
+<span class="lineNum">     629 </span>            :      * keys are likely to be fixed-width.  Testing if the new tuple is
+<span class="lineNum">     630 </span>            :      * variable width directly might also work, but that fails to apply the
+<span class="lineNum">     631 </span>            :      * optimization to indexes with a numeric_ops attribute.
+<span class="lineNum">     632 </span>            :      *
+<span class="lineNum">     633 </span>            :      * Conclude that page has equisized tuples when the new item is the same
+<span class="lineNum">     634 </span>            :      * width as the smallest item observed during pass over page, and other
+<span class="lineNum">     635 </span>            :      * non-pivot tuples must be the same width as well.  (Note that the
+<span class="lineNum">     636 </span>            :      * possibly-truncated existing high key isn't counted in
+<span class="lineNum">     637 </span>            :      * olddataitemstotal, and must be subtracted from maxoff.)
+<span class="lineNum">     638 </span>            :      */
+<span class="lineNum">     639 </span><span class="lineCov">       1082 :     if (state-&gt;newitemsz != state-&gt;minfirstrightsz)</span>
+<span class="lineNum">     640 </span><span class="lineCov">        202 :         return false;</span>
+<span class="lineNum">     641 </span><span class="lineCov">        880 :     if (state-&gt;newitemsz * (maxoff - 1) != state-&gt;olddataitemstotal)</span>
+<span class="lineNum">     642 </span><span class="lineCov">         18 :         return false;</span>
+<span class="lineNum">     643 </span>            : 
+<span class="lineNum">     644 </span>            :     /*
+<span class="lineNum">     645 </span>            :      * Avoid applying optimization when tuples are wider than a tuple
+<span class="lineNum">     646 </span>            :      * consisting of two non-NULL int8/int64 attributes (or four non-NULL
+<span class="lineNum">     647 </span>            :      * int4/int32 attributes)
+<span class="lineNum">     648 </span>            :      */
+<span class="lineNum">     649 </span><span class="lineCov">        862 :     if (state-&gt;newitemsz &gt;</span>
+<span class="lineNum">     650 </span>            :         MAXALIGN(sizeof(IndexTupleData) + sizeof(int64) * 2) +
+<span class="lineNum">     651 </span>            :         sizeof(ItemIdData))
+<span class="lineNum">     652 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     653 </span>            : 
+<span class="lineNum">     654 </span>            :     /*
+<span class="lineNum">     655 </span>            :      * At least the first attribute's value must be equal to the corresponding
+<span class="lineNum">     656 </span>            :      * value in previous tuple to apply optimization.  New item cannot be a
+<span class="lineNum">     657 </span>            :      * duplicate, either.
+<span class="lineNum">     658 </span>            :      *
+<span class="lineNum">     659 </span>            :      * Handle case where new item is to the right of all items on the existing
+<span class="lineNum">     660 </span>            :      * page.  This is suggestive of monotonically increasing insertions in
+<span class="lineNum">     661 </span>            :      * itself, so the &quot;heap TID adjacency&quot; test is not applied here.
+<span class="lineNum">     662 </span>            :      */
+<span class="lineNum">     663 </span><span class="lineCov">        862 :     if (state-&gt;newitemoff &gt; maxoff)</span>
+<span class="lineNum">     664 </span>            :     {
+<span class="lineNum">     665 </span><span class="lineCov">        338 :         itemid = PageGetItemId(state-&gt;page, maxoff);</span>
+<span class="lineNum">     666 </span><span class="lineCov">        338 :         tup = (IndexTuple) PageGetItem(state-&gt;page, itemid);</span>
+<span class="lineNum">     667 </span><span class="lineCov">        338 :         keepnatts = _bt_keep_natts_fast(state-&gt;rel, tup, state-&gt;newitem);</span>
+<span class="lineNum">     668 </span>            : 
+<span class="lineNum">     669 </span><span class="lineCov">        338 :         if (keepnatts &gt; 1 &amp;&amp; keepnatts &lt;= nkeyatts)</span>
+<span class="lineNum">     670 </span>            :         {
+<span class="lineNum">     671 </span><span class="lineCov">        246 :             *usemult = true;</span>
+<span class="lineNum">     672 </span><span class="lineCov">        246 :             return true;</span>
+<span class="lineNum">     673 </span>            :         }
+<span class="lineNum">     674 </span>            : 
+<span class="lineNum">     675 </span><span class="lineCov">         92 :         return false;</span>
+<span class="lineNum">     676 </span>            :     }
+<span class="lineNum">     677 </span>            : 
+<span class="lineNum">     678 </span>            :     /*
+<span class="lineNum">     679 </span>            :      * &quot;Low cardinality leading column, high cardinality suffix column&quot;
+<span class="lineNum">     680 </span>            :      * indexes with a random insertion pattern (e.g., an index with a boolean
+<span class="lineNum">     681 </span>            :      * column, such as an index on '(book_is_in_print, book_isbn)') present us
+<span class="lineNum">     682 </span>            :      * with a risk of consistently misapplying the optimization.  We're
+<span class="lineNum">     683 </span>            :      * willing to accept very occasional misapplication of the optimization,
+<span class="lineNum">     684 </span>            :      * provided the cases where we get it wrong are rare and self-limiting.
+<span class="lineNum">     685 </span>            :      *
+<span class="lineNum">     686 </span>            :      * Heap TID adjacency strongly suggests that the item just to the left was
+<span class="lineNum">     687 </span>            :      * inserted very recently, which limits overapplication of the
+<span class="lineNum">     688 </span>            :      * optimization.  Besides, all inappropriate cases triggered here will
+<span class="lineNum">     689 </span>            :      * still split in the middle of the page on average.
+<span class="lineNum">     690 </span>            :      */
+<span class="lineNum">     691 </span><span class="lineCov">        524 :     itemid = PageGetItemId(state-&gt;page, OffsetNumberPrev(state-&gt;newitemoff));</span>
+<span class="lineNum">     692 </span><span class="lineCov">        524 :     tup = (IndexTuple) PageGetItem(state-&gt;page, itemid);</span>
+<span class="lineNum">     693 </span>            :     /* Do cheaper test first */
+<span class="lineNum">     694 </span><span class="lineCov">        524 :     if (!_bt_adjacenthtid(&amp;tup-&gt;t_tid, &amp;state-&gt;newitem-&gt;t_tid))</span>
+<span class="lineNum">     695 </span><span class="lineCov">        178 :         return false;</span>
+<span class="lineNum">     696 </span>            :     /* Check same conditions as rightmost item case, too */
+<span class="lineNum">     697 </span><span class="lineCov">        346 :     keepnatts = _bt_keep_natts_fast(state-&gt;rel, tup, state-&gt;newitem);</span>
+<span class="lineNum">     698 </span>            : 
+<span class="lineNum">     699 </span><span class="lineCov">        346 :     if (keepnatts &gt; 1 &amp;&amp; keepnatts &lt;= nkeyatts)</span>
+<span class="lineNum">     700 </span>            :     {
+<span class="lineNum">     701 </span><span class="lineCov">        136 :         double      interp = (double) state-&gt;newitemoff / ((double) maxoff + 1);</span>
+<span class="lineNum">     702 </span><span class="lineCov">        136 :         double      leaffillfactormult = (double) leaffillfactor / 100.0;</span>
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span>            :         /*
+<span class="lineNum">     705 </span>            :          * Don't allow caller to split after a new item when it will result in
+<span class="lineNum">     706 </span>            :          * a split point to the right of the point that a leaf fillfactor
+<span class="lineNum">     707 </span>            :          * split would use -- have caller apply leaf fillfactor instead
+<span class="lineNum">     708 </span>            :          */
+<span class="lineNum">     709 </span><span class="lineCov">        136 :         *usemult = interp &gt; leaffillfactormult;</span>
+<span class="lineNum">     710 </span>            : 
+<span class="lineNum">     711 </span><span class="lineCov">        136 :         return true;</span>
+<span class="lineNum">     712 </span>            :     }
+<span class="lineNum">     713 </span>            : 
+<span class="lineNum">     714 </span><span class="lineCov">        210 :     return false;</span>
+<span class="lineNum">     715 </span>            : }
+<span class="lineNum">     716 </span>            : 
+<span class="lineNum">     717 </span>            : /*
+<span class="lineNum">     718 </span>            :  * Subroutine for determining if two heap TIDS are &quot;adjacent&quot;.
+<span class="lineNum">     719 </span>            :  *
+<span class="lineNum">     720 </span>            :  * Adjacent means that the high TID is very likely to have been inserted into
+<span class="lineNum">     721 </span>            :  * heap relation immediately after the low TID, probably during the current
+<span class="lineNum">     722 </span>            :  * transaction.
+<a name="723"><span class="lineNum">     723 </span>            :  */</a>
+<span class="lineNum">     724 </span>            : static bool
+<span class="lineNum">     725 </span><span class="lineCov">        524 : _bt_adjacenthtid(ItemPointer lowhtid, ItemPointer highhtid)</span>
+<span class="lineNum">     726 </span>            : {
+<span class="lineNum">     727 </span>            :     BlockNumber lowblk,
+<span class="lineNum">     728 </span>            :                 highblk;
+<span class="lineNum">     729 </span>            : 
+<span class="lineNum">     730 </span><span class="lineCov">        524 :     lowblk = ItemPointerGetBlockNumber(lowhtid);</span>
+<span class="lineNum">     731 </span><span class="lineCov">        524 :     highblk = ItemPointerGetBlockNumber(highhtid);</span>
+<span class="lineNum">     732 </span>            : 
+<span class="lineNum">     733 </span>            :     /* Make optimistic assumption of adjacency when heap blocks match */
+<span class="lineNum">     734 </span><span class="lineCov">        524 :     if (lowblk == highblk)</span>
+<span class="lineNum">     735 </span><span class="lineCov">        344 :         return true;</span>
+<span class="lineNum">     736 </span>            : 
+<span class="lineNum">     737 </span>            :     /* When heap block one up, second offset should be FirstOffsetNumber */
+<span class="lineNum">     738 </span><span class="lineCov">        238 :     if (lowblk + 1 == highblk &amp;&amp;</span>
+<span class="lineNum">     739 </span><span class="lineCov">         58 :         ItemPointerGetOffsetNumber(highhtid) == FirstOffsetNumber)</span>
+<span class="lineNum">     740 </span><span class="lineCov">          2 :         return true;</span>
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span><span class="lineCov">        178 :     return false;</span>
+<span class="lineNum">     743 </span>            : }
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span>            : /*
+<span class="lineNum">     746 </span>            :  * Subroutine to find the &quot;best&quot; split point among candidate split points.
+<span class="lineNum">     747 </span>            :  * The best split point is the split point with the lowest penalty among split
+<span class="lineNum">     748 </span>            :  * points that fall within current/final split interval.  Penalty is an
+<span class="lineNum">     749 </span>            :  * abstract score, with a definition that varies depending on whether we're
+<span class="lineNum">     750 </span>            :  * splitting a leaf page or an internal page.  See _bt_split_penalty() for
+<span class="lineNum">     751 </span>            :  * details.
+<span class="lineNum">     752 </span>            :  *
+<span class="lineNum">     753 </span>            :  * &quot;perfectpenalty&quot; is assumed to be the lowest possible penalty among
+<span class="lineNum">     754 </span>            :  * candidate split points.  This allows us to return early without wasting
+<span class="lineNum">     755 </span>            :  * cycles on calculating the first differing attribute for all candidate
+<span class="lineNum">     756 </span>            :  * splits when that clearly cannot improve our choice (or when we only want a
+<span class="lineNum">     757 </span>            :  * minimally distinguishing split point, and don't want to make the split any
+<span class="lineNum">     758 </span>            :  * more unbalanced than is necessary).
+<span class="lineNum">     759 </span>            :  *
+<span class="lineNum">     760 </span>            :  * We return the index of the first existing tuple that should go on the right
+<span class="lineNum">     761 </span>            :  * page, plus a boolean indicating if new item is on left of split point.
+<a name="762"><span class="lineNum">     762 </span>            :  */</a>
+<span class="lineNum">     763 </span>            : static OffsetNumber
+<span class="lineNum">     764 </span><span class="lineCov">       2234 : _bt_bestsplitloc(FindSplitData *state, int perfectpenalty,</span>
+<span class="lineNum">     765 </span>            :                  bool *newitemonleft, FindSplitStrat strategy)
+<span class="lineNum">     766 </span>            : {
+<span class="lineNum">     767 </span>            :     int         bestpenalty,
+<span class="lineNum">     768 </span>            :                 lowsplit;
+<span class="lineNum">     769 </span><span class="lineCov">       2234 :     int         highsplit = Min(state-&gt;interval, state-&gt;nsplits);</span>
+<span class="lineNum">     770 </span>            :     SplitPoint *final;
+<span class="lineNum">     771 </span>            : 
+<span class="lineNum">     772 </span><span class="lineCov">       2234 :     bestpenalty = INT_MAX;</span>
+<span class="lineNum">     773 </span><span class="lineCov">       2234 :     lowsplit = 0;</span>
+<span class="lineNum">     774 </span><span class="lineCov">      11244 :     for (int i = lowsplit; i &lt; highsplit; i++)</span>
+<span class="lineNum">     775 </span>            :     {
+<span class="lineNum">     776 </span>            :         int         penalty;
+<span class="lineNum">     777 </span>            : 
+<span class="lineNum">     778 </span><span class="lineCov">      11220 :         penalty = _bt_split_penalty(state, state-&gt;splits + i);</span>
+<span class="lineNum">     779 </span>            : 
+<span class="lineNum">     780 </span><span class="lineCov">      11220 :         if (penalty &lt;= perfectpenalty)</span>
+<span class="lineNum">     781 </span>            :         {
+<span class="lineNum">     782 </span><span class="lineCov">       2210 :             bestpenalty = penalty;</span>
+<span class="lineNum">     783 </span><span class="lineCov">       2210 :             lowsplit = i;</span>
+<span class="lineNum">     784 </span><span class="lineCov">       2210 :             break;</span>
+<span class="lineNum">     785 </span>            :         }
+<span class="lineNum">     786 </span>            : 
+<span class="lineNum">     787 </span><span class="lineCov">       9010 :         if (penalty &lt; bestpenalty)</span>
+<span class="lineNum">     788 </span>            :         {
+<span class="lineNum">     789 </span><span class="lineCov">       1024 :             bestpenalty = penalty;</span>
+<span class="lineNum">     790 </span><span class="lineCov">       1024 :             lowsplit = i;</span>
+<span class="lineNum">     791 </span>            :         }
+<span class="lineNum">     792 </span>            :     }
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span><span class="lineCov">       2234 :     final = &amp;state-&gt;splits[lowsplit];</span>
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span>            :     /*
+<span class="lineNum">     797 </span>            :      * There is a risk that the &quot;many duplicates&quot; strategy will repeatedly do
+<span class="lineNum">     798 </span>            :      * the wrong thing when there are monotonically decreasing insertions to
+<span class="lineNum">     799 </span>            :      * the right of a large group of duplicates.   Repeated splits could leave
+<span class="lineNum">     800 </span>            :      * a succession of right half pages with free space that can never be
+<span class="lineNum">     801 </span>            :      * used.  This must be avoided.
+<span class="lineNum">     802 </span>            :      *
+<span class="lineNum">     803 </span>            :      * Consider the example of the leftmost page in a single integer attribute
+<span class="lineNum">     804 </span>            :      * NULLS FIRST index which is almost filled with NULLs.  Monotonically
+<span class="lineNum">     805 </span>            :      * decreasing integer insertions might cause the same leftmost page to
+<span class="lineNum">     806 </span>            :      * split repeatedly at the same point.  Each split derives its new high
+<span class="lineNum">     807 </span>            :      * key from the lowest current value to the immediate right of the large
+<span class="lineNum">     808 </span>            :      * group of NULLs, which will always be higher than all future integer
+<span class="lineNum">     809 </span>            :      * insertions, directing all future integer insertions to the same
+<span class="lineNum">     810 </span>            :      * leftmost page.
+<span class="lineNum">     811 </span>            :      */
+<span class="lineNum">     812 </span><span class="lineCov">       2300 :     if (strategy == SPLIT_MANY_DUPLICATES &amp;&amp; !state-&gt;is_rightmost &amp;&amp;</span>
+<span class="lineNum">     813 </span><span class="lineCov">         96 :         !final-&gt;newitemonleft &amp;&amp; final-&gt;firstoldonright &gt;= state-&gt;newitemoff &amp;&amp;</span>
+<span class="lineNum">     814 </span><span class="lineNoCov">          0 :         final-&gt;firstoldonright &lt; state-&gt;newitemoff + MAX_LEAF_INTERVAL)</span>
+<span class="lineNum">     815 </span>            :     {
+<span class="lineNum">     816 </span>            :         /*
+<span class="lineNum">     817 </span>            :          * Avoid the problem by performing a 50:50 split when the new item is
+<span class="lineNum">     818 </span>            :          * just to the right of the would-be &quot;many duplicates&quot; split point.
+<span class="lineNum">     819 </span>            :          */
+<span class="lineNum">     820 </span><span class="lineNoCov">          0 :         final = &amp;state-&gt;splits[0];</span>
+<span class="lineNum">     821 </span>            :     }
+<span class="lineNum">     822 </span>            : 
+<span class="lineNum">     823 </span><span class="lineCov">       2234 :     *newitemonleft = final-&gt;newitemonleft;</span>
+<span class="lineNum">     824 </span><span class="lineCov">       2234 :     return final-&gt;firstoldonright;</span>
+<span class="lineNum">     825 </span>            : }
+<span class="lineNum">     826 </span>            : 
+<span class="lineNum">     827 </span>            : /*
+<span class="lineNum">     828 </span>            :  * Subroutine to decide whether split should use default strategy/initial
+<span class="lineNum">     829 </span>            :  * split interval, or whether it should finish splitting the page using
+<span class="lineNum">     830 </span>            :  * alternative strategies (this is only possible with leaf pages).
+<span class="lineNum">     831 </span>            :  *
+<span class="lineNum">     832 </span>            :  * Caller uses alternative strategy (or sticks with default strategy) based
+<span class="lineNum">     833 </span>            :  * on how *strategy is set here.  Return value is &quot;perfect penalty&quot;, which is
+<span class="lineNum">     834 </span>            :  * passed to _bt_bestsplitloc() as a final constraint on how far caller is
+<span class="lineNum">     835 </span>            :  * willing to go to avoid appending a heap TID when using the many duplicates
+<span class="lineNum">     836 </span>            :  * strategy (it also saves _bt_bestsplitloc() useless cycles).
+<a name="837"><span class="lineNum">     837 </span>            :  */</a>
+<span class="lineNum">     838 </span>            : static int
+<span class="lineNum">     839 </span><span class="lineCov">       2234 : _bt_strategy(FindSplitData *state, SplitPoint *leftpage,</span>
+<span class="lineNum">     840 </span>            :              SplitPoint *rightpage, FindSplitStrat *strategy)
+<span class="lineNum">     841 </span>            : {
+<span class="lineNum">     842 </span>            :     IndexTuple  leftmost,
+<span class="lineNum">     843 </span>            :                 rightmost;
+<span class="lineNum">     844 </span>            :     SplitPoint *leftinterval,
+<span class="lineNum">     845 </span>            :                *rightinterval;
+<span class="lineNum">     846 </span>            :     int         perfectpenalty;
+<span class="lineNum">     847 </span><span class="lineCov">       2234 :     int         indnkeyatts = IndexRelationGetNumberOfKeyAttributes(state-&gt;rel);</span>
+<span class="lineNum">     848 </span>            : 
+<span class="lineNum">     849 </span>            :     /* Assume that alternative strategy won't be used for now */
+<span class="lineNum">     850 </span><span class="lineCov">       2234 :     *strategy = SPLIT_DEFAULT;</span>
+<span class="lineNum">     851 </span>            : 
+<span class="lineNum">     852 </span>            :     /*
+<span class="lineNum">     853 </span>            :      * Use smallest observed first right item size for entire page as perfect
+<span class="lineNum">     854 </span>            :      * penalty on internal pages.  This can save cycles in the common case
+<span class="lineNum">     855 </span>            :      * where most or all splits (not just splits within interval) have first
+<span class="lineNum">     856 </span>            :      * right tuples that are the same size.
+<span class="lineNum">     857 </span>            :      */
+<span class="lineNum">     858 </span><span class="lineCov">       2234 :     if (!state-&gt;is_leaf)</span>
+<span class="lineNum">     859 </span><span class="lineCov">          2 :         return state-&gt;minfirstrightsz;</span>
+<span class="lineNum">     860 </span>            : 
+<span class="lineNum">     861 </span>            :     /*
+<span class="lineNum">     862 </span>            :      * Use leftmost and rightmost tuples from leftmost and rightmost splits in
+<span class="lineNum">     863 </span>            :      * current split interval
+<span class="lineNum">     864 </span>            :      */
+<span class="lineNum">     865 </span><span class="lineCov">       2232 :     _bt_interval_edges(state, &amp;leftinterval, &amp;rightinterval);</span>
+<span class="lineNum">     866 </span><span class="lineCov">       2232 :     leftmost = _bt_split_lastleft(state, leftinterval);</span>
+<span class="lineNum">     867 </span><span class="lineCov">       2232 :     rightmost = _bt_split_firstright(state, rightinterval);</span>
+<span class="lineNum">     868 </span>            : 
+<span class="lineNum">     869 </span>            :     /*
+<span class="lineNum">     870 </span>            :      * If initial split interval can produce a split point that will at least
+<span class="lineNum">     871 </span>            :      * avoid appending a heap TID in new high key, we're done.  Finish split
+<span class="lineNum">     872 </span>            :      * with default strategy and initial split interval.
+<span class="lineNum">     873 </span>            :      */
+<span class="lineNum">     874 </span><span class="lineCov">       2232 :     perfectpenalty = _bt_keep_natts_fast(state-&gt;rel, leftmost, rightmost);</span>
+<span class="lineNum">     875 </span><span class="lineCov">       2232 :     if (perfectpenalty &lt;= indnkeyatts)</span>
+<span class="lineNum">     876 </span><span class="lineCov">       2076 :         return perfectpenalty;</span>
+<span class="lineNum">     877 </span>            : 
+<span class="lineNum">     878 </span>            :     /*
+<span class="lineNum">     879 </span>            :      * Work out how caller should finish split when even their &quot;perfect&quot;
+<span class="lineNum">     880 </span>            :      * penalty for initial/default split interval indicates that the interval
+<span class="lineNum">     881 </span>            :      * does not contain even a single split that avoids appending a heap TID.
+<span class="lineNum">     882 </span>            :      *
+<span class="lineNum">     883 </span>            :      * Use the leftmost split's lastleft tuple and the rightmost split's
+<span class="lineNum">     884 </span>            :      * firstright tuple to assess every possible split.
+<span class="lineNum">     885 </span>            :      */
+<span class="lineNum">     886 </span><span class="lineCov">        156 :     leftmost = _bt_split_lastleft(state, leftpage);</span>
+<span class="lineNum">     887 </span><span class="lineCov">        156 :     rightmost = _bt_split_firstright(state, rightpage);</span>
+<span class="lineNum">     888 </span>            : 
+<span class="lineNum">     889 </span>            :     /*
+<span class="lineNum">     890 </span>            :      * If page (including new item) has many duplicates but is not entirely
+<span class="lineNum">     891 </span>            :      * full of duplicates, a many duplicates strategy split will be performed.
+<span class="lineNum">     892 </span>            :      * If page is entirely full of duplicates, a single value strategy split
+<span class="lineNum">     893 </span>            :      * will be performed.
+<span class="lineNum">     894 </span>            :      */
+<span class="lineNum">     895 </span><span class="lineCov">        156 :     perfectpenalty = _bt_keep_natts_fast(state-&gt;rel, leftmost, rightmost);</span>
+<span class="lineNum">     896 </span><span class="lineCov">        156 :     if (perfectpenalty &lt;= indnkeyatts)</span>
+<span class="lineNum">     897 </span>            :     {
+<span class="lineNum">     898 </span><span class="lineCov">         80 :         *strategy = SPLIT_MANY_DUPLICATES;</span>
+<span class="lineNum">     899 </span>            : 
+<span class="lineNum">     900 </span>            :         /*
+<span class="lineNum">     901 </span>            :          * Many duplicates strategy should split at either side the group of
+<span class="lineNum">     902 </span>            :          * duplicates that enclose the delta-optimal split point.  Return
+<span class="lineNum">     903 </span>            :          * indnkeyatts rather than the true perfect penalty to make that
+<span class="lineNum">     904 </span>            :          * happen.  (If perfectpenalty was returned here then low cardinality
+<span class="lineNum">     905 </span>            :          * composite indexes could have continual unbalanced splits.)
+<span class="lineNum">     906 </span>            :          *
+<span class="lineNum">     907 </span>            :          * Note that caller won't go through with a many duplicates split in
+<span class="lineNum">     908 </span>            :          * rare cases where it looks like there are ever-decreasing insertions
+<span class="lineNum">     909 </span>            :          * to the immediate right of the split point.  This must happen just
+<span class="lineNum">     910 </span>            :          * before a final decision is made, within _bt_bestsplitloc().
+<span class="lineNum">     911 </span>            :          */
+<span class="lineNum">     912 </span><span class="lineCov">         80 :         return indnkeyatts;</span>
+<span class="lineNum">     913 </span>            :     }
+<span class="lineNum">     914 </span>            : 
+<span class="lineNum">     915 </span>            :     /*
+<span class="lineNum">     916 </span>            :      * Single value strategy is only appropriate with ever-increasing heap
+<span class="lineNum">     917 </span>            :      * TIDs; otherwise, original default strategy split should proceed to
+<span class="lineNum">     918 </span>            :      * avoid pathological performance.  Use page high key to infer if this is
+<span class="lineNum">     919 </span>            :      * the rightmost page among pages that store the same duplicate value.
+<span class="lineNum">     920 </span>            :      * This should not prevent insertions of heap TIDs that are slightly out
+<span class="lineNum">     921 </span>            :      * of order from using single value strategy, since that's expected with
+<span class="lineNum">     922 </span>            :      * concurrent inserters of the same duplicate value.
+<span class="lineNum">     923 </span>            :      */
+<span class="lineNum">     924 </span><span class="lineCov">         76 :     else if (state-&gt;is_rightmost)</span>
+<span class="lineNum">     925 </span><span class="lineCov">         42 :         *strategy = SPLIT_SINGLE_VALUE;</span>
+<span class="lineNum">     926 </span>            :     else
+<span class="lineNum">     927 </span>            :     {
+<span class="lineNum">     928 </span>            :         ItemId      itemid;
+<span class="lineNum">     929 </span>            :         IndexTuple  hikey;
+<span class="lineNum">     930 </span>            : 
+<span class="lineNum">     931 </span><span class="lineCov">         34 :         itemid = PageGetItemId(state-&gt;page, P_HIKEY);</span>
+<span class="lineNum">     932 </span><span class="lineCov">         34 :         hikey = (IndexTuple) PageGetItem(state-&gt;page, itemid);</span>
+<span class="lineNum">     933 </span><span class="lineCov">         34 :         perfectpenalty = _bt_keep_natts_fast(state-&gt;rel, hikey,</span>
+<span class="lineNum">     934 </span>            :                                              state-&gt;newitem);
+<span class="lineNum">     935 </span><span class="lineCov">         34 :         if (perfectpenalty &lt;= indnkeyatts)</span>
+<span class="lineNum">     936 </span><span class="lineCov">         24 :             *strategy = SPLIT_SINGLE_VALUE;</span>
+<span class="lineNum">     937 </span>            :         else
+<span class="lineNum">     938 </span>            :         {
+<span class="lineNum">     939 </span>            :             /*
+<span class="lineNum">     940 </span>            :              * Have caller finish split using default strategy, since page
+<span class="lineNum">     941 </span>            :              * does not appear to be the rightmost page for duplicates of the
+<span class="lineNum">     942 </span>            :              * value the page is filled with
+<span class="lineNum">     943 </span>            :              */
+<span class="lineNum">     944 </span>            :         }
+<span class="lineNum">     945 </span>            :     }
+<span class="lineNum">     946 </span>            : 
+<span class="lineNum">     947 </span><span class="lineCov">         76 :     return perfectpenalty;</span>
+<span class="lineNum">     948 </span>            : }
+<span class="lineNum">     949 </span>            : 
+<span class="lineNum">     950 </span>            : /*
+<span class="lineNum">     951 </span>            :  * Subroutine to locate leftmost and rightmost splits for current/default
+<span class="lineNum">     952 </span>            :  * split interval.  Note that it will be the same split iff there is only one
+<span class="lineNum">     953 </span>            :  * split in interval.
+<a name="954"><span class="lineNum">     954 </span>            :  */</a>
+<span class="lineNum">     955 </span>            : static void
+<span class="lineNum">     956 </span><span class="lineCov">       2232 : _bt_interval_edges(FindSplitData *state, SplitPoint **leftinterval,</span>
+<span class="lineNum">     957 </span>            :                    SplitPoint **rightinterval)
+<span class="lineNum">     958 </span>            : {
+<span class="lineNum">     959 </span><span class="lineCov">       2232 :     int         highsplit = Min(state-&gt;interval, state-&gt;nsplits);</span>
+<span class="lineNum">     960 </span>            :     SplitPoint *deltaoptimal;
+<span class="lineNum">     961 </span>            : 
+<span class="lineNum">     962 </span><span class="lineCov">       2232 :     deltaoptimal = state-&gt;splits;</span>
+<span class="lineNum">     963 </span><span class="lineCov">       2232 :     *leftinterval = NULL;</span>
+<span class="lineNum">     964 </span><span class="lineCov">       2232 :     *rightinterval = NULL;</span>
+<span class="lineNum">     965 </span>            : 
+<span class="lineNum">     966 </span>            :     /*
+<span class="lineNum">     967 </span>            :      * Delta is an absolute distance to optimal split point, so both the
+<span class="lineNum">     968 </span>            :      * leftmost and rightmost split point will usually be at the end of the
+<span class="lineNum">     969 </span>            :      * array
+<span class="lineNum">     970 </span>            :      */
+<span class="lineNum">     971 </span><span class="lineCov">       4430 :     for (int i = highsplit - 1; i &gt;= 0; i--)</span>
+<span class="lineNum">     972 </span>            :     {
+<span class="lineNum">     973 </span><span class="lineCov">       4430 :         SplitPoint *distant = state-&gt;splits + i;</span>
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span><span class="lineCov">       4430 :         if (distant-&gt;firstoldonright &lt; deltaoptimal-&gt;firstoldonright)</span>
+<span class="lineNum">     976 </span>            :         {
+<span class="lineNum">     977 </span><span class="lineCov">       2182 :             if (*leftinterval == NULL)</span>
+<span class="lineNum">     978 </span><span class="lineCov">       2164 :                 *leftinterval = distant;</span>
+<span class="lineNum">     979 </span>            :         }
+<span class="lineNum">     980 </span><span class="lineCov">       2248 :         else if (distant-&gt;firstoldonright &gt; deltaoptimal-&gt;firstoldonright)</span>
+<span class="lineNum">     981 </span>            :         {
+<span class="lineNum">     982 </span><span class="lineCov">       2180 :             if (*rightinterval == NULL)</span>
+<span class="lineNum">     983 </span><span class="lineCov">       2164 :                 *rightinterval = distant;</span>
+<span class="lineNum">     984 </span>            :         }
+<span class="lineNum">     985 </span><span class="lineCov">         68 :         else if (!distant-&gt;newitemonleft &amp;&amp; deltaoptimal-&gt;newitemonleft)</span>
+<span class="lineNum">     986 </span>            :         {
+<span class="lineNum">     987 </span>            :             /*
+<span class="lineNum">     988 </span>            :              * &quot;incoming tuple will become first on right page&quot; (distant) is
+<span class="lineNum">     989 </span>            :              * to the left of &quot;incoming tuple will become last on left page&quot;
+<span class="lineNum">     990 </span>            :              * (delta-optimal)
+<span class="lineNum">     991 </span>            :              */
+<span class="lineNum">     992 </span><span class="lineNoCov">          0 :             Assert(distant-&gt;firstoldonright == state-&gt;newitemoff);</span>
+<span class="lineNum">     993 </span><span class="lineNoCov">          0 :             if (*leftinterval == NULL)</span>
+<span class="lineNum">     994 </span><span class="lineNoCov">          0 :                 *leftinterval = distant;</span>
+<span class="lineNum">     995 </span>            :         }
+<span class="lineNum">     996 </span><span class="lineCov">         68 :         else if (distant-&gt;newitemonleft &amp;&amp; !deltaoptimal-&gt;newitemonleft)</span>
+<span class="lineNum">     997 </span>            :         {
+<span class="lineNum">     998 </span>            :             /*
+<span class="lineNum">     999 </span>            :              * &quot;incoming tuple will become last on left page&quot; (distant) is to
+<span class="lineNum">    1000 </span>            :              * the right of &quot;incoming tuple will become first on right page&quot;
+<span class="lineNum">    1001 </span>            :              * (delta-optimal)
+<span class="lineNum">    1002 </span>            :              */
+<span class="lineNum">    1003 </span><span class="lineNoCov">          0 :             Assert(distant-&gt;firstoldonright == state-&gt;newitemoff);</span>
+<span class="lineNum">    1004 </span><span class="lineNoCov">          0 :             if (*rightinterval == NULL)</span>
+<span class="lineNum">    1005 </span><span class="lineNoCov">          0 :                 *rightinterval = distant;</span>
+<span class="lineNum">    1006 </span>            :         }
+<span class="lineNum">    1007 </span>            :         else
+<span class="lineNum">    1008 </span>            :         {
+<span class="lineNum">    1009 </span>            :             /* There was only one or two splits in initial split interval */
+<span class="lineNum">    1010 </span><span class="lineCov">         68 :             Assert(distant == deltaoptimal);</span>
+<span class="lineNum">    1011 </span><span class="lineCov">         68 :             if (*leftinterval == NULL)</span>
+<span class="lineNum">    1012 </span><span class="lineCov">         68 :                 *leftinterval = distant;</span>
+<span class="lineNum">    1013 </span><span class="lineCov">         68 :             if (*rightinterval == NULL)</span>
+<span class="lineNum">    1014 </span><span class="lineCov">         68 :                 *rightinterval = distant;</span>
+<span class="lineNum">    1015 </span>            :         }
+<span class="lineNum">    1016 </span>            : 
+<span class="lineNum">    1017 </span><span class="lineCov">       4430 :         if (*leftinterval &amp;&amp; *rightinterval)</span>
+<span class="lineNum">    1018 </span><span class="lineCov">       4464 :             return;</span>
+<span class="lineNum">    1019 </span>            :     }
+<span class="lineNum">    1020 </span>            : 
+<span class="lineNum">    1021 </span><span class="lineNoCov">          0 :     Assert(false);</span>
+<span class="lineNum">    1022 </span>            : }
+<span class="lineNum">    1023 </span>            : 
+<span class="lineNum">    1024 </span>            : /*
+<span class="lineNum">    1025 </span>            :  * Subroutine to find penalty for caller's candidate split point.
+<span class="lineNum">    1026 </span>            :  *
+<span class="lineNum">    1027 </span>            :  * On leaf pages, penalty is the attribute number that distinguishes each side
+<span class="lineNum">    1028 </span>            :  * of a split.  It's the last attribute that needs to be included in new high
+<span class="lineNum">    1029 </span>            :  * key for left page.  It can be greater than the number of key attributes in
+<span class="lineNum">    1030 </span>            :  * cases where a heap TID will need to be appended during truncation.
+<span class="lineNum">    1031 </span>            :  *
+<span class="lineNum">    1032 </span>            :  * On internal pages, penalty is simply the size of the first item on the
+<span class="lineNum">    1033 </span>            :  * right half of the split (including line pointer overhead).  This tuple will
+<span class="lineNum">    1034 </span>            :  * become the new high key for the left page.
+<a name="1035"><span class="lineNum">    1035 </span>            :  */</a>
+<span class="lineNum">    1036 </span>            : static inline int
+<span class="lineNum">    1037 </span><span class="lineCov">      11220 : _bt_split_penalty(FindSplitData *state, SplitPoint *split)</span>
+<span class="lineNum">    1038 </span>            : {
+<span class="lineNum">    1039 </span>            :     IndexTuple  lastleftuple;
+<span class="lineNum">    1040 </span>            :     IndexTuple  firstrighttuple;
+<span class="lineNum">    1041 </span>            : 
+<span class="lineNum">    1042 </span><span class="lineCov">      11220 :     if (!state-&gt;is_leaf)</span>
+<span class="lineNum">    1043 </span>            :     {
+<span class="lineNum">    1044 </span>            :         ItemId      itemid;
+<span class="lineNum">    1045 </span>            : 
+<span class="lineNum">    1046 </span><span class="lineCov">          4 :         if (!split-&gt;newitemonleft &amp;&amp;</span>
+<span class="lineNum">    1047 </span><span class="lineCov">          2 :             split-&gt;firstoldonright == state-&gt;newitemoff)</span>
+<span class="lineNum">    1048 </span><span class="lineNoCov">          0 :             return state-&gt;newitemsz;</span>
+<span class="lineNum">    1049 </span>            : 
+<span class="lineNum">    1050 </span><span class="lineCov">          2 :         itemid = PageGetItemId(state-&gt;page, split-&gt;firstoldonright);</span>
+<span class="lineNum">    1051 </span>            : 
+<span class="lineNum">    1052 </span><span class="lineCov">          2 :         return MAXALIGN(ItemIdGetLength(itemid)) + sizeof(ItemIdData);</span>
+<span class="lineNum">    1053 </span>            :     }
+<span class="lineNum">    1054 </span>            : 
+<span class="lineNum">    1055 </span><span class="lineCov">      11218 :     lastleftuple = _bt_split_lastleft(state, split);</span>
+<span class="lineNum">    1056 </span><span class="lineCov">      11218 :     firstrighttuple = _bt_split_firstright(state, split);</span>
+<span class="lineNum">    1057 </span>            : 
+<span class="lineNum">    1058 </span><span class="lineCov">      11218 :     Assert(lastleftuple != firstrighttuple);</span>
+<span class="lineNum">    1059 </span><span class="lineCov">      11218 :     return _bt_keep_natts_fast(state-&gt;rel, lastleftuple, firstrighttuple);</span>
+<span class="lineNum">    1060 </span>            : }
+<span class="lineNum">    1061 </span>            : 
+<span class="lineNum">    1062 </span>            : /*
+<span class="lineNum">    1063 </span>            :  * Subroutine to get a lastleft IndexTuple for a split point from page
+<a name="1064"><span class="lineNum">    1064 </span>            :  */</a>
+<span class="lineNum">    1065 </span>            : static inline IndexTuple
+<span class="lineNum">    1066 </span><span class="lineCov">      13606 : _bt_split_lastleft(FindSplitData *state, SplitPoint *split)</span>
+<span class="lineNum">    1067 </span>            : {
+<span class="lineNum">    1068 </span>            :     ItemId      itemid;
+<span class="lineNum">    1069 </span>            : 
+<span class="lineNum">    1070 </span><span class="lineCov">      13606 :     if (split-&gt;newitemonleft &amp;&amp; split-&gt;firstoldonright == state-&gt;newitemoff)</span>
+<span class="lineNum">    1071 </span><span class="lineCov">         58 :         return state-&gt;newitem;</span>
+<span class="lineNum">    1072 </span>            : 
+<span class="lineNum">    1073 </span><span class="lineCov">      13548 :     itemid = PageGetItemId(state-&gt;page,</span>
+<span class="lineNum">    1074 </span>            :                            OffsetNumberPrev(split-&gt;firstoldonright));
+<span class="lineNum">    1075 </span><span class="lineCov">      13548 :     return (IndexTuple) PageGetItem(state-&gt;page, itemid);</span>
+<span class="lineNum">    1076 </span>            : }
+<span class="lineNum">    1077 </span>            : 
+<span class="lineNum">    1078 </span>            : /*
+<span class="lineNum">    1079 </span>            :  * Subroutine to get a firstright IndexTuple for a split point from page
+<a name="1080"><span class="lineNum">    1080 </span>            :  */</a>
+<span class="lineNum">    1081 </span>            : static inline IndexTuple
+<span class="lineNum">    1082 </span><span class="lineCov">      13606 : _bt_split_firstright(FindSplitData *state, SplitPoint *split)</span>
+<span class="lineNum">    1083 </span>            : {
+<span class="lineNum">    1084 </span>            :     ItemId      itemid;
+<span class="lineNum">    1085 </span>            : 
+<span class="lineNum">    1086 </span><span class="lineCov">      13606 :     if (!split-&gt;newitemonleft &amp;&amp; split-&gt;firstoldonright == state-&gt;newitemoff)</span>
+<span class="lineNum">    1087 </span><span class="lineCov">         64 :         return state-&gt;newitem;</span>
+<span class="lineNum">    1088 </span>            : 
+<span class="lineNum">    1089 </span><span class="lineCov">      13542 :     itemid = PageGetItemId(state-&gt;page, split-&gt;firstoldonright);</span>
+<span class="lineNum">    1090 </span><span class="lineCov">      13542 :     return (IndexTuple) PageGetItem(state-&gt;page, itemid);</span>
+<span class="lineNum">    1091 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

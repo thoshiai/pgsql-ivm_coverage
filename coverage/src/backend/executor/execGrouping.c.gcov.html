@@ -1,0 +1,569 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/executor/execGrouping.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/executor</a> - execGrouping.c<span style="font-size: 80%;"> (source / <a href="execGrouping.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">102</td>
+            <td class="headerCovTableEntry">108</td>
+            <td class="headerCovTableEntryHi">94.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">8</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntryMed">88.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * execGrouping.c
+<span class="lineNum">       4 </span>            :  *    executor utility routines for grouping, hashing, and aggregation
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Note: we currently assume that equality and hashing functions are not
+<span class="lineNum">       7 </span>            :  * collation-sensitive, so the code in this file has no support for passing
+<span class="lineNum">       8 </span>            :  * collation settings through from callers.  That may have to change someday.
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      11 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * IDENTIFICATION
+<span class="lineNum">      15 </span>            :  *    src/backend/executor/execGrouping.c
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      18 </span>            :  */
+<span class="lineNum">      19 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      20 </span>            : 
+<span class="lineNum">      21 </span>            : #include &quot;access/parallel.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;executor/executor.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;utils/hashutils.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : static uint32 TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple);
+<span class="lineNum">      29 </span>            : static int  TupleHashTableMatch(struct tuplehash_hash *tb, const MinimalTuple tuple1, const MinimalTuple tuple2);
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : /*
+<span class="lineNum">      32 </span>            :  * Define parameters for tuple hash table code generation. The interface is
+<span class="lineNum">      33 </span>            :  * *also* declared in execnodes.h (to generate the types, which are externally
+<span class="lineNum">      34 </span>            :  * visible).
+<span class="lineNum">      35 </span>            :  */
+<span class="lineNum">      36 </span>            : #define SH_PREFIX tuplehash
+<span class="lineNum">      37 </span>            : #define SH_ELEMENT_TYPE TupleHashEntryData
+<span class="lineNum">      38 </span>            : #define SH_KEY_TYPE MinimalTuple
+<span class="lineNum">      39 </span>            : #define SH_KEY firstTuple
+<span class="lineNum">      40 </span>            : #define SH_HASH_KEY(tb, key) TupleHashTableHash(tb, key)
+<span class="lineNum">      41 </span>            : #define SH_EQUAL(tb, a, b) TupleHashTableMatch(tb, a, b) == 0
+<span class="lineNum">      42 </span>            : #define SH_SCOPE extern
+<span class="lineNum">      43 </span>            : #define SH_STORE_HASH
+<span class="lineNum">      44 </span>            : #define SH_GET_HASH(tb, a) a-&gt;hash
+<span class="lineNum">      45 </span>            : #define SH_DEFINE
+<span class="lineNum">      46 </span>            : #include &quot;lib/simplehash.h&quot;
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : /*****************************************************************************
+<span class="lineNum">      50 </span>            :  *      Utility routines for grouping tuples together
+<span class="lineNum">      51 </span>            :  *****************************************************************************/
+<span class="lineNum">      52 </span>            : 
+<span class="lineNum">      53 </span>            : /*
+<span class="lineNum">      54 </span>            :  * execTuplesMatchPrepare
+<span class="lineNum">      55 </span>            :  *      Build expression that can be evaluated using ExecQual(), returning
+<span class="lineNum">      56 </span>            :  *      whether an ExprContext's inner/outer tuples are NOT DISTINCT
+<a name="57"><span class="lineNum">      57 </span>            :  */</a>
+<span class="lineNum">      58 </span>            : ExprState *
+<span class="lineNum">      59 </span><span class="lineCov">       2726 : execTuplesMatchPrepare(TupleDesc desc,</span>
+<span class="lineNum">      60 </span>            :                        int numCols,
+<span class="lineNum">      61 </span>            :                        const AttrNumber *keyColIdx,
+<span class="lineNum">      62 </span>            :                        const Oid *eqOperators,
+<span class="lineNum">      63 </span>            :                        const Oid *collations,
+<span class="lineNum">      64 </span>            :                        PlanState *parent)
+<span class="lineNum">      65 </span>            : {
+<span class="lineNum">      66 </span><span class="lineCov">       2726 :     Oid        *eqFunctions = (Oid *) palloc(numCols * sizeof(Oid));</span>
+<span class="lineNum">      67 </span>            :     int         i;
+<span class="lineNum">      68 </span>            :     ExprState  *expr;
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span><span class="lineCov">       2726 :     if (numCols == 0)</span>
+<span class="lineNum">      71 </span><span class="lineCov">         16 :         return NULL;</span>
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            :     /* lookup equality functions */
+<span class="lineNum">      74 </span><span class="lineCov">       8858 :     for (i = 0; i &lt; numCols; i++)</span>
+<span class="lineNum">      75 </span><span class="lineCov">       6148 :         eqFunctions[i] = get_opcode(eqOperators[i]);</span>
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span>            :     /* build actual expression */
+<span class="lineNum">      78 </span><span class="lineCov">       2710 :     expr = ExecBuildGroupingEqual(desc, desc, NULL, NULL,</span>
+<span class="lineNum">      79 </span>            :                                   numCols, keyColIdx, eqFunctions, collations,
+<span class="lineNum">      80 </span>            :                                   parent);
+<span class="lineNum">      81 </span>            : 
+<span class="lineNum">      82 </span><span class="lineCov">       2710 :     return expr;</span>
+<span class="lineNum">      83 </span>            : }
+<span class="lineNum">      84 </span>            : 
+<span class="lineNum">      85 </span>            : /*
+<span class="lineNum">      86 </span>            :  * execTuplesHashPrepare
+<span class="lineNum">      87 </span>            :  *      Look up the equality and hashing functions needed for a TupleHashTable.
+<span class="lineNum">      88 </span>            :  *
+<span class="lineNum">      89 </span>            :  * This is similar to execTuplesMatchPrepare, but we also need to find the
+<span class="lineNum">      90 </span>            :  * hash functions associated with the equality operators.  *eqFunctions and
+<span class="lineNum">      91 </span>            :  * *hashFunctions receive the palloc'd result arrays.
+<span class="lineNum">      92 </span>            :  *
+<span class="lineNum">      93 </span>            :  * Note: we expect that the given operators are not cross-type comparisons.
+<a name="94"><span class="lineNum">      94 </span>            :  */</a>
+<span class="lineNum">      95 </span>            : void
+<span class="lineNum">      96 </span><span class="lineCov">       2108 : execTuplesHashPrepare(int numCols,</span>
+<span class="lineNum">      97 </span>            :                       const Oid *eqOperators,
+<span class="lineNum">      98 </span>            :                       Oid **eqFuncOids,
+<span class="lineNum">      99 </span>            :                       FmgrInfo **hashFunctions)
+<span class="lineNum">     100 </span>            : {
+<span class="lineNum">     101 </span>            :     int         i;
+<span class="lineNum">     102 </span>            : 
+<span class="lineNum">     103 </span><span class="lineCov">       2108 :     *eqFuncOids = (Oid *) palloc(numCols * sizeof(Oid));</span>
+<span class="lineNum">     104 </span><span class="lineCov">       2108 :     *hashFunctions = (FmgrInfo *) palloc(numCols * sizeof(FmgrInfo));</span>
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span><span class="lineCov">       6606 :     for (i = 0; i &lt; numCols; i++)</span>
+<span class="lineNum">     107 </span>            :     {
+<span class="lineNum">     108 </span><span class="lineCov">       4498 :         Oid         eq_opr = eqOperators[i];</span>
+<span class="lineNum">     109 </span>            :         Oid         eq_function;
+<span class="lineNum">     110 </span>            :         Oid         left_hash_function;
+<span class="lineNum">     111 </span>            :         Oid         right_hash_function;
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span><span class="lineCov">       4498 :         eq_function = get_opcode(eq_opr);</span>
+<span class="lineNum">     114 </span><span class="lineCov">       4498 :         if (!get_op_hash_functions(eq_opr,</span>
+<span class="lineNum">     115 </span>            :                                    &amp;left_hash_function, &amp;right_hash_function))
+<span class="lineNum">     116 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;could not find hash function for hash operator %u&quot;,</span>
+<span class="lineNum">     117 </span>            :                  eq_opr);
+<span class="lineNum">     118 </span>            :         /* We're not supporting cross-type cases here */
+<span class="lineNum">     119 </span><span class="lineCov">       4498 :         Assert(left_hash_function == right_hash_function);</span>
+<span class="lineNum">     120 </span><span class="lineCov">       4498 :         (*eqFuncOids)[i] = eq_function;</span>
+<span class="lineNum">     121 </span><span class="lineCov">       4498 :         fmgr_info(right_hash_function, &amp;(*hashFunctions)[i]);</span>
+<span class="lineNum">     122 </span>            :     }
+<span class="lineNum">     123 </span><span class="lineCov">       2108 : }</span>
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span>            : /*****************************************************************************
+<span class="lineNum">     127 </span>            :  *      Utility routines for all-in-memory hash tables
+<span class="lineNum">     128 </span>            :  *
+<span class="lineNum">     129 </span>            :  * These routines build hash tables for grouping tuples together (eg, for
+<span class="lineNum">     130 </span>            :  * hash aggregation).  There is one entry for each not-distinct set of tuples
+<span class="lineNum">     131 </span>            :  * presented.
+<span class="lineNum">     132 </span>            :  *****************************************************************************/
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span>            : /*
+<span class="lineNum">     135 </span>            :  * Construct an empty TupleHashTable
+<span class="lineNum">     136 </span>            :  *
+<span class="lineNum">     137 </span>            :  *  numCols, keyColIdx: identify the tuple fields to use as lookup key
+<span class="lineNum">     138 </span>            :  *  eqfunctions: equality comparison functions to use
+<span class="lineNum">     139 </span>            :  *  hashfunctions: datatype-specific hashing functions to use
+<span class="lineNum">     140 </span>            :  *  nbuckets: initial estimate of hashtable size
+<span class="lineNum">     141 </span>            :  *  additionalsize: size of data stored in -&gt;additional
+<span class="lineNum">     142 </span>            :  *  metacxt: memory context for long-lived allocation, but not per-entry data
+<span class="lineNum">     143 </span>            :  *  tablecxt: memory context in which to store table entries
+<span class="lineNum">     144 </span>            :  *  tempcxt: short-lived context for evaluation hash and comparison functions
+<span class="lineNum">     145 </span>            :  *
+<span class="lineNum">     146 </span>            :  * The function arrays may be made with execTuplesHashPrepare().  Note they
+<span class="lineNum">     147 </span>            :  * are not cross-type functions, but expect to see the table datatype(s)
+<span class="lineNum">     148 </span>            :  * on both sides.
+<span class="lineNum">     149 </span>            :  *
+<span class="lineNum">     150 </span>            :  * Note that keyColIdx, eqfunctions, and hashfunctions must be allocated in
+<span class="lineNum">     151 </span>            :  * storage that will live as long as the hashtable does.
+<a name="152"><span class="lineNum">     152 </span>            :  */</a>
+<span class="lineNum">     153 </span>            : TupleHashTable
+<span class="lineNum">     154 </span><span class="lineCov">       2822 : BuildTupleHashTableExt(PlanState *parent,</span>
+<span class="lineNum">     155 </span>            :                        TupleDesc inputDesc,
+<span class="lineNum">     156 </span>            :                        int numCols, AttrNumber *keyColIdx,
+<span class="lineNum">     157 </span>            :                        const Oid *eqfuncoids,
+<span class="lineNum">     158 </span>            :                        FmgrInfo *hashfunctions,
+<span class="lineNum">     159 </span>            :                        Oid *collations,
+<span class="lineNum">     160 </span>            :                        long nbuckets, Size additionalsize,
+<span class="lineNum">     161 </span>            :                        MemoryContext metacxt,
+<span class="lineNum">     162 </span>            :                        MemoryContext tablecxt,
+<span class="lineNum">     163 </span>            :                        MemoryContext tempcxt,
+<span class="lineNum">     164 </span>            :                        bool use_variable_hash_iv)
+<span class="lineNum">     165 </span>            : {
+<span class="lineNum">     166 </span>            :     TupleHashTable hashtable;
+<span class="lineNum">     167 </span><span class="lineCov">       2822 :     Size        entrysize = sizeof(TupleHashEntryData) + additionalsize;</span>
+<span class="lineNum">     168 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">     169 </span>            :     bool        allow_jit;
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span><span class="lineCov">       2822 :     Assert(nbuckets &gt; 0);</span>
+<span class="lineNum">     172 </span>            : 
+<span class="lineNum">     173 </span>            :     /* Limit initial table size request to not more than work_mem */
+<span class="lineNum">     174 </span><span class="lineCov">       2822 :     nbuckets = Min(nbuckets, (long) ((work_mem * 1024L) / entrysize));</span>
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span><span class="lineCov">       2822 :     oldcontext = MemoryContextSwitchTo(metacxt);</span>
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span><span class="lineCov">       2822 :     hashtable = (TupleHashTable) palloc(sizeof(TupleHashTableData));</span>
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span><span class="lineCov">       2822 :     hashtable-&gt;numCols = numCols;</span>
+<span class="lineNum">     181 </span><span class="lineCov">       2822 :     hashtable-&gt;keyColIdx = keyColIdx;</span>
+<span class="lineNum">     182 </span><span class="lineCov">       2822 :     hashtable-&gt;tab_hash_funcs = hashfunctions;</span>
+<span class="lineNum">     183 </span><span class="lineCov">       2822 :     hashtable-&gt;tab_collations = collations;</span>
+<span class="lineNum">     184 </span><span class="lineCov">       2822 :     hashtable-&gt;tablecxt = tablecxt;</span>
+<span class="lineNum">     185 </span><span class="lineCov">       2822 :     hashtable-&gt;tempcxt = tempcxt;</span>
+<span class="lineNum">     186 </span><span class="lineCov">       2822 :     hashtable-&gt;entrysize = entrysize;</span>
+<span class="lineNum">     187 </span><span class="lineCov">       2822 :     hashtable-&gt;tableslot = NULL; /* will be made on first lookup */</span>
+<span class="lineNum">     188 </span><span class="lineCov">       2822 :     hashtable-&gt;inputslot = NULL;</span>
+<span class="lineNum">     189 </span><span class="lineCov">       2822 :     hashtable-&gt;in_hash_funcs = NULL;</span>
+<span class="lineNum">     190 </span><span class="lineCov">       2822 :     hashtable-&gt;cur_eq_func = NULL;</span>
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span>            :     /*
+<span class="lineNum">     193 </span>            :      * If parallelism is in use, even if the master backend is performing the
+<span class="lineNum">     194 </span>            :      * scan itself, we don't want to create the hashtable exactly the same way
+<span class="lineNum">     195 </span>            :      * in all workers. As hashtables are iterated over in keyspace-order,
+<span class="lineNum">     196 </span>            :      * doing so in all processes in the same way is likely to lead to
+<span class="lineNum">     197 </span>            :      * &quot;unbalanced&quot; hashtables when the table size initially is
+<span class="lineNum">     198 </span>            :      * underestimated.
+<span class="lineNum">     199 </span>            :      */
+<span class="lineNum">     200 </span><span class="lineCov">       2822 :     if (use_variable_hash_iv)</span>
+<span class="lineNum">     201 </span><span class="lineCov">        290 :         hashtable-&gt;hash_iv = murmurhash32(ParallelWorkerNumber);</span>
+<span class="lineNum">     202 </span>            :     else
+<span class="lineNum">     203 </span><span class="lineCov">       2532 :         hashtable-&gt;hash_iv = 0;</span>
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span><span class="lineCov">       2822 :     hashtable-&gt;hashtab = tuplehash_create(metacxt, nbuckets, hashtable);</span>
+<span class="lineNum">     206 </span>            : 
+<span class="lineNum">     207 </span>            :     /*
+<span class="lineNum">     208 </span>            :      * We copy the input tuple descriptor just for safety --- we assume all
+<span class="lineNum">     209 </span>            :      * input tuples will have equivalent descriptors.
+<span class="lineNum">     210 </span>            :      */
+<span class="lineNum">     211 </span><span class="lineCov">       2822 :     hashtable-&gt;tableslot = MakeSingleTupleTableSlot(CreateTupleDescCopy(inputDesc),</span>
+<span class="lineNum">     212 </span>            :                                                     &amp;TTSOpsMinimalTuple);
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span>            :     /*
+<span class="lineNum">     215 </span>            :      * If the old reset interface is used (i.e. BuildTupleHashTable, rather
+<span class="lineNum">     216 </span>            :      * than BuildTupleHashTableExt), allowing JIT would lead to the generated
+<span class="lineNum">     217 </span>            :      * functions to a) live longer than the query b) be re-generated each time
+<span class="lineNum">     218 </span>            :      * the table is being reset. Therefore prevent JIT from being used in that
+<span class="lineNum">     219 </span>            :      * case, by not providing a parent node (which prevents accessing the
+<span class="lineNum">     220 </span>            :      * JitContext in the EState).
+<span class="lineNum">     221 </span>            :      */
+<span class="lineNum">     222 </span><span class="lineCov">       2822 :     allow_jit = metacxt != tablecxt;</span>
+<span class="lineNum">     223 </span>            : 
+<span class="lineNum">     224 </span>            :     /* build comparator for all columns */
+<span class="lineNum">     225 </span>            :     /* XXX: should we support non-minimal tuples for the inputslot? */
+<span class="lineNum">     226 </span><span class="lineCov">       2822 :     hashtable-&gt;tab_eq_func = ExecBuildGroupingEqual(inputDesc, inputDesc,</span>
+<span class="lineNum">     227 </span>            :                                                     &amp;TTSOpsMinimalTuple, &amp;TTSOpsMinimalTuple,
+<span class="lineNum">     228 </span>            :                                                     numCols,
+<span class="lineNum">     229 </span>            :                                                     keyColIdx, eqfuncoids, collations,
+<span class="lineNum">     230 </span>            :                                                     allow_jit ? parent : NULL);
+<span class="lineNum">     231 </span>            : 
+<span class="lineNum">     232 </span>            :     /*
+<span class="lineNum">     233 </span>            :      * While not pretty, it's ok to not shut down this context, but instead
+<span class="lineNum">     234 </span>            :      * rely on the containing memory context being reset, as
+<span class="lineNum">     235 </span>            :      * ExecBuildGroupingEqual() only builds a very simple expression calling
+<span class="lineNum">     236 </span>            :      * functions (i.e. nothing that'd employ RegisterExprContextCallback()).
+<span class="lineNum">     237 </span>            :      */
+<span class="lineNum">     238 </span><span class="lineCov">       2822 :     hashtable-&gt;exprcontext = CreateStandaloneExprContext();</span>
+<span class="lineNum">     239 </span>            : 
+<span class="lineNum">     240 </span><span class="lineCov">       2822 :     MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     241 </span>            : 
+<span class="lineNum">     242 </span><span class="lineCov">       2822 :     return hashtable;</span>
+<span class="lineNum">     243 </span>            : }
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span>            : /*
+<span class="lineNum">     246 </span>            :  * BuildTupleHashTable is a backwards-compatibilty wrapper for
+<span class="lineNum">     247 </span>            :  * BuildTupleHashTableExt(), that allocates the hashtable's metadata in
+<span class="lineNum">     248 </span>            :  * tablecxt. Note that hashtables created this way cannot be reset leak-free
+<span class="lineNum">     249 </span>            :  * with ResetTupleHashTable().
+<a name="250"><span class="lineNum">     250 </span>            :  */</a>
+<span class="lineNum">     251 </span>            : TupleHashTable
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 : BuildTupleHashTable(PlanState *parent,</span>
+<span class="lineNum">     253 </span>            :                     TupleDesc inputDesc,
+<span class="lineNum">     254 </span>            :                     int numCols, AttrNumber *keyColIdx,
+<span class="lineNum">     255 </span>            :                     const Oid *eqfuncoids,
+<span class="lineNum">     256 </span>            :                     FmgrInfo *hashfunctions,
+<span class="lineNum">     257 </span>            :                     Oid *collations,
+<span class="lineNum">     258 </span>            :                     long nbuckets, Size additionalsize,
+<span class="lineNum">     259 </span>            :                     MemoryContext tablecxt,
+<span class="lineNum">     260 </span>            :                     MemoryContext tempcxt,
+<span class="lineNum">     261 </span>            :                     bool use_variable_hash_iv)
+<span class="lineNum">     262 </span>            : {
+<span class="lineNum">     263 </span><span class="lineNoCov">          0 :     return BuildTupleHashTableExt(parent,</span>
+<span class="lineNum">     264 </span>            :                                   inputDesc,
+<span class="lineNum">     265 </span>            :                                   numCols, keyColIdx,
+<span class="lineNum">     266 </span>            :                                   eqfuncoids,
+<span class="lineNum">     267 </span>            :                                   hashfunctions,
+<span class="lineNum">     268 </span>            :                                   collations,
+<span class="lineNum">     269 </span>            :                                   nbuckets, additionalsize,
+<span class="lineNum">     270 </span>            :                                   tablecxt,
+<span class="lineNum">     271 </span>            :                                   tablecxt,
+<span class="lineNum">     272 </span>            :                                   tempcxt,
+<span class="lineNum">     273 </span>            :                                   use_variable_hash_iv);
+<span class="lineNum">     274 </span>            : }
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span>            : /*
+<span class="lineNum">     277 </span>            :  * Reset contents of the hashtable to be empty, preserving all the non-content
+<span class="lineNum">     278 </span>            :  * state. Note that the tablecxt passed to BuildTupleHashTableExt() should
+<span class="lineNum">     279 </span>            :  * also be reset, otherwise there will be leaks.
+<a name="280"><span class="lineNum">     280 </span>            :  */</a>
+<span class="lineNum">     281 </span>            : void
+<span class="lineNum">     282 </span><span class="lineCov">        256 : ResetTupleHashTable(TupleHashTable hashtable)</span>
+<span class="lineNum">     283 </span>            : {
+<span class="lineNum">     284 </span><span class="lineCov">        256 :     tuplehash_reset(hashtable-&gt;hashtab);</span>
+<span class="lineNum">     285 </span><span class="lineCov">        256 : }</span>
+<span class="lineNum">     286 </span>            : 
+<span class="lineNum">     287 </span>            : /*
+<span class="lineNum">     288 </span>            :  * Find or create a hashtable entry for the tuple group containing the
+<span class="lineNum">     289 </span>            :  * given tuple.  The tuple must be the same type as the hashtable entries.
+<span class="lineNum">     290 </span>            :  *
+<span class="lineNum">     291 </span>            :  * If isnew is NULL, we do not create new entries; we return NULL if no
+<span class="lineNum">     292 </span>            :  * match is found.
+<span class="lineNum">     293 </span>            :  *
+<span class="lineNum">     294 </span>            :  * If isnew isn't NULL, then a new entry is created if no existing entry
+<span class="lineNum">     295 </span>            :  * matches.  On return, *isnew is true if the entry is newly created,
+<span class="lineNum">     296 </span>            :  * false if it existed already.  -&gt;additional_data in the new entry has
+<span class="lineNum">     297 </span>            :  * been zeroed.
+<a name="298"><span class="lineNum">     298 </span>            :  */</a>
+<span class="lineNum">     299 </span>            : TupleHashEntry
+<span class="lineNum">     300 </span><span class="lineCov">    1566500 : LookupTupleHashEntry(TupleHashTable hashtable, TupleTableSlot *slot,</span>
+<span class="lineNum">     301 </span>            :                      bool *isnew)
+<span class="lineNum">     302 </span>            : {
+<span class="lineNum">     303 </span>            :     TupleHashEntryData *entry;
+<span class="lineNum">     304 </span>            :     MemoryContext oldContext;
+<span class="lineNum">     305 </span>            :     bool        found;
+<span class="lineNum">     306 </span>            :     MinimalTuple key;
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span>            :     /* Need to run the hash functions in short-lived context */
+<span class="lineNum">     309 </span><span class="lineCov">    1566500 :     oldContext = MemoryContextSwitchTo(hashtable-&gt;tempcxt);</span>
+<span class="lineNum">     310 </span>            : 
+<span class="lineNum">     311 </span>            :     /* set up data needed by hash and match functions */
+<span class="lineNum">     312 </span><span class="lineCov">    1566500 :     hashtable-&gt;inputslot = slot;</span>
+<span class="lineNum">     313 </span><span class="lineCov">    1566500 :     hashtable-&gt;in_hash_funcs = hashtable-&gt;tab_hash_funcs;</span>
+<span class="lineNum">     314 </span><span class="lineCov">    1566500 :     hashtable-&gt;cur_eq_func = hashtable-&gt;tab_eq_func;</span>
+<span class="lineNum">     315 </span>            : 
+<span class="lineNum">     316 </span><span class="lineCov">    1566500 :     key = NULL;                 /* flag to reference inputslot */</span>
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span><span class="lineCov">    1566500 :     if (isnew)</span>
+<span class="lineNum">     319 </span>            :     {
+<span class="lineNum">     320 </span><span class="lineCov">    1522690 :         entry = tuplehash_insert(hashtable-&gt;hashtab, key, &amp;found);</span>
+<span class="lineNum">     321 </span>            : 
+<span class="lineNum">     322 </span><span class="lineCov">    1522688 :         if (found)</span>
+<span class="lineNum">     323 </span>            :         {
+<span class="lineNum">     324 </span>            :             /* found pre-existing entry */
+<span class="lineNum">     325 </span><span class="lineCov">    1387914 :             *isnew = false;</span>
+<span class="lineNum">     326 </span>            :         }
+<span class="lineNum">     327 </span>            :         else
+<span class="lineNum">     328 </span>            :         {
+<span class="lineNum">     329 </span>            :             /* created new entry */
+<span class="lineNum">     330 </span><span class="lineCov">     134774 :             *isnew = true;</span>
+<span class="lineNum">     331 </span>            :             /* zero caller data */
+<span class="lineNum">     332 </span><span class="lineCov">     134774 :             entry-&gt;additional = NULL;</span>
+<span class="lineNum">     333 </span><span class="lineCov">     134774 :             MemoryContextSwitchTo(hashtable-&gt;tablecxt);</span>
+<span class="lineNum">     334 </span>            :             /* Copy the first tuple into the table context */
+<span class="lineNum">     335 </span><span class="lineCov">     134774 :             entry-&gt;firstTuple = ExecCopySlotMinimalTuple(slot);</span>
+<span class="lineNum">     336 </span>            :         }
+<span class="lineNum">     337 </span>            :     }
+<span class="lineNum">     338 </span>            :     else
+<span class="lineNum">     339 </span>            :     {
+<span class="lineNum">     340 </span><span class="lineCov">      43810 :         entry = tuplehash_lookup(hashtable-&gt;hashtab, key);</span>
+<span class="lineNum">     341 </span>            :     }
+<span class="lineNum">     342 </span>            : 
+<span class="lineNum">     343 </span><span class="lineCov">    1566498 :     MemoryContextSwitchTo(oldContext);</span>
+<span class="lineNum">     344 </span>            : 
+<span class="lineNum">     345 </span><span class="lineCov">    1566498 :     return entry;</span>
+<span class="lineNum">     346 </span>            : }
+<span class="lineNum">     347 </span>            : 
+<span class="lineNum">     348 </span>            : /*
+<span class="lineNum">     349 </span>            :  * Search for a hashtable entry matching the given tuple.  No entry is
+<span class="lineNum">     350 </span>            :  * created if there's not a match.  This is similar to the non-creating
+<span class="lineNum">     351 </span>            :  * case of LookupTupleHashEntry, except that it supports cross-type
+<span class="lineNum">     352 </span>            :  * comparisons, in which the given tuple is not of the same type as the
+<span class="lineNum">     353 </span>            :  * table entries.  The caller must provide the hash functions to use for
+<span class="lineNum">     354 </span>            :  * the input tuple, as well as the equality functions, since these may be
+<span class="lineNum">     355 </span>            :  * different from the table's internal functions.
+<a name="356"><span class="lineNum">     356 </span>            :  */</a>
+<span class="lineNum">     357 </span>            : TupleHashEntry
+<span class="lineNum">     358 </span><span class="lineCov">     120426 : FindTupleHashEntry(TupleHashTable hashtable, TupleTableSlot *slot,</span>
+<span class="lineNum">     359 </span>            :                    ExprState *eqcomp,
+<span class="lineNum">     360 </span>            :                    FmgrInfo *hashfunctions)
+<span class="lineNum">     361 </span>            : {
+<span class="lineNum">     362 </span>            :     TupleHashEntry entry;
+<span class="lineNum">     363 </span>            :     MemoryContext oldContext;
+<span class="lineNum">     364 </span>            :     MinimalTuple key;
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span>            :     /* Need to run the hash functions in short-lived context */
+<span class="lineNum">     367 </span><span class="lineCov">     120426 :     oldContext = MemoryContextSwitchTo(hashtable-&gt;tempcxt);</span>
+<span class="lineNum">     368 </span>            : 
+<span class="lineNum">     369 </span>            :     /* Set up data needed by hash and match functions */
+<span class="lineNum">     370 </span><span class="lineCov">     120426 :     hashtable-&gt;inputslot = slot;</span>
+<span class="lineNum">     371 </span><span class="lineCov">     120426 :     hashtable-&gt;in_hash_funcs = hashfunctions;</span>
+<span class="lineNum">     372 </span><span class="lineCov">     120426 :     hashtable-&gt;cur_eq_func = eqcomp;</span>
+<span class="lineNum">     373 </span>            : 
+<span class="lineNum">     374 </span>            :     /* Search the hash table */
+<span class="lineNum">     375 </span><span class="lineCov">     120426 :     key = NULL;                 /* flag to reference inputslot */</span>
+<span class="lineNum">     376 </span><span class="lineCov">     120426 :     entry = tuplehash_lookup(hashtable-&gt;hashtab, key);</span>
+<span class="lineNum">     377 </span><span class="lineCov">     120426 :     MemoryContextSwitchTo(oldContext);</span>
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span><span class="lineCov">     120426 :     return entry;</span>
+<span class="lineNum">     380 </span>            : }
+<span class="lineNum">     381 </span>            : 
+<span class="lineNum">     382 </span>            : /*
+<span class="lineNum">     383 </span>            :  * Compute the hash value for a tuple
+<span class="lineNum">     384 </span>            :  *
+<span class="lineNum">     385 </span>            :  * The passed-in key is a pointer to TupleHashEntryData.  In an actual hash
+<span class="lineNum">     386 </span>            :  * table entry, the firstTuple field points to a tuple (in MinimalTuple
+<span class="lineNum">     387 </span>            :  * format).  LookupTupleHashEntry sets up a dummy TupleHashEntryData with a
+<span class="lineNum">     388 </span>            :  * NULL firstTuple field --- that cues us to look at the inputslot instead.
+<span class="lineNum">     389 </span>            :  * This convention avoids the need to materialize virtual input tuples unless
+<span class="lineNum">     390 </span>            :  * they actually need to get copied into the table.
+<span class="lineNum">     391 </span>            :  *
+<span class="lineNum">     392 </span>            :  * Also, the caller must select an appropriate memory context for running
+<span class="lineNum">     393 </span>            :  * the hash functions. (dynahash.c doesn't change CurrentMemoryContext.)
+<a name="394"><span class="lineNum">     394 </span>            :  */</a>
+<span class="lineNum">     395 </span>            : static uint32
+<span class="lineNum">     396 </span><span class="lineCov">    1686926 : TupleHashTableHash(struct tuplehash_hash *tb, const MinimalTuple tuple)</span>
+<span class="lineNum">     397 </span>            : {
+<span class="lineNum">     398 </span><span class="lineCov">    1686926 :     TupleHashTable hashtable = (TupleHashTable) tb-&gt;private_data;</span>
+<span class="lineNum">     399 </span><span class="lineCov">    1686926 :     int         numCols = hashtable-&gt;numCols;</span>
+<span class="lineNum">     400 </span><span class="lineCov">    1686926 :     AttrNumber *keyColIdx = hashtable-&gt;keyColIdx;</span>
+<span class="lineNum">     401 </span><span class="lineCov">    1686926 :     uint32      hashkey = hashtable-&gt;hash_iv;</span>
+<span class="lineNum">     402 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     403 </span>            :     FmgrInfo   *hashfunctions;
+<span class="lineNum">     404 </span>            :     int         i;
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span><span class="lineCov">    1686926 :     if (tuple == NULL)</span>
+<span class="lineNum">     407 </span>            :     {
+<span class="lineNum">     408 </span>            :         /* Process the current input tuple for the table */
+<span class="lineNum">     409 </span><span class="lineCov">    1686926 :         slot = hashtable-&gt;inputslot;</span>
+<span class="lineNum">     410 </span><span class="lineCov">    1686926 :         hashfunctions = hashtable-&gt;in_hash_funcs;</span>
+<span class="lineNum">     411 </span>            :     }
+<span class="lineNum">     412 </span>            :     else
+<span class="lineNum">     413 </span>            :     {
+<span class="lineNum">     414 </span>            :         /*
+<span class="lineNum">     415 </span>            :          * Process a tuple already stored in the table.
+<span class="lineNum">     416 </span>            :          *
+<span class="lineNum">     417 </span>            :          * (this case never actually occurs due to the way simplehash.h is
+<span class="lineNum">     418 </span>            :          * used, as the hash-value is stored in the entries)
+<span class="lineNum">     419 </span>            :          */
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :         slot = hashtable-&gt;tableslot;</span>
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :         ExecStoreMinimalTuple(tuple, slot, false);</span>
+<span class="lineNum">     422 </span><span class="lineNoCov">          0 :         hashfunctions = hashtable-&gt;tab_hash_funcs;</span>
+<span class="lineNum">     423 </span>            :     }
+<span class="lineNum">     424 </span>            : 
+<span class="lineNum">     425 </span><span class="lineCov">    4196344 :     for (i = 0; i &lt; numCols; i++)</span>
+<span class="lineNum">     426 </span>            :     {
+<span class="lineNum">     427 </span><span class="lineCov">    2509420 :         AttrNumber  att = keyColIdx[i];</span>
+<span class="lineNum">     428 </span>            :         Datum       attr;
+<span class="lineNum">     429 </span>            :         bool        isNull;
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span>            :         /* rotate hashkey left 1 bit at each step */
+<span class="lineNum">     432 </span><span class="lineCov">    2509420 :         hashkey = (hashkey &lt;&lt; 1) | ((hashkey &amp; 0x80000000) ? 1 : 0);</span>
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span><span class="lineCov">    2509420 :         attr = slot_getattr(slot, att, &amp;isNull);</span>
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span><span class="lineCov">    2509420 :         if (!isNull)            /* treat nulls as having hash key 0 */</span>
+<span class="lineNum">     437 </span>            :         {
+<span class="lineNum">     438 </span>            :             uint32      hkey;
+<span class="lineNum">     439 </span>            : 
+<span class="lineNum">     440 </span><span class="lineCov">    2433856 :             hkey = DatumGetUInt32(FunctionCall1Coll(&amp;hashfunctions[i],</span>
+<span class="lineNum">     441 </span>            :                                                     hashtable-&gt;tab_collations[i],
+<span class="lineNum">     442 </span>            :                                                     attr));
+<span class="lineNum">     443 </span><span class="lineCov">    2433854 :             hashkey ^= hkey;</span>
+<span class="lineNum">     444 </span>            :         }
+<span class="lineNum">     445 </span>            :     }
+<span class="lineNum">     446 </span>            : 
+<span class="lineNum">     447 </span>            :     /*
+<span class="lineNum">     448 </span>            :      * The way hashes are combined above, among each other and with the IV,
+<span class="lineNum">     449 </span>            :      * doesn't lead to good bit perturbation. As the IV's goal is to lead to
+<span class="lineNum">     450 </span>            :      * achieve that, perform a round of hashing of the combined hash -
+<span class="lineNum">     451 </span>            :      * resulting in near perfect perturbation.
+<span class="lineNum">     452 </span>            :      */
+<span class="lineNum">     453 </span><span class="lineCov">    1686924 :     return murmurhash32(hashkey);</span>
+<span class="lineNum">     454 </span>            : }
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span>            : /*
+<span class="lineNum">     457 </span>            :  * See whether two tuples (presumably of the same hash value) match
+<span class="lineNum">     458 </span>            :  *
+<span class="lineNum">     459 </span>            :  * As above, the passed pointers are pointers to TupleHashEntryData.
+<a name="460"><span class="lineNum">     460 </span>            :  */</a>
+<span class="lineNum">     461 </span>            : static int
+<span class="lineNum">     462 </span><span class="lineCov">    1424190 : TupleHashTableMatch(struct tuplehash_hash *tb, const MinimalTuple tuple1, const MinimalTuple tuple2)</span>
+<span class="lineNum">     463 </span>            : {
+<span class="lineNum">     464 </span>            :     TupleTableSlot *slot1;
+<span class="lineNum">     465 </span>            :     TupleTableSlot *slot2;
+<span class="lineNum">     466 </span><span class="lineCov">    1424190 :     TupleHashTable hashtable = (TupleHashTable) tb-&gt;private_data;</span>
+<span class="lineNum">     467 </span><span class="lineCov">    1424190 :     ExprContext *econtext = hashtable-&gt;exprcontext;</span>
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span>            :     /*
+<span class="lineNum">     470 </span>            :      * We assume that simplehash.h will only ever call us with the first
+<span class="lineNum">     471 </span>            :      * argument being an actual table entry, and the second argument being
+<span class="lineNum">     472 </span>            :      * LookupTupleHashEntry's dummy TupleHashEntryData.  The other direction
+<span class="lineNum">     473 </span>            :      * could be supported too, but is not currently required.
+<span class="lineNum">     474 </span>            :      */
+<span class="lineNum">     475 </span><span class="lineCov">    1424190 :     Assert(tuple1 != NULL);</span>
+<span class="lineNum">     476 </span><span class="lineCov">    1424190 :     slot1 = hashtable-&gt;tableslot;</span>
+<span class="lineNum">     477 </span><span class="lineCov">    1424190 :     ExecStoreMinimalTuple(tuple1, slot1, false);</span>
+<span class="lineNum">     478 </span><span class="lineCov">    1424190 :     Assert(tuple2 == NULL);</span>
+<span class="lineNum">     479 </span><span class="lineCov">    1424190 :     slot2 = hashtable-&gt;inputslot;</span>
+<span class="lineNum">     480 </span>            : 
+<span class="lineNum">     481 </span>            :     /* For crosstype comparisons, the inputslot must be first */
+<span class="lineNum">     482 </span><span class="lineCov">    1424190 :     econtext-&gt;ecxt_innertuple = slot2;</span>
+<span class="lineNum">     483 </span><span class="lineCov">    1424190 :     econtext-&gt;ecxt_outertuple = slot1;</span>
+<span class="lineNum">     484 </span><span class="lineCov">    1424190 :     return !ExecQualAndReset(hashtable-&gt;cur_eq_func, econtext);</span>
+<span class="lineNum">     485 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

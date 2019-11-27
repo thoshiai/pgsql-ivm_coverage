@@ -1,0 +1,805 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/hash/hashsearch.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/hash</a> - hashsearch.c<span style="font-size: 80%;"> (source / <a href="hashsearch.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">167</td>
+            <td class="headerCovTableEntry">248</td>
+            <td class="headerCovTableEntryLo">67.3 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">6</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntryMed">85.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * hashsearch.c
+<span class="lineNum">       4 </span>            :  *    search code for postgres hash tables
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/access/hash/hashsearch.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/hash.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;access/relscan.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;storage/predicate.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : static bool _hash_readpage(IndexScanDesc scan, Buffer *bufP,
+<span class="lineNum">      25 </span>            :                            ScanDirection dir);
+<span class="lineNum">      26 </span>            : static int  _hash_load_qualified_items(IndexScanDesc scan, Page page,
+<span class="lineNum">      27 </span>            :                                        OffsetNumber offnum, ScanDirection dir);
+<span class="lineNum">      28 </span>            : static inline void _hash_saveitem(HashScanOpaque so, int itemIndex,
+<span class="lineNum">      29 </span>            :                                   OffsetNumber offnum, IndexTuple itup);
+<span class="lineNum">      30 </span>            : static void _hash_readnext(IndexScanDesc scan, Buffer *bufp,
+<span class="lineNum">      31 </span>            :                            Page *pagep, HashPageOpaque *opaquep);
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /*
+<span class="lineNum">      34 </span>            :  *  _hash_next() -- Get the next item in a scan.
+<span class="lineNum">      35 </span>            :  *
+<span class="lineNum">      36 </span>            :  *      On entry, so-&gt;currPos describes the current page, which may
+<span class="lineNum">      37 </span>            :  *      be pinned but not locked, and so-&gt;currPos.itemIndex identifies
+<span class="lineNum">      38 </span>            :  *      which item was previously returned.
+<span class="lineNum">      39 </span>            :  *
+<span class="lineNum">      40 </span>            :  *      On successful exit, scan-&gt;xs_ctup.t_self is set to the TID
+<span class="lineNum">      41 </span>            :  *      of the next heap tuple. so-&gt;currPos is updated as needed.
+<span class="lineNum">      42 </span>            :  *
+<span class="lineNum">      43 </span>            :  *      On failure exit (no more tuples), we return false with pin
+<span class="lineNum">      44 </span>            :  *      held on bucket page but no pins or locks held on overflow
+<span class="lineNum">      45 </span>            :  *      page.
+<a name="46"><span class="lineNum">      46 </span>            :  */</a>
+<span class="lineNum">      47 </span>            : bool
+<span class="lineNum">      48 </span><span class="lineCov">      33082 : _hash_next(IndexScanDesc scan, ScanDirection dir)</span>
+<span class="lineNum">      49 </span>            : {
+<span class="lineNum">      50 </span><span class="lineCov">      33082 :     Relation    rel = scan-&gt;indexRelation;</span>
+<span class="lineNum">      51 </span><span class="lineCov">      33082 :     HashScanOpaque so = (HashScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">      52 </span>            :     HashScanPosItem *currItem;
+<span class="lineNum">      53 </span>            :     BlockNumber blkno;
+<span class="lineNum">      54 </span>            :     Buffer      buf;
+<span class="lineNum">      55 </span><span class="lineCov">      33082 :     bool        end_of_scan = false;</span>
+<span class="lineNum">      56 </span>            : 
+<span class="lineNum">      57 </span>            :     /*
+<span class="lineNum">      58 </span>            :      * Advance to the next tuple on the current page; or if done, try to read
+<span class="lineNum">      59 </span>            :      * data from the next or previous page based on the scan direction. Before
+<span class="lineNum">      60 </span>            :      * moving to the next or previous page make sure that we deal with all the
+<span class="lineNum">      61 </span>            :      * killed items.
+<span class="lineNum">      62 </span>            :      */
+<span class="lineNum">      63 </span><span class="lineCov">      33082 :     if (ScanDirectionIsForward(dir))</span>
+<span class="lineNum">      64 </span>            :     {
+<span class="lineNum">      65 </span><span class="lineCov">      22082 :         if (++so-&gt;currPos.itemIndex &gt; so-&gt;currPos.lastItem)</span>
+<span class="lineNum">      66 </span>            :         {
+<span class="lineNum">      67 </span><span class="lineCov">        102 :             if (so-&gt;numKilled &gt; 0)</span>
+<span class="lineNum">      68 </span><span class="lineNoCov">          0 :                 _hash_kill_items(scan);</span>
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span><span class="lineCov">        102 :             blkno = so-&gt;currPos.nextPage;</span>
+<span class="lineNum">      71 </span><span class="lineCov">        102 :             if (BlockNumberIsValid(blkno))</span>
+<span class="lineNum">      72 </span>            :             {
+<span class="lineNum">      73 </span><span class="lineCov">         52 :                 buf = _hash_getbuf(rel, blkno, HASH_READ, LH_OVERFLOW_PAGE);</span>
+<span class="lineNum">      74 </span><span class="lineCov">         52 :                 TestForOldSnapshot(scan-&gt;xs_snapshot, rel, BufferGetPage(buf));</span>
+<span class="lineNum">      75 </span><span class="lineCov">         52 :                 if (!_hash_readpage(scan, &amp;buf, dir))</span>
+<span class="lineNum">      76 </span><span class="lineNoCov">          0 :                     end_of_scan = true;</span>
+<span class="lineNum">      77 </span>            :             }
+<span class="lineNum">      78 </span>            :             else
+<span class="lineNum">      79 </span><span class="lineCov">         50 :                 end_of_scan = true;</span>
+<span class="lineNum">      80 </span>            :         }
+<span class="lineNum">      81 </span>            :     }
+<span class="lineNum">      82 </span>            :     else
+<span class="lineNum">      83 </span>            :     {
+<span class="lineNum">      84 </span><span class="lineCov">      11000 :         if (--so-&gt;currPos.itemIndex &lt; so-&gt;currPos.firstItem)</span>
+<span class="lineNum">      85 </span>            :         {
+<span class="lineNum">      86 </span><span class="lineCov">         28 :             if (so-&gt;numKilled &gt; 0)</span>
+<span class="lineNum">      87 </span><span class="lineNoCov">          0 :                 _hash_kill_items(scan);</span>
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span><span class="lineCov">         28 :             blkno = so-&gt;currPos.prevPage;</span>
+<span class="lineNum">      90 </span><span class="lineCov">         28 :             if (BlockNumberIsValid(blkno))</span>
+<span class="lineNum">      91 </span>            :             {
+<span class="lineNum">      92 </span><span class="lineCov">         26 :                 buf = _hash_getbuf(rel, blkno, HASH_READ,</span>
+<span class="lineNum">      93 </span>            :                                    LH_BUCKET_PAGE | LH_OVERFLOW_PAGE);
+<span class="lineNum">      94 </span><span class="lineCov">         26 :                 TestForOldSnapshot(scan-&gt;xs_snapshot, rel, BufferGetPage(buf));</span>
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span>            :                 /*
+<span class="lineNum">      97 </span>            :                  * We always maintain the pin on bucket page for whole scan
+<span class="lineNum">      98 </span>            :                  * operation, so releasing the additional pin we have acquired
+<span class="lineNum">      99 </span>            :                  * here.
+<span class="lineNum">     100 </span>            :                  */
+<span class="lineNum">     101 </span><span class="lineCov">         50 :                 if (buf == so-&gt;hashso_bucket_buf ||</span>
+<span class="lineNum">     102 </span><span class="lineCov">         24 :                     buf == so-&gt;hashso_split_bucket_buf)</span>
+<span class="lineNum">     103 </span><span class="lineCov">          2 :                     _hash_dropbuf(rel, buf);</span>
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span><span class="lineCov">         26 :                 if (!_hash_readpage(scan, &amp;buf, dir))</span>
+<span class="lineNum">     106 </span><span class="lineNoCov">          0 :                     end_of_scan = true;</span>
+<span class="lineNum">     107 </span>            :             }
+<span class="lineNum">     108 </span>            :             else
+<span class="lineNum">     109 </span><span class="lineCov">          2 :                 end_of_scan = true;</span>
+<span class="lineNum">     110 </span>            :         }
+<span class="lineNum">     111 </span>            :     }
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span><span class="lineCov">      33082 :     if (end_of_scan)</span>
+<span class="lineNum">     114 </span>            :     {
+<span class="lineNum">     115 </span><span class="lineCov">         52 :         _hash_dropscanbuf(rel, so);</span>
+<span class="lineNum">     116 </span><span class="lineCov">         52 :         HashScanPosInvalidate(so-&gt;currPos);</span>
+<span class="lineNum">     117 </span><span class="lineCov">         52 :         return false;</span>
+<span class="lineNum">     118 </span>            :     }
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            :     /* OK, itemIndex says what to return */
+<span class="lineNum">     121 </span><span class="lineCov">      33030 :     currItem = &amp;so-&gt;currPos.items[so-&gt;currPos.itemIndex];</span>
+<span class="lineNum">     122 </span><span class="lineCov">      33030 :     scan-&gt;xs_heaptid = currItem-&gt;heapTid;</span>
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span><span class="lineCov">      33030 :     return true;</span>
+<span class="lineNum">     125 </span>            : }
+<span class="lineNum">     126 </span>            : 
+<span class="lineNum">     127 </span>            : /*
+<span class="lineNum">     128 </span>            :  * Advance to next page in a bucket, if any.  If we are scanning the bucket
+<span class="lineNum">     129 </span>            :  * being populated during split operation then this function advances to the
+<span class="lineNum">     130 </span>            :  * bucket being split after the last bucket page of bucket being populated.
+<a name="131"><span class="lineNum">     131 </span>            :  */</a>
+<span class="lineNum">     132 </span>            : static void
+<span class="lineNum">     133 </span><span class="lineCov">         42 : _hash_readnext(IndexScanDesc scan,</span>
+<span class="lineNum">     134 </span>            :                Buffer *bufp, Page *pagep, HashPageOpaque *opaquep)
+<span class="lineNum">     135 </span>            : {
+<span class="lineNum">     136 </span>            :     BlockNumber blkno;
+<span class="lineNum">     137 </span><span class="lineCov">         42 :     Relation    rel = scan-&gt;indexRelation;</span>
+<span class="lineNum">     138 </span><span class="lineCov">         42 :     HashScanOpaque so = (HashScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     139 </span><span class="lineCov">         42 :     bool        block_found = false;</span>
+<span class="lineNum">     140 </span>            : 
+<span class="lineNum">     141 </span><span class="lineCov">         42 :     blkno = (*opaquep)-&gt;hasho_nextblkno;</span>
+<span class="lineNum">     142 </span>            : 
+<span class="lineNum">     143 </span>            :     /*
+<span class="lineNum">     144 </span>            :      * Retain the pin on primary bucket page till the end of scan.  Refer the
+<span class="lineNum">     145 </span>            :      * comments in _hash_first to know the reason of retaining pin.
+<span class="lineNum">     146 </span>            :      */
+<span class="lineNum">     147 </span><span class="lineCov">         42 :     if (*bufp == so-&gt;hashso_bucket_buf || *bufp == so-&gt;hashso_split_bucket_buf)</span>
+<span class="lineNum">     148 </span><span class="lineCov">         18 :         LockBuffer(*bufp, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     149 </span>            :     else
+<span class="lineNum">     150 </span><span class="lineCov">         24 :         _hash_relbuf(rel, *bufp);</span>
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineCov">         42 :     *bufp = InvalidBuffer;</span>
+<span class="lineNum">     153 </span>            :     /* check for interrupts while we're not holding any buffer lock */
+<span class="lineNum">     154 </span><span class="lineCov">         42 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     155 </span><span class="lineCov">         42 :     if (BlockNumberIsValid(blkno))</span>
+<span class="lineNum">     156 </span>            :     {
+<span class="lineNum">     157 </span><span class="lineCov">         26 :         *bufp = _hash_getbuf(rel, blkno, HASH_READ, LH_OVERFLOW_PAGE);</span>
+<span class="lineNum">     158 </span><span class="lineCov">         26 :         block_found = true;</span>
+<span class="lineNum">     159 </span>            :     }
+<span class="lineNum">     160 </span><span class="lineCov">         16 :     else if (so-&gt;hashso_buc_populated &amp;&amp; !so-&gt;hashso_buc_split)</span>
+<span class="lineNum">     161 </span>            :     {
+<span class="lineNum">     162 </span>            :         /*
+<span class="lineNum">     163 </span>            :          * end of bucket, scan bucket being split if there was a split in
+<span class="lineNum">     164 </span>            :          * progress at the start of scan.
+<span class="lineNum">     165 </span>            :          */
+<span class="lineNum">     166 </span><span class="lineNoCov">          0 :         *bufp = so-&gt;hashso_split_bucket_buf;</span>
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            :         /*
+<span class="lineNum">     169 </span>            :          * buffer for bucket being split must be valid as we acquire the pin
+<span class="lineNum">     170 </span>            :          * on it before the start of scan and retain it till end of scan.
+<span class="lineNum">     171 </span>            :          */
+<span class="lineNum">     172 </span><span class="lineNoCov">          0 :         Assert(BufferIsValid(*bufp));</span>
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span><span class="lineNoCov">          0 :         LockBuffer(*bufp, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">     175 </span><span class="lineNoCov">          0 :         PredicateLockPage(rel, BufferGetBlockNumber(*bufp), scan-&gt;xs_snapshot);</span>
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span>            :         /*
+<span class="lineNum">     178 </span>            :          * setting hashso_buc_split to true indicates that we are scanning
+<span class="lineNum">     179 </span>            :          * bucket being split.
+<span class="lineNum">     180 </span>            :          */
+<span class="lineNum">     181 </span><span class="lineNoCov">          0 :         so-&gt;hashso_buc_split = true;</span>
+<span class="lineNum">     182 </span>            : 
+<span class="lineNum">     183 </span><span class="lineNoCov">          0 :         block_found = true;</span>
+<span class="lineNum">     184 </span>            :     }
+<span class="lineNum">     185 </span>            : 
+<span class="lineNum">     186 </span><span class="lineCov">         42 :     if (block_found)</span>
+<span class="lineNum">     187 </span>            :     {
+<span class="lineNum">     188 </span><span class="lineCov">         26 :         *pagep = BufferGetPage(*bufp);</span>
+<span class="lineNum">     189 </span><span class="lineCov">         26 :         TestForOldSnapshot(scan-&gt;xs_snapshot, rel, *pagep);</span>
+<span class="lineNum">     190 </span><span class="lineCov">         26 :         *opaquep = (HashPageOpaque) PageGetSpecialPointer(*pagep);</span>
+<span class="lineNum">     191 </span>            :     }
+<span class="lineNum">     192 </span><span class="lineCov">         42 : }</span>
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span>            : /*
+<span class="lineNum">     195 </span>            :  * Advance to previous page in a bucket, if any.  If the current scan has
+<span class="lineNum">     196 </span>            :  * started during split operation then this function advances to bucket
+<span class="lineNum">     197 </span>            :  * being populated after the first bucket page of bucket being split.
+<a name="198"><span class="lineNum">     198 </span>            :  */</a>
+<span class="lineNum">     199 </span>            : static void
+<span class="lineNum">     200 </span><span class="lineNoCov">          0 : _hash_readprev(IndexScanDesc scan,</span>
+<span class="lineNum">     201 </span>            :                Buffer *bufp, Page *pagep, HashPageOpaque *opaquep)
+<span class="lineNum">     202 </span>            : {
+<span class="lineNum">     203 </span>            :     BlockNumber blkno;
+<span class="lineNum">     204 </span><span class="lineNoCov">          0 :     Relation    rel = scan-&gt;indexRelation;</span>
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 :     HashScanOpaque so = (HashScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     206 </span>            :     bool        haveprevblk;
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span><span class="lineNoCov">          0 :     blkno = (*opaquep)-&gt;hasho_prevblkno;</span>
+<span class="lineNum">     209 </span>            : 
+<span class="lineNum">     210 </span>            :     /*
+<span class="lineNum">     211 </span>            :      * Retain the pin on primary bucket page till the end of scan.  Refer the
+<span class="lineNum">     212 </span>            :      * comments in _hash_first to know the reason of retaining pin.
+<span class="lineNum">     213 </span>            :      */
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 :     if (*bufp == so-&gt;hashso_bucket_buf || *bufp == so-&gt;hashso_split_bucket_buf)</span>
+<span class="lineNum">     215 </span>            :     {
+<span class="lineNum">     216 </span><span class="lineNoCov">          0 :         LockBuffer(*bufp, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 :         haveprevblk = false;</span>
+<span class="lineNum">     218 </span>            :     }
+<span class="lineNum">     219 </span>            :     else
+<span class="lineNum">     220 </span>            :     {
+<span class="lineNum">     221 </span><span class="lineNoCov">          0 :         _hash_relbuf(rel, *bufp);</span>
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :         haveprevblk = true;</span>
+<span class="lineNum">     223 </span>            :     }
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span><span class="lineNoCov">          0 :     *bufp = InvalidBuffer;</span>
+<span class="lineNum">     226 </span>            :     /* check for interrupts while we're not holding any buffer lock */
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     228 </span>            : 
+<span class="lineNum">     229 </span><span class="lineNoCov">          0 :     if (haveprevblk)</span>
+<span class="lineNum">     230 </span>            :     {
+<span class="lineNum">     231 </span><span class="lineNoCov">          0 :         Assert(BlockNumberIsValid(blkno));</span>
+<span class="lineNum">     232 </span><span class="lineNoCov">          0 :         *bufp = _hash_getbuf(rel, blkno, HASH_READ,</span>
+<span class="lineNum">     233 </span>            :                              LH_BUCKET_PAGE | LH_OVERFLOW_PAGE);
+<span class="lineNum">     234 </span><span class="lineNoCov">          0 :         *pagep = BufferGetPage(*bufp);</span>
+<span class="lineNum">     235 </span><span class="lineNoCov">          0 :         TestForOldSnapshot(scan-&gt;xs_snapshot, rel, *pagep);</span>
+<span class="lineNum">     236 </span><span class="lineNoCov">          0 :         *opaquep = (HashPageOpaque) PageGetSpecialPointer(*pagep);</span>
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span>            :         /*
+<span class="lineNum">     239 </span>            :          * We always maintain the pin on bucket page for whole scan operation,
+<span class="lineNum">     240 </span>            :          * so releasing the additional pin we have acquired here.
+<span class="lineNum">     241 </span>            :          */
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 :         if (*bufp == so-&gt;hashso_bucket_buf || *bufp == so-&gt;hashso_split_bucket_buf)</span>
+<span class="lineNum">     243 </span><span class="lineNoCov">          0 :             _hash_dropbuf(rel, *bufp);</span>
+<span class="lineNum">     244 </span>            :     }
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :     else if (so-&gt;hashso_buc_populated &amp;&amp; so-&gt;hashso_buc_split)</span>
+<span class="lineNum">     246 </span>            :     {
+<span class="lineNum">     247 </span>            :         /*
+<span class="lineNum">     248 </span>            :          * end of bucket, scan bucket being populated if there was a split in
+<span class="lineNum">     249 </span>            :          * progress at the start of scan.
+<span class="lineNum">     250 </span>            :          */
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :         *bufp = so-&gt;hashso_bucket_buf;</span>
+<span class="lineNum">     252 </span>            : 
+<span class="lineNum">     253 </span>            :         /*
+<span class="lineNum">     254 </span>            :          * buffer for bucket being populated must be valid as we acquire the
+<span class="lineNum">     255 </span>            :          * pin on it before the start of scan and retain it till end of scan.
+<span class="lineNum">     256 </span>            :          */
+<span class="lineNum">     257 </span><span class="lineNoCov">          0 :         Assert(BufferIsValid(*bufp));</span>
+<span class="lineNum">     258 </span>            : 
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :         LockBuffer(*bufp, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">     260 </span><span class="lineNoCov">          0 :         *pagep = BufferGetPage(*bufp);</span>
+<span class="lineNum">     261 </span><span class="lineNoCov">          0 :         *opaquep = (HashPageOpaque) PageGetSpecialPointer(*pagep);</span>
+<span class="lineNum">     262 </span>            : 
+<span class="lineNum">     263 </span>            :         /* move to the end of bucket chain */
+<span class="lineNum">     264 </span><span class="lineNoCov">          0 :         while (BlockNumberIsValid((*opaquep)-&gt;hasho_nextblkno))</span>
+<span class="lineNum">     265 </span><span class="lineNoCov">          0 :             _hash_readnext(scan, bufp, pagep, opaquep);</span>
+<span class="lineNum">     266 </span>            : 
+<span class="lineNum">     267 </span>            :         /*
+<span class="lineNum">     268 </span>            :          * setting hashso_buc_split to false indicates that we are scanning
+<span class="lineNum">     269 </span>            :          * bucket being populated.
+<span class="lineNum">     270 </span>            :          */
+<span class="lineNum">     271 </span><span class="lineNoCov">          0 :         so-&gt;hashso_buc_split = false;</span>
+<span class="lineNum">     272 </span>            :     }
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span>            : /*
+<span class="lineNum">     276 </span>            :  *  _hash_first() -- Find the first item in a scan.
+<span class="lineNum">     277 </span>            :  *
+<span class="lineNum">     278 </span>            :  *      We find the first item (or, if backward scan, the last item) in the
+<span class="lineNum">     279 </span>            :  *      index that satisfies the qualification associated with the scan
+<span class="lineNum">     280 </span>            :  *      descriptor.
+<span class="lineNum">     281 </span>            :  *
+<span class="lineNum">     282 </span>            :  *      On successful exit, if the page containing current index tuple is an
+<span class="lineNum">     283 </span>            :  *      overflow page, both pin and lock are released whereas if it is a bucket
+<span class="lineNum">     284 </span>            :  *      page then it is pinned but not locked and data about the matching
+<span class="lineNum">     285 </span>            :  *      tuple(s) on the page has been loaded into so-&gt;currPos,
+<span class="lineNum">     286 </span>            :  *      scan-&gt;xs_ctup.t_self is set to the heap TID of the current tuple.
+<span class="lineNum">     287 </span>            :  *
+<span class="lineNum">     288 </span>            :  *      On failure exit (no more tuples), we return false, with pin held on
+<span class="lineNum">     289 </span>            :  *      bucket page but no pins or locks held on overflow page.
+<a name="290"><span class="lineNum">     290 </span>            :  */</a>
+<span class="lineNum">     291 </span>            : bool
+<span class="lineNum">     292 </span><span class="lineCov">         68 : _hash_first(IndexScanDesc scan, ScanDirection dir)</span>
+<span class="lineNum">     293 </span>            : {
+<span class="lineNum">     294 </span><span class="lineCov">         68 :     Relation    rel = scan-&gt;indexRelation;</span>
+<span class="lineNum">     295 </span><span class="lineCov">         68 :     HashScanOpaque so = (HashScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     296 </span>            :     ScanKey     cur;
+<span class="lineNum">     297 </span>            :     uint32      hashkey;
+<span class="lineNum">     298 </span>            :     Bucket      bucket;
+<span class="lineNum">     299 </span>            :     Buffer      buf;
+<span class="lineNum">     300 </span>            :     Page        page;
+<span class="lineNum">     301 </span>            :     HashPageOpaque opaque;
+<span class="lineNum">     302 </span>            :     HashScanPosItem *currItem;
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span><span class="lineCov">         68 :     pgstat_count_index_scan(rel);</span>
+<span class="lineNum">     305 </span>            : 
+<span class="lineNum">     306 </span>            :     /*
+<span class="lineNum">     307 </span>            :      * We do not support hash scans with no index qualification, because we
+<span class="lineNum">     308 </span>            :      * would have to read the whole index rather than just one bucket. That
+<span class="lineNum">     309 </span>            :      * creates a whole raft of problems, since we haven't got a practical way
+<span class="lineNum">     310 </span>            :      * to lock all the buckets against splits or compactions.
+<span class="lineNum">     311 </span>            :      */
+<span class="lineNum">     312 </span><span class="lineCov">         68 :     if (scan-&gt;numberOfKeys &lt; 1)</span>
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     314 </span>            :                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     315 </span>            :                  errmsg(&quot;hash indexes do not support whole-index scans&quot;)));
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            :     /* There may be more than one index qual, but we hash only the first */
+<span class="lineNum">     318 </span><span class="lineCov">         68 :     cur = &amp;scan-&gt;keyData[0];</span>
+<span class="lineNum">     319 </span>            : 
+<span class="lineNum">     320 </span>            :     /* We support only single-column hash indexes */
+<span class="lineNum">     321 </span><span class="lineCov">         68 :     Assert(cur-&gt;sk_attno == 1);</span>
+<span class="lineNum">     322 </span>            :     /* And there's only one operator strategy, too */
+<span class="lineNum">     323 </span><span class="lineCov">         68 :     Assert(cur-&gt;sk_strategy == HTEqualStrategyNumber);</span>
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span>            :     /*
+<span class="lineNum">     326 </span>            :      * If the constant in the index qual is NULL, assume it cannot match any
+<span class="lineNum">     327 </span>            :      * items in the index.
+<span class="lineNum">     328 </span>            :      */
+<span class="lineNum">     329 </span><span class="lineCov">         68 :     if (cur-&gt;sk_flags &amp; SK_ISNULL)</span>
+<span class="lineNum">     330 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     331 </span>            : 
+<span class="lineNum">     332 </span>            :     /*
+<span class="lineNum">     333 </span>            :      * Okay to compute the hash key.  We want to do this before acquiring any
+<span class="lineNum">     334 </span>            :      * locks, in case a user-defined hash function happens to be slow.
+<span class="lineNum">     335 </span>            :      *
+<span class="lineNum">     336 </span>            :      * If scankey operator is not a cross-type comparison, we can use the
+<span class="lineNum">     337 </span>            :      * cached hash function; otherwise gotta look it up in the catalogs.
+<span class="lineNum">     338 </span>            :      *
+<span class="lineNum">     339 </span>            :      * We support the convention that sk_subtype == InvalidOid means the
+<span class="lineNum">     340 </span>            :      * opclass input type; this is a hack to simplify life for ScanKeyInit().
+<span class="lineNum">     341 </span>            :      */
+<span class="lineNum">     342 </span><span class="lineCov">         68 :     if (cur-&gt;sk_subtype == rel-&gt;rd_opcintype[0] ||</span>
+<span class="lineNum">     343 </span><span class="lineNoCov">          0 :         cur-&gt;sk_subtype == InvalidOid)</span>
+<span class="lineNum">     344 </span><span class="lineCov">         68 :         hashkey = _hash_datum2hashkey(rel, cur-&gt;sk_argument);</span>
+<span class="lineNum">     345 </span>            :     else
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :         hashkey = _hash_datum2hashkey_type(rel, cur-&gt;sk_argument,</span>
+<span class="lineNum">     347 </span>            :                                            cur-&gt;sk_subtype);
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span><span class="lineCov">         68 :     so-&gt;hashso_sk_hash = hashkey;</span>
+<span class="lineNum">     350 </span>            : 
+<span class="lineNum">     351 </span><span class="lineCov">         68 :     buf = _hash_getbucketbuf_from_hashkey(rel, hashkey, HASH_READ, NULL);</span>
+<span class="lineNum">     352 </span><span class="lineCov">         68 :     PredicateLockPage(rel, BufferGetBlockNumber(buf), scan-&gt;xs_snapshot);</span>
+<span class="lineNum">     353 </span><span class="lineCov">         68 :     page = BufferGetPage(buf);</span>
+<span class="lineNum">     354 </span><span class="lineCov">         68 :     TestForOldSnapshot(scan-&gt;xs_snapshot, rel, page);</span>
+<span class="lineNum">     355 </span><span class="lineCov">         68 :     opaque = (HashPageOpaque) PageGetSpecialPointer(page);</span>
+<span class="lineNum">     356 </span><span class="lineCov">         68 :     bucket = opaque-&gt;hasho_bucket;</span>
+<span class="lineNum">     357 </span>            : 
+<span class="lineNum">     358 </span><span class="lineCov">         68 :     so-&gt;hashso_bucket_buf = buf;</span>
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span>            :     /*
+<span class="lineNum">     361 </span>            :      * If a bucket split is in progress, then while scanning the bucket being
+<span class="lineNum">     362 </span>            :      * populated, we need to skip tuples that were copied from bucket being
+<span class="lineNum">     363 </span>            :      * split.  We also need to maintain a pin on the bucket being split to
+<span class="lineNum">     364 </span>            :      * ensure that split-cleanup work done by vacuum doesn't remove tuples
+<span class="lineNum">     365 </span>            :      * from it till this scan is done.  We need to maintain a pin on the
+<span class="lineNum">     366 </span>            :      * bucket being populated to ensure that vacuum doesn't squeeze that
+<span class="lineNum">     367 </span>            :      * bucket till this scan is complete; otherwise, the ordering of tuples
+<span class="lineNum">     368 </span>            :      * can't be maintained during forward and backward scans.  Here, we have
+<span class="lineNum">     369 </span>            :      * to be cautious about locking order: first, acquire the lock on bucket
+<span class="lineNum">     370 </span>            :      * being split; then, release the lock on it but not the pin; then,
+<span class="lineNum">     371 </span>            :      * acquire a lock on bucket being populated and again re-verify whether
+<span class="lineNum">     372 </span>            :      * the bucket split is still in progress.  Acquiring the lock on bucket
+<span class="lineNum">     373 </span>            :      * being split first ensures that the vacuum waits for this scan to
+<span class="lineNum">     374 </span>            :      * finish.
+<span class="lineNum">     375 </span>            :      */
+<span class="lineNum">     376 </span><span class="lineCov">         68 :     if (H_BUCKET_BEING_POPULATED(opaque))</span>
+<span class="lineNum">     377 </span>            :     {
+<span class="lineNum">     378 </span>            :         BlockNumber old_blkno;
+<span class="lineNum">     379 </span>            :         Buffer      old_buf;
+<span class="lineNum">     380 </span>            : 
+<span class="lineNum">     381 </span><span class="lineNoCov">          0 :         old_blkno = _hash_get_oldblock_from_newbucket(rel, bucket);</span>
+<span class="lineNum">     382 </span>            : 
+<span class="lineNum">     383 </span>            :         /*
+<span class="lineNum">     384 </span>            :          * release the lock on new bucket and re-acquire it after acquiring
+<span class="lineNum">     385 </span>            :          * the lock on old bucket.
+<span class="lineNum">     386 </span>            :          */
+<span class="lineNum">     387 </span><span class="lineNoCov">          0 :         LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :         old_buf = _hash_getbuf(rel, old_blkno, HASH_READ, LH_BUCKET_PAGE);</span>
+<span class="lineNum">     390 </span><span class="lineNoCov">          0 :         TestForOldSnapshot(scan-&gt;xs_snapshot, rel, BufferGetPage(old_buf));</span>
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span>            :         /*
+<span class="lineNum">     393 </span>            :          * remember the split bucket buffer so as to use it later for
+<span class="lineNum">     394 </span>            :          * scanning.
+<span class="lineNum">     395 </span>            :          */
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :         so-&gt;hashso_split_bucket_buf = old_buf;</span>
+<span class="lineNum">     397 </span><span class="lineNoCov">          0 :         LockBuffer(old_buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     398 </span>            : 
+<span class="lineNum">     399 </span><span class="lineNoCov">          0 :         LockBuffer(buf, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">     400 </span><span class="lineNoCov">          0 :         page = BufferGetPage(buf);</span>
+<span class="lineNum">     401 </span><span class="lineNoCov">          0 :         opaque = (HashPageOpaque) PageGetSpecialPointer(page);</span>
+<span class="lineNum">     402 </span><span class="lineNoCov">          0 :         Assert(opaque-&gt;hasho_bucket == bucket);</span>
+<span class="lineNum">     403 </span>            : 
+<span class="lineNum">     404 </span><span class="lineNoCov">          0 :         if (H_BUCKET_BEING_POPULATED(opaque))</span>
+<span class="lineNum">     405 </span><span class="lineNoCov">          0 :             so-&gt;hashso_buc_populated = true;</span>
+<span class="lineNum">     406 </span>            :         else
+<span class="lineNum">     407 </span>            :         {
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :             _hash_dropbuf(rel, so-&gt;hashso_split_bucket_buf);</span>
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :             so-&gt;hashso_split_bucket_buf = InvalidBuffer;</span>
+<span class="lineNum">     410 </span>            :         }
+<span class="lineNum">     411 </span>            :     }
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            :     /* If a backwards scan is requested, move to the end of the chain */
+<span class="lineNum">     414 </span><span class="lineCov">         68 :     if (ScanDirectionIsBackward(dir))</span>
+<span class="lineNum">     415 </span>            :     {
+<span class="lineNum">     416 </span>            :         /*
+<span class="lineNum">     417 </span>            :          * Backward scans that start during split needs to start from end of
+<span class="lineNum">     418 </span>            :          * bucket being split.
+<span class="lineNum">     419 </span>            :          */
+<span class="lineNum">     420 </span><span class="lineCov">         32 :         while (BlockNumberIsValid(opaque-&gt;hasho_nextblkno) ||</span>
+<span class="lineNum">     421 </span><span class="lineCov">          2 :                (so-&gt;hashso_buc_populated &amp;&amp; !so-&gt;hashso_buc_split))</span>
+<span class="lineNum">     422 </span><span class="lineCov">         26 :             _hash_readnext(scan, &amp;buf, &amp;page, &amp;opaque);</span>
+<span class="lineNum">     423 </span>            :     }
+<span class="lineNum">     424 </span>            : 
+<span class="lineNum">     425 </span>            :     /* remember which buffer we have pinned, if any */
+<span class="lineNum">     426 </span><span class="lineCov">         68 :     Assert(BufferIsInvalid(so-&gt;currPos.buf));</span>
+<span class="lineNum">     427 </span><span class="lineCov">         68 :     so-&gt;currPos.buf = buf;</span>
+<span class="lineNum">     428 </span>            : 
+<span class="lineNum">     429 </span>            :     /* Now find all the tuples satisfying the qualification from a page */
+<span class="lineNum">     430 </span><span class="lineCov">         68 :     if (!_hash_readpage(scan, &amp;buf, dir))</span>
+<span class="lineNum">     431 </span><span class="lineCov">         16 :         return false;</span>
+<span class="lineNum">     432 </span>            : 
+<span class="lineNum">     433 </span>            :     /* OK, itemIndex says what to return */
+<span class="lineNum">     434 </span><span class="lineCov">         52 :     currItem = &amp;so-&gt;currPos.items[so-&gt;currPos.itemIndex];</span>
+<span class="lineNum">     435 </span><span class="lineCov">         52 :     scan-&gt;xs_heaptid = currItem-&gt;heapTid;</span>
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span>            :     /* if we're here, _hash_readpage found a valid tuples */
+<span class="lineNum">     438 </span><span class="lineCov">         52 :     return true;</span>
+<span class="lineNum">     439 </span>            : }
+<span class="lineNum">     440 </span>            : 
+<span class="lineNum">     441 </span>            : /*
+<span class="lineNum">     442 </span>            :  *  _hash_readpage() -- Load data from current index page into so-&gt;currPos
+<span class="lineNum">     443 </span>            :  *
+<span class="lineNum">     444 </span>            :  *  We scan all the items in the current index page and save them into
+<span class="lineNum">     445 </span>            :  *  so-&gt;currPos if it satisfies the qualification. If no matching items
+<span class="lineNum">     446 </span>            :  *  are found in the current page, we move to the next or previous page
+<span class="lineNum">     447 </span>            :  *  in a bucket chain as indicated by the direction.
+<span class="lineNum">     448 </span>            :  *
+<span class="lineNum">     449 </span>            :  *  Return true if any matching items are found else return false.
+<a name="450"><span class="lineNum">     450 </span>            :  */</a>
+<span class="lineNum">     451 </span>            : static bool
+<span class="lineNum">     452 </span><span class="lineCov">        146 : _hash_readpage(IndexScanDesc scan, Buffer *bufP, ScanDirection dir)</span>
+<span class="lineNum">     453 </span>            : {
+<span class="lineNum">     454 </span><span class="lineCov">        146 :     Relation    rel = scan-&gt;indexRelation;</span>
+<span class="lineNum">     455 </span><span class="lineCov">        146 :     HashScanOpaque so = (HashScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     456 </span>            :     Buffer      buf;
+<span class="lineNum">     457 </span>            :     Page        page;
+<span class="lineNum">     458 </span>            :     HashPageOpaque opaque;
+<span class="lineNum">     459 </span>            :     OffsetNumber offnum;
+<span class="lineNum">     460 </span>            :     uint16      itemIndex;
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span><span class="lineCov">        146 :     buf = *bufP;</span>
+<span class="lineNum">     463 </span><span class="lineCov">        146 :     Assert(BufferIsValid(buf));</span>
+<span class="lineNum">     464 </span><span class="lineCov">        146 :     _hash_checkpage(rel, buf, LH_BUCKET_PAGE | LH_OVERFLOW_PAGE);</span>
+<span class="lineNum">     465 </span><span class="lineCov">        146 :     page = BufferGetPage(buf);</span>
+<span class="lineNum">     466 </span><span class="lineCov">        146 :     opaque = (HashPageOpaque) PageGetSpecialPointer(page);</span>
+<span class="lineNum">     467 </span>            : 
+<span class="lineNum">     468 </span><span class="lineCov">        146 :     so-&gt;currPos.buf = buf;</span>
+<span class="lineNum">     469 </span><span class="lineCov">        146 :     so-&gt;currPos.currPage = BufferGetBlockNumber(buf);</span>
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span><span class="lineCov">        146 :     if (ScanDirectionIsForward(dir))</span>
+<span class="lineNum">     472 </span>            :     {
+<span class="lineNum">     473 </span><span class="lineCov">        118 :         BlockNumber prev_blkno = InvalidBlockNumber;</span>
+<span class="lineNum">     474 </span>            : 
+<span class="lineNum">     475 </span>            :         for (;;)
+<span class="lineNum">     476 </span>            :         {
+<span class="lineNum">     477 </span>            :             /* new page, locate starting position by binary search */
+<span class="lineNum">     478 </span><span class="lineCov">        118 :             offnum = _hash_binsearch(page, so-&gt;hashso_sk_hash);</span>
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span><span class="lineCov">        118 :             itemIndex = _hash_load_qualified_items(scan, page, offnum, dir);</span>
+<span class="lineNum">     481 </span>            : 
+<span class="lineNum">     482 </span><span class="lineCov">        118 :             if (itemIndex != 0)</span>
+<span class="lineNum">     483 </span><span class="lineCov">        102 :                 break;</span>
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span>            :             /*
+<span class="lineNum">     486 </span>            :              * Could not find any matching tuples in the current page, move to
+<span class="lineNum">     487 </span>            :              * the next page. Before leaving the current page, deal with any
+<span class="lineNum">     488 </span>            :              * killed items.
+<span class="lineNum">     489 </span>            :              */
+<span class="lineNum">     490 </span><span class="lineCov">         16 :             if (so-&gt;numKilled &gt; 0)</span>
+<span class="lineNum">     491 </span><span class="lineNoCov">          0 :                 _hash_kill_items(scan);</span>
+<span class="lineNum">     492 </span>            : 
+<span class="lineNum">     493 </span>            :             /*
+<span class="lineNum">     494 </span>            :              * If this is a primary bucket page, hasho_prevblkno is not a real
+<span class="lineNum">     495 </span>            :              * block number.
+<span class="lineNum">     496 </span>            :              */
+<span class="lineNum">     497 </span><span class="lineCov">         16 :             if (so-&gt;currPos.buf == so-&gt;hashso_bucket_buf ||</span>
+<span class="lineNum">     498 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.buf == so-&gt;hashso_split_bucket_buf)</span>
+<span class="lineNum">     499 </span><span class="lineCov">         16 :                 prev_blkno = InvalidBlockNumber;</span>
+<span class="lineNum">     500 </span>            :             else
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :                 prev_blkno = opaque-&gt;hasho_prevblkno;</span>
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span><span class="lineCov">         16 :             _hash_readnext(scan, &amp;buf, &amp;page, &amp;opaque);</span>
+<span class="lineNum">     504 </span><span class="lineCov">         16 :             if (BufferIsValid(buf))</span>
+<span class="lineNum">     505 </span>            :             {
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.buf = buf;</span>
+<span class="lineNum">     507 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.currPage = BufferGetBlockNumber(buf);</span>
+<span class="lineNum">     508 </span>            :             }
+<span class="lineNum">     509 </span>            :             else
+<span class="lineNum">     510 </span>            :             {
+<span class="lineNum">     511 </span>            :                 /*
+<span class="lineNum">     512 </span>            :                  * Remember next and previous block numbers for scrollable
+<span class="lineNum">     513 </span>            :                  * cursors to know the start position and return false
+<span class="lineNum">     514 </span>            :                  * indicating that no more matching tuples were found. Also,
+<span class="lineNum">     515 </span>            :                  * don't reset currPage or lsn, because we expect
+<span class="lineNum">     516 </span>            :                  * _hash_kill_items to be called for the old page after this
+<span class="lineNum">     517 </span>            :                  * function returns.
+<span class="lineNum">     518 </span>            :                  */
+<span class="lineNum">     519 </span><span class="lineCov">         16 :                 so-&gt;currPos.prevPage = prev_blkno;</span>
+<span class="lineNum">     520 </span><span class="lineCov">         16 :                 so-&gt;currPos.nextPage = InvalidBlockNumber;</span>
+<span class="lineNum">     521 </span><span class="lineCov">         16 :                 so-&gt;currPos.buf = buf;</span>
+<span class="lineNum">     522 </span><span class="lineCov">         16 :                 return false;</span>
+<span class="lineNum">     523 </span>            :             }
+<span class="lineNum">     524 </span><span class="lineNoCov">          0 :         }</span>
+<span class="lineNum">     525 </span>            : 
+<span class="lineNum">     526 </span><span class="lineCov">        102 :         so-&gt;currPos.firstItem = 0;</span>
+<span class="lineNum">     527 </span><span class="lineCov">        102 :         so-&gt;currPos.lastItem = itemIndex - 1;</span>
+<span class="lineNum">     528 </span><span class="lineCov">        102 :         so-&gt;currPos.itemIndex = 0;</span>
+<span class="lineNum">     529 </span>            :     }
+<span class="lineNum">     530 </span>            :     else
+<span class="lineNum">     531 </span>            :     {
+<span class="lineNum">     532 </span><span class="lineCov">         28 :         BlockNumber next_blkno = InvalidBlockNumber;</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span>            :         for (;;)
+<span class="lineNum">     535 </span>            :         {
+<span class="lineNum">     536 </span>            :             /* new page, locate starting position by binary search */
+<span class="lineNum">     537 </span><span class="lineCov">         28 :             offnum = _hash_binsearch_last(page, so-&gt;hashso_sk_hash);</span>
+<span class="lineNum">     538 </span>            : 
+<span class="lineNum">     539 </span><span class="lineCov">         28 :             itemIndex = _hash_load_qualified_items(scan, page, offnum, dir);</span>
+<span class="lineNum">     540 </span>            : 
+<span class="lineNum">     541 </span><span class="lineCov">         28 :             if (itemIndex != MaxIndexTuplesPerPage)</span>
+<span class="lineNum">     542 </span><span class="lineCov">         28 :                 break;</span>
+<span class="lineNum">     543 </span>            : 
+<span class="lineNum">     544 </span>            :             /*
+<span class="lineNum">     545 </span>            :              * Could not find any matching tuples in the current page, move to
+<span class="lineNum">     546 </span>            :              * the previous page. Before leaving the current page, deal with
+<span class="lineNum">     547 </span>            :              * any killed items.
+<span class="lineNum">     548 </span>            :              */
+<span class="lineNum">     549 </span><span class="lineNoCov">          0 :             if (so-&gt;numKilled &gt; 0)</span>
+<span class="lineNum">     550 </span><span class="lineNoCov">          0 :                 _hash_kill_items(scan);</span>
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :             if (so-&gt;currPos.buf == so-&gt;hashso_bucket_buf ||</span>
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.buf == so-&gt;hashso_split_bucket_buf)</span>
+<span class="lineNum">     554 </span><span class="lineNoCov">          0 :                 next_blkno = opaque-&gt;hasho_nextblkno;</span>
+<span class="lineNum">     555 </span>            : 
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :             _hash_readprev(scan, &amp;buf, &amp;page, &amp;opaque);</span>
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 :             if (BufferIsValid(buf))</span>
+<span class="lineNum">     558 </span>            :             {
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.buf = buf;</span>
+<span class="lineNum">     560 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.currPage = BufferGetBlockNumber(buf);</span>
+<span class="lineNum">     561 </span>            :             }
+<span class="lineNum">     562 </span>            :             else
+<span class="lineNum">     563 </span>            :             {
+<span class="lineNum">     564 </span>            :                 /*
+<span class="lineNum">     565 </span>            :                  * Remember next and previous block numbers for scrollable
+<span class="lineNum">     566 </span>            :                  * cursors to know the start position and return false
+<span class="lineNum">     567 </span>            :                  * indicating that no more matching tuples were found. Also,
+<span class="lineNum">     568 </span>            :                  * don't reset currPage or lsn, because we expect
+<span class="lineNum">     569 </span>            :                  * _hash_kill_items to be called for the old page after this
+<span class="lineNum">     570 </span>            :                  * function returns.
+<span class="lineNum">     571 </span>            :                  */
+<span class="lineNum">     572 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.prevPage = InvalidBlockNumber;</span>
+<span class="lineNum">     573 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.nextPage = next_blkno;</span>
+<span class="lineNum">     574 </span><span class="lineNoCov">          0 :                 so-&gt;currPos.buf = buf;</span>
+<span class="lineNum">     575 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">     576 </span>            :             }
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 :         }</span>
+<span class="lineNum">     578 </span>            : 
+<span class="lineNum">     579 </span><span class="lineCov">         28 :         so-&gt;currPos.firstItem = itemIndex;</span>
+<span class="lineNum">     580 </span><span class="lineCov">         28 :         so-&gt;currPos.lastItem = MaxIndexTuplesPerPage - 1;</span>
+<span class="lineNum">     581 </span><span class="lineCov">         28 :         so-&gt;currPos.itemIndex = MaxIndexTuplesPerPage - 1;</span>
+<span class="lineNum">     582 </span>            :     }
+<span class="lineNum">     583 </span>            : 
+<span class="lineNum">     584 </span><span class="lineCov">        208 :     if (so-&gt;currPos.buf == so-&gt;hashso_bucket_buf ||</span>
+<span class="lineNum">     585 </span><span class="lineCov">         78 :         so-&gt;currPos.buf == so-&gt;hashso_split_bucket_buf)</span>
+<span class="lineNum">     586 </span>            :     {
+<span class="lineNum">     587 </span><span class="lineCov">         52 :         so-&gt;currPos.prevPage = InvalidBlockNumber;</span>
+<span class="lineNum">     588 </span><span class="lineCov">         52 :         so-&gt;currPos.nextPage = opaque-&gt;hasho_nextblkno;</span>
+<span class="lineNum">     589 </span><span class="lineCov">         52 :         LockBuffer(so-&gt;currPos.buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     590 </span>            :     }
+<span class="lineNum">     591 </span>            :     else
+<span class="lineNum">     592 </span>            :     {
+<span class="lineNum">     593 </span><span class="lineCov">         78 :         so-&gt;currPos.prevPage = opaque-&gt;hasho_prevblkno;</span>
+<span class="lineNum">     594 </span><span class="lineCov">         78 :         so-&gt;currPos.nextPage = opaque-&gt;hasho_nextblkno;</span>
+<span class="lineNum">     595 </span><span class="lineCov">         78 :         _hash_relbuf(rel, so-&gt;currPos.buf);</span>
+<span class="lineNum">     596 </span><span class="lineCov">         78 :         so-&gt;currPos.buf = InvalidBuffer;</span>
+<span class="lineNum">     597 </span>            :     }
+<span class="lineNum">     598 </span>            : 
+<span class="lineNum">     599 </span><span class="lineCov">        130 :     Assert(so-&gt;currPos.firstItem &lt;= so-&gt;currPos.lastItem);</span>
+<span class="lineNum">     600 </span><span class="lineCov">        130 :     return true;</span>
+<span class="lineNum">     601 </span>            : }
+<span class="lineNum">     602 </span>            : 
+<span class="lineNum">     603 </span>            : /*
+<span class="lineNum">     604 </span>            :  * Load all the qualified items from a current index page
+<span class="lineNum">     605 </span>            :  * into so-&gt;currPos. Helper function for _hash_readpage.
+<a name="606"><span class="lineNum">     606 </span>            :  */</a>
+<span class="lineNum">     607 </span>            : static int
+<span class="lineNum">     608 </span><span class="lineCov">        146 : _hash_load_qualified_items(IndexScanDesc scan, Page page,</span>
+<span class="lineNum">     609 </span>            :                            OffsetNumber offnum, ScanDirection dir)
+<span class="lineNum">     610 </span>            : {
+<span class="lineNum">     611 </span><span class="lineCov">        146 :     HashScanOpaque so = (HashScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     612 </span>            :     IndexTuple  itup;
+<span class="lineNum">     613 </span>            :     int         itemIndex;
+<span class="lineNum">     614 </span>            :     OffsetNumber maxoff;
+<span class="lineNum">     615 </span>            : 
+<span class="lineNum">     616 </span><span class="lineCov">        146 :     maxoff = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">     617 </span>            : 
+<span class="lineNum">     618 </span><span class="lineCov">        146 :     if (ScanDirectionIsForward(dir))</span>
+<span class="lineNum">     619 </span>            :     {
+<span class="lineNum">     620 </span>            :         /* load items[] in ascending order */
+<span class="lineNum">     621 </span><span class="lineCov">        118 :         itemIndex = 0;</span>
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span><span class="lineCov">      22318 :         while (offnum &lt;= maxoff)</span>
+<span class="lineNum">     624 </span>            :         {
+<span class="lineNum">     625 </span><span class="lineCov">      22130 :             Assert(offnum &gt;= FirstOffsetNumber);</span>
+<span class="lineNum">     626 </span><span class="lineCov">      22130 :             itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));</span>
+<span class="lineNum">     627 </span>            : 
+<span class="lineNum">     628 </span>            :             /*
+<span class="lineNum">     629 </span>            :              * skip the tuples that are moved by split operation for the scan
+<span class="lineNum">     630 </span>            :              * that has started when split was in progress. Also, skip the
+<span class="lineNum">     631 </span>            :              * tuples that are marked as dead.
+<span class="lineNum">     632 </span>            :              */
+<span class="lineNum">     633 </span><span class="lineCov">      22130 :             if ((so-&gt;hashso_buc_populated &amp;&amp; !so-&gt;hashso_buc_split &amp;&amp;</span>
+<span class="lineNum">     634 </span><span class="lineCov">      22130 :                  (itup-&gt;t_info &amp; INDEX_MOVED_BY_SPLIT_MASK)) ||</span>
+<span class="lineNum">     635 </span><span class="lineCov">      44260 :                 (scan-&gt;ignore_killed_tuples &amp;&amp;</span>
+<span class="lineNum">     636 </span><span class="lineCov">      22130 :                  (ItemIdIsDead(PageGetItemId(page, offnum)))))</span>
+<span class="lineNum">     637 </span>            :             {
+<span class="lineNum">     638 </span><span class="lineNoCov">          0 :                 offnum = OffsetNumberNext(offnum);  /* move forward */</span>
+<span class="lineNum">     639 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     640 </span>            :             }
+<span class="lineNum">     641 </span>            : 
+<span class="lineNum">     642 </span><span class="lineCov">      44212 :             if (so-&gt;hashso_sk_hash == _hash_get_indextuple_hashkey(itup) &amp;&amp;</span>
+<span class="lineNum">     643 </span><span class="lineCov">      22082 :                 _hash_checkqual(scan, itup))</span>
+<span class="lineNum">     644 </span>            :             {
+<span class="lineNum">     645 </span>            :                 /* tuple is qualified, so remember it */
+<span class="lineNum">     646 </span><span class="lineCov">      22082 :                 _hash_saveitem(so, itemIndex, offnum, itup);</span>
+<span class="lineNum">     647 </span><span class="lineCov">      22082 :                 itemIndex++;</span>
+<span class="lineNum">     648 </span>            :             }
+<span class="lineNum">     649 </span>            :             else
+<span class="lineNum">     650 </span>            :             {
+<span class="lineNum">     651 </span>            :                 /*
+<span class="lineNum">     652 </span>            :                  * No more matching tuples exist in this page. so, exit while
+<span class="lineNum">     653 </span>            :                  * loop.
+<span class="lineNum">     654 </span>            :                  */
+<span class="lineNum">     655 </span>            :                 break;
+<span class="lineNum">     656 </span>            :             }
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span><span class="lineCov">      22082 :             offnum = OffsetNumberNext(offnum);</span>
+<span class="lineNum">     659 </span>            :         }
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span><span class="lineCov">        118 :         Assert(itemIndex &lt;= MaxIndexTuplesPerPage);</span>
+<span class="lineNum">     662 </span><span class="lineCov">        118 :         return itemIndex;</span>
+<span class="lineNum">     663 </span>            :     }
+<span class="lineNum">     664 </span>            :     else
+<span class="lineNum">     665 </span>            :     {
+<span class="lineNum">     666 </span>            :         /* load items[] in descending order */
+<span class="lineNum">     667 </span><span class="lineCov">         28 :         itemIndex = MaxIndexTuplesPerPage;</span>
+<span class="lineNum">     668 </span>            : 
+<span class="lineNum">     669 </span><span class="lineCov">      11056 :         while (offnum &gt;= FirstOffsetNumber)</span>
+<span class="lineNum">     670 </span>            :         {
+<span class="lineNum">     671 </span><span class="lineCov">      11000 :             Assert(offnum &lt;= maxoff);</span>
+<span class="lineNum">     672 </span><span class="lineCov">      11000 :             itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, offnum));</span>
+<span class="lineNum">     673 </span>            : 
+<span class="lineNum">     674 </span>            :             /*
+<span class="lineNum">     675 </span>            :              * skip the tuples that are moved by split operation for the scan
+<span class="lineNum">     676 </span>            :              * that has started when split was in progress. Also, skip the
+<span class="lineNum">     677 </span>            :              * tuples that are marked as dead.
+<span class="lineNum">     678 </span>            :              */
+<span class="lineNum">     679 </span><span class="lineCov">      11000 :             if ((so-&gt;hashso_buc_populated &amp;&amp; !so-&gt;hashso_buc_split &amp;&amp;</span>
+<span class="lineNum">     680 </span><span class="lineCov">      11000 :                  (itup-&gt;t_info &amp; INDEX_MOVED_BY_SPLIT_MASK)) ||</span>
+<span class="lineNum">     681 </span><span class="lineCov">      22000 :                 (scan-&gt;ignore_killed_tuples &amp;&amp;</span>
+<span class="lineNum">     682 </span><span class="lineCov">      11000 :                  (ItemIdIsDead(PageGetItemId(page, offnum)))))</span>
+<span class="lineNum">     683 </span>            :             {
+<span class="lineNum">     684 </span><span class="lineNoCov">          0 :                 offnum = OffsetNumberPrev(offnum);  /* move back */</span>
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     686 </span>            :             }
+<span class="lineNum">     687 </span>            : 
+<span class="lineNum">     688 </span><span class="lineCov">      22000 :             if (so-&gt;hashso_sk_hash == _hash_get_indextuple_hashkey(itup) &amp;&amp;</span>
+<span class="lineNum">     689 </span><span class="lineCov">      11000 :                 _hash_checkqual(scan, itup))</span>
+<span class="lineNum">     690 </span>            :             {
+<span class="lineNum">     691 </span><span class="lineCov">      11000 :                 itemIndex--;</span>
+<span class="lineNum">     692 </span>            :                 /* tuple is qualified, so remember it */
+<span class="lineNum">     693 </span><span class="lineCov">      11000 :                 _hash_saveitem(so, itemIndex, offnum, itup);</span>
+<span class="lineNum">     694 </span>            :             }
+<span class="lineNum">     695 </span>            :             else
+<span class="lineNum">     696 </span>            :             {
+<span class="lineNum">     697 </span>            :                 /*
+<span class="lineNum">     698 </span>            :                  * No more matching tuples exist in this page. so, exit while
+<span class="lineNum">     699 </span>            :                  * loop.
+<span class="lineNum">     700 </span>            :                  */
+<span class="lineNum">     701 </span>            :                 break;
+<span class="lineNum">     702 </span>            :             }
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span><span class="lineCov">      11000 :             offnum = OffsetNumberPrev(offnum);</span>
+<span class="lineNum">     705 </span>            :         }
+<span class="lineNum">     706 </span>            : 
+<span class="lineNum">     707 </span><span class="lineCov">         28 :         Assert(itemIndex &gt;= 0);</span>
+<span class="lineNum">     708 </span><span class="lineCov">         28 :         return itemIndex;</span>
+<span class="lineNum">     709 </span>            :     }
+<span class="lineNum">     710 </span>            : }
+<span class="lineNum">     711 </span>            : 
+<a name="712"><span class="lineNum">     712 </span>            : /* Save an index item into so-&gt;currPos.items[itemIndex] */</a>
+<span class="lineNum">     713 </span>            : static inline void
+<span class="lineNum">     714 </span><span class="lineCov">      33082 : _hash_saveitem(HashScanOpaque so, int itemIndex,</span>
+<span class="lineNum">     715 </span>            :                OffsetNumber offnum, IndexTuple itup)
+<span class="lineNum">     716 </span>            : {
+<span class="lineNum">     717 </span><span class="lineCov">      33082 :     HashScanPosItem *currItem = &amp;so-&gt;currPos.items[itemIndex];</span>
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span><span class="lineCov">      33082 :     currItem-&gt;heapTid = itup-&gt;t_tid;</span>
+<span class="lineNum">     720 </span><span class="lineCov">      33082 :     currItem-&gt;indexOffset = offnum;</span>
+<span class="lineNum">     721 </span><span class="lineCov">      33082 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

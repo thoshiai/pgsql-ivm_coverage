@@ -1,0 +1,1885 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/optimizer/util/relnode.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/optimizer/util</a> - relnode.c<span style="font-size: 80%;"> (source / <a href="relnode.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">571</td>
+            <td class="headerCovTableEntry">595</td>
+            <td class="headerCovTableEntryHi">96.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">24</td>
+            <td class="headerCovTableEntry">24</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * relnode.c
+<span class="lineNum">       4 </span>            :  *    Relation-node lookup/construction routines
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/optimizer/util/relnode.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &lt;limits.h&gt;
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;optimizer/appendinfo.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;optimizer/clauses.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;optimizer/cost.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;optimizer/inherit.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;optimizer/pathnode.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;optimizer/paths.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;optimizer/placeholder.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;optimizer/plancat.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;optimizer/restrictinfo.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;optimizer/tlist.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;partitioning/partbounds.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;utils/hsearch.h&quot;
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : 
+<span class="lineNum">      34 </span>            : typedef struct JoinHashEntry
+<span class="lineNum">      35 </span>            : {
+<span class="lineNum">      36 </span>            :     Relids      join_relids;    /* hash key --- MUST BE FIRST */
+<span class="lineNum">      37 </span>            :     RelOptInfo *join_rel;
+<span class="lineNum">      38 </span>            : } JoinHashEntry;
+<span class="lineNum">      39 </span>            : 
+<span class="lineNum">      40 </span>            : static void build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,
+<span class="lineNum">      41 </span>            :                                 RelOptInfo *input_rel);
+<span class="lineNum">      42 </span>            : static List *build_joinrel_restrictlist(PlannerInfo *root,
+<span class="lineNum">      43 </span>            :                                         RelOptInfo *joinrel,
+<span class="lineNum">      44 </span>            :                                         RelOptInfo *outer_rel,
+<span class="lineNum">      45 </span>            :                                         RelOptInfo *inner_rel);
+<span class="lineNum">      46 </span>            : static void build_joinrel_joinlist(RelOptInfo *joinrel,
+<span class="lineNum">      47 </span>            :                                    RelOptInfo *outer_rel,
+<span class="lineNum">      48 </span>            :                                    RelOptInfo *inner_rel);
+<span class="lineNum">      49 </span>            : static List *subbuild_joinrel_restrictlist(RelOptInfo *joinrel,
+<span class="lineNum">      50 </span>            :                                            List *joininfo_list,
+<span class="lineNum">      51 </span>            :                                            List *new_restrictlist);
+<span class="lineNum">      52 </span>            : static List *subbuild_joinrel_joinlist(RelOptInfo *joinrel,
+<span class="lineNum">      53 </span>            :                                        List *joininfo_list,
+<span class="lineNum">      54 </span>            :                                        List *new_joininfo);
+<span class="lineNum">      55 </span>            : static void set_foreign_rel_properties(RelOptInfo *joinrel,
+<span class="lineNum">      56 </span>            :                                        RelOptInfo *outer_rel, RelOptInfo *inner_rel);
+<span class="lineNum">      57 </span>            : static void add_join_rel(PlannerInfo *root, RelOptInfo *joinrel);
+<span class="lineNum">      58 </span>            : static void build_joinrel_partition_info(RelOptInfo *joinrel,
+<span class="lineNum">      59 </span>            :                                          RelOptInfo *outer_rel, RelOptInfo *inner_rel,
+<span class="lineNum">      60 </span>            :                                          List *restrictlist, JoinType jointype);
+<span class="lineNum">      61 </span>            : static void build_child_join_reltarget(PlannerInfo *root,
+<span class="lineNum">      62 </span>            :                                        RelOptInfo *parentrel,
+<span class="lineNum">      63 </span>            :                                        RelOptInfo *childrel,
+<span class="lineNum">      64 </span>            :                                        int nappinfos,
+<span class="lineNum">      65 </span>            :                                        AppendRelInfo **appinfos);
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : 
+<span class="lineNum">      68 </span>            : /*
+<span class="lineNum">      69 </span>            :  * setup_simple_rel_arrays
+<span class="lineNum">      70 </span>            :  *    Prepare the arrays we use for quickly accessing base relations
+<span class="lineNum">      71 </span>            :  *    and AppendRelInfos.
+<a name="72"><span class="lineNum">      72 </span>            :  */</a>
+<span class="lineNum">      73 </span>            : void
+<span class="lineNum">      74 </span><span class="lineCov">      76986 : setup_simple_rel_arrays(PlannerInfo *root)</span>
+<span class="lineNum">      75 </span>            : {
+<span class="lineNum">      76 </span>            :     int         size;
+<span class="lineNum">      77 </span>            :     Index       rti;
+<span class="lineNum">      78 </span>            :     ListCell   *lc;
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            :     /* Arrays are accessed using RT indexes (1..N) */
+<span class="lineNum">      81 </span><span class="lineCov">      76986 :     size = list_length(root-&gt;parse-&gt;rtable) + 1;</span>
+<span class="lineNum">      82 </span><span class="lineCov">      76986 :     root-&gt;simple_rel_array_size = size;</span>
+<span class="lineNum">      83 </span>            : 
+<span class="lineNum">      84 </span>            :     /*
+<span class="lineNum">      85 </span>            :      * simple_rel_array is initialized to all NULLs, since no RelOptInfos
+<span class="lineNum">      86 </span>            :      * exist yet.  It'll be filled by later calls to build_simple_rel().
+<span class="lineNum">      87 </span>            :      */
+<span class="lineNum">      88 </span><span class="lineCov">      76986 :     root-&gt;simple_rel_array = (RelOptInfo **)</span>
+<span class="lineNum">      89 </span><span class="lineCov">      76986 :         palloc0(size * sizeof(RelOptInfo *));</span>
+<span class="lineNum">      90 </span>            : 
+<span class="lineNum">      91 </span>            :     /* simple_rte_array is an array equivalent of the rtable list */
+<span class="lineNum">      92 </span><span class="lineCov">      76986 :     root-&gt;simple_rte_array = (RangeTblEntry **)</span>
+<span class="lineNum">      93 </span><span class="lineCov">      76986 :         palloc0(size * sizeof(RangeTblEntry *));</span>
+<span class="lineNum">      94 </span><span class="lineCov">      76986 :     rti = 1;</span>
+<span class="lineNum">      95 </span><span class="lineCov">     219630 :     foreach(lc, root-&gt;parse-&gt;rtable)</span>
+<span class="lineNum">      96 </span>            :     {
+<span class="lineNum">      97 </span><span class="lineCov">     142644 :         RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);</span>
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span><span class="lineCov">     142644 :         root-&gt;simple_rte_array[rti++] = rte;</span>
+<span class="lineNum">     100 </span>            :     }
+<span class="lineNum">     101 </span>            : 
+<span class="lineNum">     102 </span>            :     /* append_rel_array is not needed if there are no AppendRelInfos */
+<span class="lineNum">     103 </span><span class="lineCov">      76986 :     if (root-&gt;append_rel_list == NIL)</span>
+<span class="lineNum">     104 </span>            :     {
+<span class="lineNum">     105 </span><span class="lineCov">      75576 :         root-&gt;append_rel_array = NULL;</span>
+<span class="lineNum">     106 </span><span class="lineCov">     152562 :         return;</span>
+<span class="lineNum">     107 </span>            :     }
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span><span class="lineCov">       1410 :     root-&gt;append_rel_array = (AppendRelInfo **)</span>
+<span class="lineNum">     110 </span><span class="lineCov">       1410 :         palloc0(size * sizeof(AppendRelInfo *));</span>
+<span class="lineNum">     111 </span>            : 
+<span class="lineNum">     112 </span>            :     /*
+<span class="lineNum">     113 </span>            :      * append_rel_array is filled with any already-existing AppendRelInfos,
+<span class="lineNum">     114 </span>            :      * which currently could only come from UNION ALL flattening.  We might
+<span class="lineNum">     115 </span>            :      * add more later during inheritance expansion, but it's the
+<span class="lineNum">     116 </span>            :      * responsibility of the expansion code to update the array properly.
+<span class="lineNum">     117 </span>            :      */
+<span class="lineNum">     118 </span><span class="lineCov">       4374 :     foreach(lc, root-&gt;append_rel_list)</span>
+<span class="lineNum">     119 </span>            :     {
+<span class="lineNum">     120 </span><span class="lineCov">       2964 :         AppendRelInfo *appinfo = lfirst_node(AppendRelInfo, lc);</span>
+<span class="lineNum">     121 </span><span class="lineCov">       2964 :         int         child_relid = appinfo-&gt;child_relid;</span>
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span>            :         /* Sanity check */
+<span class="lineNum">     124 </span><span class="lineCov">       2964 :         Assert(child_relid &lt; size);</span>
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span><span class="lineCov">       2964 :         if (root-&gt;append_rel_array[child_relid])</span>
+<span class="lineNum">     127 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;child relation already exists&quot;);</span>
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span><span class="lineCov">       2964 :         root-&gt;append_rel_array[child_relid] = appinfo;</span>
+<span class="lineNum">     130 </span>            :     }
+<span class="lineNum">     131 </span>            : }
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span>            : /*
+<span class="lineNum">     134 </span>            :  * expand_planner_arrays
+<span class="lineNum">     135 </span>            :  *      Expand the PlannerInfo's per-RTE arrays by add_size members
+<span class="lineNum">     136 </span>            :  *      and initialize the newly added entries to NULLs
+<span class="lineNum">     137 </span>            :  *
+<span class="lineNum">     138 </span>            :  * Note: this causes the append_rel_array to become allocated even if
+<span class="lineNum">     139 </span>            :  * it was not before.  This is okay for current uses, because we only call
+<span class="lineNum">     140 </span>            :  * this when adding child relations, which always have AppendRelInfos.
+<a name="141"><span class="lineNum">     141 </span>            :  */</a>
+<span class="lineNum">     142 </span>            : void
+<span class="lineNum">     143 </span><span class="lineCov">       3248 : expand_planner_arrays(PlannerInfo *root, int add_size)</span>
+<span class="lineNum">     144 </span>            : {
+<span class="lineNum">     145 </span>            :     int         new_size;
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span><span class="lineCov">       3248 :     Assert(add_size &gt; 0);</span>
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span><span class="lineCov">       3248 :     new_size = root-&gt;simple_rel_array_size + add_size;</span>
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span><span class="lineCov">       3248 :     root-&gt;simple_rel_array = (RelOptInfo **)</span>
+<span class="lineNum">     152 </span><span class="lineCov">       3248 :         repalloc(root-&gt;simple_rel_array,</span>
+<span class="lineNum">     153 </span>            :                  sizeof(RelOptInfo *) * new_size);
+<span class="lineNum">     154 </span><span class="lineCov">       3248 :     MemSet(root-&gt;simple_rel_array + root-&gt;simple_rel_array_size,</span>
+<span class="lineNum">     155 </span>            :            0, sizeof(RelOptInfo *) * add_size);
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span><span class="lineCov">       3248 :     root-&gt;simple_rte_array = (RangeTblEntry **)</span>
+<span class="lineNum">     158 </span><span class="lineCov">       3248 :         repalloc(root-&gt;simple_rte_array,</span>
+<span class="lineNum">     159 </span>            :                  sizeof(RangeTblEntry *) * new_size);
+<span class="lineNum">     160 </span><span class="lineCov">       3248 :     MemSet(root-&gt;simple_rte_array + root-&gt;simple_rel_array_size,</span>
+<span class="lineNum">     161 </span>            :            0, sizeof(RangeTblEntry *) * add_size);
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span><span class="lineCov">       3248 :     if (root-&gt;append_rel_array)</span>
+<span class="lineNum">     164 </span>            :     {
+<span class="lineNum">     165 </span><span class="lineCov">       1186 :         root-&gt;append_rel_array = (AppendRelInfo **)</span>
+<span class="lineNum">     166 </span><span class="lineCov">       1186 :             repalloc(root-&gt;append_rel_array,</span>
+<span class="lineNum">     167 </span>            :                      sizeof(AppendRelInfo *) * new_size);
+<span class="lineNum">     168 </span><span class="lineCov">       1186 :         MemSet(root-&gt;append_rel_array + root-&gt;simple_rel_array_size,</span>
+<span class="lineNum">     169 </span>            :                0, sizeof(AppendRelInfo *) * add_size);
+<span class="lineNum">     170 </span>            :     }
+<span class="lineNum">     171 </span>            :     else
+<span class="lineNum">     172 </span>            :     {
+<span class="lineNum">     173 </span><span class="lineCov">       2062 :         root-&gt;append_rel_array = (AppendRelInfo **)</span>
+<span class="lineNum">     174 </span><span class="lineCov">       2062 :             palloc0(sizeof(AppendRelInfo *) * new_size);</span>
+<span class="lineNum">     175 </span>            :     }
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span><span class="lineCov">       3248 :     root-&gt;simple_rel_array_size = new_size;</span>
+<span class="lineNum">     178 </span><span class="lineCov">       3248 : }</span>
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span>            : /*
+<span class="lineNum">     181 </span>            :  * build_simple_rel
+<span class="lineNum">     182 </span>            :  *    Construct a new RelOptInfo for a base relation or 'other' relation.
+<a name="183"><span class="lineNum">     183 </span>            :  */</a>
+<span class="lineNum">     184 </span>            : RelOptInfo *
+<span class="lineNum">     185 </span><span class="lineCov">     108178 : build_simple_rel(PlannerInfo *root, int relid, RelOptInfo *parent)</span>
+<span class="lineNum">     186 </span>            : {
+<span class="lineNum">     187 </span>            :     RelOptInfo *rel;
+<span class="lineNum">     188 </span>            :     RangeTblEntry *rte;
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span>            :     /* Rel should not exist already */
+<span class="lineNum">     191 </span><span class="lineCov">     108178 :     Assert(relid &gt; 0 &amp;&amp; relid &lt; root-&gt;simple_rel_array_size);</span>
+<span class="lineNum">     192 </span><span class="lineCov">     108178 :     if (root-&gt;simple_rel_array[relid] != NULL)</span>
+<span class="lineNum">     193 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;rel %d already exists&quot;, relid);</span>
+<span class="lineNum">     194 </span>            : 
+<span class="lineNum">     195 </span>            :     /* Fetch RTE for relation */
+<span class="lineNum">     196 </span><span class="lineCov">     108178 :     rte = root-&gt;simple_rte_array[relid];</span>
+<span class="lineNum">     197 </span><span class="lineCov">     108178 :     Assert(rte != NULL);</span>
+<span class="lineNum">     198 </span>            : 
+<span class="lineNum">     199 </span><span class="lineCov">     108178 :     rel = makeNode(RelOptInfo);</span>
+<span class="lineNum">     200 </span><span class="lineCov">     108178 :     rel-&gt;reloptkind = parent ? RELOPT_OTHER_MEMBER_REL : RELOPT_BASEREL;</span>
+<span class="lineNum">     201 </span><span class="lineCov">     108178 :     rel-&gt;relids = bms_make_singleton(relid);</span>
+<span class="lineNum">     202 </span><span class="lineCov">     108178 :     rel-&gt;rows = 0;</span>
+<span class="lineNum">     203 </span>            :     /* cheap startup cost is interesting iff not all tuples to be retrieved */
+<span class="lineNum">     204 </span><span class="lineCov">     108178 :     rel-&gt;consider_startup = (root-&gt;tuple_fraction &gt; 0);</span>
+<span class="lineNum">     205 </span><span class="lineCov">     108178 :     rel-&gt;consider_param_startup = false; /* might get changed later */</span>
+<span class="lineNum">     206 </span><span class="lineCov">     108178 :     rel-&gt;consider_parallel = false; /* might get changed later */</span>
+<span class="lineNum">     207 </span><span class="lineCov">     108178 :     rel-&gt;reltarget = create_empty_pathtarget();</span>
+<span class="lineNum">     208 </span><span class="lineCov">     108178 :     rel-&gt;pathlist = NIL;</span>
+<span class="lineNum">     209 </span><span class="lineCov">     108178 :     rel-&gt;ppilist = NIL;</span>
+<span class="lineNum">     210 </span><span class="lineCov">     108178 :     rel-&gt;partial_pathlist = NIL;</span>
+<span class="lineNum">     211 </span><span class="lineCov">     108178 :     rel-&gt;cheapest_startup_path = NULL;</span>
+<span class="lineNum">     212 </span><span class="lineCov">     108178 :     rel-&gt;cheapest_total_path = NULL;</span>
+<span class="lineNum">     213 </span><span class="lineCov">     108178 :     rel-&gt;cheapest_unique_path = NULL;</span>
+<span class="lineNum">     214 </span><span class="lineCov">     108178 :     rel-&gt;cheapest_parameterized_paths = NIL;</span>
+<span class="lineNum">     215 </span><span class="lineCov">     108178 :     rel-&gt;relid = relid;</span>
+<span class="lineNum">     216 </span><span class="lineCov">     108178 :     rel-&gt;rtekind = rte-&gt;rtekind;</span>
+<span class="lineNum">     217 </span>            :     /* min_attr, max_attr, attr_needed, attr_widths are set below */
+<span class="lineNum">     218 </span><span class="lineCov">     108178 :     rel-&gt;lateral_vars = NIL;</span>
+<span class="lineNum">     219 </span><span class="lineCov">     108178 :     rel-&gt;indexlist = NIL;</span>
+<span class="lineNum">     220 </span><span class="lineCov">     108178 :     rel-&gt;statlist = NIL;</span>
+<span class="lineNum">     221 </span><span class="lineCov">     108178 :     rel-&gt;pages = 0;</span>
+<span class="lineNum">     222 </span><span class="lineCov">     108178 :     rel-&gt;tuples = 0;</span>
+<span class="lineNum">     223 </span><span class="lineCov">     108178 :     rel-&gt;allvisfrac = 0;</span>
+<span class="lineNum">     224 </span><span class="lineCov">     108178 :     rel-&gt;eclass_indexes = NULL;</span>
+<span class="lineNum">     225 </span><span class="lineCov">     108178 :     rel-&gt;subroot = NULL;</span>
+<span class="lineNum">     226 </span><span class="lineCov">     108178 :     rel-&gt;subplan_params = NIL;</span>
+<span class="lineNum">     227 </span><span class="lineCov">     108178 :     rel-&gt;rel_parallel_workers = -1; /* set up in get_relation_info */</span>
+<span class="lineNum">     228 </span><span class="lineCov">     108178 :     rel-&gt;serverid = InvalidOid;</span>
+<span class="lineNum">     229 </span><span class="lineCov">     108178 :     rel-&gt;userid = rte-&gt;checkAsUser;</span>
+<span class="lineNum">     230 </span><span class="lineCov">     108178 :     rel-&gt;useridiscurrent = false;</span>
+<span class="lineNum">     231 </span><span class="lineCov">     108178 :     rel-&gt;fdwroutine = NULL;</span>
+<span class="lineNum">     232 </span><span class="lineCov">     108178 :     rel-&gt;fdw_private = NULL;</span>
+<span class="lineNum">     233 </span><span class="lineCov">     108178 :     rel-&gt;unique_for_rels = NIL;</span>
+<span class="lineNum">     234 </span><span class="lineCov">     108178 :     rel-&gt;non_unique_for_rels = NIL;</span>
+<span class="lineNum">     235 </span><span class="lineCov">     108178 :     rel-&gt;baserestrictinfo = NIL;</span>
+<span class="lineNum">     236 </span><span class="lineCov">     108178 :     rel-&gt;baserestrictcost.startup = 0;</span>
+<span class="lineNum">     237 </span><span class="lineCov">     108178 :     rel-&gt;baserestrictcost.per_tuple = 0;</span>
+<span class="lineNum">     238 </span><span class="lineCov">     108178 :     rel-&gt;baserestrict_min_security = UINT_MAX;</span>
+<span class="lineNum">     239 </span><span class="lineCov">     108178 :     rel-&gt;joininfo = NIL;</span>
+<span class="lineNum">     240 </span><span class="lineCov">     108178 :     rel-&gt;has_eclass_joins = false;</span>
+<span class="lineNum">     241 </span><span class="lineCov">     108178 :     rel-&gt;consider_partitionwise_join = false;    /* might get changed later */</span>
+<span class="lineNum">     242 </span><span class="lineCov">     108178 :     rel-&gt;part_scheme = NULL;</span>
+<span class="lineNum">     243 </span><span class="lineCov">     108178 :     rel-&gt;nparts = 0;</span>
+<span class="lineNum">     244 </span><span class="lineCov">     108178 :     rel-&gt;boundinfo = NULL;</span>
+<span class="lineNum">     245 </span><span class="lineCov">     108178 :     rel-&gt;partition_qual = NIL;</span>
+<span class="lineNum">     246 </span><span class="lineCov">     108178 :     rel-&gt;part_rels = NULL;</span>
+<span class="lineNum">     247 </span><span class="lineCov">     108178 :     rel-&gt;partexprs = NULL;</span>
+<span class="lineNum">     248 </span><span class="lineCov">     108178 :     rel-&gt;nullable_partexprs = NULL;</span>
+<span class="lineNum">     249 </span><span class="lineCov">     108178 :     rel-&gt;partitioned_child_rels = NIL;</span>
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span>            :     /*
+<span class="lineNum">     252 </span>            :      * Pass assorted information down the inheritance hierarchy.
+<span class="lineNum">     253 </span>            :      */
+<span class="lineNum">     254 </span><span class="lineCov">     108178 :     if (parent)</span>
+<span class="lineNum">     255 </span>            :     {
+<span class="lineNum">     256 </span>            :         /*
+<span class="lineNum">     257 </span>            :          * Each direct or indirect child wants to know the relids of its
+<span class="lineNum">     258 </span>            :          * topmost parent.
+<span class="lineNum">     259 </span>            :          */
+<span class="lineNum">     260 </span><span class="lineCov">      10896 :         if (parent-&gt;top_parent_relids)</span>
+<span class="lineNum">     261 </span><span class="lineCov">       1816 :             rel-&gt;top_parent_relids = parent-&gt;top_parent_relids;</span>
+<span class="lineNum">     262 </span>            :         else
+<span class="lineNum">     263 </span><span class="lineCov">       9080 :             rel-&gt;top_parent_relids = bms_copy(parent-&gt;relids);</span>
+<span class="lineNum">     264 </span>            : 
+<span class="lineNum">     265 </span>            :         /*
+<span class="lineNum">     266 </span>            :          * Also propagate lateral-reference information from appendrel parent
+<span class="lineNum">     267 </span>            :          * rels to their child rels.  We intentionally give each child rel the
+<span class="lineNum">     268 </span>            :          * same minimum parameterization, even though it's quite possible that
+<span class="lineNum">     269 </span>            :          * some don't reference all the lateral rels.  This is because any
+<span class="lineNum">     270 </span>            :          * append path for the parent will have to have the same
+<span class="lineNum">     271 </span>            :          * parameterization for every child anyway, and there's no value in
+<span class="lineNum">     272 </span>            :          * forcing extra reparameterize_path() calls.  Similarly, a lateral
+<span class="lineNum">     273 </span>            :          * reference to the parent prevents use of otherwise-movable join rels
+<span class="lineNum">     274 </span>            :          * for each child.
+<span class="lineNum">     275 </span>            :          *
+<span class="lineNum">     276 </span>            :          * It's possible for child rels to have their own children, in which
+<span class="lineNum">     277 </span>            :          * case the topmost parent's lateral info propagates all the way down.
+<span class="lineNum">     278 </span>            :          */
+<span class="lineNum">     279 </span><span class="lineCov">      10896 :         rel-&gt;direct_lateral_relids = parent-&gt;direct_lateral_relids;</span>
+<span class="lineNum">     280 </span><span class="lineCov">      10896 :         rel-&gt;lateral_relids = parent-&gt;lateral_relids;</span>
+<span class="lineNum">     281 </span><span class="lineCov">      10896 :         rel-&gt;lateral_referencers = parent-&gt;lateral_referencers;</span>
+<span class="lineNum">     282 </span>            :     }
+<span class="lineNum">     283 </span>            :     else
+<span class="lineNum">     284 </span>            :     {
+<span class="lineNum">     285 </span><span class="lineCov">      97282 :         rel-&gt;top_parent_relids = NULL;</span>
+<span class="lineNum">     286 </span><span class="lineCov">      97282 :         rel-&gt;direct_lateral_relids = NULL;</span>
+<span class="lineNum">     287 </span><span class="lineCov">      97282 :         rel-&gt;lateral_relids = NULL;</span>
+<span class="lineNum">     288 </span><span class="lineCov">      97282 :         rel-&gt;lateral_referencers = NULL;</span>
+<span class="lineNum">     289 </span>            :     }
+<span class="lineNum">     290 </span>            : 
+<span class="lineNum">     291 </span>            :     /* Check type of rtable entry */
+<span class="lineNum">     292 </span><span class="lineCov">     108178 :     switch (rte-&gt;rtekind)</span>
+<span class="lineNum">     293 </span>            :     {
+<span class="lineNum">     294 </span>            :         case RTE_RELATION:
+<span class="lineNum">     295 </span>            :             /* Table --- retrieve statistics from the system catalogs */
+<span class="lineNum">     296 </span><span class="lineCov">      65314 :             get_relation_info(root, rte-&gt;relid, rte-&gt;inh, rel);</span>
+<span class="lineNum">     297 </span><span class="lineCov">      65310 :             break;</span>
+<span class="lineNum">     298 </span>            :         case RTE_SUBQUERY:
+<span class="lineNum">     299 </span>            :         case RTE_FUNCTION:
+<span class="lineNum">     300 </span>            :         case RTE_TABLEFUNC:
+<span class="lineNum">     301 </span>            :         case RTE_VALUES:
+<span class="lineNum">     302 </span>            :         case RTE_CTE:
+<span class="lineNum">     303 </span>            :         case RTE_NAMEDTUPLESTORE:
+<span class="lineNum">     304 </span>            : 
+<span class="lineNum">     305 </span>            :             /*
+<span class="lineNum">     306 </span>            :              * Subquery, function, tablefunc, values list, CTE, or ENR --- set
+<span class="lineNum">     307 </span>            :              * up attr range and arrays
+<span class="lineNum">     308 </span>            :              *
+<span class="lineNum">     309 </span>            :              * Note: 0 is included in range to support whole-row Vars
+<span class="lineNum">     310 </span>            :              */
+<span class="lineNum">     311 </span><span class="lineCov">      16880 :             rel-&gt;min_attr = 0;</span>
+<span class="lineNum">     312 </span><span class="lineCov">      16880 :             rel-&gt;max_attr = list_length(rte-&gt;eref-&gt;colnames);</span>
+<span class="lineNum">     313 </span><span class="lineCov">      16880 :             rel-&gt;attr_needed = (Relids *)</span>
+<span class="lineNum">     314 </span><span class="lineCov">      16880 :                 palloc0((rel-&gt;max_attr - rel-&gt;min_attr + 1) * sizeof(Relids));</span>
+<span class="lineNum">     315 </span><span class="lineCov">      16880 :             rel-&gt;attr_widths = (int32 *)</span>
+<span class="lineNum">     316 </span><span class="lineCov">      16880 :                 palloc0((rel-&gt;max_attr - rel-&gt;min_attr + 1) * sizeof(int32));</span>
+<span class="lineNum">     317 </span><span class="lineCov">      16880 :             break;</span>
+<span class="lineNum">     318 </span>            :         case RTE_RESULT:
+<span class="lineNum">     319 </span>            :             /* RTE_RESULT has no columns, nor could it have whole-row Var */
+<span class="lineNum">     320 </span><span class="lineCov">      25984 :             rel-&gt;min_attr = 0;</span>
+<span class="lineNum">     321 </span><span class="lineCov">      25984 :             rel-&gt;max_attr = -1;</span>
+<span class="lineNum">     322 </span><span class="lineCov">      25984 :             rel-&gt;attr_needed = NULL;</span>
+<span class="lineNum">     323 </span><span class="lineCov">      25984 :             rel-&gt;attr_widths = NULL;</span>
+<span class="lineNum">     324 </span><span class="lineCov">      25984 :             break;</span>
+<span class="lineNum">     325 </span>            :         default:
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized RTE kind: %d&quot;,</span>
+<span class="lineNum">     327 </span>            :                  (int) rte-&gt;rtekind);
+<span class="lineNum">     328 </span>            :             break;
+<span class="lineNum">     329 </span>            :     }
+<span class="lineNum">     330 </span>            : 
+<span class="lineNum">     331 </span>            :     /*
+<span class="lineNum">     332 </span>            :      * Copy the parent's quals to the child, with appropriate substitution of
+<span class="lineNum">     333 </span>            :      * variables.  If any constant false or NULL clauses turn up, we can mark
+<span class="lineNum">     334 </span>            :      * the child as dummy right away.  (We must do this immediately so that
+<span class="lineNum">     335 </span>            :      * pruning works correctly when recursing in expand_partitioned_rtentry.)
+<span class="lineNum">     336 </span>            :      */
+<span class="lineNum">     337 </span><span class="lineCov">     108174 :     if (parent)</span>
+<span class="lineNum">     338 </span>            :     {
+<span class="lineNum">     339 </span><span class="lineCov">      10896 :         AppendRelInfo *appinfo = root-&gt;append_rel_array[relid];</span>
+<span class="lineNum">     340 </span>            : 
+<span class="lineNum">     341 </span><span class="lineCov">      10896 :         Assert(appinfo != NULL);</span>
+<span class="lineNum">     342 </span><span class="lineCov">      10896 :         if (!apply_child_basequals(root, parent, rel, rte, appinfo))</span>
+<span class="lineNum">     343 </span>            :         {
+<span class="lineNum">     344 </span>            :             /*
+<span class="lineNum">     345 </span>            :              * Some restriction clause reduced to constant FALSE or NULL after
+<span class="lineNum">     346 </span>            :              * substitution, so this child need not be scanned.
+<span class="lineNum">     347 </span>            :              */
+<span class="lineNum">     348 </span><span class="lineCov">         26 :             mark_dummy_rel(rel);</span>
+<span class="lineNum">     349 </span>            :         }
+<span class="lineNum">     350 </span>            :     }
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span>            :     /* Save the finished struct in the query's simple_rel_array */
+<span class="lineNum">     353 </span><span class="lineCov">     108174 :     root-&gt;simple_rel_array[relid] = rel;</span>
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span><span class="lineCov">     108174 :     return rel;</span>
+<span class="lineNum">     356 </span>            : }
+<span class="lineNum">     357 </span>            : 
+<span class="lineNum">     358 </span>            : /*
+<span class="lineNum">     359 </span>            :  * find_base_rel
+<span class="lineNum">     360 </span>            :  *    Find a base or other relation entry, which must already exist.
+<a name="361"><span class="lineNum">     361 </span>            :  */</a>
+<span class="lineNum">     362 </span>            : RelOptInfo *
+<span class="lineNum">     363 </span><span class="lineCov">     843848 : find_base_rel(PlannerInfo *root, int relid)</span>
+<span class="lineNum">     364 </span>            : {
+<span class="lineNum">     365 </span>            :     RelOptInfo *rel;
+<span class="lineNum">     366 </span>            : 
+<span class="lineNum">     367 </span><span class="lineCov">     843848 :     Assert(relid &gt; 0);</span>
+<span class="lineNum">     368 </span>            : 
+<span class="lineNum">     369 </span><span class="lineCov">     843848 :     if (relid &lt; root-&gt;simple_rel_array_size)</span>
+<span class="lineNum">     370 </span>            :     {
+<span class="lineNum">     371 </span><span class="lineCov">     843848 :         rel = root-&gt;simple_rel_array[relid];</span>
+<span class="lineNum">     372 </span><span class="lineCov">     843848 :         if (rel)</span>
+<span class="lineNum">     373 </span><span class="lineCov">     843848 :             return rel;</span>
+<span class="lineNum">     374 </span>            :     }
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :     elog(ERROR, &quot;no relation entry for relid %d&quot;, relid);</span>
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span>            :     return NULL;                /* keep compiler quiet */
+<span class="lineNum">     379 </span>            : }
+<span class="lineNum">     380 </span>            : 
+<span class="lineNum">     381 </span>            : /*
+<span class="lineNum">     382 </span>            :  * build_join_rel_hash
+<span class="lineNum">     383 </span>            :  *    Construct the auxiliary hash table for join relations.
+<a name="384"><span class="lineNum">     384 </span>            :  */</a>
+<span class="lineNum">     385 </span>            : static void
+<span class="lineNum">     386 </span><span class="lineCov">          6 : build_join_rel_hash(PlannerInfo *root)</span>
+<span class="lineNum">     387 </span>            : {
+<span class="lineNum">     388 </span>            :     HTAB       *hashtab;
+<span class="lineNum">     389 </span>            :     HASHCTL     hash_ctl;
+<span class="lineNum">     390 </span>            :     ListCell   *l;
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span>            :     /* Create the hash table */
+<span class="lineNum">     393 </span><span class="lineCov">          6 :     MemSet(&amp;hash_ctl, 0, sizeof(hash_ctl));</span>
+<span class="lineNum">     394 </span><span class="lineCov">          6 :     hash_ctl.keysize = sizeof(Relids);</span>
+<span class="lineNum">     395 </span><span class="lineCov">          6 :     hash_ctl.entrysize = sizeof(JoinHashEntry);</span>
+<span class="lineNum">     396 </span><span class="lineCov">          6 :     hash_ctl.hash = bitmap_hash;</span>
+<span class="lineNum">     397 </span><span class="lineCov">          6 :     hash_ctl.match = bitmap_match;</span>
+<span class="lineNum">     398 </span><span class="lineCov">          6 :     hash_ctl.hcxt = CurrentMemoryContext;</span>
+<span class="lineNum">     399 </span><span class="lineCov">          6 :     hashtab = hash_create(&quot;JoinRelHashTable&quot;,</span>
+<span class="lineNum">     400 </span>            :                           256L,
+<span class="lineNum">     401 </span>            :                           &amp;hash_ctl,
+<span class="lineNum">     402 </span>            :                           HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+<span class="lineNum">     403 </span>            : 
+<span class="lineNum">     404 </span>            :     /* Insert all the already-existing joinrels */
+<span class="lineNum">     405 </span><span class="lineCov">        204 :     foreach(l, root-&gt;join_rel_list)</span>
+<span class="lineNum">     406 </span>            :     {
+<span class="lineNum">     407 </span><span class="lineCov">        198 :         RelOptInfo *rel = (RelOptInfo *) lfirst(l);</span>
+<span class="lineNum">     408 </span>            :         JoinHashEntry *hentry;
+<span class="lineNum">     409 </span>            :         bool        found;
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span><span class="lineCov">        198 :         hentry = (JoinHashEntry *) hash_search(hashtab,</span>
+<span class="lineNum">     412 </span><span class="lineCov">        198 :                                                &amp;(rel-&gt;relids),</span>
+<span class="lineNum">     413 </span>            :                                                HASH_ENTER,
+<span class="lineNum">     414 </span>            :                                                &amp;found);
+<span class="lineNum">     415 </span><span class="lineCov">        198 :         Assert(!found);</span>
+<span class="lineNum">     416 </span><span class="lineCov">        198 :         hentry-&gt;join_rel = rel;</span>
+<span class="lineNum">     417 </span>            :     }
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span><span class="lineCov">          6 :     root-&gt;join_rel_hash = hashtab;</span>
+<span class="lineNum">     420 </span><span class="lineCov">          6 : }</span>
+<span class="lineNum">     421 </span>            : 
+<span class="lineNum">     422 </span>            : /*
+<span class="lineNum">     423 </span>            :  * find_join_rel
+<span class="lineNum">     424 </span>            :  *    Returns relation entry corresponding to 'relids' (a set of RT indexes),
+<span class="lineNum">     425 </span>            :  *    or NULL if none exists.  This is for join relations.
+<a name="426"><span class="lineNum">     426 </span>            :  */</a>
+<span class="lineNum">     427 </span>            : RelOptInfo *
+<span class="lineNum">     428 </span><span class="lineCov">      31974 : find_join_rel(PlannerInfo *root, Relids relids)</span>
+<span class="lineNum">     429 </span>            : {
+<span class="lineNum">     430 </span>            :     /*
+<span class="lineNum">     431 </span>            :      * Switch to using hash lookup when list grows &quot;too long&quot;.  The threshold
+<span class="lineNum">     432 </span>            :      * is arbitrary and is known only here.
+<span class="lineNum">     433 </span>            :      */
+<span class="lineNum">     434 </span><span class="lineCov">      31974 :     if (!root-&gt;join_rel_hash &amp;&amp; list_length(root-&gt;join_rel_list) &gt; 32)</span>
+<span class="lineNum">     435 </span><span class="lineCov">          6 :         build_join_rel_hash(root);</span>
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span>            :     /*
+<span class="lineNum">     438 </span>            :      * Use either hashtable lookup or linear search, as appropriate.
+<span class="lineNum">     439 </span>            :      *
+<span class="lineNum">     440 </span>            :      * Note: the seemingly redundant hashkey variable is used to avoid taking
+<span class="lineNum">     441 </span>            :      * the address of relids; unless the compiler is exceedingly smart, doing
+<span class="lineNum">     442 </span>            :      * so would force relids out of a register and thus probably slow down the
+<span class="lineNum">     443 </span>            :      * list-search case.
+<span class="lineNum">     444 </span>            :      */
+<span class="lineNum">     445 </span><span class="lineCov">      31974 :     if (root-&gt;join_rel_hash)</span>
+<span class="lineNum">     446 </span>            :     {
+<span class="lineNum">     447 </span><span class="lineCov">        172 :         Relids      hashkey = relids;</span>
+<span class="lineNum">     448 </span>            :         JoinHashEntry *hentry;
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span><span class="lineCov">        172 :         hentry = (JoinHashEntry *) hash_search(root-&gt;join_rel_hash,</span>
+<span class="lineNum">     451 </span>            :                                                &amp;hashkey,
+<span class="lineNum">     452 </span>            :                                                HASH_FIND,
+<span class="lineNum">     453 </span>            :                                                NULL);
+<span class="lineNum">     454 </span><span class="lineCov">        172 :         if (hentry)</span>
+<span class="lineNum">     455 </span><span class="lineCov">        138 :             return hentry-&gt;join_rel;</span>
+<span class="lineNum">     456 </span>            :     }
+<span class="lineNum">     457 </span>            :     else
+<span class="lineNum">     458 </span>            :     {
+<span class="lineNum">     459 </span>            :         ListCell   *l;
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span><span class="lineCov">     122704 :         foreach(l, root-&gt;join_rel_list)</span>
+<span class="lineNum">     462 </span>            :         {
+<span class="lineNum">     463 </span><span class="lineCov">      98552 :             RelOptInfo *rel = (RelOptInfo *) lfirst(l);</span>
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span><span class="lineCov">      98552 :             if (bms_equal(rel-&gt;relids, relids))</span>
+<span class="lineNum">     466 </span><span class="lineCov">       7650 :                 return rel;</span>
+<span class="lineNum">     467 </span>            :         }
+<span class="lineNum">     468 </span>            :     }
+<span class="lineNum">     469 </span>            : 
+<span class="lineNum">     470 </span><span class="lineCov">      24186 :     return NULL;</span>
+<span class="lineNum">     471 </span>            : }
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span>            : /*
+<span class="lineNum">     474 </span>            :  * set_foreign_rel_properties
+<span class="lineNum">     475 </span>            :  *      Set up foreign-join fields if outer and inner relation are foreign
+<span class="lineNum">     476 </span>            :  *      tables (or joins) belonging to the same server and assigned to the same
+<span class="lineNum">     477 </span>            :  *      user to check access permissions as.
+<span class="lineNum">     478 </span>            :  *
+<span class="lineNum">     479 </span>            :  * In addition to an exact match of userid, we allow the case where one side
+<span class="lineNum">     480 </span>            :  * has zero userid (implying current user) and the other side has explicit
+<span class="lineNum">     481 </span>            :  * userid that happens to equal the current user; but in that case, pushdown of
+<span class="lineNum">     482 </span>            :  * the join is only valid for the current user.  The useridiscurrent field
+<span class="lineNum">     483 </span>            :  * records whether we had to make such an assumption for this join or any
+<span class="lineNum">     484 </span>            :  * sub-join.
+<span class="lineNum">     485 </span>            :  *
+<span class="lineNum">     486 </span>            :  * Otherwise these fields are left invalid, so GetForeignJoinPaths will not be
+<span class="lineNum">     487 </span>            :  * called for the join relation.
+<span class="lineNum">     488 </span>            :  *
+<a name="489"><span class="lineNum">     489 </span>            :  */</a>
+<span class="lineNum">     490 </span>            : static void
+<span class="lineNum">     491 </span><span class="lineCov">      24142 : set_foreign_rel_properties(RelOptInfo *joinrel, RelOptInfo *outer_rel,</span>
+<span class="lineNum">     492 </span>            :                            RelOptInfo *inner_rel)
+<span class="lineNum">     493 </span>            : {
+<span class="lineNum">     494 </span><span class="lineCov">      24142 :     if (OidIsValid(outer_rel-&gt;serverid) &amp;&amp;</span>
+<span class="lineNum">     495 </span><span class="lineNoCov">          0 :         inner_rel-&gt;serverid == outer_rel-&gt;serverid)</span>
+<span class="lineNum">     496 </span>            :     {
+<span class="lineNum">     497 </span><span class="lineNoCov">          0 :         if (inner_rel-&gt;userid == outer_rel-&gt;userid)</span>
+<span class="lineNum">     498 </span>            :         {
+<span class="lineNum">     499 </span><span class="lineNoCov">          0 :             joinrel-&gt;serverid = outer_rel-&gt;serverid;</span>
+<span class="lineNum">     500 </span><span class="lineNoCov">          0 :             joinrel-&gt;userid = outer_rel-&gt;userid;</span>
+<span class="lineNum">     501 </span><span class="lineNoCov">          0 :             joinrel-&gt;useridiscurrent = outer_rel-&gt;useridiscurrent || inner_rel-&gt;useridiscurrent;</span>
+<span class="lineNum">     502 </span><span class="lineNoCov">          0 :             joinrel-&gt;fdwroutine = outer_rel-&gt;fdwroutine;</span>
+<span class="lineNum">     503 </span>            :         }
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :         else if (!OidIsValid(inner_rel-&gt;userid) &amp;&amp;</span>
+<span class="lineNum">     505 </span><span class="lineNoCov">          0 :                  outer_rel-&gt;userid == GetUserId())</span>
+<span class="lineNum">     506 </span>            :         {
+<span class="lineNum">     507 </span><span class="lineNoCov">          0 :             joinrel-&gt;serverid = outer_rel-&gt;serverid;</span>
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 :             joinrel-&gt;userid = outer_rel-&gt;userid;</span>
+<span class="lineNum">     509 </span><span class="lineNoCov">          0 :             joinrel-&gt;useridiscurrent = true;</span>
+<span class="lineNum">     510 </span><span class="lineNoCov">          0 :             joinrel-&gt;fdwroutine = outer_rel-&gt;fdwroutine;</span>
+<span class="lineNum">     511 </span>            :         }
+<span class="lineNum">     512 </span><span class="lineNoCov">          0 :         else if (!OidIsValid(outer_rel-&gt;userid) &amp;&amp;</span>
+<span class="lineNum">     513 </span><span class="lineNoCov">          0 :                  inner_rel-&gt;userid == GetUserId())</span>
+<span class="lineNum">     514 </span>            :         {
+<span class="lineNum">     515 </span><span class="lineNoCov">          0 :             joinrel-&gt;serverid = outer_rel-&gt;serverid;</span>
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :             joinrel-&gt;userid = inner_rel-&gt;userid;</span>
+<span class="lineNum">     517 </span><span class="lineNoCov">          0 :             joinrel-&gt;useridiscurrent = true;</span>
+<span class="lineNum">     518 </span><span class="lineNoCov">          0 :             joinrel-&gt;fdwroutine = outer_rel-&gt;fdwroutine;</span>
+<span class="lineNum">     519 </span>            :         }
+<span class="lineNum">     520 </span>            :     }
+<span class="lineNum">     521 </span><span class="lineCov">      24142 : }</span>
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span>            : /*
+<span class="lineNum">     524 </span>            :  * add_join_rel
+<span class="lineNum">     525 </span>            :  *      Add given join relation to the list of join relations in the given
+<span class="lineNum">     526 </span>            :  *      PlannerInfo. Also add it to the auxiliary hashtable if there is one.
+<a name="527"><span class="lineNum">     527 </span>            :  */</a>
+<span class="lineNum">     528 </span>            : static void
+<span class="lineNum">     529 </span><span class="lineCov">      24142 : add_join_rel(PlannerInfo *root, RelOptInfo *joinrel)</span>
+<span class="lineNum">     530 </span>            : {
+<span class="lineNum">     531 </span>            :     /* GEQO requires us to append the new joinrel to the end of the list! */
+<span class="lineNum">     532 </span><span class="lineCov">      24142 :     root-&gt;join_rel_list = lappend(root-&gt;join_rel_list, joinrel);</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span>            :     /* store it into the auxiliary hashtable if there is one. */
+<span class="lineNum">     535 </span><span class="lineCov">      24142 :     if (root-&gt;join_rel_hash)</span>
+<span class="lineNum">     536 </span>            :     {
+<span class="lineNum">     537 </span>            :         JoinHashEntry *hentry;
+<span class="lineNum">     538 </span>            :         bool        found;
+<span class="lineNum">     539 </span>            : 
+<span class="lineNum">     540 </span><span class="lineCov">         34 :         hentry = (JoinHashEntry *) hash_search(root-&gt;join_rel_hash,</span>
+<span class="lineNum">     541 </span><span class="lineCov">         34 :                                                &amp;(joinrel-&gt;relids),</span>
+<span class="lineNum">     542 </span>            :                                                HASH_ENTER,
+<span class="lineNum">     543 </span>            :                                                &amp;found);
+<span class="lineNum">     544 </span><span class="lineCov">         34 :         Assert(!found);</span>
+<span class="lineNum">     545 </span><span class="lineCov">         34 :         hentry-&gt;join_rel = joinrel;</span>
+<span class="lineNum">     546 </span>            :     }
+<span class="lineNum">     547 </span><span class="lineCov">      24142 : }</span>
+<span class="lineNum">     548 </span>            : 
+<span class="lineNum">     549 </span>            : /*
+<span class="lineNum">     550 </span>            :  * build_join_rel
+<span class="lineNum">     551 </span>            :  *    Returns relation entry corresponding to the union of two given rels,
+<span class="lineNum">     552 </span>            :  *    creating a new relation entry if none already exists.
+<span class="lineNum">     553 </span>            :  *
+<span class="lineNum">     554 </span>            :  * 'joinrelids' is the Relids set that uniquely identifies the join
+<span class="lineNum">     555 </span>            :  * 'outer_rel' and 'inner_rel' are relation nodes for the relations to be
+<span class="lineNum">     556 </span>            :  *      joined
+<span class="lineNum">     557 </span>            :  * 'sjinfo': join context info
+<span class="lineNum">     558 </span>            :  * 'restrictlist_ptr': result variable.  If not NULL, *restrictlist_ptr
+<span class="lineNum">     559 </span>            :  *      receives the list of RestrictInfo nodes that apply to this
+<span class="lineNum">     560 </span>            :  *      particular pair of joinable relations.
+<span class="lineNum">     561 </span>            :  *
+<span class="lineNum">     562 </span>            :  * restrictlist_ptr makes the routine's API a little grotty, but it saves
+<span class="lineNum">     563 </span>            :  * duplicated calculation of the restrictlist...
+<a name="564"><span class="lineNum">     564 </span>            :  */</a>
+<span class="lineNum">     565 </span>            : RelOptInfo *
+<span class="lineNum">     566 </span><span class="lineCov">      30972 : build_join_rel(PlannerInfo *root,</span>
+<span class="lineNum">     567 </span>            :                Relids joinrelids,
+<span class="lineNum">     568 </span>            :                RelOptInfo *outer_rel,
+<span class="lineNum">     569 </span>            :                RelOptInfo *inner_rel,
+<span class="lineNum">     570 </span>            :                SpecialJoinInfo *sjinfo,
+<span class="lineNum">     571 </span>            :                List **restrictlist_ptr)
+<span class="lineNum">     572 </span>            : {
+<span class="lineNum">     573 </span>            :     RelOptInfo *joinrel;
+<span class="lineNum">     574 </span>            :     List       *restrictlist;
+<span class="lineNum">     575 </span>            : 
+<span class="lineNum">     576 </span>            :     /* This function should be used only for join between parents. */
+<span class="lineNum">     577 </span><span class="lineCov">      30972 :     Assert(!IS_OTHER_REL(outer_rel) &amp;&amp; !IS_OTHER_REL(inner_rel));</span>
+<span class="lineNum">     578 </span>            : 
+<span class="lineNum">     579 </span>            :     /*
+<span class="lineNum">     580 </span>            :      * See if we already have a joinrel for this set of base rels.
+<span class="lineNum">     581 </span>            :      */
+<span class="lineNum">     582 </span><span class="lineCov">      30972 :     joinrel = find_join_rel(root, joinrelids);</span>
+<span class="lineNum">     583 </span>            : 
+<span class="lineNum">     584 </span><span class="lineCov">      30972 :     if (joinrel)</span>
+<span class="lineNum">     585 </span>            :     {
+<span class="lineNum">     586 </span>            :         /*
+<span class="lineNum">     587 </span>            :          * Yes, so we only need to figure the restrictlist for this particular
+<span class="lineNum">     588 </span>            :          * pair of component relations.
+<span class="lineNum">     589 </span>            :          */
+<span class="lineNum">     590 </span><span class="lineCov">       7516 :         if (restrictlist_ptr)</span>
+<span class="lineNum">     591 </span><span class="lineCov">       7516 :             *restrictlist_ptr = build_joinrel_restrictlist(root,</span>
+<span class="lineNum">     592 </span>            :                                                            joinrel,
+<span class="lineNum">     593 </span>            :                                                            outer_rel,
+<span class="lineNum">     594 </span>            :                                                            inner_rel);
+<span class="lineNum">     595 </span><span class="lineCov">       7516 :         return joinrel;</span>
+<span class="lineNum">     596 </span>            :     }
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span>            :     /*
+<span class="lineNum">     599 </span>            :      * Nope, so make one.
+<span class="lineNum">     600 </span>            :      */
+<span class="lineNum">     601 </span><span class="lineCov">      23456 :     joinrel = makeNode(RelOptInfo);</span>
+<span class="lineNum">     602 </span><span class="lineCov">      23456 :     joinrel-&gt;reloptkind = RELOPT_JOINREL;</span>
+<span class="lineNum">     603 </span><span class="lineCov">      23456 :     joinrel-&gt;relids = bms_copy(joinrelids);</span>
+<span class="lineNum">     604 </span><span class="lineCov">      23456 :     joinrel-&gt;rows = 0;</span>
+<span class="lineNum">     605 </span>            :     /* cheap startup cost is interesting iff not all tuples to be retrieved */
+<span class="lineNum">     606 </span><span class="lineCov">      23456 :     joinrel-&gt;consider_startup = (root-&gt;tuple_fraction &gt; 0);</span>
+<span class="lineNum">     607 </span><span class="lineCov">      23456 :     joinrel-&gt;consider_param_startup = false;</span>
+<span class="lineNum">     608 </span><span class="lineCov">      23456 :     joinrel-&gt;consider_parallel = false;</span>
+<span class="lineNum">     609 </span><span class="lineCov">      23456 :     joinrel-&gt;reltarget = create_empty_pathtarget();</span>
+<span class="lineNum">     610 </span><span class="lineCov">      23456 :     joinrel-&gt;pathlist = NIL;</span>
+<span class="lineNum">     611 </span><span class="lineCov">      23456 :     joinrel-&gt;ppilist = NIL;</span>
+<span class="lineNum">     612 </span><span class="lineCov">      23456 :     joinrel-&gt;partial_pathlist = NIL;</span>
+<span class="lineNum">     613 </span><span class="lineCov">      23456 :     joinrel-&gt;cheapest_startup_path = NULL;</span>
+<span class="lineNum">     614 </span><span class="lineCov">      23456 :     joinrel-&gt;cheapest_total_path = NULL;</span>
+<span class="lineNum">     615 </span><span class="lineCov">      23456 :     joinrel-&gt;cheapest_unique_path = NULL;</span>
+<span class="lineNum">     616 </span><span class="lineCov">      23456 :     joinrel-&gt;cheapest_parameterized_paths = NIL;</span>
+<span class="lineNum">     617 </span>            :     /* init direct_lateral_relids from children; we'll finish it up below */
+<span class="lineNum">     618 </span><span class="lineCov">      23456 :     joinrel-&gt;direct_lateral_relids =</span>
+<span class="lineNum">     619 </span><span class="lineCov">      23456 :         bms_union(outer_rel-&gt;direct_lateral_relids,</span>
+<span class="lineNum">     620 </span><span class="lineCov">      23456 :                   inner_rel-&gt;direct_lateral_relids);</span>
+<span class="lineNum">     621 </span><span class="lineCov">      23456 :     joinrel-&gt;lateral_relids = min_join_parameterization(root, joinrel-&gt;relids,</span>
+<span class="lineNum">     622 </span>            :                                                         outer_rel, inner_rel);
+<span class="lineNum">     623 </span><span class="lineCov">      23456 :     joinrel-&gt;relid = 0;          /* indicates not a baserel */</span>
+<span class="lineNum">     624 </span><span class="lineCov">      23456 :     joinrel-&gt;rtekind = RTE_JOIN;</span>
+<span class="lineNum">     625 </span><span class="lineCov">      23456 :     joinrel-&gt;min_attr = 0;</span>
+<span class="lineNum">     626 </span><span class="lineCov">      23456 :     joinrel-&gt;max_attr = 0;</span>
+<span class="lineNum">     627 </span><span class="lineCov">      23456 :     joinrel-&gt;attr_needed = NULL;</span>
+<span class="lineNum">     628 </span><span class="lineCov">      23456 :     joinrel-&gt;attr_widths = NULL;</span>
+<span class="lineNum">     629 </span><span class="lineCov">      23456 :     joinrel-&gt;lateral_vars = NIL;</span>
+<span class="lineNum">     630 </span><span class="lineCov">      23456 :     joinrel-&gt;lateral_referencers = NULL;</span>
+<span class="lineNum">     631 </span><span class="lineCov">      23456 :     joinrel-&gt;indexlist = NIL;</span>
+<span class="lineNum">     632 </span><span class="lineCov">      23456 :     joinrel-&gt;statlist = NIL;</span>
+<span class="lineNum">     633 </span><span class="lineCov">      23456 :     joinrel-&gt;pages = 0;</span>
+<span class="lineNum">     634 </span><span class="lineCov">      23456 :     joinrel-&gt;tuples = 0;</span>
+<span class="lineNum">     635 </span><span class="lineCov">      23456 :     joinrel-&gt;allvisfrac = 0;</span>
+<span class="lineNum">     636 </span><span class="lineCov">      23456 :     joinrel-&gt;eclass_indexes = NULL;</span>
+<span class="lineNum">     637 </span><span class="lineCov">      23456 :     joinrel-&gt;subroot = NULL;</span>
+<span class="lineNum">     638 </span><span class="lineCov">      23456 :     joinrel-&gt;subplan_params = NIL;</span>
+<span class="lineNum">     639 </span><span class="lineCov">      23456 :     joinrel-&gt;rel_parallel_workers = -1;</span>
+<span class="lineNum">     640 </span><span class="lineCov">      23456 :     joinrel-&gt;serverid = InvalidOid;</span>
+<span class="lineNum">     641 </span><span class="lineCov">      23456 :     joinrel-&gt;userid = InvalidOid;</span>
+<span class="lineNum">     642 </span><span class="lineCov">      23456 :     joinrel-&gt;useridiscurrent = false;</span>
+<span class="lineNum">     643 </span><span class="lineCov">      23456 :     joinrel-&gt;fdwroutine = NULL;</span>
+<span class="lineNum">     644 </span><span class="lineCov">      23456 :     joinrel-&gt;fdw_private = NULL;</span>
+<span class="lineNum">     645 </span><span class="lineCov">      23456 :     joinrel-&gt;unique_for_rels = NIL;</span>
+<span class="lineNum">     646 </span><span class="lineCov">      23456 :     joinrel-&gt;non_unique_for_rels = NIL;</span>
+<span class="lineNum">     647 </span><span class="lineCov">      23456 :     joinrel-&gt;baserestrictinfo = NIL;</span>
+<span class="lineNum">     648 </span><span class="lineCov">      23456 :     joinrel-&gt;baserestrictcost.startup = 0;</span>
+<span class="lineNum">     649 </span><span class="lineCov">      23456 :     joinrel-&gt;baserestrictcost.per_tuple = 0;</span>
+<span class="lineNum">     650 </span><span class="lineCov">      23456 :     joinrel-&gt;baserestrict_min_security = UINT_MAX;</span>
+<span class="lineNum">     651 </span><span class="lineCov">      23456 :     joinrel-&gt;joininfo = NIL;</span>
+<span class="lineNum">     652 </span><span class="lineCov">      23456 :     joinrel-&gt;has_eclass_joins = false;</span>
+<span class="lineNum">     653 </span><span class="lineCov">      23456 :     joinrel-&gt;consider_partitionwise_join = false;    /* might get changed later */</span>
+<span class="lineNum">     654 </span><span class="lineCov">      23456 :     joinrel-&gt;top_parent_relids = NULL;</span>
+<span class="lineNum">     655 </span><span class="lineCov">      23456 :     joinrel-&gt;part_scheme = NULL;</span>
+<span class="lineNum">     656 </span><span class="lineCov">      23456 :     joinrel-&gt;nparts = 0;</span>
+<span class="lineNum">     657 </span><span class="lineCov">      23456 :     joinrel-&gt;boundinfo = NULL;</span>
+<span class="lineNum">     658 </span><span class="lineCov">      23456 :     joinrel-&gt;partition_qual = NIL;</span>
+<span class="lineNum">     659 </span><span class="lineCov">      23456 :     joinrel-&gt;part_rels = NULL;</span>
+<span class="lineNum">     660 </span><span class="lineCov">      23456 :     joinrel-&gt;partexprs = NULL;</span>
+<span class="lineNum">     661 </span><span class="lineCov">      23456 :     joinrel-&gt;nullable_partexprs = NULL;</span>
+<span class="lineNum">     662 </span><span class="lineCov">      23456 :     joinrel-&gt;partitioned_child_rels = NIL;</span>
+<span class="lineNum">     663 </span>            : 
+<span class="lineNum">     664 </span>            :     /* Compute information relevant to the foreign relations. */
+<span class="lineNum">     665 </span><span class="lineCov">      23456 :     set_foreign_rel_properties(joinrel, outer_rel, inner_rel);</span>
+<span class="lineNum">     666 </span>            : 
+<span class="lineNum">     667 </span>            :     /*
+<span class="lineNum">     668 </span>            :      * Create a new tlist containing just the vars that need to be output from
+<span class="lineNum">     669 </span>            :      * this join (ie, are needed for higher joinclauses or final output).
+<span class="lineNum">     670 </span>            :      *
+<span class="lineNum">     671 </span>            :      * NOTE: the tlist order for a join rel will depend on which pair of outer
+<span class="lineNum">     672 </span>            :      * and inner rels we first try to build it from.  But the contents should
+<span class="lineNum">     673 </span>            :      * be the same regardless.
+<span class="lineNum">     674 </span>            :      */
+<span class="lineNum">     675 </span><span class="lineCov">      23456 :     build_joinrel_tlist(root, joinrel, outer_rel);</span>
+<span class="lineNum">     676 </span><span class="lineCov">      23456 :     build_joinrel_tlist(root, joinrel, inner_rel);</span>
+<span class="lineNum">     677 </span><span class="lineCov">      23456 :     add_placeholders_to_joinrel(root, joinrel, outer_rel, inner_rel);</span>
+<span class="lineNum">     678 </span>            : 
+<span class="lineNum">     679 </span>            :     /*
+<span class="lineNum">     680 </span>            :      * add_placeholders_to_joinrel also took care of adding the ph_lateral
+<span class="lineNum">     681 </span>            :      * sets of any PlaceHolderVars computed here to direct_lateral_relids, so
+<span class="lineNum">     682 </span>            :      * now we can finish computing that.  This is much like the computation of
+<span class="lineNum">     683 </span>            :      * the transitively-closed lateral_relids in min_join_parameterization,
+<span class="lineNum">     684 </span>            :      * except that here we *do* have to consider the added PHVs.
+<span class="lineNum">     685 </span>            :      */
+<span class="lineNum">     686 </span><span class="lineCov">      23456 :     joinrel-&gt;direct_lateral_relids =</span>
+<span class="lineNum">     687 </span><span class="lineCov">      23456 :         bms_del_members(joinrel-&gt;direct_lateral_relids, joinrel-&gt;relids);</span>
+<span class="lineNum">     688 </span><span class="lineCov">      23456 :     if (bms_is_empty(joinrel-&gt;direct_lateral_relids))</span>
+<span class="lineNum">     689 </span><span class="lineCov">      23356 :         joinrel-&gt;direct_lateral_relids = NULL;</span>
+<span class="lineNum">     690 </span>            : 
+<span class="lineNum">     691 </span>            :     /*
+<span class="lineNum">     692 </span>            :      * Construct restrict and join clause lists for the new joinrel. (The
+<span class="lineNum">     693 </span>            :      * caller might or might not need the restrictlist, but I need it anyway
+<span class="lineNum">     694 </span>            :      * for set_joinrel_size_estimates().)
+<span class="lineNum">     695 </span>            :      */
+<span class="lineNum">     696 </span><span class="lineCov">      23456 :     restrictlist = build_joinrel_restrictlist(root, joinrel,</span>
+<span class="lineNum">     697 </span>            :                                               outer_rel, inner_rel);
+<span class="lineNum">     698 </span><span class="lineCov">      23456 :     if (restrictlist_ptr)</span>
+<span class="lineNum">     699 </span><span class="lineCov">      23456 :         *restrictlist_ptr = restrictlist;</span>
+<span class="lineNum">     700 </span><span class="lineCov">      23456 :     build_joinrel_joinlist(joinrel, outer_rel, inner_rel);</span>
+<span class="lineNum">     701 </span>            : 
+<span class="lineNum">     702 </span>            :     /*
+<span class="lineNum">     703 </span>            :      * This is also the right place to check whether the joinrel has any
+<span class="lineNum">     704 </span>            :      * pending EquivalenceClass joins.
+<span class="lineNum">     705 </span>            :      */
+<span class="lineNum">     706 </span><span class="lineCov">      23456 :     joinrel-&gt;has_eclass_joins = has_relevant_eclass_joinclause(root, joinrel);</span>
+<span class="lineNum">     707 </span>            : 
+<span class="lineNum">     708 </span>            :     /* Store the partition information. */
+<span class="lineNum">     709 </span><span class="lineCov">      23456 :     build_joinrel_partition_info(joinrel, outer_rel, inner_rel, restrictlist,</span>
+<span class="lineNum">     710 </span>            :                                  sjinfo-&gt;jointype);
+<span class="lineNum">     711 </span>            : 
+<span class="lineNum">     712 </span>            :     /*
+<span class="lineNum">     713 </span>            :      * Set estimates of the joinrel's size.
+<span class="lineNum">     714 </span>            :      */
+<span class="lineNum">     715 </span><span class="lineCov">      23456 :     set_joinrel_size_estimates(root, joinrel, outer_rel, inner_rel,</span>
+<span class="lineNum">     716 </span>            :                                sjinfo, restrictlist);
+<span class="lineNum">     717 </span>            : 
+<span class="lineNum">     718 </span>            :     /*
+<span class="lineNum">     719 </span>            :      * Set the consider_parallel flag if this joinrel could potentially be
+<span class="lineNum">     720 </span>            :      * scanned within a parallel worker.  If this flag is false for either
+<span class="lineNum">     721 </span>            :      * inner_rel or outer_rel, then it must be false for the joinrel also.
+<span class="lineNum">     722 </span>            :      * Even if both are true, there might be parallel-restricted expressions
+<span class="lineNum">     723 </span>            :      * in the targetlist or quals.
+<span class="lineNum">     724 </span>            :      *
+<span class="lineNum">     725 </span>            :      * Note that if there are more than two rels in this relation, they could
+<span class="lineNum">     726 </span>            :      * be divided between inner_rel and outer_rel in any arbitrary way.  We
+<span class="lineNum">     727 </span>            :      * assume this doesn't matter, because we should hit all the same baserels
+<span class="lineNum">     728 </span>            :      * and joinclauses while building up to this joinrel no matter which we
+<span class="lineNum">     729 </span>            :      * take; therefore, we should make the same decision here however we get
+<span class="lineNum">     730 </span>            :      * here.
+<span class="lineNum">     731 </span>            :      */
+<span class="lineNum">     732 </span><span class="lineCov">      40476 :     if (inner_rel-&gt;consider_parallel &amp;&amp; outer_rel-&gt;consider_parallel &amp;&amp;</span>
+<span class="lineNum">     733 </span><span class="lineCov">      34028 :         is_parallel_safe(root, (Node *) restrictlist) &amp;&amp;</span>
+<span class="lineNum">     734 </span><span class="lineCov">      17008 :         is_parallel_safe(root, (Node *) joinrel-&gt;reltarget-&gt;exprs))</span>
+<span class="lineNum">     735 </span><span class="lineCov">      17006 :         joinrel-&gt;consider_parallel = true;</span>
+<span class="lineNum">     736 </span>            : 
+<span class="lineNum">     737 </span>            :     /* Add the joinrel to the PlannerInfo. */
+<span class="lineNum">     738 </span><span class="lineCov">      23456 :     add_join_rel(root, joinrel);</span>
+<span class="lineNum">     739 </span>            : 
+<span class="lineNum">     740 </span>            :     /*
+<span class="lineNum">     741 </span>            :      * Also, if dynamic-programming join search is active, add the new joinrel
+<span class="lineNum">     742 </span>            :      * to the appropriate sublist.  Note: you might think the Assert on number
+<span class="lineNum">     743 </span>            :      * of members should be for equality, but some of the level 1 rels might
+<span class="lineNum">     744 </span>            :      * have been joinrels already, so we can only assert &lt;=.
+<span class="lineNum">     745 </span>            :      */
+<span class="lineNum">     746 </span><span class="lineCov">      23456 :     if (root-&gt;join_rel_level)</span>
+<span class="lineNum">     747 </span>            :     {
+<span class="lineNum">     748 </span><span class="lineCov">      22424 :         Assert(root-&gt;join_cur_level &gt; 0);</span>
+<span class="lineNum">     749 </span><span class="lineCov">      22424 :         Assert(root-&gt;join_cur_level &lt;= bms_num_members(joinrel-&gt;relids));</span>
+<span class="lineNum">     750 </span><span class="lineCov">      44848 :         root-&gt;join_rel_level[root-&gt;join_cur_level] =</span>
+<span class="lineNum">     751 </span><span class="lineCov">      22424 :             lappend(root-&gt;join_rel_level[root-&gt;join_cur_level], joinrel);</span>
+<span class="lineNum">     752 </span>            :     }
+<span class="lineNum">     753 </span>            : 
+<span class="lineNum">     754 </span><span class="lineCov">      23456 :     return joinrel;</span>
+<span class="lineNum">     755 </span>            : }
+<span class="lineNum">     756 </span>            : 
+<span class="lineNum">     757 </span>            : /*
+<span class="lineNum">     758 </span>            :  * build_child_join_rel
+<span class="lineNum">     759 </span>            :  *    Builds RelOptInfo representing join between given two child relations.
+<span class="lineNum">     760 </span>            :  *
+<span class="lineNum">     761 </span>            :  * 'outer_rel' and 'inner_rel' are the RelOptInfos of child relations being
+<span class="lineNum">     762 </span>            :  *      joined
+<span class="lineNum">     763 </span>            :  * 'parent_joinrel' is the RelOptInfo representing the join between parent
+<span class="lineNum">     764 </span>            :  *      relations. Some of the members of new RelOptInfo are produced by
+<span class="lineNum">     765 </span>            :  *      translating corresponding members of this RelOptInfo
+<span class="lineNum">     766 </span>            :  * 'sjinfo': child-join context info
+<span class="lineNum">     767 </span>            :  * 'restrictlist': list of RestrictInfo nodes that apply to this particular
+<span class="lineNum">     768 </span>            :  *      pair of joinable relations
+<span class="lineNum">     769 </span>            :  * 'jointype' is the join type (inner, left, full, etc)
+<a name="770"><span class="lineNum">     770 </span>            :  */</a>
+<span class="lineNum">     771 </span>            : RelOptInfo *
+<span class="lineNum">     772 </span><span class="lineCov">        686 : build_child_join_rel(PlannerInfo *root, RelOptInfo *outer_rel,</span>
+<span class="lineNum">     773 </span>            :                      RelOptInfo *inner_rel, RelOptInfo *parent_joinrel,
+<span class="lineNum">     774 </span>            :                      List *restrictlist, SpecialJoinInfo *sjinfo,
+<span class="lineNum">     775 </span>            :                      JoinType jointype)
+<span class="lineNum">     776 </span>            : {
+<span class="lineNum">     777 </span><span class="lineCov">        686 :     RelOptInfo *joinrel = makeNode(RelOptInfo);</span>
+<span class="lineNum">     778 </span>            :     AppendRelInfo **appinfos;
+<span class="lineNum">     779 </span>            :     int         nappinfos;
+<span class="lineNum">     780 </span>            : 
+<span class="lineNum">     781 </span>            :     /* Only joins between &quot;other&quot; relations land here. */
+<span class="lineNum">     782 </span><span class="lineCov">        686 :     Assert(IS_OTHER_REL(outer_rel) &amp;&amp; IS_OTHER_REL(inner_rel));</span>
+<span class="lineNum">     783 </span>            : 
+<span class="lineNum">     784 </span>            :     /* The parent joinrel should have consider_partitionwise_join set. */
+<span class="lineNum">     785 </span><span class="lineCov">        686 :     Assert(parent_joinrel-&gt;consider_partitionwise_join);</span>
+<span class="lineNum">     786 </span>            : 
+<span class="lineNum">     787 </span><span class="lineCov">        686 :     joinrel-&gt;reloptkind = RELOPT_OTHER_JOINREL;</span>
+<span class="lineNum">     788 </span><span class="lineCov">        686 :     joinrel-&gt;relids = bms_union(outer_rel-&gt;relids, inner_rel-&gt;relids);</span>
+<span class="lineNum">     789 </span><span class="lineCov">        686 :     joinrel-&gt;rows = 0;</span>
+<span class="lineNum">     790 </span>            :     /* cheap startup cost is interesting iff not all tuples to be retrieved */
+<span class="lineNum">     791 </span><span class="lineCov">        686 :     joinrel-&gt;consider_startup = (root-&gt;tuple_fraction &gt; 0);</span>
+<span class="lineNum">     792 </span><span class="lineCov">        686 :     joinrel-&gt;consider_param_startup = false;</span>
+<span class="lineNum">     793 </span><span class="lineCov">        686 :     joinrel-&gt;consider_parallel = false;</span>
+<span class="lineNum">     794 </span><span class="lineCov">        686 :     joinrel-&gt;reltarget = create_empty_pathtarget();</span>
+<span class="lineNum">     795 </span><span class="lineCov">        686 :     joinrel-&gt;pathlist = NIL;</span>
+<span class="lineNum">     796 </span><span class="lineCov">        686 :     joinrel-&gt;ppilist = NIL;</span>
+<span class="lineNum">     797 </span><span class="lineCov">        686 :     joinrel-&gt;partial_pathlist = NIL;</span>
+<span class="lineNum">     798 </span><span class="lineCov">        686 :     joinrel-&gt;cheapest_startup_path = NULL;</span>
+<span class="lineNum">     799 </span><span class="lineCov">        686 :     joinrel-&gt;cheapest_total_path = NULL;</span>
+<span class="lineNum">     800 </span><span class="lineCov">        686 :     joinrel-&gt;cheapest_unique_path = NULL;</span>
+<span class="lineNum">     801 </span><span class="lineCov">        686 :     joinrel-&gt;cheapest_parameterized_paths = NIL;</span>
+<span class="lineNum">     802 </span><span class="lineCov">        686 :     joinrel-&gt;direct_lateral_relids = NULL;</span>
+<span class="lineNum">     803 </span><span class="lineCov">        686 :     joinrel-&gt;lateral_relids = NULL;</span>
+<span class="lineNum">     804 </span><span class="lineCov">        686 :     joinrel-&gt;relid = 0;          /* indicates not a baserel */</span>
+<span class="lineNum">     805 </span><span class="lineCov">        686 :     joinrel-&gt;rtekind = RTE_JOIN;</span>
+<span class="lineNum">     806 </span><span class="lineCov">        686 :     joinrel-&gt;min_attr = 0;</span>
+<span class="lineNum">     807 </span><span class="lineCov">        686 :     joinrel-&gt;max_attr = 0;</span>
+<span class="lineNum">     808 </span><span class="lineCov">        686 :     joinrel-&gt;attr_needed = NULL;</span>
+<span class="lineNum">     809 </span><span class="lineCov">        686 :     joinrel-&gt;attr_widths = NULL;</span>
+<span class="lineNum">     810 </span><span class="lineCov">        686 :     joinrel-&gt;lateral_vars = NIL;</span>
+<span class="lineNum">     811 </span><span class="lineCov">        686 :     joinrel-&gt;lateral_referencers = NULL;</span>
+<span class="lineNum">     812 </span><span class="lineCov">        686 :     joinrel-&gt;indexlist = NIL;</span>
+<span class="lineNum">     813 </span><span class="lineCov">        686 :     joinrel-&gt;pages = 0;</span>
+<span class="lineNum">     814 </span><span class="lineCov">        686 :     joinrel-&gt;tuples = 0;</span>
+<span class="lineNum">     815 </span><span class="lineCov">        686 :     joinrel-&gt;allvisfrac = 0;</span>
+<span class="lineNum">     816 </span><span class="lineCov">        686 :     joinrel-&gt;eclass_indexes = NULL;</span>
+<span class="lineNum">     817 </span><span class="lineCov">        686 :     joinrel-&gt;subroot = NULL;</span>
+<span class="lineNum">     818 </span><span class="lineCov">        686 :     joinrel-&gt;subplan_params = NIL;</span>
+<span class="lineNum">     819 </span><span class="lineCov">        686 :     joinrel-&gt;serverid = InvalidOid;</span>
+<span class="lineNum">     820 </span><span class="lineCov">        686 :     joinrel-&gt;userid = InvalidOid;</span>
+<span class="lineNum">     821 </span><span class="lineCov">        686 :     joinrel-&gt;useridiscurrent = false;</span>
+<span class="lineNum">     822 </span><span class="lineCov">        686 :     joinrel-&gt;fdwroutine = NULL;</span>
+<span class="lineNum">     823 </span><span class="lineCov">        686 :     joinrel-&gt;fdw_private = NULL;</span>
+<span class="lineNum">     824 </span><span class="lineCov">        686 :     joinrel-&gt;baserestrictinfo = NIL;</span>
+<span class="lineNum">     825 </span><span class="lineCov">        686 :     joinrel-&gt;baserestrictcost.startup = 0;</span>
+<span class="lineNum">     826 </span><span class="lineCov">        686 :     joinrel-&gt;baserestrictcost.per_tuple = 0;</span>
+<span class="lineNum">     827 </span><span class="lineCov">        686 :     joinrel-&gt;joininfo = NIL;</span>
+<span class="lineNum">     828 </span><span class="lineCov">        686 :     joinrel-&gt;has_eclass_joins = false;</span>
+<span class="lineNum">     829 </span><span class="lineCov">        686 :     joinrel-&gt;consider_partitionwise_join = false;    /* might get changed later */</span>
+<span class="lineNum">     830 </span><span class="lineCov">        686 :     joinrel-&gt;top_parent_relids = NULL;</span>
+<span class="lineNum">     831 </span><span class="lineCov">        686 :     joinrel-&gt;part_scheme = NULL;</span>
+<span class="lineNum">     832 </span><span class="lineCov">        686 :     joinrel-&gt;nparts = 0;</span>
+<span class="lineNum">     833 </span><span class="lineCov">        686 :     joinrel-&gt;boundinfo = NULL;</span>
+<span class="lineNum">     834 </span><span class="lineCov">        686 :     joinrel-&gt;partition_qual = NIL;</span>
+<span class="lineNum">     835 </span><span class="lineCov">        686 :     joinrel-&gt;part_rels = NULL;</span>
+<span class="lineNum">     836 </span><span class="lineCov">        686 :     joinrel-&gt;partexprs = NULL;</span>
+<span class="lineNum">     837 </span><span class="lineCov">        686 :     joinrel-&gt;nullable_partexprs = NULL;</span>
+<span class="lineNum">     838 </span><span class="lineCov">        686 :     joinrel-&gt;partitioned_child_rels = NIL;</span>
+<span class="lineNum">     839 </span>            : 
+<span class="lineNum">     840 </span><span class="lineCov">        686 :     joinrel-&gt;top_parent_relids = bms_union(outer_rel-&gt;top_parent_relids,</span>
+<span class="lineNum">     841 </span><span class="lineCov">        686 :                                            inner_rel-&gt;top_parent_relids);</span>
+<span class="lineNum">     842 </span>            : 
+<span class="lineNum">     843 </span>            :     /* Compute information relevant to foreign relations. */
+<span class="lineNum">     844 </span><span class="lineCov">        686 :     set_foreign_rel_properties(joinrel, outer_rel, inner_rel);</span>
+<span class="lineNum">     845 </span>            : 
+<span class="lineNum">     846 </span>            :     /* Compute information needed for mapping Vars to the child rel */
+<span class="lineNum">     847 </span><span class="lineCov">        686 :     appinfos = find_appinfos_by_relids(root, joinrel-&gt;relids, &amp;nappinfos);</span>
+<span class="lineNum">     848 </span>            : 
+<span class="lineNum">     849 </span>            :     /* Set up reltarget struct */
+<span class="lineNum">     850 </span><span class="lineCov">        686 :     build_child_join_reltarget(root, parent_joinrel, joinrel,</span>
+<span class="lineNum">     851 </span>            :                                nappinfos, appinfos);
+<span class="lineNum">     852 </span>            : 
+<span class="lineNum">     853 </span>            :     /* Construct joininfo list. */
+<span class="lineNum">     854 </span><span class="lineCov">       1372 :     joinrel-&gt;joininfo = (List *) adjust_appendrel_attrs(root,</span>
+<span class="lineNum">     855 </span><span class="lineCov">        686 :                                                         (Node *) parent_joinrel-&gt;joininfo,</span>
+<span class="lineNum">     856 </span>            :                                                         nappinfos,
+<span class="lineNum">     857 </span>            :                                                         appinfos);
+<span class="lineNum">     858 </span>            : 
+<span class="lineNum">     859 </span>            :     /*
+<span class="lineNum">     860 </span>            :      * Lateral relids referred in child join will be same as that referred in
+<span class="lineNum">     861 </span>            :      * the parent relation.
+<span class="lineNum">     862 </span>            :      */
+<span class="lineNum">     863 </span><span class="lineCov">        686 :     joinrel-&gt;direct_lateral_relids = (Relids) bms_copy(parent_joinrel-&gt;direct_lateral_relids);</span>
+<span class="lineNum">     864 </span><span class="lineCov">        686 :     joinrel-&gt;lateral_relids = (Relids) bms_copy(parent_joinrel-&gt;lateral_relids);</span>
+<span class="lineNum">     865 </span>            : 
+<span class="lineNum">     866 </span>            :     /*
+<span class="lineNum">     867 </span>            :      * If the parent joinrel has pending equivalence classes, so does the
+<span class="lineNum">     868 </span>            :      * child.
+<span class="lineNum">     869 </span>            :      */
+<span class="lineNum">     870 </span><span class="lineCov">        686 :     joinrel-&gt;has_eclass_joins = parent_joinrel-&gt;has_eclass_joins;</span>
+<span class="lineNum">     871 </span>            : 
+<span class="lineNum">     872 </span>            :     /* Is the join between partitions itself partitioned? */
+<span class="lineNum">     873 </span><span class="lineCov">        686 :     build_joinrel_partition_info(joinrel, outer_rel, inner_rel, restrictlist,</span>
+<span class="lineNum">     874 </span>            :                                  jointype);
+<span class="lineNum">     875 </span>            : 
+<span class="lineNum">     876 </span>            :     /* Child joinrel is parallel safe if parent is parallel safe. */
+<span class="lineNum">     877 </span><span class="lineCov">        686 :     joinrel-&gt;consider_parallel = parent_joinrel-&gt;consider_parallel;</span>
+<span class="lineNum">     878 </span>            : 
+<span class="lineNum">     879 </span>            :     /* Set estimates of the child-joinrel's size. */
+<span class="lineNum">     880 </span><span class="lineCov">        686 :     set_joinrel_size_estimates(root, joinrel, outer_rel, inner_rel,</span>
+<span class="lineNum">     881 </span>            :                                sjinfo, restrictlist);
+<span class="lineNum">     882 </span>            : 
+<span class="lineNum">     883 </span>            :     /* We build the join only once. */
+<span class="lineNum">     884 </span><span class="lineCov">        686 :     Assert(!find_join_rel(root, joinrel-&gt;relids));</span>
+<span class="lineNum">     885 </span>            : 
+<span class="lineNum">     886 </span>            :     /* Add the relation to the PlannerInfo. */
+<span class="lineNum">     887 </span><span class="lineCov">        686 :     add_join_rel(root, joinrel);</span>
+<span class="lineNum">     888 </span>            : 
+<span class="lineNum">     889 </span>            :     /*
+<span class="lineNum">     890 </span>            :      * We might need EquivalenceClass members corresponding to the child join,
+<span class="lineNum">     891 </span>            :      * so that we can represent sort pathkeys for it.  As with children of
+<span class="lineNum">     892 </span>            :      * baserels, we shouldn't need this unless there are relevant eclass joins
+<span class="lineNum">     893 </span>            :      * (implying that a merge join might be possible) or pathkeys to sort by.
+<span class="lineNum">     894 </span>            :      */
+<span class="lineNum">     895 </span><span class="lineCov">        686 :     if (joinrel-&gt;has_eclass_joins || has_useful_pathkeys(root, parent_joinrel))</span>
+<span class="lineNum">     896 </span><span class="lineCov">        674 :         add_child_join_rel_equivalences(root,</span>
+<span class="lineNum">     897 </span>            :                                         nappinfos, appinfos,
+<span class="lineNum">     898 </span>            :                                         parent_joinrel, joinrel);
+<span class="lineNum">     899 </span>            : 
+<span class="lineNum">     900 </span><span class="lineCov">        686 :     pfree(appinfos);</span>
+<span class="lineNum">     901 </span>            : 
+<span class="lineNum">     902 </span><span class="lineCov">        686 :     return joinrel;</span>
+<span class="lineNum">     903 </span>            : }
+<span class="lineNum">     904 </span>            : 
+<span class="lineNum">     905 </span>            : /*
+<span class="lineNum">     906 </span>            :  * min_join_parameterization
+<span class="lineNum">     907 </span>            :  *
+<span class="lineNum">     908 </span>            :  * Determine the minimum possible parameterization of a joinrel, that is, the
+<span class="lineNum">     909 </span>            :  * set of other rels it contains LATERAL references to.  We save this value in
+<span class="lineNum">     910 </span>            :  * the join's RelOptInfo.  This function is split out of build_join_rel()
+<span class="lineNum">     911 </span>            :  * because join_is_legal() needs the value to check a prospective join.
+<a name="912"><span class="lineNum">     912 </span>            :  */</a>
+<span class="lineNum">     913 </span>            : Relids
+<span class="lineNum">     914 </span><span class="lineCov">      26258 : min_join_parameterization(PlannerInfo *root,</span>
+<span class="lineNum">     915 </span>            :                           Relids joinrelids,
+<span class="lineNum">     916 </span>            :                           RelOptInfo *outer_rel,
+<span class="lineNum">     917 </span>            :                           RelOptInfo *inner_rel)
+<span class="lineNum">     918 </span>            : {
+<span class="lineNum">     919 </span>            :     Relids      result;
+<span class="lineNum">     920 </span>            : 
+<span class="lineNum">     921 </span>            :     /*
+<span class="lineNum">     922 </span>            :      * Basically we just need the union of the inputs' lateral_relids, less
+<span class="lineNum">     923 </span>            :      * whatever is already in the join.
+<span class="lineNum">     924 </span>            :      *
+<span class="lineNum">     925 </span>            :      * It's not immediately obvious that this is a valid way to compute the
+<span class="lineNum">     926 </span>            :      * result, because it might seem that we're ignoring possible lateral refs
+<span class="lineNum">     927 </span>            :      * of PlaceHolderVars that are due to be computed at the join but not in
+<span class="lineNum">     928 </span>            :      * either input.  However, because create_lateral_join_info() already
+<span class="lineNum">     929 </span>            :      * charged all such PHV refs to each member baserel of the join, they'll
+<span class="lineNum">     930 </span>            :      * be accounted for already in the inputs' lateral_relids.  Likewise, we
+<span class="lineNum">     931 </span>            :      * do not need to worry about doing transitive closure here, because that
+<span class="lineNum">     932 </span>            :      * was already accounted for in the original baserel lateral_relids.
+<span class="lineNum">     933 </span>            :      */
+<span class="lineNum">     934 </span><span class="lineCov">      26258 :     result = bms_union(outer_rel-&gt;lateral_relids, inner_rel-&gt;lateral_relids);</span>
+<span class="lineNum">     935 </span><span class="lineCov">      26258 :     result = bms_del_members(result, joinrelids);</span>
+<span class="lineNum">     936 </span>            : 
+<span class="lineNum">     937 </span>            :     /* Maintain invariant that result is exactly NULL if empty */
+<span class="lineNum">     938 </span><span class="lineCov">      26258 :     if (bms_is_empty(result))</span>
+<span class="lineNum">     939 </span><span class="lineCov">      25948 :         result = NULL;</span>
+<span class="lineNum">     940 </span>            : 
+<span class="lineNum">     941 </span><span class="lineCov">      26258 :     return result;</span>
+<span class="lineNum">     942 </span>            : }
+<span class="lineNum">     943 </span>            : 
+<span class="lineNum">     944 </span>            : /*
+<span class="lineNum">     945 </span>            :  * build_joinrel_tlist
+<span class="lineNum">     946 </span>            :  *    Builds a join relation's target list from an input relation.
+<span class="lineNum">     947 </span>            :  *    (This is invoked twice to handle the two input relations.)
+<span class="lineNum">     948 </span>            :  *
+<span class="lineNum">     949 </span>            :  * The join's targetlist includes all Vars of its member relations that
+<span class="lineNum">     950 </span>            :  * will still be needed above the join.  This subroutine adds all such
+<span class="lineNum">     951 </span>            :  * Vars from the specified input rel's tlist to the join rel's tlist.
+<span class="lineNum">     952 </span>            :  *
+<span class="lineNum">     953 </span>            :  * We also compute the expected width of the join's output, making use
+<span class="lineNum">     954 </span>            :  * of data that was cached at the baserel level by set_rel_width().
+<a name="955"><span class="lineNum">     955 </span>            :  */</a>
+<span class="lineNum">     956 </span>            : static void
+<span class="lineNum">     957 </span><span class="lineCov">      46912 : build_joinrel_tlist(PlannerInfo *root, RelOptInfo *joinrel,</span>
+<span class="lineNum">     958 </span>            :                     RelOptInfo *input_rel)
+<span class="lineNum">     959 </span>            : {
+<span class="lineNum">     960 </span><span class="lineCov">      46912 :     Relids      relids = joinrel-&gt;relids;</span>
+<span class="lineNum">     961 </span>            :     ListCell   *vars;
+<span class="lineNum">     962 </span>            : 
+<span class="lineNum">     963 </span><span class="lineCov">     190006 :     foreach(vars, input_rel-&gt;reltarget-&gt;exprs)</span>
+<span class="lineNum">     964 </span>            :     {
+<span class="lineNum">     965 </span><span class="lineCov">     143094 :         Var        *var = (Var *) lfirst(vars);</span>
+<span class="lineNum">     966 </span>            :         RelOptInfo *baserel;
+<span class="lineNum">     967 </span>            :         int         ndx;
+<span class="lineNum">     968 </span>            : 
+<span class="lineNum">     969 </span>            :         /*
+<span class="lineNum">     970 </span>            :          * Ignore PlaceHolderVars in the input tlists; we'll make our own
+<span class="lineNum">     971 </span>            :          * decisions about whether to copy them.
+<span class="lineNum">     972 </span>            :          */
+<span class="lineNum">     973 </span><span class="lineCov">     143094 :         if (IsA(var, PlaceHolderVar))</span>
+<span class="lineNum">     974 </span><span class="lineCov">        370 :             continue;</span>
+<span class="lineNum">     975 </span>            : 
+<span class="lineNum">     976 </span>            :         /*
+<span class="lineNum">     977 </span>            :          * Otherwise, anything in a baserel or joinrel targetlist ought to be
+<span class="lineNum">     978 </span>            :          * a Var.  (More general cases can only appear in appendrel child
+<span class="lineNum">     979 </span>            :          * rels, which will never be seen here.)
+<span class="lineNum">     980 </span>            :          */
+<span class="lineNum">     981 </span><span class="lineCov">     142724 :         if (!IsA(var, Var))</span>
+<span class="lineNum">     982 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unexpected node type in rel targetlist: %d&quot;,</span>
+<span class="lineNum">     983 </span>            :                  (int) nodeTag(var));
+<span class="lineNum">     984 </span>            : 
+<span class="lineNum">     985 </span>            :         /* Get the Var's original base rel */
+<span class="lineNum">     986 </span><span class="lineCov">     142724 :         baserel = find_base_rel(root, var-&gt;varno);</span>
+<span class="lineNum">     987 </span>            : 
+<span class="lineNum">     988 </span>            :         /* Is it still needed above this joinrel? */
+<span class="lineNum">     989 </span><span class="lineCov">     142724 :         ndx = var-&gt;varattno - baserel-&gt;min_attr;</span>
+<span class="lineNum">     990 </span><span class="lineCov">     142724 :         if (bms_nonempty_difference(baserel-&gt;attr_needed[ndx], relids))</span>
+<span class="lineNum">     991 </span>            :         {
+<span class="lineNum">     992 </span>            :             /* Yup, add it to the output */
+<span class="lineNum">     993 </span><span class="lineCov">     112892 :             joinrel-&gt;reltarget-&gt;exprs = lappend(joinrel-&gt;reltarget-&gt;exprs, var);</span>
+<span class="lineNum">     994 </span>            :             /* Vars have cost zero, so no need to adjust reltarget-&gt;cost */
+<span class="lineNum">     995 </span><span class="lineCov">     112892 :             joinrel-&gt;reltarget-&gt;width += baserel-&gt;attr_widths[ndx];</span>
+<span class="lineNum">     996 </span>            :         }
+<span class="lineNum">     997 </span>            :     }
+<span class="lineNum">     998 </span><span class="lineCov">      46912 : }</span>
+<span class="lineNum">     999 </span>            : 
+<span class="lineNum">    1000 </span>            : /*
+<span class="lineNum">    1001 </span>            :  * build_joinrel_restrictlist
+<span class="lineNum">    1002 </span>            :  * build_joinrel_joinlist
+<span class="lineNum">    1003 </span>            :  *    These routines build lists of restriction and join clauses for a
+<span class="lineNum">    1004 </span>            :  *    join relation from the joininfo lists of the relations it joins.
+<span class="lineNum">    1005 </span>            :  *
+<span class="lineNum">    1006 </span>            :  *    These routines are separate because the restriction list must be
+<span class="lineNum">    1007 </span>            :  *    built afresh for each pair of input sub-relations we consider, whereas
+<span class="lineNum">    1008 </span>            :  *    the join list need only be computed once for any join RelOptInfo.
+<span class="lineNum">    1009 </span>            :  *    The join list is fully determined by the set of rels making up the
+<span class="lineNum">    1010 </span>            :  *    joinrel, so we should get the same results (up to ordering) from any
+<span class="lineNum">    1011 </span>            :  *    candidate pair of sub-relations.  But the restriction list is whatever
+<span class="lineNum">    1012 </span>            :  *    is not handled in the sub-relations, so it depends on which
+<span class="lineNum">    1013 </span>            :  *    sub-relations are considered.
+<span class="lineNum">    1014 </span>            :  *
+<span class="lineNum">    1015 </span>            :  *    If a join clause from an input relation refers to base rels still not
+<span class="lineNum">    1016 </span>            :  *    present in the joinrel, then it is still a join clause for the joinrel;
+<span class="lineNum">    1017 </span>            :  *    we put it into the joininfo list for the joinrel.  Otherwise,
+<span class="lineNum">    1018 </span>            :  *    the clause is now a restrict clause for the joined relation, and we
+<span class="lineNum">    1019 </span>            :  *    return it to the caller of build_joinrel_restrictlist() to be stored in
+<span class="lineNum">    1020 </span>            :  *    join paths made from this pair of sub-relations.  (It will not need to
+<span class="lineNum">    1021 </span>            :  *    be considered further up the join tree.)
+<span class="lineNum">    1022 </span>            :  *
+<span class="lineNum">    1023 </span>            :  *    In many case we will find the same RestrictInfos in both input
+<span class="lineNum">    1024 </span>            :  *    relations' joinlists, so be careful to eliminate duplicates.
+<span class="lineNum">    1025 </span>            :  *    Pointer equality should be a sufficient test for dups, since all
+<span class="lineNum">    1026 </span>            :  *    the various joinlist entries ultimately refer to RestrictInfos
+<span class="lineNum">    1027 </span>            :  *    pushed into them by distribute_restrictinfo_to_rels().
+<span class="lineNum">    1028 </span>            :  *
+<span class="lineNum">    1029 </span>            :  * 'joinrel' is a join relation node
+<span class="lineNum">    1030 </span>            :  * 'outer_rel' and 'inner_rel' are a pair of relations that can be joined
+<span class="lineNum">    1031 </span>            :  *      to form joinrel.
+<span class="lineNum">    1032 </span>            :  *
+<span class="lineNum">    1033 </span>            :  * build_joinrel_restrictlist() returns a list of relevant restrictinfos,
+<span class="lineNum">    1034 </span>            :  * whereas build_joinrel_joinlist() stores its results in the joinrel's
+<span class="lineNum">    1035 </span>            :  * joininfo list.  One or the other must accept each given clause!
+<span class="lineNum">    1036 </span>            :  *
+<span class="lineNum">    1037 </span>            :  * NB: Formerly, we made deep(!) copies of each input RestrictInfo to pass
+<span class="lineNum">    1038 </span>            :  * up to the join relation.  I believe this is no longer necessary, because
+<span class="lineNum">    1039 </span>            :  * RestrictInfo nodes are no longer context-dependent.  Instead, just include
+<span class="lineNum">    1040 </span>            :  * the original nodes in the lists made for the join relation.
+<a name="1041"><span class="lineNum">    1041 </span>            :  */</a>
+<span class="lineNum">    1042 </span>            : static List *
+<span class="lineNum">    1043 </span><span class="lineCov">      30972 : build_joinrel_restrictlist(PlannerInfo *root,</span>
+<span class="lineNum">    1044 </span>            :                            RelOptInfo *joinrel,
+<span class="lineNum">    1045 </span>            :                            RelOptInfo *outer_rel,
+<span class="lineNum">    1046 </span>            :                            RelOptInfo *inner_rel)
+<span class="lineNum">    1047 </span>            : {
+<span class="lineNum">    1048 </span>            :     List       *result;
+<span class="lineNum">    1049 </span>            : 
+<span class="lineNum">    1050 </span>            :     /*
+<span class="lineNum">    1051 </span>            :      * Collect all the clauses that syntactically belong at this level,
+<span class="lineNum">    1052 </span>            :      * eliminating any duplicates (important since we will see many of the
+<span class="lineNum">    1053 </span>            :      * same clauses arriving from both input relations).
+<span class="lineNum">    1054 </span>            :      */
+<span class="lineNum">    1055 </span><span class="lineCov">      30972 :     result = subbuild_joinrel_restrictlist(joinrel, outer_rel-&gt;joininfo, NIL);</span>
+<span class="lineNum">    1056 </span><span class="lineCov">      30972 :     result = subbuild_joinrel_restrictlist(joinrel, inner_rel-&gt;joininfo, result);</span>
+<span class="lineNum">    1057 </span>            : 
+<span class="lineNum">    1058 </span>            :     /*
+<span class="lineNum">    1059 </span>            :      * Add on any clauses derived from EquivalenceClasses.  These cannot be
+<span class="lineNum">    1060 </span>            :      * redundant with the clauses in the joininfo lists, so don't bother
+<span class="lineNum">    1061 </span>            :      * checking.
+<span class="lineNum">    1062 </span>            :      */
+<span class="lineNum">    1063 </span><span class="lineCov">      30972 :     result = list_concat(result,</span>
+<span class="lineNum">    1064 </span><span class="lineCov">      30972 :                          generate_join_implied_equalities(root,</span>
+<span class="lineNum">    1065 </span>            :                                                           joinrel-&gt;relids,
+<span class="lineNum">    1066 </span>            :                                                           outer_rel-&gt;relids,
+<span class="lineNum">    1067 </span>            :                                                           inner_rel));
+<span class="lineNum">    1068 </span>            : 
+<span class="lineNum">    1069 </span><span class="lineCov">      30972 :     return result;</span>
+<span class="lineNum">    1070 </span>            : }
+<a name="1071"><span class="lineNum">    1071 </span>            : </a>
+<span class="lineNum">    1072 </span>            : static void
+<span class="lineNum">    1073 </span><span class="lineCov">      23456 : build_joinrel_joinlist(RelOptInfo *joinrel,</span>
+<span class="lineNum">    1074 </span>            :                        RelOptInfo *outer_rel,
+<span class="lineNum">    1075 </span>            :                        RelOptInfo *inner_rel)
+<span class="lineNum">    1076 </span>            : {
+<span class="lineNum">    1077 </span>            :     List       *result;
+<span class="lineNum">    1078 </span>            : 
+<span class="lineNum">    1079 </span>            :     /*
+<span class="lineNum">    1080 </span>            :      * Collect all the clauses that syntactically belong above this level,
+<span class="lineNum">    1081 </span>            :      * eliminating any duplicates (important since we will see many of the
+<span class="lineNum">    1082 </span>            :      * same clauses arriving from both input relations).
+<span class="lineNum">    1083 </span>            :      */
+<span class="lineNum">    1084 </span><span class="lineCov">      23456 :     result = subbuild_joinrel_joinlist(joinrel, outer_rel-&gt;joininfo, NIL);</span>
+<span class="lineNum">    1085 </span><span class="lineCov">      23456 :     result = subbuild_joinrel_joinlist(joinrel, inner_rel-&gt;joininfo, result);</span>
+<span class="lineNum">    1086 </span>            : 
+<span class="lineNum">    1087 </span><span class="lineCov">      23456 :     joinrel-&gt;joininfo = result;</span>
+<span class="lineNum">    1088 </span><span class="lineCov">      23456 : }</span>
+<a name="1089"><span class="lineNum">    1089 </span>            : </a>
+<span class="lineNum">    1090 </span>            : static List *
+<span class="lineNum">    1091 </span><span class="lineCov">      61944 : subbuild_joinrel_restrictlist(RelOptInfo *joinrel,</span>
+<span class="lineNum">    1092 </span>            :                               List *joininfo_list,
+<span class="lineNum">    1093 </span>            :                               List *new_restrictlist)
+<span class="lineNum">    1094 </span>            : {
+<span class="lineNum">    1095 </span>            :     ListCell   *l;
+<span class="lineNum">    1096 </span>            : 
+<span class="lineNum">    1097 </span><span class="lineCov">     106936 :     foreach(l, joininfo_list)</span>
+<span class="lineNum">    1098 </span>            :     {
+<span class="lineNum">    1099 </span><span class="lineCov">      44992 :         RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);</span>
+<span class="lineNum">    1100 </span>            : 
+<span class="lineNum">    1101 </span><span class="lineCov">      44992 :         if (bms_is_subset(rinfo-&gt;required_relids, joinrel-&gt;relids))</span>
+<span class="lineNum">    1102 </span>            :         {
+<span class="lineNum">    1103 </span>            :             /*
+<span class="lineNum">    1104 </span>            :              * This clause becomes a restriction clause for the joinrel, since
+<span class="lineNum">    1105 </span>            :              * it refers to no outside rels.  Add it to the list, being
+<span class="lineNum">    1106 </span>            :              * careful to eliminate duplicates. (Since RestrictInfo nodes in
+<span class="lineNum">    1107 </span>            :              * different joinlists will have been multiply-linked rather than
+<span class="lineNum">    1108 </span>            :              * copied, pointer equality should be a sufficient test.)
+<span class="lineNum">    1109 </span>            :              */
+<span class="lineNum">    1110 </span><span class="lineCov">      29108 :             new_restrictlist = list_append_unique_ptr(new_restrictlist, rinfo);</span>
+<span class="lineNum">    1111 </span>            :         }
+<span class="lineNum">    1112 </span>            :         else
+<span class="lineNum">    1113 </span>            :         {
+<span class="lineNum">    1114 </span>            :             /*
+<span class="lineNum">    1115 </span>            :              * This clause is still a join clause at this level, so we ignore
+<span class="lineNum">    1116 </span>            :              * it in this routine.
+<span class="lineNum">    1117 </span>            :              */
+<span class="lineNum">    1118 </span>            :         }
+<span class="lineNum">    1119 </span>            :     }
+<span class="lineNum">    1120 </span>            : 
+<span class="lineNum">    1121 </span><span class="lineCov">      61944 :     return new_restrictlist;</span>
+<span class="lineNum">    1122 </span>            : }
+<a name="1123"><span class="lineNum">    1123 </span>            : </a>
+<span class="lineNum">    1124 </span>            : static List *
+<span class="lineNum">    1125 </span><span class="lineCov">      46912 : subbuild_joinrel_joinlist(RelOptInfo *joinrel,</span>
+<span class="lineNum">    1126 </span>            :                           List *joininfo_list,
+<span class="lineNum">    1127 </span>            :                           List *new_joininfo)
+<span class="lineNum">    1128 </span>            : {
+<span class="lineNum">    1129 </span>            :     ListCell   *l;
+<span class="lineNum">    1130 </span>            : 
+<span class="lineNum">    1131 </span>            :     /* Expected to be called only for join between parent relations. */
+<span class="lineNum">    1132 </span><span class="lineCov">      46912 :     Assert(joinrel-&gt;reloptkind == RELOPT_JOINREL);</span>
+<span class="lineNum">    1133 </span>            : 
+<span class="lineNum">    1134 </span><span class="lineCov">      79604 :     foreach(l, joininfo_list)</span>
+<span class="lineNum">    1135 </span>            :     {
+<span class="lineNum">    1136 </span><span class="lineCov">      32692 :         RestrictInfo *rinfo = (RestrictInfo *) lfirst(l);</span>
+<span class="lineNum">    1137 </span>            : 
+<span class="lineNum">    1138 </span><span class="lineCov">      32692 :         if (bms_is_subset(rinfo-&gt;required_relids, joinrel-&gt;relids))</span>
+<span class="lineNum">    1139 </span>            :         {
+<span class="lineNum">    1140 </span>            :             /*
+<span class="lineNum">    1141 </span>            :              * This clause becomes a restriction clause for the joinrel, since
+<span class="lineNum">    1142 </span>            :              * it refers to no outside rels.  So we can ignore it in this
+<span class="lineNum">    1143 </span>            :              * routine.
+<span class="lineNum">    1144 </span>            :              */
+<span class="lineNum">    1145 </span>            :         }
+<span class="lineNum">    1146 </span>            :         else
+<span class="lineNum">    1147 </span>            :         {
+<span class="lineNum">    1148 </span>            :             /*
+<span class="lineNum">    1149 </span>            :              * This clause is still a join clause at this level, so add it to
+<span class="lineNum">    1150 </span>            :              * the new joininfo list, being careful to eliminate duplicates.
+<span class="lineNum">    1151 </span>            :              * (Since RestrictInfo nodes in different joinlists will have been
+<span class="lineNum">    1152 </span>            :              * multiply-linked rather than copied, pointer equality should be
+<span class="lineNum">    1153 </span>            :              * a sufficient test.)
+<span class="lineNum">    1154 </span>            :              */
+<span class="lineNum">    1155 </span><span class="lineCov">       9320 :             new_joininfo = list_append_unique_ptr(new_joininfo, rinfo);</span>
+<span class="lineNum">    1156 </span>            :         }
+<span class="lineNum">    1157 </span>            :     }
+<span class="lineNum">    1158 </span>            : 
+<span class="lineNum">    1159 </span><span class="lineCov">      46912 :     return new_joininfo;</span>
+<span class="lineNum">    1160 </span>            : }
+<span class="lineNum">    1161 </span>            : 
+<span class="lineNum">    1162 </span>            : 
+<span class="lineNum">    1163 </span>            : /*
+<span class="lineNum">    1164 </span>            :  * fetch_upper_rel
+<span class="lineNum">    1165 </span>            :  *      Build a RelOptInfo describing some post-scan/join query processing,
+<span class="lineNum">    1166 </span>            :  *      or return a pre-existing one if somebody already built it.
+<span class="lineNum">    1167 </span>            :  *
+<span class="lineNum">    1168 </span>            :  * An &quot;upper&quot; relation is identified by an UpperRelationKind and a Relids set.
+<span class="lineNum">    1169 </span>            :  * The meaning of the Relids set is not specified here, and very likely will
+<span class="lineNum">    1170 </span>            :  * vary for different relation kinds.
+<span class="lineNum">    1171 </span>            :  *
+<span class="lineNum">    1172 </span>            :  * Most of the fields in an upper-level RelOptInfo are not used and are not
+<span class="lineNum">    1173 </span>            :  * set here (though makeNode should ensure they're zeroes).  We basically only
+<span class="lineNum">    1174 </span>            :  * care about fields that are of interest to add_path() and set_cheapest().
+<a name="1175"><span class="lineNum">    1175 </span>            :  */</a>
+<span class="lineNum">    1176 </span>            : RelOptInfo *
+<span class="lineNum">    1177 </span><span class="lineCov">     248208 : fetch_upper_rel(PlannerInfo *root, UpperRelationKind kind, Relids relids)</span>
+<span class="lineNum">    1178 </span>            : {
+<span class="lineNum">    1179 </span>            :     RelOptInfo *upperrel;
+<span class="lineNum">    1180 </span>            :     ListCell   *lc;
+<span class="lineNum">    1181 </span>            : 
+<span class="lineNum">    1182 </span>            :     /*
+<span class="lineNum">    1183 </span>            :      * For the moment, our indexing data structure is just a List for each
+<span class="lineNum">    1184 </span>            :      * relation kind.  If we ever get so many of one kind that this stops
+<span class="lineNum">    1185 </span>            :      * working well, we can improve it.  No code outside this function should
+<span class="lineNum">    1186 </span>            :      * assume anything about how to find a particular upperrel.
+<span class="lineNum">    1187 </span>            :      */
+<span class="lineNum">    1188 </span>            : 
+<span class="lineNum">    1189 </span>            :     /* If we already made this upperrel for the query, return it */
+<span class="lineNum">    1190 </span><span class="lineCov">     250516 :     foreach(lc, root-&gt;upper_rels[kind])</span>
+<span class="lineNum">    1191 </span>            :     {
+<span class="lineNum">    1192 </span><span class="lineCov">     158146 :         upperrel = (RelOptInfo *) lfirst(lc);</span>
+<span class="lineNum">    1193 </span>            : 
+<span class="lineNum">    1194 </span><span class="lineCov">     158146 :         if (bms_equal(upperrel-&gt;relids, relids))</span>
+<span class="lineNum">    1195 </span><span class="lineCov">     155838 :             return upperrel;</span>
+<span class="lineNum">    1196 </span>            :     }
+<span class="lineNum">    1197 </span>            : 
+<span class="lineNum">    1198 </span><span class="lineCov">      92370 :     upperrel = makeNode(RelOptInfo);</span>
+<span class="lineNum">    1199 </span><span class="lineCov">      92370 :     upperrel-&gt;reloptkind = RELOPT_UPPER_REL;</span>
+<span class="lineNum">    1200 </span><span class="lineCov">      92370 :     upperrel-&gt;relids = bms_copy(relids);</span>
+<span class="lineNum">    1201 </span>            : 
+<span class="lineNum">    1202 </span>            :     /* cheap startup cost is interesting iff not all tuples to be retrieved */
+<span class="lineNum">    1203 </span><span class="lineCov">      92370 :     upperrel-&gt;consider_startup = (root-&gt;tuple_fraction &gt; 0);</span>
+<span class="lineNum">    1204 </span><span class="lineCov">      92370 :     upperrel-&gt;consider_param_startup = false;</span>
+<span class="lineNum">    1205 </span><span class="lineCov">      92370 :     upperrel-&gt;consider_parallel = false; /* might get changed later */</span>
+<span class="lineNum">    1206 </span><span class="lineCov">      92370 :     upperrel-&gt;reltarget = create_empty_pathtarget();</span>
+<span class="lineNum">    1207 </span><span class="lineCov">      92370 :     upperrel-&gt;pathlist = NIL;</span>
+<span class="lineNum">    1208 </span><span class="lineCov">      92370 :     upperrel-&gt;cheapest_startup_path = NULL;</span>
+<span class="lineNum">    1209 </span><span class="lineCov">      92370 :     upperrel-&gt;cheapest_total_path = NULL;</span>
+<span class="lineNum">    1210 </span><span class="lineCov">      92370 :     upperrel-&gt;cheapest_unique_path = NULL;</span>
+<span class="lineNum">    1211 </span><span class="lineCov">      92370 :     upperrel-&gt;cheapest_parameterized_paths = NIL;</span>
+<span class="lineNum">    1212 </span>            : 
+<span class="lineNum">    1213 </span><span class="lineCov">      92370 :     root-&gt;upper_rels[kind] = lappend(root-&gt;upper_rels[kind], upperrel);</span>
+<span class="lineNum">    1214 </span>            : 
+<span class="lineNum">    1215 </span><span class="lineCov">      92370 :     return upperrel;</span>
+<span class="lineNum">    1216 </span>            : }
+<span class="lineNum">    1217 </span>            : 
+<span class="lineNum">    1218 </span>            : 
+<span class="lineNum">    1219 </span>            : /*
+<span class="lineNum">    1220 </span>            :  * find_childrel_parents
+<span class="lineNum">    1221 </span>            :  *      Compute the set of parent relids of an appendrel child rel.
+<span class="lineNum">    1222 </span>            :  *
+<span class="lineNum">    1223 </span>            :  * Since appendrels can be nested, a child could have multiple levels of
+<span class="lineNum">    1224 </span>            :  * appendrel ancestors.  This function computes a Relids set of all the
+<span class="lineNum">    1225 </span>            :  * parent relation IDs.
+<a name="1226"><span class="lineNum">    1226 </span>            :  */</a>
+<span class="lineNum">    1227 </span>            : Relids
+<span class="lineNum">    1228 </span><span class="lineCov">       2438 : find_childrel_parents(PlannerInfo *root, RelOptInfo *rel)</span>
+<span class="lineNum">    1229 </span>            : {
+<span class="lineNum">    1230 </span><span class="lineCov">       2438 :     Relids      result = NULL;</span>
+<span class="lineNum">    1231 </span>            : 
+<span class="lineNum">    1232 </span><span class="lineCov">       2438 :     Assert(rel-&gt;reloptkind == RELOPT_OTHER_MEMBER_REL);</span>
+<span class="lineNum">    1233 </span><span class="lineCov">       2438 :     Assert(rel-&gt;relid &gt; 0 &amp;&amp; rel-&gt;relid &lt; root-&gt;simple_rel_array_size);</span>
+<span class="lineNum">    1234 </span>            : 
+<span class="lineNum">    1235 </span>            :     do
+<span class="lineNum">    1236 </span>            :     {
+<span class="lineNum">    1237 </span><span class="lineCov">       3022 :         AppendRelInfo *appinfo = root-&gt;append_rel_array[rel-&gt;relid];</span>
+<span class="lineNum">    1238 </span><span class="lineCov">       3022 :         Index       prelid = appinfo-&gt;parent_relid;</span>
+<span class="lineNum">    1239 </span>            : 
+<span class="lineNum">    1240 </span><span class="lineCov">       3022 :         result = bms_add_member(result, prelid);</span>
+<span class="lineNum">    1241 </span>            : 
+<span class="lineNum">    1242 </span>            :         /* traverse up to the parent rel, loop if it's also a child rel */
+<span class="lineNum">    1243 </span><span class="lineCov">       3022 :         rel = find_base_rel(root, prelid);</span>
+<span class="lineNum">    1244 </span><span class="lineCov">       3022 :     } while (rel-&gt;reloptkind == RELOPT_OTHER_MEMBER_REL);</span>
+<span class="lineNum">    1245 </span>            : 
+<span class="lineNum">    1246 </span><span class="lineCov">       2438 :     Assert(rel-&gt;reloptkind == RELOPT_BASEREL);</span>
+<span class="lineNum">    1247 </span>            : 
+<span class="lineNum">    1248 </span><span class="lineCov">       2438 :     return result;</span>
+<span class="lineNum">    1249 </span>            : }
+<span class="lineNum">    1250 </span>            : 
+<span class="lineNum">    1251 </span>            : 
+<span class="lineNum">    1252 </span>            : /*
+<span class="lineNum">    1253 </span>            :  * get_baserel_parampathinfo
+<span class="lineNum">    1254 </span>            :  *      Get the ParamPathInfo for a parameterized path for a base relation,
+<span class="lineNum">    1255 </span>            :  *      constructing one if we don't have one already.
+<span class="lineNum">    1256 </span>            :  *
+<span class="lineNum">    1257 </span>            :  * This centralizes estimating the rowcounts for parameterized paths.
+<span class="lineNum">    1258 </span>            :  * We need to cache those to be sure we use the same rowcount for all paths
+<span class="lineNum">    1259 </span>            :  * of the same parameterization for a given rel.  This is also a convenient
+<span class="lineNum">    1260 </span>            :  * place to determine which movable join clauses the parameterized path will
+<span class="lineNum">    1261 </span>            :  * be responsible for evaluating.
+<a name="1262"><span class="lineNum">    1262 </span>            :  */</a>
+<span class="lineNum">    1263 </span>            : ParamPathInfo *
+<span class="lineNum">    1264 </span><span class="lineCov">     202790 : get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,</span>
+<span class="lineNum">    1265 </span>            :                           Relids required_outer)
+<span class="lineNum">    1266 </span>            : {
+<span class="lineNum">    1267 </span>            :     ParamPathInfo *ppi;
+<span class="lineNum">    1268 </span>            :     Relids      joinrelids;
+<span class="lineNum">    1269 </span>            :     List       *pclauses;
+<span class="lineNum">    1270 </span>            :     double      rows;
+<span class="lineNum">    1271 </span>            :     ListCell   *lc;
+<span class="lineNum">    1272 </span>            : 
+<span class="lineNum">    1273 </span>            :     /* If rel has LATERAL refs, every path for it should account for them */
+<span class="lineNum">    1274 </span><span class="lineCov">     202790 :     Assert(bms_is_subset(baserel-&gt;lateral_relids, required_outer));</span>
+<span class="lineNum">    1275 </span>            : 
+<span class="lineNum">    1276 </span>            :     /* Unparameterized paths have no ParamPathInfo */
+<span class="lineNum">    1277 </span><span class="lineCov">     202790 :     if (bms_is_empty(required_outer))</span>
+<span class="lineNum">    1278 </span><span class="lineCov">     168744 :         return NULL;</span>
+<span class="lineNum">    1279 </span>            : 
+<span class="lineNum">    1280 </span><span class="lineCov">      34046 :     Assert(!bms_overlap(baserel-&gt;relids, required_outer));</span>
+<span class="lineNum">    1281 </span>            : 
+<span class="lineNum">    1282 </span>            :     /* If we already have a PPI for this parameterization, just return it */
+<span class="lineNum">    1283 </span><span class="lineCov">      34046 :     if ((ppi = find_param_path_info(baserel, required_outer)))</span>
+<span class="lineNum">    1284 </span><span class="lineCov">      18786 :         return ppi;</span>
+<span class="lineNum">    1285 </span>            : 
+<span class="lineNum">    1286 </span>            :     /*
+<span class="lineNum">    1287 </span>            :      * Identify all joinclauses that are movable to this base rel given this
+<span class="lineNum">    1288 </span>            :      * parameterization.
+<span class="lineNum">    1289 </span>            :      */
+<span class="lineNum">    1290 </span><span class="lineCov">      15260 :     joinrelids = bms_union(baserel-&gt;relids, required_outer);</span>
+<span class="lineNum">    1291 </span><span class="lineCov">      15260 :     pclauses = NIL;</span>
+<span class="lineNum">    1292 </span><span class="lineCov">      21672 :     foreach(lc, baserel-&gt;joininfo)</span>
+<span class="lineNum">    1293 </span>            :     {
+<span class="lineNum">    1294 </span><span class="lineCov">       6412 :         RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);</span>
+<span class="lineNum">    1295 </span>            : 
+<span class="lineNum">    1296 </span><span class="lineCov">       6412 :         if (join_clause_is_movable_into(rinfo,</span>
+<span class="lineNum">    1297 </span>            :                                         baserel-&gt;relids,
+<span class="lineNum">    1298 </span>            :                                         joinrelids))
+<span class="lineNum">    1299 </span><span class="lineCov">       4224 :             pclauses = lappend(pclauses, rinfo);</span>
+<span class="lineNum">    1300 </span>            :     }
+<span class="lineNum">    1301 </span>            : 
+<span class="lineNum">    1302 </span>            :     /*
+<span class="lineNum">    1303 </span>            :      * Add in joinclauses generated by EquivalenceClasses, too.  (These
+<span class="lineNum">    1304 </span>            :      * necessarily satisfy join_clause_is_movable_into.)
+<span class="lineNum">    1305 </span>            :      */
+<span class="lineNum">    1306 </span><span class="lineCov">      15260 :     pclauses = list_concat(pclauses,</span>
+<span class="lineNum">    1307 </span><span class="lineCov">      15260 :                            generate_join_implied_equalities(root,</span>
+<span class="lineNum">    1308 </span>            :                                                             joinrelids,
+<span class="lineNum">    1309 </span>            :                                                             required_outer,
+<span class="lineNum">    1310 </span>            :                                                             baserel));
+<span class="lineNum">    1311 </span>            : 
+<span class="lineNum">    1312 </span>            :     /* Estimate the number of rows returned by the parameterized scan */
+<span class="lineNum">    1313 </span><span class="lineCov">      15260 :     rows = get_parameterized_baserel_size(root, baserel, pclauses);</span>
+<span class="lineNum">    1314 </span>            : 
+<span class="lineNum">    1315 </span>            :     /* And now we can build the ParamPathInfo */
+<span class="lineNum">    1316 </span><span class="lineCov">      15260 :     ppi = makeNode(ParamPathInfo);</span>
+<span class="lineNum">    1317 </span><span class="lineCov">      15260 :     ppi-&gt;ppi_req_outer = required_outer;</span>
+<span class="lineNum">    1318 </span><span class="lineCov">      15260 :     ppi-&gt;ppi_rows = rows;</span>
+<span class="lineNum">    1319 </span><span class="lineCov">      15260 :     ppi-&gt;ppi_clauses = pclauses;</span>
+<span class="lineNum">    1320 </span><span class="lineCov">      15260 :     baserel-&gt;ppilist = lappend(baserel-&gt;ppilist, ppi);</span>
+<span class="lineNum">    1321 </span>            : 
+<span class="lineNum">    1322 </span><span class="lineCov">      15260 :     return ppi;</span>
+<span class="lineNum">    1323 </span>            : }
+<span class="lineNum">    1324 </span>            : 
+<span class="lineNum">    1325 </span>            : /*
+<span class="lineNum">    1326 </span>            :  * get_joinrel_parampathinfo
+<span class="lineNum">    1327 </span>            :  *      Get the ParamPathInfo for a parameterized path for a join relation,
+<span class="lineNum">    1328 </span>            :  *      constructing one if we don't have one already.
+<span class="lineNum">    1329 </span>            :  *
+<span class="lineNum">    1330 </span>            :  * This centralizes estimating the rowcounts for parameterized paths.
+<span class="lineNum">    1331 </span>            :  * We need to cache those to be sure we use the same rowcount for all paths
+<span class="lineNum">    1332 </span>            :  * of the same parameterization for a given rel.  This is also a convenient
+<span class="lineNum">    1333 </span>            :  * place to determine which movable join clauses the parameterized path will
+<span class="lineNum">    1334 </span>            :  * be responsible for evaluating.
+<span class="lineNum">    1335 </span>            :  *
+<span class="lineNum">    1336 </span>            :  * outer_path and inner_path are a pair of input paths that can be used to
+<span class="lineNum">    1337 </span>            :  * construct the join, and restrict_clauses is the list of regular join
+<span class="lineNum">    1338 </span>            :  * clauses (including clauses derived from EquivalenceClasses) that must be
+<span class="lineNum">    1339 </span>            :  * applied at the join node when using these inputs.
+<span class="lineNum">    1340 </span>            :  *
+<span class="lineNum">    1341 </span>            :  * Unlike the situation for base rels, the set of movable join clauses to be
+<span class="lineNum">    1342 </span>            :  * enforced at a join varies with the selected pair of input paths, so we
+<span class="lineNum">    1343 </span>            :  * must calculate that and pass it back, even if we already have a matching
+<span class="lineNum">    1344 </span>            :  * ParamPathInfo.  We handle this by adding any clauses moved down to this
+<span class="lineNum">    1345 </span>            :  * join to *restrict_clauses, which is an in/out parameter.  (The addition
+<span class="lineNum">    1346 </span>            :  * is done in such a way as to not modify the passed-in List structure.)
+<span class="lineNum">    1347 </span>            :  *
+<span class="lineNum">    1348 </span>            :  * Note: when considering a nestloop join, the caller must have removed from
+<span class="lineNum">    1349 </span>            :  * restrict_clauses any movable clauses that are themselves scheduled to be
+<span class="lineNum">    1350 </span>            :  * pushed into the right-hand path.  We do not do that here since it's
+<span class="lineNum">    1351 </span>            :  * unnecessary for other join types.
+<a name="1352"><span class="lineNum">    1352 </span>            :  */</a>
+<span class="lineNum">    1353 </span>            : ParamPathInfo *
+<span class="lineNum">    1354 </span><span class="lineCov">     159036 : get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,</span>
+<span class="lineNum">    1355 </span>            :                           Path *outer_path,
+<span class="lineNum">    1356 </span>            :                           Path *inner_path,
+<span class="lineNum">    1357 </span>            :                           SpecialJoinInfo *sjinfo,
+<span class="lineNum">    1358 </span>            :                           Relids required_outer,
+<span class="lineNum">    1359 </span>            :                           List **restrict_clauses)
+<span class="lineNum">    1360 </span>            : {
+<span class="lineNum">    1361 </span>            :     ParamPathInfo *ppi;
+<span class="lineNum">    1362 </span>            :     Relids      join_and_req;
+<span class="lineNum">    1363 </span>            :     Relids      outer_and_req;
+<span class="lineNum">    1364 </span>            :     Relids      inner_and_req;
+<span class="lineNum">    1365 </span>            :     List       *pclauses;
+<span class="lineNum">    1366 </span>            :     List       *eclauses;
+<span class="lineNum">    1367 </span>            :     List       *dropped_ecs;
+<span class="lineNum">    1368 </span>            :     double      rows;
+<span class="lineNum">    1369 </span>            :     ListCell   *lc;
+<span class="lineNum">    1370 </span>            : 
+<span class="lineNum">    1371 </span>            :     /* If rel has LATERAL refs, every path for it should account for them */
+<span class="lineNum">    1372 </span><span class="lineCov">     159036 :     Assert(bms_is_subset(joinrel-&gt;lateral_relids, required_outer));</span>
+<span class="lineNum">    1373 </span>            : 
+<span class="lineNum">    1374 </span>            :     /* Unparameterized paths have no ParamPathInfo or extra join clauses */
+<span class="lineNum">    1375 </span><span class="lineCov">     159036 :     if (bms_is_empty(required_outer))</span>
+<span class="lineNum">    1376 </span><span class="lineCov">     157254 :         return NULL;</span>
+<span class="lineNum">    1377 </span>            : 
+<span class="lineNum">    1378 </span><span class="lineCov">       1782 :     Assert(!bms_overlap(joinrel-&gt;relids, required_outer));</span>
+<span class="lineNum">    1379 </span>            : 
+<span class="lineNum">    1380 </span>            :     /*
+<span class="lineNum">    1381 </span>            :      * Identify all joinclauses that are movable to this join rel given this
+<span class="lineNum">    1382 </span>            :      * parameterization.  These are the clauses that are movable into this
+<span class="lineNum">    1383 </span>            :      * join, but not movable into either input path.  Treat an unparameterized
+<span class="lineNum">    1384 </span>            :      * input path as not accepting parameterized clauses (because it won't,
+<span class="lineNum">    1385 </span>            :      * per the shortcut exit above), even though the joinclause movement rules
+<span class="lineNum">    1386 </span>            :      * might allow the same clauses to be moved into a parameterized path for
+<span class="lineNum">    1387 </span>            :      * that rel.
+<span class="lineNum">    1388 </span>            :      */
+<span class="lineNum">    1389 </span><span class="lineCov">       1782 :     join_and_req = bms_union(joinrel-&gt;relids, required_outer);</span>
+<span class="lineNum">    1390 </span><span class="lineCov">       1782 :     if (outer_path-&gt;param_info)</span>
+<span class="lineNum">    1391 </span><span class="lineCov">       2964 :         outer_and_req = bms_union(outer_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1392 </span><span class="lineCov">       2964 :                                   PATH_REQ_OUTER(outer_path));</span>
+<span class="lineNum">    1393 </span>            :     else
+<span class="lineNum">    1394 </span><span class="lineCov">        300 :         outer_and_req = NULL;   /* outer path does not accept parameters */</span>
+<span class="lineNum">    1395 </span><span class="lineCov">       1782 :     if (inner_path-&gt;param_info)</span>
+<span class="lineNum">    1396 </span><span class="lineCov">       1948 :         inner_and_req = bms_union(inner_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1397 </span><span class="lineCov">       1948 :                                   PATH_REQ_OUTER(inner_path));</span>
+<span class="lineNum">    1398 </span>            :     else
+<span class="lineNum">    1399 </span><span class="lineCov">        808 :         inner_and_req = NULL;   /* inner path does not accept parameters */</span>
+<span class="lineNum">    1400 </span>            : 
+<span class="lineNum">    1401 </span><span class="lineCov">       1782 :     pclauses = NIL;</span>
+<span class="lineNum">    1402 </span><span class="lineCov">       3746 :     foreach(lc, joinrel-&gt;joininfo)</span>
+<span class="lineNum">    1403 </span>            :     {
+<span class="lineNum">    1404 </span><span class="lineCov">       1964 :         RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);</span>
+<span class="lineNum">    1405 </span>            : 
+<span class="lineNum">    1406 </span><span class="lineCov">       1964 :         if (join_clause_is_movable_into(rinfo,</span>
+<span class="lineNum">    1407 </span>            :                                         joinrel-&gt;relids,
+<span class="lineNum">    1408 </span><span class="lineCov">       1348 :                                         join_and_req) &amp;&amp;</span>
+<span class="lineNum">    1409 </span><span class="lineCov">       1348 :             !join_clause_is_movable_into(rinfo,</span>
+<span class="lineNum">    1410 </span><span class="lineCov">       1348 :                                          outer_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1411 </span><span class="lineCov">        204 :                                          outer_and_req) &amp;&amp;</span>
+<span class="lineNum">    1412 </span><span class="lineCov">        204 :             !join_clause_is_movable_into(rinfo,</span>
+<span class="lineNum">    1413 </span><span class="lineCov">        204 :                                          inner_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1414 </span>            :                                          inner_and_req))
+<span class="lineNum">    1415 </span><span class="lineCov">         24 :             pclauses = lappend(pclauses, rinfo);</span>
+<span class="lineNum">    1416 </span>            :     }
+<span class="lineNum">    1417 </span>            : 
+<span class="lineNum">    1418 </span>            :     /* Consider joinclauses generated by EquivalenceClasses, too */
+<span class="lineNum">    1419 </span><span class="lineCov">       1782 :     eclauses = generate_join_implied_equalities(root,</span>
+<span class="lineNum">    1420 </span>            :                                                 join_and_req,
+<span class="lineNum">    1421 </span>            :                                                 required_outer,
+<span class="lineNum">    1422 </span>            :                                                 joinrel);
+<span class="lineNum">    1423 </span>            :     /* We only want ones that aren't movable to lower levels */
+<span class="lineNum">    1424 </span><span class="lineCov">       1782 :     dropped_ecs = NIL;</span>
+<span class="lineNum">    1425 </span><span class="lineCov">       2352 :     foreach(lc, eclauses)</span>
+<span class="lineNum">    1426 </span>            :     {
+<span class="lineNum">    1427 </span><span class="lineCov">        570 :         RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);</span>
+<span class="lineNum">    1428 </span>            : 
+<span class="lineNum">    1429 </span>            :         /*
+<span class="lineNum">    1430 </span>            :          * In principle, join_clause_is_movable_into() should accept anything
+<span class="lineNum">    1431 </span>            :          * returned by generate_join_implied_equalities(); but because its
+<span class="lineNum">    1432 </span>            :          * analysis is only approximate, sometimes it doesn't.  So we
+<span class="lineNum">    1433 </span>            :          * currently cannot use this Assert; instead just assume it's okay to
+<span class="lineNum">    1434 </span>            :          * apply the joinclause at this level.
+<span class="lineNum">    1435 </span>            :          */
+<span class="lineNum">    1436 </span>            : #ifdef NOT_USED
+<span class="lineNum">    1437 </span>            :         Assert(join_clause_is_movable_into(rinfo,
+<span class="lineNum">    1438 </span>            :                                            joinrel-&gt;relids,
+<span class="lineNum">    1439 </span>            :                                            join_and_req));
+<span class="lineNum">    1440 </span>            : #endif
+<span class="lineNum">    1441 </span><span class="lineCov">        570 :         if (join_clause_is_movable_into(rinfo,</span>
+<span class="lineNum">    1442 </span><span class="lineCov">        570 :                                         outer_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1443 </span>            :                                         outer_and_req))
+<span class="lineNum">    1444 </span><span class="lineCov">        308 :             continue;           /* drop if movable into LHS */</span>
+<span class="lineNum">    1445 </span><span class="lineCov">        262 :         if (join_clause_is_movable_into(rinfo,</span>
+<span class="lineNum">    1446 </span><span class="lineCov">        262 :                                         inner_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1447 </span>            :                                         inner_and_req))
+<span class="lineNum">    1448 </span>            :         {
+<span class="lineNum">    1449 </span>            :             /* drop if movable into RHS, but remember EC for use below */
+<span class="lineNum">    1450 </span><span class="lineCov">        134 :             Assert(rinfo-&gt;left_ec == rinfo-&gt;right_ec);</span>
+<span class="lineNum">    1451 </span><span class="lineCov">        134 :             dropped_ecs = lappend(dropped_ecs, rinfo-&gt;left_ec);</span>
+<span class="lineNum">    1452 </span><span class="lineCov">        134 :             continue;</span>
+<span class="lineNum">    1453 </span>            :         }
+<span class="lineNum">    1454 </span><span class="lineCov">        128 :         pclauses = lappend(pclauses, rinfo);</span>
+<span class="lineNum">    1455 </span>            :     }
+<span class="lineNum">    1456 </span>            : 
+<span class="lineNum">    1457 </span>            :     /*
+<span class="lineNum">    1458 </span>            :      * EquivalenceClasses are harder to deal with than we could wish, because
+<span class="lineNum">    1459 </span>            :      * of the fact that a given EC can generate different clauses depending on
+<span class="lineNum">    1460 </span>            :      * context.  Suppose we have an EC {X.X, Y.Y, Z.Z} where X and Y are the
+<span class="lineNum">    1461 </span>            :      * LHS and RHS of the current join and Z is in required_outer, and further
+<span class="lineNum">    1462 </span>            :      * suppose that the inner_path is parameterized by both X and Z.  The code
+<span class="lineNum">    1463 </span>            :      * above will have produced either Z.Z = X.X or Z.Z = Y.Y from that EC,
+<span class="lineNum">    1464 </span>            :      * and in the latter case will have discarded it as being movable into the
+<span class="lineNum">    1465 </span>            :      * RHS.  However, the EC machinery might have produced either Y.Y = X.X or
+<span class="lineNum">    1466 </span>            :      * Y.Y = Z.Z as the EC enforcement clause within the inner_path; it will
+<span class="lineNum">    1467 </span>            :      * not have produced both, and we can't readily tell from here which one
+<span class="lineNum">    1468 </span>            :      * it did pick.  If we add no clause to this join, we'll end up with
+<span class="lineNum">    1469 </span>            :      * insufficient enforcement of the EC; either Z.Z or X.X will fail to be
+<span class="lineNum">    1470 </span>            :      * constrained to be equal to the other members of the EC.  (When we come
+<span class="lineNum">    1471 </span>            :      * to join Z to this X/Y path, we will certainly drop whichever EC clause
+<span class="lineNum">    1472 </span>            :      * is generated at that join, so this omission won't get fixed later.)
+<span class="lineNum">    1473 </span>            :      *
+<span class="lineNum">    1474 </span>            :      * To handle this, for each EC we discarded such a clause from, try to
+<span class="lineNum">    1475 </span>            :      * generate a clause connecting the required_outer rels to the join's LHS
+<span class="lineNum">    1476 </span>            :      * (&quot;Z.Z = X.X&quot; in the terms of the above example).  If successful, and if
+<span class="lineNum">    1477 </span>            :      * the clause can't be moved to the LHS, add it to the current join's
+<span class="lineNum">    1478 </span>            :      * restriction clauses.  (If an EC cannot generate such a clause then it
+<span class="lineNum">    1479 </span>            :      * has nothing that needs to be enforced here, while if the clause can be
+<span class="lineNum">    1480 </span>            :      * moved into the LHS then it should have been enforced within that path.)
+<span class="lineNum">    1481 </span>            :      *
+<span class="lineNum">    1482 </span>            :      * Note that we don't need similar processing for ECs whose clause was
+<span class="lineNum">    1483 </span>            :      * considered to be movable into the LHS, because the LHS can't refer to
+<span class="lineNum">    1484 </span>            :      * the RHS so there is no comparable ambiguity about what it might
+<span class="lineNum">    1485 </span>            :      * actually be enforcing internally.
+<span class="lineNum">    1486 </span>            :      */
+<span class="lineNum">    1487 </span><span class="lineCov">       1782 :     if (dropped_ecs)</span>
+<span class="lineNum">    1488 </span>            :     {
+<span class="lineNum">    1489 </span>            :         Relids      real_outer_and_req;
+<span class="lineNum">    1490 </span>            : 
+<span class="lineNum">    1491 </span><span class="lineCov">        124 :         real_outer_and_req = bms_union(outer_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1492 </span>            :                                        required_outer);
+<span class="lineNum">    1493 </span><span class="lineCov">        124 :         eclauses =</span>
+<span class="lineNum">    1494 </span><span class="lineCov">        124 :             generate_join_implied_equalities_for_ecs(root,</span>
+<span class="lineNum">    1495 </span>            :                                                      dropped_ecs,
+<span class="lineNum">    1496 </span>            :                                                      real_outer_and_req,
+<span class="lineNum">    1497 </span>            :                                                      required_outer,
+<span class="lineNum">    1498 </span>            :                                                      outer_path-&gt;parent);
+<span class="lineNum">    1499 </span><span class="lineCov">        138 :         foreach(lc, eclauses)</span>
+<span class="lineNum">    1500 </span>            :         {
+<span class="lineNum">    1501 </span><span class="lineCov">         14 :             RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);</span>
+<span class="lineNum">    1502 </span>            : 
+<span class="lineNum">    1503 </span>            :             /* As above, can't quite assert this here */
+<span class="lineNum">    1504 </span>            : #ifdef NOT_USED
+<span class="lineNum">    1505 </span>            :             Assert(join_clause_is_movable_into(rinfo,
+<span class="lineNum">    1506 </span>            :                                                outer_path-&gt;parent-&gt;relids,
+<span class="lineNum">    1507 </span>            :                                                real_outer_and_req));
+<span class="lineNum">    1508 </span>            : #endif
+<span class="lineNum">    1509 </span><span class="lineCov">         14 :             if (!join_clause_is_movable_into(rinfo,</span>
+<span class="lineNum">    1510 </span><span class="lineCov">         14 :                                              outer_path-&gt;parent-&gt;relids,</span>
+<span class="lineNum">    1511 </span>            :                                              outer_and_req))
+<span class="lineNum">    1512 </span><span class="lineCov">         10 :                 pclauses = lappend(pclauses, rinfo);</span>
+<span class="lineNum">    1513 </span>            :         }
+<span class="lineNum">    1514 </span>            :     }
+<span class="lineNum">    1515 </span>            : 
+<span class="lineNum">    1516 </span>            :     /*
+<span class="lineNum">    1517 </span>            :      * Now, attach the identified moved-down clauses to the caller's
+<span class="lineNum">    1518 </span>            :      * restrict_clauses list.  By using list_concat in this order, we leave
+<span class="lineNum">    1519 </span>            :      * the original list structure of restrict_clauses undamaged.
+<span class="lineNum">    1520 </span>            :      */
+<span class="lineNum">    1521 </span><span class="lineCov">       1782 :     *restrict_clauses = list_concat(pclauses, *restrict_clauses);</span>
+<span class="lineNum">    1522 </span>            : 
+<span class="lineNum">    1523 </span>            :     /* If we already have a PPI for this parameterization, just return it */
+<span class="lineNum">    1524 </span><span class="lineCov">       1782 :     if ((ppi = find_param_path_info(joinrel, required_outer)))</span>
+<span class="lineNum">    1525 </span><span class="lineCov">       1260 :         return ppi;</span>
+<span class="lineNum">    1526 </span>            : 
+<span class="lineNum">    1527 </span>            :     /* Estimate the number of rows returned by the parameterized join */
+<span class="lineNum">    1528 </span><span class="lineCov">        522 :     rows = get_parameterized_joinrel_size(root, joinrel,</span>
+<span class="lineNum">    1529 </span>            :                                           outer_path,
+<span class="lineNum">    1530 </span>            :                                           inner_path,
+<span class="lineNum">    1531 </span>            :                                           sjinfo,
+<span class="lineNum">    1532 </span>            :                                           *restrict_clauses);
+<span class="lineNum">    1533 </span>            : 
+<span class="lineNum">    1534 </span>            :     /*
+<span class="lineNum">    1535 </span>            :      * And now we can build the ParamPathInfo.  No point in saving the
+<span class="lineNum">    1536 </span>            :      * input-pair-dependent clause list, though.
+<span class="lineNum">    1537 </span>            :      *
+<span class="lineNum">    1538 </span>            :      * Note: in GEQO mode, we'll be called in a temporary memory context, but
+<span class="lineNum">    1539 </span>            :      * the joinrel structure is there too, so no problem.
+<span class="lineNum">    1540 </span>            :      */
+<span class="lineNum">    1541 </span><span class="lineCov">        522 :     ppi = makeNode(ParamPathInfo);</span>
+<span class="lineNum">    1542 </span><span class="lineCov">        522 :     ppi-&gt;ppi_req_outer = required_outer;</span>
+<span class="lineNum">    1543 </span><span class="lineCov">        522 :     ppi-&gt;ppi_rows = rows;</span>
+<span class="lineNum">    1544 </span><span class="lineCov">        522 :     ppi-&gt;ppi_clauses = NIL;</span>
+<span class="lineNum">    1545 </span><span class="lineCov">        522 :     joinrel-&gt;ppilist = lappend(joinrel-&gt;ppilist, ppi);</span>
+<span class="lineNum">    1546 </span>            : 
+<span class="lineNum">    1547 </span><span class="lineCov">        522 :     return ppi;</span>
+<span class="lineNum">    1548 </span>            : }
+<span class="lineNum">    1549 </span>            : 
+<span class="lineNum">    1550 </span>            : /*
+<span class="lineNum">    1551 </span>            :  * get_appendrel_parampathinfo
+<span class="lineNum">    1552 </span>            :  *      Get the ParamPathInfo for a parameterized path for an append relation.
+<span class="lineNum">    1553 </span>            :  *
+<span class="lineNum">    1554 </span>            :  * For an append relation, the rowcount estimate will just be the sum of
+<span class="lineNum">    1555 </span>            :  * the estimates for its children.  However, we still need a ParamPathInfo
+<span class="lineNum">    1556 </span>            :  * to flag the fact that the path requires parameters.  So this just creates
+<span class="lineNum">    1557 </span>            :  * a suitable struct with zero ppi_rows (and no ppi_clauses either, since
+<span class="lineNum">    1558 </span>            :  * the Append node isn't responsible for checking quals).
+<a name="1559"><span class="lineNum">    1559 </span>            :  */</a>
+<span class="lineNum">    1560 </span>            : ParamPathInfo *
+<span class="lineNum">    1561 </span><span class="lineCov">       9094 : get_appendrel_parampathinfo(RelOptInfo *appendrel, Relids required_outer)</span>
+<span class="lineNum">    1562 </span>            : {
+<span class="lineNum">    1563 </span>            :     ParamPathInfo *ppi;
+<span class="lineNum">    1564 </span>            : 
+<span class="lineNum">    1565 </span>            :     /* If rel has LATERAL refs, every path for it should account for them */
+<span class="lineNum">    1566 </span><span class="lineCov">       9094 :     Assert(bms_is_subset(appendrel-&gt;lateral_relids, required_outer));</span>
+<span class="lineNum">    1567 </span>            : 
+<span class="lineNum">    1568 </span>            :     /* Unparameterized paths have no ParamPathInfo */
+<span class="lineNum">    1569 </span><span class="lineCov">       9094 :     if (bms_is_empty(required_outer))</span>
+<span class="lineNum">    1570 </span><span class="lineCov">       8886 :         return NULL;</span>
+<span class="lineNum">    1571 </span>            : 
+<span class="lineNum">    1572 </span><span class="lineCov">        208 :     Assert(!bms_overlap(appendrel-&gt;relids, required_outer));</span>
+<span class="lineNum">    1573 </span>            : 
+<span class="lineNum">    1574 </span>            :     /* If we already have a PPI for this parameterization, just return it */
+<span class="lineNum">    1575 </span><span class="lineCov">        208 :     if ((ppi = find_param_path_info(appendrel, required_outer)))</span>
+<span class="lineNum">    1576 </span><span class="lineCov">         32 :         return ppi;</span>
+<span class="lineNum">    1577 </span>            : 
+<span class="lineNum">    1578 </span>            :     /* Else build the ParamPathInfo */
+<span class="lineNum">    1579 </span><span class="lineCov">        176 :     ppi = makeNode(ParamPathInfo);</span>
+<span class="lineNum">    1580 </span><span class="lineCov">        176 :     ppi-&gt;ppi_req_outer = required_outer;</span>
+<span class="lineNum">    1581 </span><span class="lineCov">        176 :     ppi-&gt;ppi_rows = 0;</span>
+<span class="lineNum">    1582 </span><span class="lineCov">        176 :     ppi-&gt;ppi_clauses = NIL;</span>
+<span class="lineNum">    1583 </span><span class="lineCov">        176 :     appendrel-&gt;ppilist = lappend(appendrel-&gt;ppilist, ppi);</span>
+<span class="lineNum">    1584 </span>            : 
+<span class="lineNum">    1585 </span><span class="lineCov">        176 :     return ppi;</span>
+<span class="lineNum">    1586 </span>            : }
+<span class="lineNum">    1587 </span>            : 
+<span class="lineNum">    1588 </span>            : /*
+<span class="lineNum">    1589 </span>            :  * Returns a ParamPathInfo for the parameterization given by required_outer, if
+<span class="lineNum">    1590 </span>            :  * already available in the given rel. Returns NULL otherwise.
+<a name="1591"><span class="lineNum">    1591 </span>            :  */</a>
+<span class="lineNum">    1592 </span>            : ParamPathInfo *
+<span class="lineNum">    1593 </span><span class="lineCov">      37028 : find_param_path_info(RelOptInfo *rel, Relids required_outer)</span>
+<span class="lineNum">    1594 </span>            : {
+<span class="lineNum">    1595 </span>            :     ListCell   *lc;
+<span class="lineNum">    1596 </span>            : 
+<span class="lineNum">    1597 </span><span class="lineCov">      42304 :     foreach(lc, rel-&gt;ppilist)</span>
+<span class="lineNum">    1598 </span>            :     {
+<span class="lineNum">    1599 </span><span class="lineCov">      25880 :         ParamPathInfo *ppi = (ParamPathInfo *) lfirst(lc);</span>
+<span class="lineNum">    1600 </span>            : 
+<span class="lineNum">    1601 </span><span class="lineCov">      25880 :         if (bms_equal(ppi-&gt;ppi_req_outer, required_outer))</span>
+<span class="lineNum">    1602 </span><span class="lineCov">      20604 :             return ppi;</span>
+<span class="lineNum">    1603 </span>            :     }
+<span class="lineNum">    1604 </span>            : 
+<span class="lineNum">    1605 </span><span class="lineCov">      16424 :     return NULL;</span>
+<span class="lineNum">    1606 </span>            : }
+<span class="lineNum">    1607 </span>            : 
+<span class="lineNum">    1608 </span>            : /*
+<span class="lineNum">    1609 </span>            :  * build_joinrel_partition_info
+<span class="lineNum">    1610 </span>            :  *      If the two relations have same partitioning scheme, their join may be
+<span class="lineNum">    1611 </span>            :  *      partitioned and will follow the same partitioning scheme as the joining
+<span class="lineNum">    1612 </span>            :  *      relations. Set the partition scheme and partition key expressions in
+<span class="lineNum">    1613 </span>            :  *      the join relation.
+<a name="1614"><span class="lineNum">    1614 </span>            :  */</a>
+<span class="lineNum">    1615 </span>            : static void
+<span class="lineNum">    1616 </span><span class="lineCov">      24142 : build_joinrel_partition_info(RelOptInfo *joinrel, RelOptInfo *outer_rel,</span>
+<span class="lineNum">    1617 </span>            :                              RelOptInfo *inner_rel, List *restrictlist,
+<span class="lineNum">    1618 </span>            :                              JoinType jointype)
+<span class="lineNum">    1619 </span>            : {
+<span class="lineNum">    1620 </span>            :     int         partnatts;
+<span class="lineNum">    1621 </span>            :     int         cnt;
+<span class="lineNum">    1622 </span>            :     PartitionScheme part_scheme;
+<span class="lineNum">    1623 </span>            : 
+<span class="lineNum">    1624 </span>            :     /* Nothing to do if partitionwise join technique is disabled. */
+<span class="lineNum">    1625 </span><span class="lineCov">      24142 :     if (!enable_partitionwise_join)</span>
+<span class="lineNum">    1626 </span>            :     {
+<span class="lineNum">    1627 </span><span class="lineCov">      23140 :         Assert(!IS_PARTITIONED_REL(joinrel));</span>
+<span class="lineNum">    1628 </span><span class="lineCov">      23140 :         return;</span>
+<span class="lineNum">    1629 </span>            :     }
+<span class="lineNum">    1630 </span>            : 
+<span class="lineNum">    1631 </span>            :     /*
+<span class="lineNum">    1632 </span>            :      * We can only consider this join as an input to further partitionwise
+<span class="lineNum">    1633 </span>            :      * joins if (a) the input relations are partitioned and have
+<span class="lineNum">    1634 </span>            :      * consider_partitionwise_join=true, (b) the partition schemes match, and
+<span class="lineNum">    1635 </span>            :      * (c) we can identify an equi-join between the partition keys.  Note that
+<span class="lineNum">    1636 </span>            :      * if it were possible for have_partkey_equi_join to return different
+<span class="lineNum">    1637 </span>            :      * answers for the same joinrel depending on which join ordering we try
+<span class="lineNum">    1638 </span>            :      * first, this logic would break.  That shouldn't happen, though, because
+<span class="lineNum">    1639 </span>            :      * of the way the query planner deduces implied equalities and reorders
+<span class="lineNum">    1640 </span>            :      * the joins.  Please see optimizer/README for details.
+<span class="lineNum">    1641 </span>            :      */
+<span class="lineNum">    1642 </span><span class="lineCov">       1328 :     if (!IS_PARTITIONED_REL(outer_rel) || !IS_PARTITIONED_REL(inner_rel) ||</span>
+<span class="lineNum">    1643 </span><span class="lineCov">        640 :         !outer_rel-&gt;consider_partitionwise_join ||</span>
+<span class="lineNum">    1644 </span><span class="lineCov">        628 :         !inner_rel-&gt;consider_partitionwise_join ||</span>
+<span class="lineNum">    1645 </span><span class="lineCov">        620 :         outer_rel-&gt;part_scheme != inner_rel-&gt;part_scheme ||</span>
+<span class="lineNum">    1646 </span><span class="lineCov">        306 :         !have_partkey_equi_join(joinrel, outer_rel, inner_rel,</span>
+<span class="lineNum">    1647 </span>            :                                 jointype, restrictlist))
+<span class="lineNum">    1648 </span>            :     {
+<span class="lineNum">    1649 </span><span class="lineCov">        734 :         Assert(!IS_PARTITIONED_REL(joinrel));</span>
+<span class="lineNum">    1650 </span><span class="lineCov">        734 :         return;</span>
+<span class="lineNum">    1651 </span>            :     }
+<span class="lineNum">    1652 </span>            : 
+<span class="lineNum">    1653 </span><span class="lineCov">        268 :     part_scheme = outer_rel-&gt;part_scheme;</span>
+<span class="lineNum">    1654 </span>            : 
+<span class="lineNum">    1655 </span><span class="lineCov">        268 :     Assert(REL_HAS_ALL_PART_PROPS(outer_rel) &amp;&amp;</span>
+<span class="lineNum">    1656 </span>            :            REL_HAS_ALL_PART_PROPS(inner_rel));
+<span class="lineNum">    1657 </span>            : 
+<span class="lineNum">    1658 </span>            :     /*
+<span class="lineNum">    1659 </span>            :      * For now, our partition matching algorithm can match partitions only
+<span class="lineNum">    1660 </span>            :      * when the partition bounds of the joining relations are exactly same.
+<span class="lineNum">    1661 </span>            :      * So, bail out otherwise.
+<span class="lineNum">    1662 </span>            :      */
+<span class="lineNum">    1663 </span><span class="lineCov">        534 :     if (outer_rel-&gt;nparts != inner_rel-&gt;nparts ||</span>
+<span class="lineNum">    1664 </span><span class="lineCov">        266 :         !partition_bounds_equal(part_scheme-&gt;partnatts,</span>
+<span class="lineNum">    1665 </span>            :                                 part_scheme-&gt;parttyplen,
+<span class="lineNum">    1666 </span>            :                                 part_scheme-&gt;parttypbyval,
+<span class="lineNum">    1667 </span>            :                                 outer_rel-&gt;boundinfo, inner_rel-&gt;boundinfo))
+<span class="lineNum">    1668 </span>            :     {
+<span class="lineNum">    1669 </span><span class="lineCov">         10 :         Assert(!IS_PARTITIONED_REL(joinrel));</span>
+<span class="lineNum">    1670 </span><span class="lineCov">         10 :         return;</span>
+<span class="lineNum">    1671 </span>            :     }
+<span class="lineNum">    1672 </span>            : 
+<span class="lineNum">    1673 </span>            :     /*
+<span class="lineNum">    1674 </span>            :      * This function will be called only once for each joinrel, hence it
+<span class="lineNum">    1675 </span>            :      * should not have partition scheme, partition bounds, partition key
+<span class="lineNum">    1676 </span>            :      * expressions and array for storing child relations set.
+<span class="lineNum">    1677 </span>            :      */
+<span class="lineNum">    1678 </span><span class="lineCov">        258 :     Assert(!joinrel-&gt;part_scheme &amp;&amp; !joinrel-&gt;partexprs &amp;&amp;</span>
+<span class="lineNum">    1679 </span>            :            !joinrel-&gt;nullable_partexprs &amp;&amp; !joinrel-&gt;part_rels &amp;&amp;
+<span class="lineNum">    1680 </span>            :            !joinrel-&gt;boundinfo);
+<span class="lineNum">    1681 </span>            : 
+<span class="lineNum">    1682 </span>            :     /*
+<span class="lineNum">    1683 </span>            :      * Join relation is partitioned using the same partitioning scheme as the
+<span class="lineNum">    1684 </span>            :      * joining relations and has same bounds.
+<span class="lineNum">    1685 </span>            :      */
+<span class="lineNum">    1686 </span><span class="lineCov">        258 :     joinrel-&gt;part_scheme = part_scheme;</span>
+<span class="lineNum">    1687 </span><span class="lineCov">        258 :     joinrel-&gt;boundinfo = outer_rel-&gt;boundinfo;</span>
+<span class="lineNum">    1688 </span><span class="lineCov">        258 :     partnatts = joinrel-&gt;part_scheme-&gt;partnatts;</span>
+<span class="lineNum">    1689 </span><span class="lineCov">        258 :     joinrel-&gt;partexprs = (List **) palloc0(sizeof(List *) * partnatts);</span>
+<span class="lineNum">    1690 </span><span class="lineCov">        258 :     joinrel-&gt;nullable_partexprs =</span>
+<span class="lineNum">    1691 </span><span class="lineCov">        258 :         (List **) palloc0(sizeof(List *) * partnatts);</span>
+<span class="lineNum">    1692 </span><span class="lineCov">        258 :     joinrel-&gt;nparts = outer_rel-&gt;nparts;</span>
+<span class="lineNum">    1693 </span><span class="lineCov">        258 :     joinrel-&gt;part_rels =</span>
+<span class="lineNum">    1694 </span><span class="lineCov">        258 :         (RelOptInfo **) palloc0(sizeof(RelOptInfo *) * joinrel-&gt;nparts);</span>
+<span class="lineNum">    1695 </span>            : 
+<span class="lineNum">    1696 </span>            :     /*
+<span class="lineNum">    1697 </span>            :      * Set the consider_partitionwise_join flag.
+<span class="lineNum">    1698 </span>            :      */
+<span class="lineNum">    1699 </span><span class="lineCov">        258 :     Assert(outer_rel-&gt;consider_partitionwise_join);</span>
+<span class="lineNum">    1700 </span><span class="lineCov">        258 :     Assert(inner_rel-&gt;consider_partitionwise_join);</span>
+<span class="lineNum">    1701 </span><span class="lineCov">        258 :     joinrel-&gt;consider_partitionwise_join = true;</span>
+<span class="lineNum">    1702 </span>            : 
+<span class="lineNum">    1703 </span>            :     /*
+<span class="lineNum">    1704 </span>            :      * Construct partition keys for the join.
+<span class="lineNum">    1705 </span>            :      *
+<span class="lineNum">    1706 </span>            :      * An INNER join between two partitioned relations can be regarded as
+<span class="lineNum">    1707 </span>            :      * partitioned by either key expression.  For example, A INNER JOIN B ON
+<span class="lineNum">    1708 </span>            :      * A.a = B.b can be regarded as partitioned on A.a or on B.b; they are
+<span class="lineNum">    1709 </span>            :      * equivalent.
+<span class="lineNum">    1710 </span>            :      *
+<span class="lineNum">    1711 </span>            :      * For a SEMI or ANTI join, the result can only be regarded as being
+<span class="lineNum">    1712 </span>            :      * partitioned in the same manner as the outer side, since the inner
+<span class="lineNum">    1713 </span>            :      * columns are not retained.
+<span class="lineNum">    1714 </span>            :      *
+<span class="lineNum">    1715 </span>            :      * An OUTER join like (A LEFT JOIN B ON A.a = B.b) may produce rows with
+<span class="lineNum">    1716 </span>            :      * B.b NULL. These rows may not fit the partitioning conditions imposed on
+<span class="lineNum">    1717 </span>            :      * B.b. Hence, strictly speaking, the join is not partitioned by B.b and
+<span class="lineNum">    1718 </span>            :      * thus partition keys of an OUTER join should include partition key
+<span class="lineNum">    1719 </span>            :      * expressions from the OUTER side only.  However, because all
+<span class="lineNum">    1720 </span>            :      * commonly-used comparison operators are strict, the presence of nulls on
+<span class="lineNum">    1721 </span>            :      * the outer side doesn't cause any problem; they can't match anything at
+<span class="lineNum">    1722 </span>            :      * future join levels anyway.  Therefore, we track two sets of
+<span class="lineNum">    1723 </span>            :      * expressions: those that authentically partition the relation
+<span class="lineNum">    1724 </span>            :      * (partexprs) and those that partition the relation with the exception
+<span class="lineNum">    1725 </span>            :      * that extra nulls may be present (nullable_partexprs).  When the
+<span class="lineNum">    1726 </span>            :      * comparison operator is strict, the latter is just as good as the
+<span class="lineNum">    1727 </span>            :      * former.
+<span class="lineNum">    1728 </span>            :      */
+<span class="lineNum">    1729 </span><span class="lineCov">        520 :     for (cnt = 0; cnt &lt; partnatts; cnt++)</span>
+<span class="lineNum">    1730 </span>            :     {
+<span class="lineNum">    1731 </span>            :         /* mark these const to enforce that we copy them properly */
+<span class="lineNum">    1732 </span><span class="lineCov">        262 :         const List *outer_expr = outer_rel-&gt;partexprs[cnt];</span>
+<span class="lineNum">    1733 </span><span class="lineCov">        262 :         const List *outer_null_expr = outer_rel-&gt;nullable_partexprs[cnt];</span>
+<span class="lineNum">    1734 </span><span class="lineCov">        262 :         const List *inner_expr = inner_rel-&gt;partexprs[cnt];</span>
+<span class="lineNum">    1735 </span><span class="lineCov">        262 :         const List *inner_null_expr = inner_rel-&gt;nullable_partexprs[cnt];</span>
+<span class="lineNum">    1736 </span><span class="lineCov">        262 :         List       *partexpr = NIL;</span>
+<span class="lineNum">    1737 </span><span class="lineCov">        262 :         List       *nullable_partexpr = NIL;</span>
+<span class="lineNum">    1738 </span>            : 
+<span class="lineNum">    1739 </span><span class="lineCov">        262 :         switch (jointype)</span>
+<span class="lineNum">    1740 </span>            :         {
+<span class="lineNum">    1741 </span>            :             case JOIN_INNER:
+<span class="lineNum">    1742 </span><span class="lineCov">        102 :                 partexpr = list_concat_copy(outer_expr, inner_expr);</span>
+<span class="lineNum">    1743 </span><span class="lineCov">        102 :                 nullable_partexpr = list_concat_copy(outer_null_expr,</span>
+<span class="lineNum">    1744 </span>            :                                                      inner_null_expr);
+<span class="lineNum">    1745 </span><span class="lineCov">        102 :                 break;</span>
+<span class="lineNum">    1746 </span>            : 
+<span class="lineNum">    1747 </span>            :             case JOIN_SEMI:
+<span class="lineNum">    1748 </span>            :             case JOIN_ANTI:
+<span class="lineNum">    1749 </span><span class="lineCov">         28 :                 partexpr = list_copy(outer_expr);</span>
+<span class="lineNum">    1750 </span><span class="lineCov">         28 :                 nullable_partexpr = list_copy(outer_null_expr);</span>
+<span class="lineNum">    1751 </span><span class="lineCov">         28 :                 break;</span>
+<span class="lineNum">    1752 </span>            : 
+<span class="lineNum">    1753 </span>            :             case JOIN_LEFT:
+<span class="lineNum">    1754 </span><span class="lineCov">         88 :                 partexpr = list_copy(outer_expr);</span>
+<span class="lineNum">    1755 </span><span class="lineCov">         88 :                 nullable_partexpr = list_concat_copy(inner_expr,</span>
+<span class="lineNum">    1756 </span>            :                                                      outer_null_expr);
+<span class="lineNum">    1757 </span><span class="lineCov">         88 :                 nullable_partexpr = list_concat(nullable_partexpr,</span>
+<span class="lineNum">    1758 </span>            :                                                 inner_null_expr);
+<span class="lineNum">    1759 </span><span class="lineCov">         88 :                 break;</span>
+<span class="lineNum">    1760 </span>            : 
+<span class="lineNum">    1761 </span>            :             case JOIN_FULL:
+<span class="lineNum">    1762 </span><span class="lineCov">         44 :                 nullable_partexpr = list_concat_copy(outer_expr,</span>
+<span class="lineNum">    1763 </span>            :                                                      inner_expr);
+<span class="lineNum">    1764 </span><span class="lineCov">         44 :                 nullable_partexpr = list_concat(nullable_partexpr,</span>
+<span class="lineNum">    1765 </span>            :                                                 outer_null_expr);
+<span class="lineNum">    1766 </span><span class="lineCov">         44 :                 nullable_partexpr = list_concat(nullable_partexpr,</span>
+<span class="lineNum">    1767 </span>            :                                                 inner_null_expr);
+<span class="lineNum">    1768 </span><span class="lineCov">         44 :                 break;</span>
+<span class="lineNum">    1769 </span>            : 
+<span class="lineNum">    1770 </span>            :             default:
+<span class="lineNum">    1771 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;unrecognized join type: %d&quot;, (int) jointype);</span>
+<span class="lineNum">    1772 </span>            : 
+<span class="lineNum">    1773 </span>            :         }
+<span class="lineNum">    1774 </span>            : 
+<span class="lineNum">    1775 </span><span class="lineCov">        262 :         joinrel-&gt;partexprs[cnt] = partexpr;</span>
+<span class="lineNum">    1776 </span><span class="lineCov">        262 :         joinrel-&gt;nullable_partexprs[cnt] = nullable_partexpr;</span>
+<span class="lineNum">    1777 </span>            :     }
+<span class="lineNum">    1778 </span>            : }
+<span class="lineNum">    1779 </span>            : 
+<span class="lineNum">    1780 </span>            : /*
+<span class="lineNum">    1781 </span>            :  * build_child_join_reltarget
+<span class="lineNum">    1782 </span>            :  *    Set up a child-join relation's reltarget from a parent-join relation.
+<a name="1783"><span class="lineNum">    1783 </span>            :  */</a>
+<span class="lineNum">    1784 </span>            : static void
+<span class="lineNum">    1785 </span><span class="lineCov">        686 : build_child_join_reltarget(PlannerInfo *root,</span>
+<span class="lineNum">    1786 </span>            :                            RelOptInfo *parentrel,
+<span class="lineNum">    1787 </span>            :                            RelOptInfo *childrel,
+<span class="lineNum">    1788 </span>            :                            int nappinfos,
+<span class="lineNum">    1789 </span>            :                            AppendRelInfo **appinfos)
+<span class="lineNum">    1790 </span>            : {
+<span class="lineNum">    1791 </span>            :     /* Build the targetlist */
+<span class="lineNum">    1792 </span><span class="lineCov">       1372 :     childrel-&gt;reltarget-&gt;exprs = (List *)</span>
+<span class="lineNum">    1793 </span><span class="lineCov">        686 :         adjust_appendrel_attrs(root,</span>
+<span class="lineNum">    1794 </span><span class="lineCov">        686 :                                (Node *) parentrel-&gt;reltarget-&gt;exprs,</span>
+<span class="lineNum">    1795 </span>            :                                nappinfos, appinfos);
+<span class="lineNum">    1796 </span>            : 
+<span class="lineNum">    1797 </span>            :     /* Set the cost and width fields */
+<span class="lineNum">    1798 </span><span class="lineCov">        686 :     childrel-&gt;reltarget-&gt;cost.startup = parentrel-&gt;reltarget-&gt;cost.startup;</span>
+<span class="lineNum">    1799 </span><span class="lineCov">        686 :     childrel-&gt;reltarget-&gt;cost.per_tuple = parentrel-&gt;reltarget-&gt;cost.per_tuple;</span>
+<span class="lineNum">    1800 </span><span class="lineCov">        686 :     childrel-&gt;reltarget-&gt;width = parentrel-&gt;reltarget-&gt;width;</span>
+<span class="lineNum">    1801 </span><span class="lineCov">        686 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,726 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - contrib/spi/refint.c</title>
+  <link rel="stylesheet" type="text/css" href="../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../index.html">top level</a> - <a href="index.html">contrib/spi</a> - refint.c<span style="font-size: 80%;"> (source / <a href="refint.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">151</td>
+            <td class="headerCovTableEntry">205</td>
+            <td class="headerCovTableEntryLo">73.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">6</td>
+            <td class="headerCovTableEntry">6</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*</a>
+<span class="lineNum">       2 </span>            :  * contrib/spi/refint.c
+<span class="lineNum">       3 </span>            :  *
+<span class="lineNum">       4 </span>            :  *
+<span class="lineNum">       5 </span>            :  * refint.c --  set of functions to define referential integrity
+<span class="lineNum">       6 </span>            :  *      constraints using general triggers.
+<span class="lineNum">       7 </span>            :  */
+<span class="lineNum">       8 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">       9 </span>            : 
+<span class="lineNum">      10 </span>            : #include &lt;ctype.h&gt;
+<span class="lineNum">      11 </span>            : 
+<span class="lineNum">      12 </span>            : #include &quot;commands/trigger.h&quot;
+<span class="lineNum">      13 </span>            : #include &quot;executor/spi.h&quot;
+<span class="lineNum">      14 </span>            : #include &quot;utils/builtins.h&quot;
+<a name="15"><span class="lineNum">      15 </span>            : #include &quot;utils/rel.h&quot;</a>
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span><span class="lineCov">          4 : PG_MODULE_MAGIC;</span>
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : typedef struct
+<span class="lineNum">      20 </span>            : {
+<span class="lineNum">      21 </span>            :     char       *ident;
+<span class="lineNum">      22 </span>            :     int         nplans;
+<span class="lineNum">      23 </span>            :     SPIPlanPtr *splan;
+<span class="lineNum">      24 </span>            : } EPlan;
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : static EPlan *FPlans = NULL;
+<span class="lineNum">      27 </span>            : static int  nFPlans = 0;
+<span class="lineNum">      28 </span>            : static EPlan *PPlans = NULL;
+<span class="lineNum">      29 </span>            : static int  nPPlans = 0;
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : static EPlan *find_plan(char *ident, EPlan **eplan, int *nplans);
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /*
+<span class="lineNum">      34 </span>            :  * check_primary_key () -- check that key in tuple being inserted/updated
+<span class="lineNum">      35 </span>            :  *           references existing tuple in &quot;primary&quot; table.
+<span class="lineNum">      36 </span>            :  * Though it's called without args You have to specify referenced
+<span class="lineNum">      37 </span>            :  * table/keys while creating trigger:  key field names in triggered table,
+<span class="lineNum">      38 </span>            :  * referenced table name, referenced key field names:
+<span class="lineNum">      39 </span>            :  * EXECUTE PROCEDURE
+<span class="lineNum">      40 </span>            :  * check_primary_key ('Fkey1', 'Fkey2', 'Ptable', 'Pkey1', 'Pkey2').
+<a name="41"><span class="lineNum">      41 </span>            :  */</a>
+<span class="lineNum">      42 </span>            : 
+<span class="lineNum">      43 </span><span class="lineCov">          4 : PG_FUNCTION_INFO_V1(check_primary_key);</span>
+<a name="44"><span class="lineNum">      44 </span>            : </a>
+<span class="lineNum">      45 </span>            : Datum
+<span class="lineNum">      46 </span><span class="lineCov">         32 : check_primary_key(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      47 </span>            : {
+<span class="lineNum">      48 </span><span class="lineCov">         32 :     TriggerData *trigdata = (TriggerData *) fcinfo-&gt;context;</span>
+<span class="lineNum">      49 </span>            :     Trigger    *trigger;        /* to get trigger name */
+<span class="lineNum">      50 </span>            :     int         nargs;          /* # of args specified in CREATE TRIGGER */
+<span class="lineNum">      51 </span>            :     char      **args;           /* arguments: column names and table name */
+<span class="lineNum">      52 </span>            :     int         nkeys;          /* # of key columns (= nargs / 2) */
+<span class="lineNum">      53 </span>            :     Datum      *kvals;          /* key values */
+<span class="lineNum">      54 </span>            :     char       *relname;        /* referenced relation name */
+<span class="lineNum">      55 </span>            :     Relation    rel;            /* triggered relation */
+<span class="lineNum">      56 </span><span class="lineCov">         32 :     HeapTuple   tuple = NULL;   /* tuple to return */</span>
+<span class="lineNum">      57 </span>            :     TupleDesc   tupdesc;        /* tuple description */
+<span class="lineNum">      58 </span>            :     EPlan      *plan;           /* prepared plan */
+<span class="lineNum">      59 </span><span class="lineCov">         32 :     Oid        *argtypes = NULL;    /* key types to prepare execution plan */</span>
+<span class="lineNum">      60 </span>            :     bool        isnull;         /* to know is some column NULL or not */
+<span class="lineNum">      61 </span>            :     char        ident[2 * NAMEDATALEN]; /* to identify myself */
+<span class="lineNum">      62 </span>            :     int         ret;
+<span class="lineNum">      63 </span>            :     int         i;
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            : #ifdef  DEBUG_QUERY
+<span class="lineNum">      66 </span>            :     elog(DEBUG4, &quot;check_primary_key: Enter Function&quot;);
+<span class="lineNum">      67 </span>            : #endif
+<span class="lineNum">      68 </span>            : 
+<span class="lineNum">      69 </span>            :     /*
+<span class="lineNum">      70 </span>            :      * Some checks first...
+<span class="lineNum">      71 </span>            :      */
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            :     /* Called by trigger manager ? */
+<span class="lineNum">      74 </span><span class="lineCov">         32 :     if (!CALLED_AS_TRIGGER(fcinfo))</span>
+<span class="lineNum">      75 </span>            :         /* internal error */
+<span class="lineNum">      76 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_primary_key: not fired by trigger manager&quot;);</span>
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            :     /* Should be called for ROW trigger */
+<span class="lineNum">      79 </span><span class="lineCov">         32 :     if (!TRIGGER_FIRED_FOR_ROW(trigdata-&gt;tg_event))</span>
+<span class="lineNum">      80 </span>            :         /* internal error */
+<span class="lineNum">      81 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_primary_key: must be fired for row&quot;);</span>
+<span class="lineNum">      82 </span>            : 
+<span class="lineNum">      83 </span>            :     /* If INSERTion then must check Tuple to being inserted */
+<span class="lineNum">      84 </span><span class="lineCov">         32 :     if (TRIGGER_FIRED_BY_INSERT(trigdata-&gt;tg_event))</span>
+<span class="lineNum">      85 </span><span class="lineCov">         32 :         tuple = trigdata-&gt;tg_trigtuple;</span>
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            :     /* Not should be called for DELETE */
+<span class="lineNum">      88 </span><span class="lineNoCov">          0 :     else if (TRIGGER_FIRED_BY_DELETE(trigdata-&gt;tg_event))</span>
+<span class="lineNum">      89 </span>            :         /* internal error */
+<span class="lineNum">      90 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_primary_key: cannot process DELETE events&quot;);</span>
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span>            :     /* If UPDATE, then must check new Tuple, not old one */
+<span class="lineNum">      93 </span>            :     else
+<span class="lineNum">      94 </span><span class="lineNoCov">          0 :         tuple = trigdata-&gt;tg_newtuple;</span>
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span><span class="lineCov">         32 :     trigger = trigdata-&gt;tg_trigger;</span>
+<span class="lineNum">      97 </span><span class="lineCov">         32 :     nargs = trigger-&gt;tgnargs;</span>
+<span class="lineNum">      98 </span><span class="lineCov">         32 :     args = trigger-&gt;tgargs;</span>
+<span class="lineNum">      99 </span>            : 
+<span class="lineNum">     100 </span><span class="lineCov">         32 :     if (nargs % 2 != 1)         /* odd number of arguments! */</span>
+<span class="lineNum">     101 </span>            :         /* internal error */
+<span class="lineNum">     102 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_primary_key: odd number of arguments should be specified&quot;);</span>
+<span class="lineNum">     103 </span>            : 
+<span class="lineNum">     104 </span><span class="lineCov">         32 :     nkeys = nargs / 2;</span>
+<span class="lineNum">     105 </span><span class="lineCov">         32 :     relname = args[nkeys];</span>
+<span class="lineNum">     106 </span><span class="lineCov">         32 :     rel = trigdata-&gt;tg_relation;</span>
+<span class="lineNum">     107 </span><span class="lineCov">         32 :     tupdesc = rel-&gt;rd_att;</span>
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            :     /* Connect to SPI manager */
+<span class="lineNum">     110 </span><span class="lineCov">         32 :     if ((ret = SPI_connect()) &lt; 0)</span>
+<span class="lineNum">     111 </span>            :         /* internal error */
+<span class="lineNum">     112 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_primary_key: SPI_connect returned %d&quot;, ret);</span>
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span>            :     /*
+<span class="lineNum">     115 </span>            :      * We use SPI plan preparation feature, so allocate space to place key
+<span class="lineNum">     116 </span>            :      * values.
+<span class="lineNum">     117 </span>            :      */
+<span class="lineNum">     118 </span><span class="lineCov">         32 :     kvals = (Datum *) palloc(nkeys * sizeof(Datum));</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            :     /*
+<span class="lineNum">     121 </span>            :      * Construct ident string as TriggerName $ TriggeredRelationId and try to
+<span class="lineNum">     122 </span>            :      * find prepared execution plan.
+<span class="lineNum">     123 </span>            :      */
+<span class="lineNum">     124 </span><span class="lineCov">         32 :     snprintf(ident, sizeof(ident), &quot;%s$%u&quot;, trigger-&gt;tgname, rel-&gt;rd_id);</span>
+<span class="lineNum">     125 </span><span class="lineCov">         32 :     plan = find_plan(ident, &amp;PPlans, &amp;nPPlans);</span>
+<span class="lineNum">     126 </span>            : 
+<span class="lineNum">     127 </span>            :     /* if there is no plan then allocate argtypes for preparation */
+<span class="lineNum">     128 </span><span class="lineCov">         32 :     if (plan-&gt;nplans &lt;= 0)</span>
+<span class="lineNum">     129 </span><span class="lineCov">          6 :         argtypes = (Oid *) palloc(nkeys * sizeof(Oid));</span>
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span>            :     /* For each column in key ... */
+<span class="lineNum">     132 </span><span class="lineCov">         84 :     for (i = 0; i &lt; nkeys; i++)</span>
+<span class="lineNum">     133 </span>            :     {
+<span class="lineNum">     134 </span>            :         /* get index of column in tuple */
+<span class="lineNum">     135 </span><span class="lineCov">         52 :         int         fnumber = SPI_fnumber(tupdesc, args[i]);</span>
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span>            :         /* Bad guys may give us un-existing column in CREATE TRIGGER */
+<span class="lineNum">     138 </span><span class="lineCov">         52 :         if (fnumber &lt;= 0)</span>
+<span class="lineNum">     139 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     140 </span>            :                     (errcode(ERRCODE_UNDEFINED_COLUMN),
+<span class="lineNum">     141 </span>            :                      errmsg(&quot;there is no attribute \&quot;%s\&quot; in relation \&quot;%s\&quot;&quot;,
+<span class="lineNum">     142 </span>            :                             args[i], SPI_getrelname(rel))));
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span>            :         /* Well, get binary (in internal format) value of column */
+<span class="lineNum">     145 </span><span class="lineCov">         52 :         kvals[i] = SPI_getbinval(tuple, tupdesc, fnumber, &amp;isnull);</span>
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            :         /*
+<span class="lineNum">     148 </span>            :          * If it's NULL then nothing to do! DON'T FORGET call SPI_finish ()!
+<span class="lineNum">     149 </span>            :          * DON'T FORGET return tuple! Executor inserts tuple you're returning!
+<span class="lineNum">     150 </span>            :          * If you return NULL then nothing will be inserted!
+<span class="lineNum">     151 </span>            :          */
+<span class="lineNum">     152 </span><span class="lineCov">         52 :         if (isnull)</span>
+<span class="lineNum">     153 </span>            :         {
+<span class="lineNum">     154 </span><span class="lineNoCov">          0 :             SPI_finish();</span>
+<span class="lineNum">     155 </span><span class="lineNoCov">          0 :             return PointerGetDatum(tuple);</span>
+<span class="lineNum">     156 </span>            :         }
+<span class="lineNum">     157 </span>            : 
+<span class="lineNum">     158 </span><span class="lineCov">         52 :         if (plan-&gt;nplans &lt;= 0)    /* Get typeId of column */</span>
+<span class="lineNum">     159 </span><span class="lineCov">         10 :             argtypes[i] = SPI_gettypeid(tupdesc, fnumber);</span>
+<span class="lineNum">     160 </span>            :     }
+<span class="lineNum">     161 </span>            : 
+<span class="lineNum">     162 </span>            :     /*
+<span class="lineNum">     163 </span>            :      * If we have to prepare plan ...
+<span class="lineNum">     164 </span>            :      */
+<span class="lineNum">     165 </span><span class="lineCov">         32 :     if (plan-&gt;nplans &lt;= 0)</span>
+<span class="lineNum">     166 </span>            :     {
+<span class="lineNum">     167 </span>            :         SPIPlanPtr  pplan;
+<span class="lineNum">     168 </span>            :         char        sql[8192];
+<span class="lineNum">     169 </span>            : 
+<span class="lineNum">     170 </span>            :         /*
+<span class="lineNum">     171 </span>            :          * Construct query: SELECT 1 FROM _referenced_relation_ WHERE Pkey1 =
+<span class="lineNum">     172 </span>            :          * $1 [AND Pkey2 = $2 [...]]
+<span class="lineNum">     173 </span>            :          */
+<span class="lineNum">     174 </span><span class="lineCov">          6 :         snprintf(sql, sizeof(sql), &quot;select 1 from %s where &quot;, relname);</span>
+<span class="lineNum">     175 </span><span class="lineCov">         16 :         for (i = 0; i &lt; nkeys; i++)</span>
+<span class="lineNum">     176 </span>            :         {
+<span class="lineNum">     177 </span><span class="lineCov">         20 :             snprintf(sql + strlen(sql), sizeof(sql) - strlen(sql), &quot;%s = $%d %s&quot;,</span>
+<span class="lineNum">     178 </span><span class="lineCov">         20 :                      args[i + nkeys + 1], i + 1, (i &lt; nkeys - 1) ? &quot;and &quot; : &quot;&quot;);</span>
+<span class="lineNum">     179 </span>            :         }
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span>            :         /* Prepare plan for query */
+<span class="lineNum">     182 </span><span class="lineCov">          6 :         pplan = SPI_prepare(sql, nkeys, argtypes);</span>
+<span class="lineNum">     183 </span><span class="lineCov">          6 :         if (pplan == NULL)</span>
+<span class="lineNum">     184 </span>            :             /* internal error */
+<span class="lineNum">     185 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;check_primary_key: SPI_prepare returned %s&quot;, SPI_result_code_string(SPI_result));</span>
+<span class="lineNum">     186 </span>            : 
+<span class="lineNum">     187 </span>            :         /*
+<span class="lineNum">     188 </span>            :          * Remember that SPI_prepare places plan in current memory context -
+<span class="lineNum">     189 </span>            :          * so, we have to save plan in Top memory context for later use.
+<span class="lineNum">     190 </span>            :          */
+<span class="lineNum">     191 </span><span class="lineCov">          6 :         if (SPI_keepplan(pplan))</span>
+<span class="lineNum">     192 </span>            :             /* internal error */
+<span class="lineNum">     193 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;check_primary_key: SPI_keepplan failed&quot;);</span>
+<span class="lineNum">     194 </span><span class="lineCov">          6 :         plan-&gt;splan = (SPIPlanPtr *) malloc(sizeof(SPIPlanPtr));</span>
+<span class="lineNum">     195 </span><span class="lineCov">          6 :         *(plan-&gt;splan) = pplan;</span>
+<span class="lineNum">     196 </span><span class="lineCov">          6 :         plan-&gt;nplans = 1;</span>
+<span class="lineNum">     197 </span>            :     }
+<span class="lineNum">     198 </span>            : 
+<span class="lineNum">     199 </span>            :     /*
+<span class="lineNum">     200 </span>            :      * Ok, execute prepared plan.
+<span class="lineNum">     201 </span>            :      */
+<span class="lineNum">     202 </span><span class="lineCov">         32 :     ret = SPI_execp(*(plan-&gt;splan), kvals, NULL, 1);</span>
+<span class="lineNum">     203 </span>            :     /* we have no NULLs - so we pass   ^^^^   here */
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span><span class="lineCov">         32 :     if (ret &lt; 0)</span>
+<span class="lineNum">     206 </span>            :         /* internal error */
+<span class="lineNum">     207 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_primary_key: SPI_execp returned %d&quot;, ret);</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span>            :     /*
+<span class="lineNum">     210 </span>            :      * If there are no tuples returned by SELECT then ...
+<span class="lineNum">     211 </span>            :      */
+<span class="lineNum">     212 </span><span class="lineCov">         32 :     if (SPI_processed == 0)</span>
+<span class="lineNum">     213 </span><span class="lineCov">          6 :         ereport(ERROR,</span>
+<span class="lineNum">     214 </span>            :                 (errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+<span class="lineNum">     215 </span>            :                  errmsg(&quot;tuple references non-existent key&quot;),
+<span class="lineNum">     216 </span>            :                  errdetail(&quot;Trigger \&quot;%s\&quot; found tuple referencing non-existent key in \&quot;%s\&quot;.&quot;, trigger-&gt;tgname, relname)));
+<span class="lineNum">     217 </span>            : 
+<span class="lineNum">     218 </span><span class="lineCov">         26 :     SPI_finish();</span>
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span><span class="lineCov">         26 :     return PointerGetDatum(tuple);</span>
+<span class="lineNum">     221 </span>            : }
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span>            : /*
+<span class="lineNum">     224 </span>            :  * check_foreign_key () -- check that key in tuple being deleted/updated
+<span class="lineNum">     225 </span>            :  *           is not referenced by tuples in &quot;foreign&quot; table(s).
+<span class="lineNum">     226 </span>            :  * Though it's called without args You have to specify (while creating trigger):
+<span class="lineNum">     227 </span>            :  * number of references, action to do if key referenced
+<span class="lineNum">     228 </span>            :  * ('restrict' | 'setnull' | 'cascade'), key field names in triggered
+<span class="lineNum">     229 </span>            :  * (&quot;primary&quot;) table and referencing table(s)/keys:
+<span class="lineNum">     230 </span>            :  * EXECUTE PROCEDURE
+<span class="lineNum">     231 </span>            :  * check_foreign_key (2, 'restrict', 'Pkey1', 'Pkey2',
+<span class="lineNum">     232 </span>            :  * 'Ftable1', 'Fkey11', 'Fkey12', 'Ftable2', 'Fkey21', 'Fkey22').
+<a name="233"><span class="lineNum">     233 </span>            :  */</a>
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span><span class="lineCov">          4 : PG_FUNCTION_INFO_V1(check_foreign_key);</span>
+<a name="236"><span class="lineNum">     236 </span>            : </a>
+<span class="lineNum">     237 </span>            : Datum
+<span class="lineNum">     238 </span><span class="lineCov">         16 : check_foreign_key(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     239 </span>            : {
+<span class="lineNum">     240 </span><span class="lineCov">         16 :     TriggerData *trigdata = (TriggerData *) fcinfo-&gt;context;</span>
+<span class="lineNum">     241 </span>            :     Trigger    *trigger;        /* to get trigger name */
+<span class="lineNum">     242 </span>            :     int         nargs;          /* # of args specified in CREATE TRIGGER */
+<span class="lineNum">     243 </span>            :     char      **args;           /* arguments: as described above */
+<span class="lineNum">     244 </span>            :     char      **args_temp;
+<span class="lineNum">     245 </span>            :     int         nrefs;          /* number of references (== # of plans) */
+<span class="lineNum">     246 </span>            :     char        action;         /* 'R'estrict | 'S'etnull | 'C'ascade */
+<span class="lineNum">     247 </span>            :     int         nkeys;          /* # of key columns */
+<span class="lineNum">     248 </span>            :     Datum      *kvals;          /* key values */
+<span class="lineNum">     249 </span>            :     char       *relname;        /* referencing relation name */
+<span class="lineNum">     250 </span>            :     Relation    rel;            /* triggered relation */
+<span class="lineNum">     251 </span><span class="lineCov">         16 :     HeapTuple   trigtuple = NULL;   /* tuple to being changed */</span>
+<span class="lineNum">     252 </span><span class="lineCov">         16 :     HeapTuple   newtuple = NULL;    /* tuple to return */</span>
+<span class="lineNum">     253 </span>            :     TupleDesc   tupdesc;        /* tuple description */
+<span class="lineNum">     254 </span>            :     EPlan      *plan;           /* prepared plan(s) */
+<span class="lineNum">     255 </span><span class="lineCov">         16 :     Oid        *argtypes = NULL;    /* key types to prepare execution plan */</span>
+<span class="lineNum">     256 </span>            :     bool        isnull;         /* to know is some column NULL or not */
+<span class="lineNum">     257 </span><span class="lineCov">         16 :     bool        isequal = true; /* are keys in both tuples equal (in UPDATE) */</span>
+<span class="lineNum">     258 </span>            :     char        ident[2 * NAMEDATALEN]; /* to identify myself */
+<span class="lineNum">     259 </span><span class="lineCov">         16 :     int         is_update = 0;</span>
+<span class="lineNum">     260 </span>            :     int         ret;
+<span class="lineNum">     261 </span>            :     int         i,
+<span class="lineNum">     262 </span>            :                 r;
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span>            : #ifdef DEBUG_QUERY
+<span class="lineNum">     265 </span>            :     elog(DEBUG4, &quot;check_foreign_key: Enter Function&quot;);
+<span class="lineNum">     266 </span>            : #endif
+<span class="lineNum">     267 </span>            : 
+<span class="lineNum">     268 </span>            :     /*
+<span class="lineNum">     269 </span>            :      * Some checks first...
+<span class="lineNum">     270 </span>            :      */
+<span class="lineNum">     271 </span>            : 
+<span class="lineNum">     272 </span>            :     /* Called by trigger manager ? */
+<span class="lineNum">     273 </span><span class="lineCov">         16 :     if (!CALLED_AS_TRIGGER(fcinfo))</span>
+<span class="lineNum">     274 </span>            :         /* internal error */
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: not fired by trigger manager&quot;);</span>
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span>            :     /* Should be called for ROW trigger */
+<span class="lineNum">     278 </span><span class="lineCov">         16 :     if (!TRIGGER_FIRED_FOR_ROW(trigdata-&gt;tg_event))</span>
+<span class="lineNum">     279 </span>            :         /* internal error */
+<span class="lineNum">     280 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: must be fired for row&quot;);</span>
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span>            :     /* Not should be called for INSERT */
+<span class="lineNum">     283 </span><span class="lineCov">         16 :     if (TRIGGER_FIRED_BY_INSERT(trigdata-&gt;tg_event))</span>
+<span class="lineNum">     284 </span>            :         /* internal error */
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: cannot process INSERT events&quot;);</span>
+<span class="lineNum">     286 </span>            : 
+<span class="lineNum">     287 </span>            :     /* Have to check tg_trigtuple - tuple being deleted */
+<span class="lineNum">     288 </span><span class="lineCov">         16 :     trigtuple = trigdata-&gt;tg_trigtuple;</span>
+<span class="lineNum">     289 </span>            : 
+<span class="lineNum">     290 </span>            :     /*
+<span class="lineNum">     291 </span>            :      * But if this is UPDATE then we have to return tg_newtuple. Also, if key
+<span class="lineNum">     292 </span>            :      * in tg_newtuple is the same as in tg_trigtuple then nothing to do.
+<span class="lineNum">     293 </span>            :      */
+<span class="lineNum">     294 </span><span class="lineCov">         16 :     is_update = 0;</span>
+<span class="lineNum">     295 </span><span class="lineCov">         16 :     if (TRIGGER_FIRED_BY_UPDATE(trigdata-&gt;tg_event))</span>
+<span class="lineNum">     296 </span>            :     {
+<span class="lineNum">     297 </span><span class="lineCov">          4 :         newtuple = trigdata-&gt;tg_newtuple;</span>
+<span class="lineNum">     298 </span><span class="lineCov">          4 :         is_update = 1;</span>
+<span class="lineNum">     299 </span>            :     }
+<span class="lineNum">     300 </span><span class="lineCov">         16 :     trigger = trigdata-&gt;tg_trigger;</span>
+<span class="lineNum">     301 </span><span class="lineCov">         16 :     nargs = trigger-&gt;tgnargs;</span>
+<span class="lineNum">     302 </span><span class="lineCov">         16 :     args = trigger-&gt;tgargs;</span>
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span><span class="lineCov">         16 :     if (nargs &lt; 5)               /* nrefs, action, key, Relation, key - at</span>
+<span class="lineNum">     305 </span>            :                                  * least */
+<span class="lineNum">     306 </span>            :         /* internal error */
+<span class="lineNum">     307 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: too short %d (&lt; 5) list of arguments&quot;, nargs);</span>
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span><span class="lineCov">         16 :     nrefs = pg_strtoint32(args[0]);</span>
+<span class="lineNum">     310 </span><span class="lineCov">         16 :     if (nrefs &lt; 1)</span>
+<span class="lineNum">     311 </span>            :         /* internal error */
+<span class="lineNum">     312 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: %d (&lt; 1) number of references specified&quot;, nrefs);</span>
+<span class="lineNum">     313 </span><span class="lineCov">         16 :     action = tolower((unsigned char) *(args[1]));</span>
+<span class="lineNum">     314 </span><span class="lineCov">         16 :     if (action != 'r' &amp;&amp; action != 'c' &amp;&amp; action != 's')</span>
+<span class="lineNum">     315 </span>            :         /* internal error */
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: invalid action %s&quot;, args[1]);</span>
+<span class="lineNum">     317 </span><span class="lineCov">         16 :     nargs -= 2;</span>
+<span class="lineNum">     318 </span><span class="lineCov">         16 :     args += 2;</span>
+<span class="lineNum">     319 </span><span class="lineCov">         16 :     nkeys = (nargs - nrefs) / (nrefs + 1);</span>
+<span class="lineNum">     320 </span><span class="lineCov">         16 :     if (nkeys &lt;= 0 || nargs != (nrefs + nkeys * (nrefs + 1)))</span>
+<span class="lineNum">     321 </span>            :         /* internal error */
+<span class="lineNum">     322 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: invalid number of arguments %d for %d references&quot;,</span>
+<span class="lineNum">     323 </span>            :              nargs + 2, nrefs);
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span><span class="lineCov">         16 :     rel = trigdata-&gt;tg_relation;</span>
+<span class="lineNum">     326 </span><span class="lineCov">         16 :     tupdesc = rel-&gt;rd_att;</span>
+<span class="lineNum">     327 </span>            : 
+<span class="lineNum">     328 </span>            :     /* Connect to SPI manager */
+<span class="lineNum">     329 </span><span class="lineCov">         16 :     if ((ret = SPI_connect()) &lt; 0)</span>
+<span class="lineNum">     330 </span>            :         /* internal error */
+<span class="lineNum">     331 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;check_foreign_key: SPI_connect returned %d&quot;, ret);</span>
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span>            :     /*
+<span class="lineNum">     334 </span>            :      * We use SPI plan preparation feature, so allocate space to place key
+<span class="lineNum">     335 </span>            :      * values.
+<span class="lineNum">     336 </span>            :      */
+<span class="lineNum">     337 </span><span class="lineCov">         16 :     kvals = (Datum *) palloc(nkeys * sizeof(Datum));</span>
+<span class="lineNum">     338 </span>            : 
+<span class="lineNum">     339 </span>            :     /*
+<span class="lineNum">     340 </span>            :      * Construct ident string as TriggerName $ TriggeredRelationId and try to
+<span class="lineNum">     341 </span>            :      * find prepared execution plan(s).
+<span class="lineNum">     342 </span>            :      */
+<span class="lineNum">     343 </span><span class="lineCov">         16 :     snprintf(ident, sizeof(ident), &quot;%s$%u&quot;, trigger-&gt;tgname, rel-&gt;rd_id);</span>
+<span class="lineNum">     344 </span><span class="lineCov">         16 :     plan = find_plan(ident, &amp;FPlans, &amp;nFPlans);</span>
+<span class="lineNum">     345 </span>            : 
+<span class="lineNum">     346 </span>            :     /* if there is no plan(s) then allocate argtypes for preparation */
+<span class="lineNum">     347 </span><span class="lineCov">         16 :     if (plan-&gt;nplans &lt;= 0)</span>
+<span class="lineNum">     348 </span><span class="lineCov">          4 :         argtypes = (Oid *) palloc(nkeys * sizeof(Oid));</span>
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span>            :     /*
+<span class="lineNum">     351 </span>            :      * else - check that we have exactly nrefs plan(s) ready
+<span class="lineNum">     352 </span>            :      */
+<span class="lineNum">     353 </span><span class="lineCov">         12 :     else if (plan-&gt;nplans != nrefs)</span>
+<span class="lineNum">     354 </span>            :         /* internal error */
+<span class="lineNum">     355 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;%s: check_foreign_key: # of plans changed in meantime&quot;,</span>
+<span class="lineNum">     356 </span>            :              trigger-&gt;tgname);
+<span class="lineNum">     357 </span>            : 
+<span class="lineNum">     358 </span>            :     /* For each column in key ... */
+<span class="lineNum">     359 </span><span class="lineCov">         40 :     for (i = 0; i &lt; nkeys; i++)</span>
+<span class="lineNum">     360 </span>            :     {
+<span class="lineNum">     361 </span>            :         /* get index of column in tuple */
+<span class="lineNum">     362 </span><span class="lineCov">         24 :         int         fnumber = SPI_fnumber(tupdesc, args[i]);</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span>            :         /* Bad guys may give us un-existing column in CREATE TRIGGER */
+<span class="lineNum">     365 </span><span class="lineCov">         24 :         if (fnumber &lt;= 0)</span>
+<span class="lineNum">     366 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     367 </span>            :                     (errcode(ERRCODE_UNDEFINED_COLUMN),
+<span class="lineNum">     368 </span>            :                      errmsg(&quot;there is no attribute \&quot;%s\&quot; in relation \&quot;%s\&quot;&quot;,
+<span class="lineNum">     369 </span>            :                             args[i], SPI_getrelname(rel))));
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span>            :         /* Well, get binary (in internal format) value of column */
+<span class="lineNum">     372 </span><span class="lineCov">         24 :         kvals[i] = SPI_getbinval(trigtuple, tupdesc, fnumber, &amp;isnull);</span>
+<span class="lineNum">     373 </span>            : 
+<span class="lineNum">     374 </span>            :         /*
+<span class="lineNum">     375 </span>            :          * If it's NULL then nothing to do! DON'T FORGET call SPI_finish ()!
+<span class="lineNum">     376 </span>            :          * DON'T FORGET return tuple! Executor inserts tuple you're returning!
+<span class="lineNum">     377 </span>            :          * If you return NULL then nothing will be inserted!
+<span class="lineNum">     378 </span>            :          */
+<span class="lineNum">     379 </span><span class="lineCov">         24 :         if (isnull)</span>
+<span class="lineNum">     380 </span>            :         {
+<span class="lineNum">     381 </span><span class="lineNoCov">          0 :             SPI_finish();</span>
+<span class="lineNum">     382 </span><span class="lineNoCov">          0 :             return PointerGetDatum((newtuple == NULL) ? trigtuple : newtuple);</span>
+<span class="lineNum">     383 </span>            :         }
+<span class="lineNum">     384 </span>            : 
+<span class="lineNum">     385 </span>            :         /*
+<span class="lineNum">     386 </span>            :          * If UPDATE then get column value from new tuple being inserted and
+<span class="lineNum">     387 </span>            :          * compare is this the same as old one. For the moment we use string
+<span class="lineNum">     388 </span>            :          * presentation of values...
+<span class="lineNum">     389 </span>            :          */
+<span class="lineNum">     390 </span><span class="lineCov">         24 :         if (newtuple != NULL)</span>
+<span class="lineNum">     391 </span>            :         {
+<span class="lineNum">     392 </span><span class="lineCov">          8 :             char       *oldval = SPI_getvalue(trigtuple, tupdesc, fnumber);</span>
+<span class="lineNum">     393 </span>            :             char       *newval;
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span>            :             /* this shouldn't happen! SPI_ERROR_NOOUTFUNC ? */
+<span class="lineNum">     396 </span><span class="lineCov">          8 :             if (oldval == NULL)</span>
+<span class="lineNum">     397 </span>            :                 /* internal error */
+<span class="lineNum">     398 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;check_foreign_key: SPI_getvalue returned %s&quot;, SPI_result_code_string(SPI_result));</span>
+<span class="lineNum">     399 </span><span class="lineCov">          8 :             newval = SPI_getvalue(newtuple, tupdesc, fnumber);</span>
+<span class="lineNum">     400 </span><span class="lineCov">          8 :             if (newval == NULL || strcmp(oldval, newval) != 0)</span>
+<span class="lineNum">     401 </span><span class="lineCov">          8 :                 isequal = false;</span>
+<span class="lineNum">     402 </span>            :         }
+<span class="lineNum">     403 </span>            : 
+<span class="lineNum">     404 </span><span class="lineCov">         24 :         if (plan-&gt;nplans &lt;= 0)    /* Get typeId of column */</span>
+<span class="lineNum">     405 </span><span class="lineCov">          6 :             argtypes[i] = SPI_gettypeid(tupdesc, fnumber);</span>
+<span class="lineNum">     406 </span>            :     }
+<span class="lineNum">     407 </span><span class="lineCov">         16 :     args_temp = args;</span>
+<span class="lineNum">     408 </span><span class="lineCov">         16 :     nargs -= nkeys;</span>
+<span class="lineNum">     409 </span><span class="lineCov">         16 :     args += nkeys;</span>
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span>            :     /*
+<span class="lineNum">     412 </span>            :      * If we have to prepare plans ...
+<span class="lineNum">     413 </span>            :      */
+<span class="lineNum">     414 </span><span class="lineCov">         16 :     if (plan-&gt;nplans &lt;= 0)</span>
+<span class="lineNum">     415 </span>            :     {
+<span class="lineNum">     416 </span>            :         SPIPlanPtr  pplan;
+<span class="lineNum">     417 </span>            :         char        sql[8192];
+<span class="lineNum">     418 </span><span class="lineCov">          4 :         char      **args2 = args;</span>
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span><span class="lineCov">          4 :         plan-&gt;splan = (SPIPlanPtr *) malloc(nrefs * sizeof(SPIPlanPtr));</span>
+<span class="lineNum">     421 </span>            : 
+<span class="lineNum">     422 </span><span class="lineCov">         10 :         for (r = 0; r &lt; nrefs; r++)</span>
+<span class="lineNum">     423 </span>            :         {
+<span class="lineNum">     424 </span><span class="lineCov">          6 :             relname = args2[0];</span>
+<span class="lineNum">     425 </span>            : 
+<span class="lineNum">     426 </span>            :             /*---------
+<span class="lineNum">     427 </span>            :              * For 'R'estrict action we construct SELECT query:
+<span class="lineNum">     428 </span>            :              *
+<span class="lineNum">     429 </span>            :              *  SELECT 1
+<span class="lineNum">     430 </span>            :              *  FROM _referencing_relation_
+<span class="lineNum">     431 </span>            :              *  WHERE Fkey1 = $1 [AND Fkey2 = $2 [...]]
+<span class="lineNum">     432 </span>            :              *
+<span class="lineNum">     433 </span>            :              *  to check is tuple referenced or not.
+<span class="lineNum">     434 </span>            :              *---------
+<span class="lineNum">     435 </span>            :              */
+<span class="lineNum">     436 </span><span class="lineCov">          6 :             if (action == 'r')</span>
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span><span class="lineCov">          2 :                 snprintf(sql, sizeof(sql), &quot;select 1 from %s where &quot;, relname);</span>
+<span class="lineNum">     439 </span>            : 
+<span class="lineNum">     440 </span>            :             /*---------
+<span class="lineNum">     441 </span>            :              * For 'C'ascade action we construct DELETE query
+<span class="lineNum">     442 </span>            :              *
+<span class="lineNum">     443 </span>            :              *  DELETE
+<span class="lineNum">     444 </span>            :              *  FROM _referencing_relation_
+<span class="lineNum">     445 </span>            :              *  WHERE Fkey1 = $1 [AND Fkey2 = $2 [...]]
+<span class="lineNum">     446 </span>            :              *
+<span class="lineNum">     447 </span>            :              * to delete all referencing tuples.
+<span class="lineNum">     448 </span>            :              *---------
+<span class="lineNum">     449 </span>            :              */
+<span class="lineNum">     450 </span>            : 
+<span class="lineNum">     451 </span>            :             /*
+<span class="lineNum">     452 </span>            :              * Max : Cascade with UPDATE query i create update query that
+<span class="lineNum">     453 </span>            :              * updates new key values in referenced tables
+<span class="lineNum">     454 </span>            :              */
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span><span class="lineCov">          4 :             else if (action == 'c')</span>
+<span class="lineNum">     458 </span>            :             {
+<span class="lineNum">     459 </span><span class="lineCov">          4 :                 if (is_update == 1)</span>
+<span class="lineNum">     460 </span>            :                 {
+<span class="lineNum">     461 </span>            :                     int         fn;
+<span class="lineNum">     462 </span>            :                     char       *nv;
+<span class="lineNum">     463 </span>            :                     int         k;
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span><span class="lineNoCov">          0 :                     snprintf(sql, sizeof(sql), &quot;update %s set &quot;, relname);</span>
+<span class="lineNum">     466 </span><span class="lineNoCov">          0 :                     for (k = 1; k &lt;= nkeys; k++)</span>
+<span class="lineNum">     467 </span>            :                     {
+<span class="lineNum">     468 </span><span class="lineNoCov">          0 :                         int         is_char_type = 0;</span>
+<span class="lineNum">     469 </span>            :                         char       *type;
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span><span class="lineNoCov">          0 :                         fn = SPI_fnumber(tupdesc, args_temp[k - 1]);</span>
+<span class="lineNum">     472 </span><span class="lineNoCov">          0 :                         Assert(fn &gt; 0); /* already checked above */</span>
+<span class="lineNum">     473 </span><span class="lineNoCov">          0 :                         nv = SPI_getvalue(newtuple, tupdesc, fn);</span>
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :                         type = SPI_gettype(tupdesc, fn);</span>
+<span class="lineNum">     475 </span>            : 
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 :                         if (strcmp(type, &quot;text&quot;) == 0 ||</span>
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :                             strcmp(type, &quot;varchar&quot;) == 0 ||</span>
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :                             strcmp(type, &quot;char&quot;) == 0 ||</span>
+<span class="lineNum">     479 </span><span class="lineNoCov">          0 :                             strcmp(type, &quot;bpchar&quot;) == 0 ||</span>
+<span class="lineNum">     480 </span><span class="lineNoCov">          0 :                             strcmp(type, &quot;date&quot;) == 0 ||</span>
+<span class="lineNum">     481 </span><span class="lineNoCov">          0 :                             strcmp(type, &quot;timestamp&quot;) == 0)</span>
+<span class="lineNum">     482 </span><span class="lineNoCov">          0 :                             is_char_type = 1;</span>
+<span class="lineNum">     483 </span>            : #ifdef  DEBUG_QUERY
+<span class="lineNum">     484 </span>            :                         elog(DEBUG4, &quot;check_foreign_key Debug value %s type %s %d&quot;,
+<span class="lineNum">     485 </span>            :                              nv, type, is_char_type);
+<span class="lineNum">     486 </span>            : #endif
+<span class="lineNum">     487 </span>            : 
+<span class="lineNum">     488 </span>            :                         /*
+<span class="lineNum">     489 </span>            :                          * is_char_type =1 i set ' ' for define a new value
+<span class="lineNum">     490 </span>            :                          */
+<span class="lineNum">     491 </span><span class="lineNoCov">          0 :                         snprintf(sql + strlen(sql), sizeof(sql) - strlen(sql),</span>
+<span class="lineNum">     492 </span>            :                                  &quot; %s = %s%s%s %s &quot;,
+<span class="lineNum">     493 </span><span class="lineNoCov">          0 :                                  args2[k], (is_char_type &gt; 0) ? &quot;'&quot; : &quot;&quot;,</span>
+<span class="lineNum">     494 </span>            :                                  nv, (is_char_type &gt; 0) ? &quot;'&quot; : &quot;&quot;, (k &lt; nkeys) ? &quot;, &quot; : &quot;&quot;);
+<span class="lineNum">     495 </span>            :                     }
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :                     strcat(sql, &quot; where &quot;);</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span>            :                 }
+<span class="lineNum">     499 </span>            :                 else
+<span class="lineNum">     500 </span>            :                     /* DELETE */
+<span class="lineNum">     501 </span><span class="lineCov">          4 :                     snprintf(sql, sizeof(sql), &quot;delete from %s where &quot;, relname);</span>
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span>            :             }
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span>            :             /*
+<span class="lineNum">     506 </span>            :              * For 'S'etnull action we construct UPDATE query - UPDATE
+<span class="lineNum">     507 </span>            :              * _referencing_relation_ SET Fkey1 null [, Fkey2 null [...]]
+<span class="lineNum">     508 </span>            :              * WHERE Fkey1 = $1 [AND Fkey2 = $2 [...]] - to set key columns in
+<span class="lineNum">     509 </span>            :              * all referencing tuples to NULL.
+<span class="lineNum">     510 </span>            :              */
+<span class="lineNum">     511 </span><span class="lineNoCov">          0 :             else if (action == 's')</span>
+<span class="lineNum">     512 </span>            :             {
+<span class="lineNum">     513 </span><span class="lineNoCov">          0 :                 snprintf(sql, sizeof(sql), &quot;update %s set &quot;, relname);</span>
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :                 for (i = 1; i &lt;= nkeys; i++)</span>
+<span class="lineNum">     515 </span>            :                 {
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :                     snprintf(sql + strlen(sql), sizeof(sql) - strlen(sql),</span>
+<span class="lineNum">     517 </span>            :                              &quot;%s = null%s&quot;,
+<span class="lineNum">     518 </span><span class="lineNoCov">          0 :                              args2[i], (i &lt; nkeys) ? &quot;, &quot; : &quot;&quot;);</span>
+<span class="lineNum">     519 </span>            :                 }
+<span class="lineNum">     520 </span><span class="lineNoCov">          0 :                 strcat(sql, &quot; where &quot;);</span>
+<span class="lineNum">     521 </span>            :             }
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span>            :             /* Construct WHERE qual */
+<span class="lineNum">     524 </span><span class="lineCov">         16 :             for (i = 1; i &lt;= nkeys; i++)</span>
+<span class="lineNum">     525 </span>            :             {
+<span class="lineNum">     526 </span><span class="lineCov">         20 :                 snprintf(sql + strlen(sql), sizeof(sql) - strlen(sql), &quot;%s = $%d %s&quot;,</span>
+<span class="lineNum">     527 </span><span class="lineCov">         10 :                          args2[i], i, (i &lt; nkeys) ? &quot;and &quot; : &quot;&quot;);</span>
+<span class="lineNum">     528 </span>            :             }
+<span class="lineNum">     529 </span>            : 
+<span class="lineNum">     530 </span>            :             /* Prepare plan for query */
+<span class="lineNum">     531 </span><span class="lineCov">          6 :             pplan = SPI_prepare(sql, nkeys, argtypes);</span>
+<span class="lineNum">     532 </span><span class="lineCov">          6 :             if (pplan == NULL)</span>
+<span class="lineNum">     533 </span>            :                 /* internal error */
+<span class="lineNum">     534 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;check_foreign_key: SPI_prepare returned %s&quot;, SPI_result_code_string(SPI_result));</span>
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span>            :             /*
+<span class="lineNum">     537 </span>            :              * Remember that SPI_prepare places plan in current memory context
+<span class="lineNum">     538 </span>            :              * - so, we have to save plan in Top memory context for later use.
+<span class="lineNum">     539 </span>            :              */
+<span class="lineNum">     540 </span><span class="lineCov">          6 :             if (SPI_keepplan(pplan))</span>
+<span class="lineNum">     541 </span>            :                 /* internal error */
+<span class="lineNum">     542 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;check_foreign_key: SPI_keepplan failed&quot;);</span>
+<span class="lineNum">     543 </span>            : 
+<span class="lineNum">     544 </span><span class="lineCov">          6 :             plan-&gt;splan[r] = pplan;</span>
+<span class="lineNum">     545 </span>            : 
+<span class="lineNum">     546 </span><span class="lineCov">          6 :             args2 += nkeys + 1; /* to the next relation */</span>
+<span class="lineNum">     547 </span>            :         }
+<span class="lineNum">     548 </span><span class="lineCov">          4 :         plan-&gt;nplans = nrefs;</span>
+<span class="lineNum">     549 </span>            : #ifdef  DEBUG_QUERY
+<span class="lineNum">     550 </span>            :         elog(DEBUG4, &quot;check_foreign_key Debug Query is :  %s &quot;, sql);
+<span class="lineNum">     551 </span>            : #endif
+<span class="lineNum">     552 </span>            :     }
+<span class="lineNum">     553 </span>            : 
+<span class="lineNum">     554 </span>            :     /*
+<span class="lineNum">     555 </span>            :      * If UPDATE and key is not changed ...
+<span class="lineNum">     556 </span>            :      */
+<span class="lineNum">     557 </span><span class="lineCov">         16 :     if (newtuple != NULL &amp;&amp; isequal)</span>
+<span class="lineNum">     558 </span>            :     {
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :         SPI_finish();</span>
+<span class="lineNum">     560 </span><span class="lineNoCov">          0 :         return PointerGetDatum(newtuple);</span>
+<span class="lineNum">     561 </span>            :     }
+<span class="lineNum">     562 </span>            : 
+<span class="lineNum">     563 </span>            :     /*
+<span class="lineNum">     564 </span>            :      * Ok, execute prepared plan(s).
+<span class="lineNum">     565 </span>            :      */
+<span class="lineNum">     566 </span><span class="lineCov">         32 :     for (r = 0; r &lt; nrefs; r++)</span>
+<span class="lineNum">     567 </span>            :     {
+<span class="lineNum">     568 </span>            :         /*
+<span class="lineNum">     569 </span>            :          * For 'R'estrict we may to execute plan for one tuple only, for other
+<span class="lineNum">     570 </span>            :          * actions - for all tuples.
+<span class="lineNum">     571 </span>            :          */
+<span class="lineNum">     572 </span><span class="lineCov">         24 :         int         tcount = (action == 'r') ? 1 : 0;</span>
+<span class="lineNum">     573 </span>            : 
+<span class="lineNum">     574 </span><span class="lineCov">         24 :         relname = args[0];</span>
+<span class="lineNum">     575 </span>            : 
+<span class="lineNum">     576 </span><span class="lineCov">         24 :         snprintf(ident, sizeof(ident), &quot;%s$%u&quot;, trigger-&gt;tgname, rel-&gt;rd_id);</span>
+<span class="lineNum">     577 </span><span class="lineCov">         24 :         plan = find_plan(ident, &amp;FPlans, &amp;nFPlans);</span>
+<span class="lineNum">     578 </span><span class="lineCov">         24 :         ret = SPI_execp(plan-&gt;splan[r], kvals, NULL, tcount);</span>
+<span class="lineNum">     579 </span>            :         /* we have no NULLs - so we pass   ^^^^  here */
+<span class="lineNum">     580 </span>            : 
+<span class="lineNum">     581 </span><span class="lineCov">         20 :         if (ret &lt; 0)</span>
+<span class="lineNum">     582 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     583 </span>            :                     (errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+<span class="lineNum">     584 </span>            :                      errmsg(&quot;SPI_execp returned %d&quot;, ret)));
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span>            :         /* If action is 'R'estrict ... */
+<span class="lineNum">     587 </span><span class="lineCov">         20 :         if (action == 'r')</span>
+<span class="lineNum">     588 </span>            :         {
+<span class="lineNum">     589 </span>            :             /* If there is tuple returned by SELECT then ... */
+<span class="lineNum">     590 </span><span class="lineCov">          8 :             if (SPI_processed &gt; 0)</span>
+<span class="lineNum">     591 </span><span class="lineCov">          4 :                 ereport(ERROR,</span>
+<span class="lineNum">     592 </span>            :                         (errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+<span class="lineNum">     593 </span>            :                          errmsg(&quot;\&quot;%s\&quot;: tuple is referenced in \&quot;%s\&quot;&quot;,
+<span class="lineNum">     594 </span>            :                                 trigger-&gt;tgname, relname)));
+<span class="lineNum">     595 </span>            :         }
+<span class="lineNum">     596 </span>            :         else
+<span class="lineNum">     597 </span>            :         {
+<span class="lineNum">     598 </span>            : #ifdef REFINT_VERBOSE
+<span class="lineNum">     599 </span><span class="lineCov">         12 :             elog(NOTICE, &quot;%s: &quot; UINT64_FORMAT &quot; tuple(s) of %s are %s&quot;,</span>
+<span class="lineNum">     600 </span>            :                  trigger-&gt;tgname, SPI_processed, relname,
+<span class="lineNum">     601 </span>            :                  (action == 'c') ? &quot;deleted&quot; : &quot;set to null&quot;);
+<span class="lineNum">     602 </span>            : #endif
+<span class="lineNum">     603 </span>            :         }
+<span class="lineNum">     604 </span><span class="lineCov">         16 :         args += nkeys + 1;      /* to the next relation */</span>
+<span class="lineNum">     605 </span>            :     }
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span><span class="lineCov">          8 :     SPI_finish();</span>
+<span class="lineNum">     608 </span>            : 
+<span class="lineNum">     609 </span><span class="lineCov">          8 :     return PointerGetDatum((newtuple == NULL) ? trigtuple : newtuple);</span>
+<span class="lineNum">     610 </span>            : }
+<a name="611"><span class="lineNum">     611 </span>            : </a>
+<span class="lineNum">     612 </span>            : static EPlan *
+<span class="lineNum">     613 </span><span class="lineCov">         72 : find_plan(char *ident, EPlan **eplan, int *nplans)</span>
+<span class="lineNum">     614 </span>            : {
+<span class="lineNum">     615 </span>            :     EPlan      *newp;
+<span class="lineNum">     616 </span>            :     int         i;
+<span class="lineNum">     617 </span>            : 
+<span class="lineNum">     618 </span><span class="lineCov">         72 :     if (*nplans &gt; 0)</span>
+<span class="lineNum">     619 </span>            :     {
+<span class="lineNum">     620 </span><span class="lineCov">        116 :         for (i = 0; i &lt; *nplans; i++)</span>
+<span class="lineNum">     621 </span>            :         {
+<span class="lineNum">     622 </span><span class="lineCov">        110 :             if (strcmp((*eplan)[i].ident, ident) == 0)</span>
+<span class="lineNum">     623 </span><span class="lineCov">         62 :                 break;</span>
+<span class="lineNum">     624 </span>            :         }
+<span class="lineNum">     625 </span><span class="lineCov">         68 :         if (i != *nplans)</span>
+<span class="lineNum">     626 </span><span class="lineCov">         62 :             return (*eplan + i);</span>
+<span class="lineNum">     627 </span><span class="lineCov">          6 :         *eplan = (EPlan *) realloc(*eplan, (i + 1) * sizeof(EPlan));</span>
+<span class="lineNum">     628 </span><span class="lineCov">          6 :         newp = *eplan + i;</span>
+<span class="lineNum">     629 </span>            :     }
+<span class="lineNum">     630 </span>            :     else
+<span class="lineNum">     631 </span>            :     {
+<span class="lineNum">     632 </span><span class="lineCov">          4 :         newp = *eplan = (EPlan *) malloc(sizeof(EPlan));</span>
+<span class="lineNum">     633 </span><span class="lineCov">          4 :         (*nplans) = i = 0;</span>
+<span class="lineNum">     634 </span>            :     }
+<span class="lineNum">     635 </span>            : 
+<span class="lineNum">     636 </span><span class="lineCov">         10 :     newp-&gt;ident = strdup(ident);</span>
+<span class="lineNum">     637 </span><span class="lineCov">         10 :     newp-&gt;nplans = 0;</span>
+<span class="lineNum">     638 </span><span class="lineCov">         10 :     newp-&gt;splan = NULL;</span>
+<span class="lineNum">     639 </span><span class="lineCov">         10 :     (*nplans)++;</span>
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span><span class="lineCov">         10 :     return newp;</span>
+<span class="lineNum">     642 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

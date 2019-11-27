@@ -1,0 +1,964 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/geo_spgist.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - geo_spgist.c<span style="font-size: 80%;"> (source / <a href="geo_spgist.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">307</td>
+            <td class="headerCovTableEntry">310</td>
+            <td class="headerCovTableEntryHi">99.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">33</td>
+            <td class="headerCovTableEntry">33</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * geo_spgist.c
+<span class="lineNum">       4 </span>            :  *    SP-GiST implementation of 4-dimensional quad tree over boxes
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * This module provides SP-GiST implementation for boxes using quad tree
+<span class="lineNum">       7 </span>            :  * analogy in 4-dimensional space.  SP-GiST doesn't allow indexing of
+<span class="lineNum">       8 </span>            :  * overlapping objects.  We are making 2D objects never-overlapping in
+<span class="lineNum">       9 </span>            :  * 4D space.  This technique has some benefits compared to traditional
+<span class="lineNum">      10 </span>            :  * R-Tree which is implemented as GiST.  The performance tests reveal
+<span class="lineNum">      11 </span>            :  * that this technique especially beneficial with too much overlapping
+<span class="lineNum">      12 </span>            :  * objects, so called &quot;spaghetti data&quot;.
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * Unlike the original quad tree, we are splitting the tree into 16
+<span class="lineNum">      15 </span>            :  * quadrants in 4D space.  It is easier to imagine it as splitting space
+<span class="lineNum">      16 </span>            :  * two times into 4:
+<span class="lineNum">      17 </span>            :  *
+<span class="lineNum">      18 </span>            :  *              |      |
+<span class="lineNum">      19 </span>            :  *              |      |
+<span class="lineNum">      20 </span>            :  *              | -----+-----
+<span class="lineNum">      21 </span>            :  *              |      |
+<span class="lineNum">      22 </span>            :  *              |      |
+<span class="lineNum">      23 </span>            :  * -------------+-------------
+<span class="lineNum">      24 </span>            :  *              |
+<span class="lineNum">      25 </span>            :  *              |
+<span class="lineNum">      26 </span>            :  *              |
+<span class="lineNum">      27 </span>            :  *              |
+<span class="lineNum">      28 </span>            :  *              |
+<span class="lineNum">      29 </span>            :  *
+<span class="lineNum">      30 </span>            :  * We are using box datatype as the prefix, but we are treating them
+<span class="lineNum">      31 </span>            :  * as points in 4-dimensional space, because 2D boxes are not enough
+<span class="lineNum">      32 </span>            :  * to represent the quadrant boundaries in 4D space.  They however are
+<span class="lineNum">      33 </span>            :  * sufficient to point out the additional boundaries of the next
+<span class="lineNum">      34 </span>            :  * quadrant.
+<span class="lineNum">      35 </span>            :  *
+<span class="lineNum">      36 </span>            :  * We are using traversal values provided by SP-GiST to calculate and
+<span class="lineNum">      37 </span>            :  * to store the bounds of the quadrants, while traversing into the tree.
+<span class="lineNum">      38 </span>            :  * Traversal value has all the boundaries in the 4D space, and is capable
+<span class="lineNum">      39 </span>            :  * of transferring the required boundaries to the following traversal
+<span class="lineNum">      40 </span>            :  * values.  In conclusion, three things are necessary to calculate the
+<span class="lineNum">      41 </span>            :  * next traversal value:
+<span class="lineNum">      42 </span>            :  *
+<span class="lineNum">      43 </span>            :  *  (1) the traversal value of the parent
+<span class="lineNum">      44 </span>            :  *  (2) the quadrant of the current node
+<span class="lineNum">      45 </span>            :  *  (3) the prefix of the current node
+<span class="lineNum">      46 </span>            :  *
+<span class="lineNum">      47 </span>            :  * If we visualize them on our simplified drawing (see the drawing above);
+<span class="lineNum">      48 </span>            :  * transferred boundaries of (1) would be the outer axis, relevant part
+<span class="lineNum">      49 </span>            :  * of (2) would be the up right part of the other axis, and (3) would be
+<span class="lineNum">      50 </span>            :  * the inner axis.
+<span class="lineNum">      51 </span>            :  *
+<span class="lineNum">      52 </span>            :  * For example, consider the case of overlapping.  When recursion
+<span class="lineNum">      53 </span>            :  * descends deeper and deeper down the tree, all quadrants in
+<span class="lineNum">      54 </span>            :  * the current node will be checked for overlapping.  The boundaries
+<span class="lineNum">      55 </span>            :  * will be re-calculated for all quadrants.  Overlap check answers
+<span class="lineNum">      56 </span>            :  * the question: can any box from this quadrant overlap with the given
+<span class="lineNum">      57 </span>            :  * box?  If yes, then this quadrant will be walked.  If no, then this
+<span class="lineNum">      58 </span>            :  * quadrant will be skipped.
+<span class="lineNum">      59 </span>            :  *
+<span class="lineNum">      60 </span>            :  * This method provides restrictions for minimum and maximum values of
+<span class="lineNum">      61 </span>            :  * every dimension of every corner of the box on every level of the tree
+<span class="lineNum">      62 </span>            :  * except the root.  For the root node, we are setting the boundaries
+<span class="lineNum">      63 </span>            :  * that we don't yet have as infinity.
+<span class="lineNum">      64 </span>            :  *
+<span class="lineNum">      65 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      66 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      67 </span>            :  *
+<span class="lineNum">      68 </span>            :  * IDENTIFICATION
+<span class="lineNum">      69 </span>            :  *          src/backend/utils/adt/geo_spgist.c
+<span class="lineNum">      70 </span>            :  *
+<span class="lineNum">      71 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      72 </span>            :  */
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            : #include &quot;access/spgist.h&quot;
+<span class="lineNum">      77 </span>            : #include &quot;access/spgist_private.h&quot;
+<span class="lineNum">      78 </span>            : #include &quot;access/stratnum.h&quot;
+<span class="lineNum">      79 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      80 </span>            : #include &quot;utils/float.h&quot;
+<span class="lineNum">      81 </span>            : #include &quot;utils/fmgroids.h&quot;
+<span class="lineNum">      82 </span>            : #include &quot;utils/fmgrprotos.h&quot;
+<span class="lineNum">      83 </span>            : #include &quot;utils/geo_decls.h&quot;
+<span class="lineNum">      84 </span>            : 
+<span class="lineNum">      85 </span>            : /*
+<span class="lineNum">      86 </span>            :  * Comparator for qsort
+<span class="lineNum">      87 </span>            :  *
+<span class="lineNum">      88 </span>            :  * We don't need to use the floating point macros in here, because this
+<span class="lineNum">      89 </span>            :  * is only going to be used in a place to effect the performance
+<span class="lineNum">      90 </span>            :  * of the index, not the correctness.
+<a name="91"><span class="lineNum">      91 </span>            :  */</a>
+<span class="lineNum">      92 </span>            : static int
+<span class="lineNum">      93 </span><span class="lineCov">     682750 : compareDoubles(const void *a, const void *b)</span>
+<span class="lineNum">      94 </span>            : {
+<span class="lineNum">      95 </span><span class="lineCov">     682750 :     float8      x = *(float8 *) a;</span>
+<span class="lineNum">      96 </span><span class="lineCov">     682750 :     float8      y = *(float8 *) b;</span>
+<span class="lineNum">      97 </span>            : 
+<span class="lineNum">      98 </span><span class="lineCov">     682750 :     if (x == y)</span>
+<span class="lineNum">      99 </span><span class="lineCov">     133692 :         return 0;</span>
+<span class="lineNum">     100 </span><span class="lineCov">     549058 :     return (x &gt; y) ? 1 : -1;</span>
+<span class="lineNum">     101 </span>            : }
+<span class="lineNum">     102 </span>            : 
+<span class="lineNum">     103 </span>            : typedef struct
+<span class="lineNum">     104 </span>            : {
+<span class="lineNum">     105 </span>            :     float8      low;
+<span class="lineNum">     106 </span>            :     float8      high;
+<span class="lineNum">     107 </span>            : } Range;
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            : typedef struct
+<span class="lineNum">     110 </span>            : {
+<span class="lineNum">     111 </span>            :     Range       left;
+<span class="lineNum">     112 </span>            :     Range       right;
+<span class="lineNum">     113 </span>            : } RangeBox;
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span>            : typedef struct
+<span class="lineNum">     116 </span>            : {
+<span class="lineNum">     117 </span>            :     RangeBox    range_box_x;
+<span class="lineNum">     118 </span>            :     RangeBox    range_box_y;
+<span class="lineNum">     119 </span>            : } RectBox;
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span>            : /*
+<span class="lineNum">     122 </span>            :  * Calculate the quadrant
+<span class="lineNum">     123 </span>            :  *
+<span class="lineNum">     124 </span>            :  * The quadrant is 8 bit unsigned integer with 4 least bits in use.
+<span class="lineNum">     125 </span>            :  * This function accepts BOXes as input.  They are not casted to
+<span class="lineNum">     126 </span>            :  * RangeBoxes, yet.  All 4 bits are set by comparing a corner of the box.
+<span class="lineNum">     127 </span>            :  * This makes 16 quadrants in total.
+<a name="128"><span class="lineNum">     128 </span>            :  */</a>
+<span class="lineNum">     129 </span>            : static uint8
+<span class="lineNum">     130 </span><span class="lineCov">     290788 : getQuadrant(BOX *centroid, BOX *inBox)</span>
+<span class="lineNum">     131 </span>            : {
+<span class="lineNum">     132 </span><span class="lineCov">     290788 :     uint8       quadrant = 0;</span>
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span><span class="lineCov">     290788 :     if (inBox-&gt;low.x &gt; centroid-&gt;low.x)</span>
+<span class="lineNum">     135 </span><span class="lineCov">     245206 :         quadrant |= 0x8;</span>
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span><span class="lineCov">     290788 :     if (inBox-&gt;high.x &gt; centroid-&gt;high.x)</span>
+<span class="lineNum">     138 </span><span class="lineCov">     249728 :         quadrant |= 0x4;</span>
+<span class="lineNum">     139 </span>            : 
+<span class="lineNum">     140 </span><span class="lineCov">     290788 :     if (inBox-&gt;low.y &gt; centroid-&gt;low.y)</span>
+<span class="lineNum">     141 </span><span class="lineCov">     156968 :         quadrant |= 0x2;</span>
+<span class="lineNum">     142 </span>            : 
+<span class="lineNum">     143 </span><span class="lineCov">     290788 :     if (inBox-&gt;high.y &gt; centroid-&gt;high.y)</span>
+<span class="lineNum">     144 </span><span class="lineCov">     158070 :         quadrant |= 0x1;</span>
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span><span class="lineCov">     290788 :     return quadrant;</span>
+<span class="lineNum">     147 </span>            : }
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            : /*
+<span class="lineNum">     150 </span>            :  * Get RangeBox using BOX
+<span class="lineNum">     151 </span>            :  *
+<span class="lineNum">     152 </span>            :  * We are turning the BOX to our structures to emphasize their function
+<span class="lineNum">     153 </span>            :  * of representing points in 4D space.  It also is more convenient to
+<span class="lineNum">     154 </span>            :  * access the values with this structure.
+<a name="155"><span class="lineNum">     155 </span>            :  */</a>
+<span class="lineNum">     156 </span>            : static RangeBox *
+<span class="lineNum">     157 </span><span class="lineCov">       5388 : getRangeBox(BOX *box)</span>
+<span class="lineNum">     158 </span>            : {
+<span class="lineNum">     159 </span><span class="lineCov">       5388 :     RangeBox   *range_box = (RangeBox *) palloc(sizeof(RangeBox));</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span><span class="lineCov">       5388 :     range_box-&gt;left.low = box-&gt;low.x;</span>
+<span class="lineNum">     162 </span><span class="lineCov">       5388 :     range_box-&gt;left.high = box-&gt;high.x;</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span><span class="lineCov">       5388 :     range_box-&gt;right.low = box-&gt;low.y;</span>
+<span class="lineNum">     165 </span><span class="lineCov">       5388 :     range_box-&gt;right.high = box-&gt;high.y;</span>
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span><span class="lineCov">       5388 :     return range_box;</span>
+<span class="lineNum">     168 </span>            : }
+<span class="lineNum">     169 </span>            : 
+<span class="lineNum">     170 </span>            : /*
+<span class="lineNum">     171 </span>            :  * Initialize the traversal value
+<span class="lineNum">     172 </span>            :  *
+<span class="lineNum">     173 </span>            :  * In the beginning, we don't have any restrictions.  We have to
+<span class="lineNum">     174 </span>            :  * initialize the struct to cover the whole 4D space.
+<a name="175"><span class="lineNum">     175 </span>            :  */</a>
+<span class="lineNum">     176 </span>            : static RectBox *
+<span class="lineNum">     177 </span><span class="lineCov">        282 : initRectBox(void)</span>
+<span class="lineNum">     178 </span>            : {
+<span class="lineNum">     179 </span><span class="lineCov">        282 :     RectBox    *rect_box = (RectBox *) palloc(sizeof(RectBox));</span>
+<span class="lineNum">     180 </span><span class="lineCov">        282 :     float8      infinity = get_float8_infinity();</span>
+<span class="lineNum">     181 </span>            : 
+<span class="lineNum">     182 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_x.left.low = -infinity;</span>
+<span class="lineNum">     183 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_x.left.high = infinity;</span>
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_x.right.low = -infinity;</span>
+<span class="lineNum">     186 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_x.right.high = infinity;</span>
+<span class="lineNum">     187 </span>            : 
+<span class="lineNum">     188 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_y.left.low = -infinity;</span>
+<span class="lineNum">     189 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_y.left.high = infinity;</span>
+<span class="lineNum">     190 </span>            : 
+<span class="lineNum">     191 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_y.right.low = -infinity;</span>
+<span class="lineNum">     192 </span><span class="lineCov">        282 :     rect_box-&gt;range_box_y.right.high = infinity;</span>
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span><span class="lineCov">        282 :     return rect_box;</span>
+<span class="lineNum">     195 </span>            : }
+<span class="lineNum">     196 </span>            : 
+<span class="lineNum">     197 </span>            : /*
+<span class="lineNum">     198 </span>            :  * Calculate the next traversal value
+<span class="lineNum">     199 </span>            :  *
+<span class="lineNum">     200 </span>            :  * All centroids are bounded by RectBox, but SP-GiST only keeps
+<span class="lineNum">     201 </span>            :  * boxes.  When we are traversing the tree, we must calculate RectBox,
+<span class="lineNum">     202 </span>            :  * using centroid and quadrant.
+<a name="203"><span class="lineNum">     203 </span>            :  */</a>
+<span class="lineNum">     204 </span>            : static RectBox *
+<span class="lineNum">     205 </span><span class="lineCov">      44672 : nextRectBox(RectBox *rect_box, RangeBox *centroid, uint8 quadrant)</span>
+<span class="lineNum">     206 </span>            : {
+<span class="lineNum">     207 </span><span class="lineCov">      44672 :     RectBox    *next_rect_box = (RectBox *) palloc(sizeof(RectBox));</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineCov">      44672 :     memcpy(next_rect_box, rect_box, sizeof(RectBox));</span>
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span><span class="lineCov">      44672 :     if (quadrant &amp; 0x8)</span>
+<span class="lineNum">     212 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_x.left.low = centroid-&gt;left.low;</span>
+<span class="lineNum">     213 </span>            :     else
+<span class="lineNum">     214 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_x.left.high = centroid-&gt;left.low;</span>
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span><span class="lineCov">      44672 :     if (quadrant &amp; 0x4)</span>
+<span class="lineNum">     217 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_x.right.low = centroid-&gt;left.high;</span>
+<span class="lineNum">     218 </span>            :     else
+<span class="lineNum">     219 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_x.right.high = centroid-&gt;left.high;</span>
+<span class="lineNum">     220 </span>            : 
+<span class="lineNum">     221 </span><span class="lineCov">      44672 :     if (quadrant &amp; 0x2)</span>
+<span class="lineNum">     222 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_y.left.low = centroid-&gt;right.low;</span>
+<span class="lineNum">     223 </span>            :     else
+<span class="lineNum">     224 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_y.left.high = centroid-&gt;right.low;</span>
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineCov">      44672 :     if (quadrant &amp; 0x1)</span>
+<span class="lineNum">     227 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_y.right.low = centroid-&gt;right.high;</span>
+<span class="lineNum">     228 </span>            :     else
+<span class="lineNum">     229 </span><span class="lineCov">      22336 :         next_rect_box-&gt;range_box_y.right.high = centroid-&gt;right.high;</span>
+<span class="lineNum">     230 </span>            : 
+<span class="lineNum">     231 </span><span class="lineCov">      44672 :     return next_rect_box;</span>
+<span class="lineNum">     232 </span>            : }
+<span class="lineNum">     233 </span>            : 
+<a name="234"><span class="lineNum">     234 </span>            : /* Can any range from range_box overlap with this argument? */</a>
+<span class="lineNum">     235 </span>            : static bool
+<span class="lineNum">     236 </span><span class="lineCov">       3600 : overlap2D(RangeBox *range_box, Range *query)</span>
+<span class="lineNum">     237 </span>            : {
+<span class="lineNum">     238 </span><span class="lineCov">       6776 :     return FPge(range_box-&gt;right.high, query-&gt;low) &amp;&amp;</span>
+<span class="lineNum">     239 </span><span class="lineCov">       3176 :         FPle(range_box-&gt;left.low, query-&gt;high);</span>
+<span class="lineNum">     240 </span>            : }
+<span class="lineNum">     241 </span>            : 
+<a name="242"><span class="lineNum">     242 </span>            : /* Can any rectangle from rect_box overlap with this argument? */</a>
+<span class="lineNum">     243 </span>            : static bool
+<span class="lineNum">     244 </span><span class="lineCov">       2112 : overlap4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     245 </span>            : {
+<span class="lineNum">     246 </span><span class="lineCov">       3600 :     return overlap2D(&amp;rect_box-&gt;range_box_x, &amp;query-&gt;left) &amp;&amp;</span>
+<span class="lineNum">     247 </span><span class="lineCov">       1488 :         overlap2D(&amp;rect_box-&gt;range_box_y, &amp;query-&gt;right);</span>
+<span class="lineNum">     248 </span>            : }
+<span class="lineNum">     249 </span>            : 
+<a name="250"><span class="lineNum">     250 </span>            : /* Can any range from range_box contain this argument? */</a>
+<span class="lineNum">     251 </span>            : static bool
+<span class="lineNum">     252 </span><span class="lineCov">        592 : contain2D(RangeBox *range_box, Range *query)</span>
+<span class="lineNum">     253 </span>            : {
+<span class="lineNum">     254 </span><span class="lineCov">        992 :     return FPge(range_box-&gt;right.high, query-&gt;high) &amp;&amp;</span>
+<span class="lineNum">     255 </span><span class="lineCov">        400 :         FPle(range_box-&gt;left.low, query-&gt;low);</span>
+<span class="lineNum">     256 </span>            : }
+<span class="lineNum">     257 </span>            : 
+<a name="258"><span class="lineNum">     258 </span>            : /* Can any rectangle from rect_box contain this argument? */</a>
+<span class="lineNum">     259 </span>            : static bool
+<span class="lineNum">     260 </span><span class="lineCov">        384 : contain4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     261 </span>            : {
+<span class="lineNum">     262 </span><span class="lineCov">        592 :     return contain2D(&amp;rect_box-&gt;range_box_x, &amp;query-&gt;left) &amp;&amp;</span>
+<span class="lineNum">     263 </span><span class="lineCov">        208 :         contain2D(&amp;rect_box-&gt;range_box_y, &amp;query-&gt;right);</span>
+<span class="lineNum">     264 </span>            : }
+<span class="lineNum">     265 </span>            : 
+<a name="266"><span class="lineNum">     266 </span>            : /* Can any range from range_box be contained by this argument? */</a>
+<span class="lineNum">     267 </span>            : static bool
+<span class="lineNum">     268 </span><span class="lineCov">       7000 : contained2D(RangeBox *range_box, Range *query)</span>
+<span class="lineNum">     269 </span>            : {
+<span class="lineNum">     270 </span><span class="lineCov">      20592 :     return FPle(range_box-&gt;left.low, query-&gt;high) &amp;&amp;</span>
+<span class="lineNum">     271 </span><span class="lineCov">      12168 :         FPge(range_box-&gt;left.high, query-&gt;low) &amp;&amp;</span>
+<span class="lineNum">     272 </span><span class="lineCov">      17876 :         FPle(range_box-&gt;right.low, query-&gt;high) &amp;&amp;</span>
+<span class="lineNum">     273 </span><span class="lineCov">       5300 :         FPge(range_box-&gt;right.high, query-&gt;low);</span>
+<span class="lineNum">     274 </span>            : }
+<span class="lineNum">     275 </span>            : 
+<a name="276"><span class="lineNum">     276 </span>            : /* Can any rectangle from rect_box be contained by this argument? */</a>
+<span class="lineNum">     277 </span>            : static bool
+<span class="lineNum">     278 </span><span class="lineCov">       4480 : contained4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     279 </span>            : {
+<span class="lineNum">     280 </span><span class="lineCov">       7000 :     return contained2D(&amp;rect_box-&gt;range_box_x, &amp;query-&gt;left) &amp;&amp;</span>
+<span class="lineNum">     281 </span><span class="lineCov">       2520 :         contained2D(&amp;rect_box-&gt;range_box_y, &amp;query-&gt;right);</span>
+<span class="lineNum">     282 </span>            : }
+<span class="lineNum">     283 </span>            : 
+<a name="284"><span class="lineNum">     284 </span>            : /* Can any range from range_box to be lower than this argument? */</a>
+<span class="lineNum">     285 </span>            : static bool
+<span class="lineNum">     286 </span><span class="lineCov">       4544 : lower2D(RangeBox *range_box, Range *query)</span>
+<span class="lineNum">     287 </span>            : {
+<span class="lineNum">     288 </span><span class="lineCov">       8144 :     return FPlt(range_box-&gt;left.low, query-&gt;low) &amp;&amp;</span>
+<span class="lineNum">     289 </span><span class="lineCov">       3600 :         FPlt(range_box-&gt;right.low, query-&gt;low);</span>
+<span class="lineNum">     290 </span>            : }
+<span class="lineNum">     291 </span>            : 
+<a name="292"><span class="lineNum">     292 </span>            : /* Can any range from range_box not extend to the right side of the query? */</a>
+<span class="lineNum">     293 </span>            : static bool
+<span class="lineNum">     294 </span><span class="lineCov">       8096 : overLower2D(RangeBox *range_box, Range *query)</span>
+<span class="lineNum">     295 </span>            : {
+<span class="lineNum">     296 </span><span class="lineCov">      15568 :     return FPle(range_box-&gt;left.low, query-&gt;high) &amp;&amp;</span>
+<span class="lineNum">     297 </span><span class="lineCov">       7472 :         FPle(range_box-&gt;right.low, query-&gt;high);</span>
+<span class="lineNum">     298 </span>            : }
+<span class="lineNum">     299 </span>            : 
+<a name="300"><span class="lineNum">     300 </span>            : /* Can any range from range_box to be higher than this argument? */</a>
+<span class="lineNum">     301 </span>            : static bool
+<span class="lineNum">     302 </span><span class="lineCov">      11616 : higher2D(RangeBox *range_box, Range *query)</span>
+<span class="lineNum">     303 </span>            : {
+<span class="lineNum">     304 </span><span class="lineCov">      20624 :     return FPgt(range_box-&gt;left.high, query-&gt;high) &amp;&amp;</span>
+<span class="lineNum">     305 </span><span class="lineCov">       9008 :         FPgt(range_box-&gt;right.high, query-&gt;high);</span>
+<span class="lineNum">     306 </span>            : }
+<span class="lineNum">     307 </span>            : 
+<a name="308"><span class="lineNum">     308 </span>            : /* Can any range from range_box not extend to the left side of the query? */</a>
+<span class="lineNum">     309 </span>            : static bool
+<span class="lineNum">     310 </span><span class="lineCov">      10304 : overHigher2D(RangeBox *range_box, Range *query)</span>
+<span class="lineNum">     311 </span>            : {
+<span class="lineNum">     312 </span><span class="lineCov">      19792 :     return FPge(range_box-&gt;left.high, query-&gt;low) &amp;&amp;</span>
+<span class="lineNum">     313 </span><span class="lineCov">       9488 :         FPge(range_box-&gt;right.high, query-&gt;low);</span>
+<span class="lineNum">     314 </span>            : }
+<span class="lineNum">     315 </span>            : 
+<a name="316"><span class="lineNum">     316 </span>            : /* Can any rectangle from rect_box be left of this argument? */</a>
+<span class="lineNum">     317 </span>            : static bool
+<span class="lineNum">     318 </span><span class="lineCov">       3104 : left4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     319 </span>            : {
+<span class="lineNum">     320 </span><span class="lineCov">       3104 :     return lower2D(&amp;rect_box-&gt;range_box_x, &amp;query-&gt;left);</span>
+<span class="lineNum">     321 </span>            : }
+<span class="lineNum">     322 </span>            : 
+<a name="323"><span class="lineNum">     323 </span>            : /* Can any rectangle from rect_box does not extend the right of this argument? */</a>
+<span class="lineNum">     324 </span>            : static bool
+<span class="lineNum">     325 </span><span class="lineCov">       4896 : overLeft4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     326 </span>            : {
+<span class="lineNum">     327 </span><span class="lineCov">       4896 :     return overLower2D(&amp;rect_box-&gt;range_box_x, &amp;query-&gt;left);</span>
+<span class="lineNum">     328 </span>            : }
+<span class="lineNum">     329 </span>            : 
+<a name="330"><span class="lineNum">     330 </span>            : /* Can any rectangle from rect_box be right of this argument? */</a>
+<span class="lineNum">     331 </span>            : static bool
+<span class="lineNum">     332 </span><span class="lineCov">       8768 : right4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     333 </span>            : {
+<span class="lineNum">     334 </span><span class="lineCov">       8768 :     return higher2D(&amp;rect_box-&gt;range_box_x, &amp;query-&gt;left);</span>
+<span class="lineNum">     335 </span>            : }
+<span class="lineNum">     336 </span>            : 
+<a name="337"><span class="lineNum">     337 </span>            : /* Can any rectangle from rect_box does not extend the left of this argument? */</a>
+<span class="lineNum">     338 </span>            : static bool
+<span class="lineNum">     339 </span><span class="lineCov">       5664 : overRight4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     340 </span>            : {
+<span class="lineNum">     341 </span><span class="lineCov">       5664 :     return overHigher2D(&amp;rect_box-&gt;range_box_x, &amp;query-&gt;left);</span>
+<span class="lineNum">     342 </span>            : }
+<span class="lineNum">     343 </span>            : 
+<a name="344"><span class="lineNum">     344 </span>            : /* Can any rectangle from rect_box be below of this argument? */</a>
+<span class="lineNum">     345 </span>            : static bool
+<span class="lineNum">     346 </span><span class="lineCov">       1440 : below4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     347 </span>            : {
+<span class="lineNum">     348 </span><span class="lineCov">       1440 :     return lower2D(&amp;rect_box-&gt;range_box_y, &amp;query-&gt;right);</span>
+<span class="lineNum">     349 </span>            : }
+<span class="lineNum">     350 </span>            : 
+<a name="351"><span class="lineNum">     351 </span>            : /* Can any rectangle from rect_box does not extend above this argument? */</a>
+<span class="lineNum">     352 </span>            : static bool
+<span class="lineNum">     353 </span><span class="lineCov">       3200 : overBelow4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     354 </span>            : {
+<span class="lineNum">     355 </span><span class="lineCov">       3200 :     return overLower2D(&amp;rect_box-&gt;range_box_y, &amp;query-&gt;right);</span>
+<span class="lineNum">     356 </span>            : }
+<span class="lineNum">     357 </span>            : 
+<a name="358"><span class="lineNum">     358 </span>            : /* Can any rectangle from rect_box be above of this argument? */</a>
+<span class="lineNum">     359 </span>            : static bool
+<span class="lineNum">     360 </span><span class="lineCov">       2848 : above4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     361 </span>            : {
+<span class="lineNum">     362 </span><span class="lineCov">       2848 :     return higher2D(&amp;rect_box-&gt;range_box_y, &amp;query-&gt;right);</span>
+<span class="lineNum">     363 </span>            : }
+<span class="lineNum">     364 </span>            : 
+<a name="365"><span class="lineNum">     365 </span>            : /* Can any rectangle from rect_box does not extend below of this argument? */</a>
+<span class="lineNum">     366 </span>            : static bool
+<span class="lineNum">     367 </span><span class="lineCov">       4640 : overAbove4D(RectBox *rect_box, RangeBox *query)</span>
+<span class="lineNum">     368 </span>            : {
+<span class="lineNum">     369 </span><span class="lineCov">       4640 :     return overHigher2D(&amp;rect_box-&gt;range_box_y, &amp;query-&gt;right);</span>
+<span class="lineNum">     370 </span>            : }
+<span class="lineNum">     371 </span>            : 
+<a name="372"><span class="lineNum">     372 </span>            : /* Lower bound for the distance between point and rect_box */</a>
+<span class="lineNum">     373 </span>            : static double
+<span class="lineNum">     374 </span><span class="lineCov">       4402 : pointToRectBoxDistance(Point *point, RectBox *rect_box)</span>
+<span class="lineNum">     375 </span>            : {
+<span class="lineNum">     376 </span>            :     double      dx;
+<span class="lineNum">     377 </span>            :     double      dy;
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span><span class="lineCov">       4402 :     if (point-&gt;x &lt; rect_box-&gt;range_box_x.left.low)</span>
+<span class="lineNum">     380 </span><span class="lineCov">       3408 :         dx = rect_box-&gt;range_box_x.left.low - point-&gt;x;</span>
+<span class="lineNum">     381 </span><span class="lineCov">        994 :     else if (point-&gt;x &gt; rect_box-&gt;range_box_x.right.high)</span>
+<span class="lineNum">     382 </span><span class="lineCov">        192 :         dx = point-&gt;x - rect_box-&gt;range_box_x.right.high;</span>
+<span class="lineNum">     383 </span>            :     else
+<span class="lineNum">     384 </span><span class="lineCov">        802 :         dx = 0;</span>
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span><span class="lineCov">       4402 :     if (point-&gt;y &lt; rect_box-&gt;range_box_y.left.low)</span>
+<span class="lineNum">     387 </span><span class="lineCov">       2128 :         dy = rect_box-&gt;range_box_y.left.low - point-&gt;y;</span>
+<span class="lineNum">     388 </span><span class="lineCov">       2274 :     else if (point-&gt;y &gt; rect_box-&gt;range_box_y.right.high)</span>
+<span class="lineNum">     389 </span><span class="lineCov">       2070 :         dy = point-&gt;y - rect_box-&gt;range_box_y.right.high;</span>
+<span class="lineNum">     390 </span>            :     else
+<span class="lineNum">     391 </span><span class="lineCov">        204 :         dy = 0;</span>
+<span class="lineNum">     392 </span>            : 
+<span class="lineNum">     393 </span><span class="lineCov">       4402 :     return HYPOT(dx, dy);</span>
+<span class="lineNum">     394 </span>            : }
+<span class="lineNum">     395 </span>            : 
+<span class="lineNum">     396 </span>            : 
+<span class="lineNum">     397 </span>            : /*
+<span class="lineNum">     398 </span>            :  * SP-GiST config function
+<a name="399"><span class="lineNum">     399 </span>            :  */</a>
+<span class="lineNum">     400 </span>            : Datum
+<span class="lineNum">     401 </span><span class="lineCov">         16 : spg_box_quad_config(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     402 </span>            : {
+<span class="lineNum">     403 </span><span class="lineCov">         16 :     spgConfigOut *cfg = (spgConfigOut *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     404 </span>            : 
+<span class="lineNum">     405 </span><span class="lineCov">         16 :     cfg-&gt;prefixType = BOXOID;</span>
+<span class="lineNum">     406 </span><span class="lineCov">         16 :     cfg-&gt;labelType = VOIDOID;    /* We don't need node labels. */</span>
+<span class="lineNum">     407 </span><span class="lineCov">         16 :     cfg-&gt;canReturnData = true;</span>
+<span class="lineNum">     408 </span><span class="lineCov">         16 :     cfg-&gt;longValuesOK = false;</span>
+<span class="lineNum">     409 </span>            : 
+<span class="lineNum">     410 </span><span class="lineCov">         16 :     PG_RETURN_VOID();</span>
+<span class="lineNum">     411 </span>            : }
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            : /*
+<span class="lineNum">     414 </span>            :  * SP-GiST choose function
+<a name="415"><span class="lineNum">     415 </span>            :  */</a>
+<span class="lineNum">     416 </span>            : Datum
+<span class="lineNum">     417 </span><span class="lineCov">     251470 : spg_box_quad_choose(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     418 </span>            : {
+<span class="lineNum">     419 </span><span class="lineCov">     251470 :     spgChooseIn *in = (spgChooseIn *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     420 </span><span class="lineCov">     251470 :     spgChooseOut *out = (spgChooseOut *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     421 </span><span class="lineCov">     251470 :     BOX        *centroid = DatumGetBoxP(in-&gt;prefixDatum),</span>
+<span class="lineNum">     422 </span><span class="lineCov">     251470 :                *box = DatumGetBoxP(in-&gt;leafDatum);</span>
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineCov">     251470 :     out-&gt;resultType = spgMatchNode;</span>
+<span class="lineNum">     425 </span><span class="lineCov">     251470 :     out-&gt;result.matchNode.restDatum = BoxPGetDatum(box);</span>
+<span class="lineNum">     426 </span>            : 
+<span class="lineNum">     427 </span>            :     /* nodeN will be set by core, when allTheSame. */
+<span class="lineNum">     428 </span><span class="lineCov">     251470 :     if (!in-&gt;allTheSame)</span>
+<span class="lineNum">     429 </span><span class="lineCov">     247134 :         out-&gt;result.matchNode.nodeN = getQuadrant(centroid, box);</span>
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span><span class="lineCov">     251470 :     PG_RETURN_VOID();</span>
+<span class="lineNum">     432 </span>            : }
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span>            : /*
+<span class="lineNum">     435 </span>            :  * SP-GiST pick-split function
+<span class="lineNum">     436 </span>            :  *
+<span class="lineNum">     437 </span>            :  * It splits a list of boxes into quadrants by choosing a central 4D
+<span class="lineNum">     438 </span>            :  * point as the median of the coordinates of the boxes.
+<a name="439"><span class="lineNum">     439 </span>            :  */</a>
+<span class="lineNum">     440 </span>            : Datum
+<span class="lineNum">     441 </span><span class="lineCov">        438 : spg_box_quad_picksplit(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     442 </span>            : {
+<span class="lineNum">     443 </span><span class="lineCov">        438 :     spgPickSplitIn *in = (spgPickSplitIn *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     444 </span><span class="lineCov">        438 :     spgPickSplitOut *out = (spgPickSplitOut *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     445 </span>            :     BOX        *centroid;
+<span class="lineNum">     446 </span>            :     int         median,
+<span class="lineNum">     447 </span>            :                 i;
+<span class="lineNum">     448 </span><span class="lineCov">        438 :     float8     *lowXs = palloc(sizeof(float8) * in-&gt;nTuples);</span>
+<span class="lineNum">     449 </span><span class="lineCov">        438 :     float8     *highXs = palloc(sizeof(float8) * in-&gt;nTuples);</span>
+<span class="lineNum">     450 </span><span class="lineCov">        438 :     float8     *lowYs = palloc(sizeof(float8) * in-&gt;nTuples);</span>
+<span class="lineNum">     451 </span><span class="lineCov">        438 :     float8     *highYs = palloc(sizeof(float8) * in-&gt;nTuples);</span>
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span>            :     /* Calculate median of all 4D coordinates */
+<span class="lineNum">     454 </span><span class="lineCov">      44092 :     for (i = 0; i &lt; in-&gt;nTuples; i++)</span>
+<span class="lineNum">     455 </span>            :     {
+<span class="lineNum">     456 </span><span class="lineCov">      43654 :         BOX        *box = DatumGetBoxP(in-&gt;datums[i]);</span>
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span><span class="lineCov">      43654 :         lowXs[i] = box-&gt;low.x;</span>
+<span class="lineNum">     459 </span><span class="lineCov">      43654 :         highXs[i] = box-&gt;high.x;</span>
+<span class="lineNum">     460 </span><span class="lineCov">      43654 :         lowYs[i] = box-&gt;low.y;</span>
+<span class="lineNum">     461 </span><span class="lineCov">      43654 :         highYs[i] = box-&gt;high.y;</span>
+<span class="lineNum">     462 </span>            :     }
+<span class="lineNum">     463 </span>            : 
+<span class="lineNum">     464 </span><span class="lineCov">        438 :     qsort(lowXs, in-&gt;nTuples, sizeof(float8), compareDoubles);</span>
+<span class="lineNum">     465 </span><span class="lineCov">        438 :     qsort(highXs, in-&gt;nTuples, sizeof(float8), compareDoubles);</span>
+<span class="lineNum">     466 </span><span class="lineCov">        438 :     qsort(lowYs, in-&gt;nTuples, sizeof(float8), compareDoubles);</span>
+<span class="lineNum">     467 </span><span class="lineCov">        438 :     qsort(highYs, in-&gt;nTuples, sizeof(float8), compareDoubles);</span>
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span><span class="lineCov">        438 :     median = in-&gt;nTuples / 2;</span>
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span><span class="lineCov">        438 :     centroid = palloc(sizeof(BOX));</span>
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span><span class="lineCov">        438 :     centroid-&gt;low.x = lowXs[median];</span>
+<span class="lineNum">     474 </span><span class="lineCov">        438 :     centroid-&gt;high.x = highXs[median];</span>
+<span class="lineNum">     475 </span><span class="lineCov">        438 :     centroid-&gt;low.y = lowYs[median];</span>
+<span class="lineNum">     476 </span><span class="lineCov">        438 :     centroid-&gt;high.y = highYs[median];</span>
+<span class="lineNum">     477 </span>            : 
+<span class="lineNum">     478 </span>            :     /* Fill the output */
+<span class="lineNum">     479 </span><span class="lineCov">        438 :     out-&gt;hasPrefix = true;</span>
+<span class="lineNum">     480 </span><span class="lineCov">        438 :     out-&gt;prefixDatum = BoxPGetDatum(centroid);</span>
+<span class="lineNum">     481 </span>            : 
+<span class="lineNum">     482 </span><span class="lineCov">        438 :     out-&gt;nNodes = 16;</span>
+<span class="lineNum">     483 </span><span class="lineCov">        438 :     out-&gt;nodeLabels = NULL;      /* We don't need node labels. */</span>
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span><span class="lineCov">        438 :     out-&gt;mapTuplesToNodes = palloc(sizeof(int) * in-&gt;nTuples);</span>
+<span class="lineNum">     486 </span><span class="lineCov">        438 :     out-&gt;leafTupleDatums = palloc(sizeof(Datum) * in-&gt;nTuples);</span>
+<span class="lineNum">     487 </span>            : 
+<span class="lineNum">     488 </span>            :     /*
+<span class="lineNum">     489 </span>            :      * Assign ranges to corresponding nodes according to quadrants relative to
+<span class="lineNum">     490 </span>            :      * the &quot;centroid&quot; range
+<span class="lineNum">     491 </span>            :      */
+<span class="lineNum">     492 </span><span class="lineCov">      44092 :     for (i = 0; i &lt; in-&gt;nTuples; i++)</span>
+<span class="lineNum">     493 </span>            :     {
+<span class="lineNum">     494 </span><span class="lineCov">      43654 :         BOX        *box = DatumGetBoxP(in-&gt;datums[i]);</span>
+<span class="lineNum">     495 </span><span class="lineCov">      43654 :         uint8       quadrant = getQuadrant(centroid, box);</span>
+<span class="lineNum">     496 </span>            : 
+<span class="lineNum">     497 </span><span class="lineCov">      43654 :         out-&gt;leafTupleDatums[i] = BoxPGetDatum(box);</span>
+<span class="lineNum">     498 </span><span class="lineCov">      43654 :         out-&gt;mapTuplesToNodes[i] = quadrant;</span>
+<span class="lineNum">     499 </span>            :     }
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span><span class="lineCov">        438 :     PG_RETURN_VOID();</span>
+<span class="lineNum">     502 </span>            : }
+<span class="lineNum">     503 </span>            : 
+<span class="lineNum">     504 </span>            : /*
+<span class="lineNum">     505 </span>            :  * Check if result of consistent method based on bounding box is exact.
+<a name="506"><span class="lineNum">     506 </span>            :  */</a>
+<span class="lineNum">     507 </span>            : static bool
+<span class="lineNum">     508 </span><span class="lineCov">     130680 : is_bounding_box_test_exact(StrategyNumber strategy)</span>
+<span class="lineNum">     509 </span>            : {
+<span class="lineNum">     510 </span><span class="lineCov">     130680 :     switch (strategy)</span>
+<span class="lineNum">     511 </span>            :     {
+<span class="lineNum">     512 </span>            :         case RTLeftStrategyNumber:
+<span class="lineNum">     513 </span>            :         case RTOverLeftStrategyNumber:
+<span class="lineNum">     514 </span>            :         case RTOverRightStrategyNumber:
+<span class="lineNum">     515 </span>            :         case RTRightStrategyNumber:
+<span class="lineNum">     516 </span>            :         case RTOverBelowStrategyNumber:
+<span class="lineNum">     517 </span>            :         case RTBelowStrategyNumber:
+<span class="lineNum">     518 </span>            :         case RTAboveStrategyNumber:
+<span class="lineNum">     519 </span>            :         case RTOverAboveStrategyNumber:
+<span class="lineNum">     520 </span><span class="lineCov">     108338 :             return true;</span>
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            :         default:
+<span class="lineNum">     523 </span><span class="lineCov">      22342 :             return false;</span>
+<span class="lineNum">     524 </span>            :     }
+<span class="lineNum">     525 </span>            : }
+<span class="lineNum">     526 </span>            : 
+<span class="lineNum">     527 </span>            : /*
+<span class="lineNum">     528 </span>            :  * Get bounding box for ScanKey.
+<a name="529"><span class="lineNum">     529 </span>            :  */</a>
+<span class="lineNum">     530 </span>            : static BOX *
+<span class="lineNum">     531 </span><span class="lineCov">     263710 : spg_box_quad_get_scankey_bbox(ScanKey sk, bool *recheck)</span>
+<span class="lineNum">     532 </span>            : {
+<span class="lineNum">     533 </span><span class="lineCov">     263710 :     switch (sk-&gt;sk_subtype)</span>
+<span class="lineNum">     534 </span>            :     {
+<span class="lineNum">     535 </span>            :         case BOXOID:
+<span class="lineNum">     536 </span><span class="lineCov">     131836 :             return DatumGetBoxP(sk-&gt;sk_argument);</span>
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span>            :         case POLYGONOID:
+<span class="lineNum">     539 </span><span class="lineCov">     131874 :             if (recheck &amp;&amp; !is_bounding_box_test_exact(sk-&gt;sk_strategy))</span>
+<span class="lineNum">     540 </span><span class="lineCov">      22342 :                 *recheck = true;</span>
+<span class="lineNum">     541 </span><span class="lineCov">     131874 :             return &amp;DatumGetPolygonP(sk-&gt;sk_argument)-&gt;boundbox;</span>
+<span class="lineNum">     542 </span>            : 
+<span class="lineNum">     543 </span>            :         default:
+<span class="lineNum">     544 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized scankey subtype: %d&quot;, sk-&gt;sk_subtype);</span>
+<span class="lineNum">     545 </span>            :             return NULL;
+<span class="lineNum">     546 </span>            :     }
+<span class="lineNum">     547 </span>            : }
+<span class="lineNum">     548 </span>            : 
+<span class="lineNum">     549 </span>            : /*
+<span class="lineNum">     550 </span>            :  * SP-GiST inner consistent function
+<a name="551"><span class="lineNum">     551 </span>            :  */</a>
+<span class="lineNum">     552 </span>            : Datum
+<span class="lineNum">     553 </span><span class="lineCov">       3042 : spg_box_quad_inner_consistent(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     554 </span>            : {
+<span class="lineNum">     555 </span><span class="lineCov">       3042 :     spgInnerConsistentIn *in = (spgInnerConsistentIn *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     556 </span><span class="lineCov">       3042 :     spgInnerConsistentOut *out = (spgInnerConsistentOut *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     557 </span>            :     int         i;
+<span class="lineNum">     558 </span>            :     MemoryContext old_ctx;
+<span class="lineNum">     559 </span>            :     RectBox    *rect_box;
+<span class="lineNum">     560 </span>            :     uint8       quadrant;
+<span class="lineNum">     561 </span>            :     RangeBox   *centroid,
+<span class="lineNum">     562 </span>            :               **queries;
+<span class="lineNum">     563 </span>            : 
+<span class="lineNum">     564 </span>            :     /*
+<span class="lineNum">     565 </span>            :      * We are saving the traversal value or initialize it an unbounded one, if
+<span class="lineNum">     566 </span>            :      * we have just begun to walk the tree.
+<span class="lineNum">     567 </span>            :      */
+<span class="lineNum">     568 </span><span class="lineCov">       3042 :     if (in-&gt;traversalValue)</span>
+<span class="lineNum">     569 </span><span class="lineCov">       2760 :         rect_box = in-&gt;traversalValue;</span>
+<span class="lineNum">     570 </span>            :     else
+<span class="lineNum">     571 </span><span class="lineCov">        282 :         rect_box = initRectBox();</span>
+<span class="lineNum">     572 </span>            : 
+<span class="lineNum">     573 </span><span class="lineCov">       3042 :     if (in-&gt;allTheSame)</span>
+<span class="lineNum">     574 </span>            :     {
+<span class="lineNum">     575 </span>            :         /* Report that all nodes should be visited */
+<span class="lineNum">     576 </span><span class="lineCov">        250 :         out-&gt;nNodes = in-&gt;nNodes;</span>
+<span class="lineNum">     577 </span><span class="lineCov">        250 :         out-&gt;nodeNumbers = (int *) palloc(sizeof(int) * in-&gt;nNodes);</span>
+<span class="lineNum">     578 </span><span class="lineCov">       2250 :         for (i = 0; i &lt; in-&gt;nNodes; i++)</span>
+<span class="lineNum">     579 </span><span class="lineCov">       2000 :             out-&gt;nodeNumbers[i] = i;</span>
+<span class="lineNum">     580 </span>            : 
+<span class="lineNum">     581 </span><span class="lineCov">        250 :         if (in-&gt;norderbys &gt; 0 &amp;&amp; in-&gt;nNodes &gt; 0)</span>
+<span class="lineNum">     582 </span>            :         {
+<span class="lineNum">     583 </span><span class="lineCov">         32 :             double     *distances = palloc(sizeof(double) * in-&gt;norderbys);</span>
+<span class="lineNum">     584 </span>            :             int         j;
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span><span class="lineCov">         64 :             for (j = 0; j &lt; in-&gt;norderbys; j++)</span>
+<span class="lineNum">     587 </span>            :             {
+<span class="lineNum">     588 </span><span class="lineCov">         32 :                 Point      *pt = DatumGetPointP(in-&gt;orderbys[j].sk_argument);</span>
+<span class="lineNum">     589 </span>            : 
+<span class="lineNum">     590 </span><span class="lineCov">         32 :                 distances[j] = pointToRectBoxDistance(pt, rect_box);</span>
+<span class="lineNum">     591 </span>            :             }
+<span class="lineNum">     592 </span>            : 
+<span class="lineNum">     593 </span><span class="lineCov">         32 :             out-&gt;distances = (double **) palloc(sizeof(double *) * in-&gt;nNodes);</span>
+<span class="lineNum">     594 </span><span class="lineCov">         32 :             out-&gt;distances[0] = distances;</span>
+<span class="lineNum">     595 </span>            : 
+<span class="lineNum">     596 </span><span class="lineCov">        256 :             for (i = 1; i &lt; in-&gt;nNodes; i++)</span>
+<span class="lineNum">     597 </span>            :             {
+<span class="lineNum">     598 </span><span class="lineCov">        224 :                 out-&gt;distances[i] = palloc(sizeof(double) * in-&gt;norderbys);</span>
+<span class="lineNum">     599 </span><span class="lineCov">        224 :                 memcpy(out-&gt;distances[i], distances,</span>
+<span class="lineNum">     600 </span><span class="lineCov">        224 :                        sizeof(double) * in-&gt;norderbys);</span>
+<span class="lineNum">     601 </span>            :             }
+<span class="lineNum">     602 </span>            :         }
+<span class="lineNum">     603 </span>            : 
+<span class="lineNum">     604 </span><span class="lineCov">        250 :         PG_RETURN_VOID();</span>
+<span class="lineNum">     605 </span>            :     }
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span>            :     /*
+<span class="lineNum">     608 </span>            :      * We are casting the prefix and queries to RangeBoxes for ease of the
+<span class="lineNum">     609 </span>            :      * following operations.
+<span class="lineNum">     610 </span>            :      */
+<span class="lineNum">     611 </span><span class="lineCov">       2792 :     centroid = getRangeBox(DatumGetBoxP(in-&gt;prefixDatum));</span>
+<span class="lineNum">     612 </span><span class="lineCov">       2792 :     queries = (RangeBox **) palloc(in-&gt;nkeys * sizeof(RangeBox *));</span>
+<span class="lineNum">     613 </span><span class="lineCov">       5388 :     for (i = 0; i &lt; in-&gt;nkeys; i++)</span>
+<span class="lineNum">     614 </span>            :     {
+<span class="lineNum">     615 </span><span class="lineCov">       2596 :         BOX        *box = spg_box_quad_get_scankey_bbox(&amp;in-&gt;scankeys[i], NULL);</span>
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span><span class="lineCov">       2596 :         queries[i] = getRangeBox(box);</span>
+<span class="lineNum">     618 </span>            :     }
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span>            :     /* Allocate enough memory for nodes */
+<span class="lineNum">     621 </span><span class="lineCov">       2792 :     out-&gt;nNodes = 0;</span>
+<span class="lineNum">     622 </span><span class="lineCov">       2792 :     out-&gt;nodeNumbers = (int *) palloc(sizeof(int) * in-&gt;nNodes);</span>
+<span class="lineNum">     623 </span><span class="lineCov">       2792 :     out-&gt;traversalValues = (void **) palloc(sizeof(void *) * in-&gt;nNodes);</span>
+<span class="lineNum">     624 </span><span class="lineCov">       2792 :     if (in-&gt;norderbys &gt; 0)</span>
+<span class="lineNum">     625 </span><span class="lineCov">        332 :         out-&gt;distances = (double **) palloc(sizeof(double *) * in-&gt;nNodes);</span>
+<span class="lineNum">     626 </span>            : 
+<span class="lineNum">     627 </span>            :     /*
+<span class="lineNum">     628 </span>            :      * We switch memory context, because we want to allocate memory for new
+<span class="lineNum">     629 </span>            :      * traversal values (next_rect_box) and pass these pieces of memory to
+<span class="lineNum">     630 </span>            :      * further call of this function.
+<span class="lineNum">     631 </span>            :      */
+<span class="lineNum">     632 </span><span class="lineCov">       2792 :     old_ctx = MemoryContextSwitchTo(in-&gt;traversalMemoryContext);</span>
+<span class="lineNum">     633 </span>            : 
+<span class="lineNum">     634 </span><span class="lineCov">      47464 :     for (quadrant = 0; quadrant &lt; in-&gt;nNodes; quadrant++)</span>
+<span class="lineNum">     635 </span>            :     {
+<span class="lineNum">     636 </span><span class="lineCov">      44672 :         RectBox    *next_rect_box = nextRectBox(rect_box, centroid, quadrant);</span>
+<span class="lineNum">     637 </span><span class="lineCov">      44672 :         bool        flag = true;</span>
+<span class="lineNum">     638 </span>            : 
+<span class="lineNum">     639 </span><span class="lineCov">      75506 :         for (i = 0; i &lt; in-&gt;nkeys; i++)</span>
+<span class="lineNum">     640 </span>            :         {
+<span class="lineNum">     641 </span><span class="lineCov">      41536 :             StrategyNumber strategy = in-&gt;scankeys[i].sk_strategy;</span>
+<span class="lineNum">     642 </span>            : 
+<span class="lineNum">     643 </span><span class="lineCov">      41536 :             switch (strategy)</span>
+<span class="lineNum">     644 </span>            :             {
+<span class="lineNum">     645 </span>            :                 case RTOverlapStrategyNumber:
+<span class="lineNum">     646 </span><span class="lineCov">       2112 :                     flag = overlap4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     647 </span><span class="lineCov">       2112 :                     break;</span>
+<span class="lineNum">     648 </span>            : 
+<span class="lineNum">     649 </span>            :                 case RTContainsStrategyNumber:
+<span class="lineNum">     650 </span><span class="lineCov">        384 :                     flag = contain4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     651 </span><span class="lineCov">        384 :                     break;</span>
+<span class="lineNum">     652 </span>            : 
+<span class="lineNum">     653 </span>            :                 case RTSameStrategyNumber:
+<span class="lineNum">     654 </span>            :                 case RTContainedByStrategyNumber:
+<span class="lineNum">     655 </span><span class="lineCov">       4480 :                     flag = contained4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     656 </span><span class="lineCov">       4480 :                     break;</span>
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span>            :                 case RTLeftStrategyNumber:
+<span class="lineNum">     659 </span><span class="lineCov">       3104 :                     flag = left4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     660 </span><span class="lineCov">       3104 :                     break;</span>
+<span class="lineNum">     661 </span>            : 
+<span class="lineNum">     662 </span>            :                 case RTOverLeftStrategyNumber:
+<span class="lineNum">     663 </span><span class="lineCov">       4896 :                     flag = overLeft4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     664 </span><span class="lineCov">       4896 :                     break;</span>
+<span class="lineNum">     665 </span>            : 
+<span class="lineNum">     666 </span>            :                 case RTRightStrategyNumber:
+<span class="lineNum">     667 </span><span class="lineCov">       8768 :                     flag = right4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     668 </span><span class="lineCov">       8768 :                     break;</span>
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span>            :                 case RTOverRightStrategyNumber:
+<span class="lineNum">     671 </span><span class="lineCov">       5664 :                     flag = overRight4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     672 </span><span class="lineCov">       5664 :                     break;</span>
+<span class="lineNum">     673 </span>            : 
+<span class="lineNum">     674 </span>            :                 case RTAboveStrategyNumber:
+<span class="lineNum">     675 </span><span class="lineCov">       2848 :                     flag = above4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     676 </span><span class="lineCov">       2848 :                     break;</span>
+<span class="lineNum">     677 </span>            : 
+<span class="lineNum">     678 </span>            :                 case RTOverAboveStrategyNumber:
+<span class="lineNum">     679 </span><span class="lineCov">       4640 :                     flag = overAbove4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     680 </span><span class="lineCov">       4640 :                     break;</span>
+<span class="lineNum">     681 </span>            : 
+<span class="lineNum">     682 </span>            :                 case RTBelowStrategyNumber:
+<span class="lineNum">     683 </span><span class="lineCov">       1440 :                     flag = below4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     684 </span><span class="lineCov">       1440 :                     break;</span>
+<span class="lineNum">     685 </span>            : 
+<span class="lineNum">     686 </span>            :                 case RTOverBelowStrategyNumber:
+<span class="lineNum">     687 </span><span class="lineCov">       3200 :                     flag = overBelow4D(next_rect_box, queries[i]);</span>
+<span class="lineNum">     688 </span><span class="lineCov">       3200 :                     break;</span>
+<span class="lineNum">     689 </span>            : 
+<span class="lineNum">     690 </span>            :                 default:
+<span class="lineNum">     691 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;unrecognized strategy: %d&quot;, strategy);</span>
+<span class="lineNum">     692 </span>            :             }
+<span class="lineNum">     693 </span>            : 
+<span class="lineNum">     694 </span>            :             /* If any check is failed, we have found our answer. */
+<span class="lineNum">     695 </span><span class="lineCov">      41536 :             if (!flag)</span>
+<span class="lineNum">     696 </span><span class="lineCov">      10702 :                 break;</span>
+<span class="lineNum">     697 </span>            :         }
+<span class="lineNum">     698 </span>            : 
+<span class="lineNum">     699 </span><span class="lineCov">      44672 :         if (flag)</span>
+<span class="lineNum">     700 </span>            :         {
+<span class="lineNum">     701 </span><span class="lineCov">      33970 :             out-&gt;traversalValues[out-&gt;nNodes] = next_rect_box;</span>
+<span class="lineNum">     702 </span><span class="lineCov">      33970 :             out-&gt;nodeNumbers[out-&gt;nNodes] = quadrant;</span>
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span><span class="lineCov">      33970 :             if (in-&gt;norderbys &gt; 0)</span>
+<span class="lineNum">     705 </span>            :             {
+<span class="lineNum">     706 </span><span class="lineCov">       4370 :                 double     *distances = palloc(sizeof(double) * in-&gt;norderbys);</span>
+<span class="lineNum">     707 </span>            :                 int         j;
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span><span class="lineCov">       4370 :                 out-&gt;distances[out-&gt;nNodes] = distances;</span>
+<span class="lineNum">     710 </span>            : 
+<span class="lineNum">     711 </span><span class="lineCov">       8740 :                 for (j = 0; j &lt; in-&gt;norderbys; j++)</span>
+<span class="lineNum">     712 </span>            :                 {
+<span class="lineNum">     713 </span><span class="lineCov">       4370 :                     Point      *pt = DatumGetPointP(in-&gt;orderbys[j].sk_argument);</span>
+<span class="lineNum">     714 </span>            : 
+<span class="lineNum">     715 </span><span class="lineCov">       4370 :                     distances[j] = pointToRectBoxDistance(pt, next_rect_box);</span>
+<span class="lineNum">     716 </span>            :                 }
+<span class="lineNum">     717 </span>            :             }
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span><span class="lineCov">      33970 :             out-&gt;nNodes++;</span>
+<span class="lineNum">     720 </span>            :         }
+<span class="lineNum">     721 </span>            :         else
+<span class="lineNum">     722 </span>            :         {
+<span class="lineNum">     723 </span>            :             /*
+<span class="lineNum">     724 </span>            :              * If this node is not selected, we don't need to keep the next
+<span class="lineNum">     725 </span>            :              * traversal value in the memory context.
+<span class="lineNum">     726 </span>            :              */
+<span class="lineNum">     727 </span><span class="lineCov">      10702 :             pfree(next_rect_box);</span>
+<span class="lineNum">     728 </span>            :         }
+<span class="lineNum">     729 </span>            :     }
+<span class="lineNum">     730 </span>            : 
+<span class="lineNum">     731 </span>            :     /* Switch back */
+<span class="lineNum">     732 </span><span class="lineCov">       2792 :     MemoryContextSwitchTo(old_ctx);</span>
+<span class="lineNum">     733 </span>            : 
+<span class="lineNum">     734 </span><span class="lineCov">       2792 :     PG_RETURN_VOID();</span>
+<span class="lineNum">     735 </span>            : }
+<span class="lineNum">     736 </span>            : 
+<span class="lineNum">     737 </span>            : /*
+<span class="lineNum">     738 </span>            :  * SP-GiST inner consistent function
+<a name="739"><span class="lineNum">     739 </span>            :  */</a>
+<span class="lineNum">     740 </span>            : Datum
+<span class="lineNum">     741 </span><span class="lineCov">     283120 : spg_box_quad_leaf_consistent(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     742 </span>            : {
+<span class="lineNum">     743 </span><span class="lineCov">     283120 :     spgLeafConsistentIn *in = (spgLeafConsistentIn *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     744 </span><span class="lineCov">     283120 :     spgLeafConsistentOut *out = (spgLeafConsistentOut *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     745 </span><span class="lineCov">     283120 :     Datum       leaf = in-&gt;leafDatum;</span>
+<span class="lineNum">     746 </span><span class="lineCov">     283120 :     bool        flag = true;</span>
+<span class="lineNum">     747 </span>            :     int         i;
+<span class="lineNum">     748 </span>            : 
+<span class="lineNum">     749 </span>            :     /* All tests are exact. */
+<span class="lineNum">     750 </span><span class="lineCov">     283120 :     out-&gt;recheck = false;</span>
+<span class="lineNum">     751 </span>            : 
+<span class="lineNum">     752 </span>            :     /* leafDatum is what it is... */
+<span class="lineNum">     753 </span><span class="lineCov">     283120 :     out-&gt;leafValue = in-&gt;leafDatum;</span>
+<span class="lineNum">     754 </span>            : 
+<span class="lineNum">     755 </span>            :     /* Perform the required comparison(s) */
+<span class="lineNum">     756 </span><span class="lineCov">     495838 :     for (i = 0; i &lt; in-&gt;nkeys; i++)</span>
+<span class="lineNum">     757 </span>            :     {
+<span class="lineNum">     758 </span><span class="lineCov">     261114 :         StrategyNumber strategy = in-&gt;scankeys[i].sk_strategy;</span>
+<span class="lineNum">     759 </span><span class="lineCov">     261114 :         BOX        *box = spg_box_quad_get_scankey_bbox(&amp;in-&gt;scankeys[i],</span>
+<span class="lineNum">     760 </span>            :                                                         &amp;out-&gt;recheck);
+<span class="lineNum">     761 </span><span class="lineCov">     261114 :         Datum       query = BoxPGetDatum(box);</span>
+<span class="lineNum">     762 </span>            : 
+<span class="lineNum">     763 </span><span class="lineCov">     261114 :         switch (strategy)</span>
+<span class="lineNum">     764 </span>            :         {
+<span class="lineNum">     765 </span>            :             case RTOverlapStrategyNumber:
+<span class="lineNum">     766 </span><span class="lineCov">      12106 :                 flag = DatumGetBool(DirectFunctionCall2(box_overlap, leaf,</span>
+<span class="lineNum">     767 </span>            :                                                         query));
+<span class="lineNum">     768 </span><span class="lineCov">      12106 :                 break;</span>
+<span class="lineNum">     769 </span>            : 
+<span class="lineNum">     770 </span>            :             case RTContainsStrategyNumber:
+<span class="lineNum">     771 </span><span class="lineCov">       2802 :                 flag = DatumGetBool(DirectFunctionCall2(box_contain, leaf,</span>
+<span class="lineNum">     772 </span>            :                                                         query));
+<span class="lineNum">     773 </span><span class="lineCov">       2802 :                 break;</span>
+<span class="lineNum">     774 </span>            : 
+<span class="lineNum">     775 </span>            :             case RTContainedByStrategyNumber:
+<span class="lineNum">     776 </span><span class="lineCov">      23084 :                 flag = DatumGetBool(DirectFunctionCall2(box_contained, leaf,</span>
+<span class="lineNum">     777 </span>            :                                                         query));
+<span class="lineNum">     778 </span><span class="lineCov">      23084 :                 break;</span>
+<span class="lineNum">     779 </span>            : 
+<span class="lineNum">     780 </span>            :             case RTSameStrategyNumber:
+<span class="lineNum">     781 </span><span class="lineCov">       4344 :                 flag = DatumGetBool(DirectFunctionCall2(box_same, leaf,</span>
+<span class="lineNum">     782 </span>            :                                                         query));
+<span class="lineNum">     783 </span><span class="lineCov">       4344 :                 break;</span>
+<span class="lineNum">     784 </span>            : 
+<span class="lineNum">     785 </span>            :             case RTLeftStrategyNumber:
+<span class="lineNum">     786 </span><span class="lineCov">      16064 :                 flag = DatumGetBool(DirectFunctionCall2(box_left, leaf,</span>
+<span class="lineNum">     787 </span>            :                                                         query));
+<span class="lineNum">     788 </span><span class="lineCov">      16064 :                 break;</span>
+<span class="lineNum">     789 </span>            : 
+<span class="lineNum">     790 </span>            :             case RTOverLeftStrategyNumber:
+<span class="lineNum">     791 </span><span class="lineCov">      32626 :                 flag = DatumGetBool(DirectFunctionCall2(box_overleft, leaf,</span>
+<span class="lineNum">     792 </span>            :                                                         query));
+<span class="lineNum">     793 </span><span class="lineCov">      32626 :                 break;</span>
+<span class="lineNum">     794 </span>            : 
+<span class="lineNum">     795 </span>            :             case RTRightStrategyNumber:
+<span class="lineNum">     796 </span><span class="lineCov">      43304 :                 flag = DatumGetBool(DirectFunctionCall2(box_right, leaf,</span>
+<span class="lineNum">     797 </span>            :                                                         query));
+<span class="lineNum">     798 </span><span class="lineCov">      43304 :                 break;</span>
+<span class="lineNum">     799 </span>            : 
+<span class="lineNum">     800 </span>            :             case RTOverRightStrategyNumber:
+<span class="lineNum">     801 </span><span class="lineCov">      36856 :                 flag = DatumGetBool(DirectFunctionCall2(box_overright, leaf,</span>
+<span class="lineNum">     802 </span>            :                                                         query));
+<span class="lineNum">     803 </span><span class="lineCov">      36856 :                 break;</span>
+<span class="lineNum">     804 </span>            : 
+<span class="lineNum">     805 </span>            :             case RTAboveStrategyNumber:
+<span class="lineNum">     806 </span><span class="lineCov">      18640 :                 flag = DatumGetBool(DirectFunctionCall2(box_above, leaf,</span>
+<span class="lineNum">     807 </span>            :                                                         query));
+<span class="lineNum">     808 </span><span class="lineCov">      18640 :                 break;</span>
+<span class="lineNum">     809 </span>            : 
+<span class="lineNum">     810 </span>            :             case RTOverAboveStrategyNumber:
+<span class="lineNum">     811 </span><span class="lineCov">      36450 :                 flag = DatumGetBool(DirectFunctionCall2(box_overabove, leaf,</span>
+<span class="lineNum">     812 </span>            :                                                         query));
+<span class="lineNum">     813 </span><span class="lineCov">      36450 :                 break;</span>
+<span class="lineNum">     814 </span>            : 
+<span class="lineNum">     815 </span>            :             case RTBelowStrategyNumber:
+<span class="lineNum">     816 </span><span class="lineCov">       8626 :                 flag = DatumGetBool(DirectFunctionCall2(box_below, leaf,</span>
+<span class="lineNum">     817 </span>            :                                                         query));
+<span class="lineNum">     818 </span><span class="lineCov">       8626 :                 break;</span>
+<span class="lineNum">     819 </span>            : 
+<span class="lineNum">     820 </span>            :             case RTOverBelowStrategyNumber:
+<span class="lineNum">     821 </span><span class="lineCov">      26212 :                 flag = DatumGetBool(DirectFunctionCall2(box_overbelow, leaf,</span>
+<span class="lineNum">     822 </span>            :                                                         query));
+<span class="lineNum">     823 </span><span class="lineCov">      26212 :                 break;</span>
+<span class="lineNum">     824 </span>            : 
+<span class="lineNum">     825 </span>            :             default:
+<span class="lineNum">     826 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;unrecognized strategy: %d&quot;, strategy);</span>
+<span class="lineNum">     827 </span>            :         }
+<span class="lineNum">     828 </span>            : 
+<span class="lineNum">     829 </span>            :         /* If any check is failed, we have found our answer. */
+<span class="lineNum">     830 </span><span class="lineCov">     261114 :         if (!flag)</span>
+<span class="lineNum">     831 </span><span class="lineCov">      48396 :             break;</span>
+<span class="lineNum">     832 </span>            :     }
+<span class="lineNum">     833 </span>            : 
+<span class="lineNum">     834 </span><span class="lineCov">     283120 :     if (flag &amp;&amp; in-&gt;norderbys &gt; 0)</span>
+<span class="lineNum">     835 </span>            :     {
+<span class="lineNum">     836 </span><span class="lineCov">      28848 :         Oid         distfnoid = in-&gt;orderbys[0].sk_func.fn_oid;</span>
+<span class="lineNum">     837 </span>            : 
+<span class="lineNum">     838 </span><span class="lineCov">      28848 :         out-&gt;distances = spg_key_orderbys_distances(leaf, false,</span>
+<span class="lineNum">     839 </span>            :                                                     in-&gt;orderbys, in-&gt;norderbys);
+<span class="lineNum">     840 </span>            : 
+<span class="lineNum">     841 </span>            :         /* Recheck is necessary when computing distance to polygon */
+<span class="lineNum">     842 </span><span class="lineCov">      28848 :         out-&gt;recheckDistances = distfnoid == F_DIST_POLYP;</span>
+<span class="lineNum">     843 </span>            :     }
+<span class="lineNum">     844 </span>            : 
+<span class="lineNum">     845 </span><span class="lineCov">     283120 :     PG_RETURN_BOOL(flag);</span>
+<span class="lineNum">     846 </span>            : }
+<span class="lineNum">     847 </span>            : 
+<span class="lineNum">     848 </span>            : 
+<span class="lineNum">     849 </span>            : /*
+<span class="lineNum">     850 </span>            :  * SP-GiST config function for 2-D types that are lossy represented by their
+<span class="lineNum">     851 </span>            :  * bounding boxes
+<a name="852"><span class="lineNum">     852 </span>            :  */</a>
+<span class="lineNum">     853 </span>            : Datum
+<span class="lineNum">     854 </span><span class="lineCov">          8 : spg_bbox_quad_config(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     855 </span>            : {
+<span class="lineNum">     856 </span><span class="lineCov">          8 :     spgConfigOut *cfg = (spgConfigOut *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     857 </span>            : 
+<span class="lineNum">     858 </span><span class="lineCov">          8 :     cfg-&gt;prefixType = BOXOID;    /* A type represented by its bounding box */</span>
+<span class="lineNum">     859 </span><span class="lineCov">          8 :     cfg-&gt;labelType = VOIDOID;    /* We don't need node labels. */</span>
+<span class="lineNum">     860 </span><span class="lineCov">          8 :     cfg-&gt;leafType = BOXOID;</span>
+<span class="lineNum">     861 </span><span class="lineCov">          8 :     cfg-&gt;canReturnData = false;</span>
+<span class="lineNum">     862 </span><span class="lineCov">          8 :     cfg-&gt;longValuesOK = false;</span>
+<span class="lineNum">     863 </span>            : 
+<span class="lineNum">     864 </span><span class="lineCov">          8 :     PG_RETURN_VOID();</span>
+<span class="lineNum">     865 </span>            : }
+<span class="lineNum">     866 </span>            : 
+<span class="lineNum">     867 </span>            : /*
+<span class="lineNum">     868 </span>            :  * SP-GiST compress function for polygons
+<a name="869"><span class="lineNum">     869 </span>            :  */</a>
+<span class="lineNum">     870 </span>            : Datum
+<span class="lineNum">     871 </span><span class="lineCov">      22000 : spg_poly_quad_compress(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     872 </span>            : {
+<span class="lineNum">     873 </span><span class="lineCov">      22000 :     POLYGON    *polygon = PG_GETARG_POLYGON_P(0);</span>
+<span class="lineNum">     874 </span>            :     BOX        *box;
+<span class="lineNum">     875 </span>            : 
+<span class="lineNum">     876 </span><span class="lineCov">      22000 :     box = (BOX *) palloc(sizeof(BOX));</span>
+<span class="lineNum">     877 </span><span class="lineCov">      22000 :     *box = polygon-&gt;boundbox;</span>
+<span class="lineNum">     878 </span>            : 
+<span class="lineNum">     879 </span><span class="lineCov">      22000 :     PG_RETURN_BOX_P(box);</span>
+<span class="lineNum">     880 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

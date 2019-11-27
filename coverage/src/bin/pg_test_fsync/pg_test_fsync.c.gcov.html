@@ -1,0 +1,688 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/bin/pg_test_fsync/pg_test_fsync.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/bin/pg_test_fsync</a> - pg_test_fsync.c<span style="font-size: 80%;"> (source / <a href="pg_test_fsync.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">213</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">0</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntryLo">0.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*</a>
+<span class="lineNum">       2 </span>            :  *  pg_test_fsync.c
+<span class="lineNum">       3 </span>            :  *      tests all supported fsync() methods
+<span class="lineNum">       4 </span>            :  */
+<span class="lineNum">       5 </span>            : 
+<span class="lineNum">       6 </span>            : #include &quot;postgres_fe.h&quot;
+<span class="lineNum">       7 </span>            : 
+<span class="lineNum">       8 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">       9 </span>            : #include &lt;sys/time.h&gt;
+<span class="lineNum">      10 </span>            : #include &lt;fcntl.h&gt;
+<span class="lineNum">      11 </span>            : #include &lt;time.h&gt;
+<span class="lineNum">      12 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      13 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &quot;access/xlogdefs.h&quot;
+<span class="lineNum">      16 </span>            : #include &quot;common/logging.h&quot;
+<span class="lineNum">      17 </span>            : #include &quot;getopt_long.h&quot;
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : /*
+<span class="lineNum">      20 </span>            :  * put the temp files in the local directory
+<span class="lineNum">      21 </span>            :  * unless the user specifies otherwise
+<span class="lineNum">      22 </span>            :  */
+<span class="lineNum">      23 </span>            : #define FSYNC_FILENAME  &quot;./pg_test_fsync.out&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : #define XLOG_BLCKSZ_K   (XLOG_BLCKSZ / 1024)
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : #define LABEL_FORMAT        &quot;        %-30s&quot;
+<span class="lineNum">      28 </span>            : #define NA_FORMAT           &quot;%21s\n&quot;
+<span class="lineNum">      29 </span>            : /* translator: maintain alignment with NA_FORMAT */
+<span class="lineNum">      30 </span>            : #define OPS_FORMAT          gettext_noop(&quot;%13.3f ops/sec  %6.0f usecs/op\n&quot;)
+<span class="lineNum">      31 </span>            : #define USECS_SEC           1000000
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /* These are macros to avoid timing the function call overhead. */
+<span class="lineNum">      34 </span>            : #ifndef WIN32
+<span class="lineNum">      35 </span>            : #define START_TIMER \
+<span class="lineNum">      36 </span>            : do { \
+<span class="lineNum">      37 </span>            :     alarm_triggered = false; \
+<span class="lineNum">      38 </span>            :     alarm(secs_per_test); \
+<span class="lineNum">      39 </span>            :     gettimeofday(&amp;start_t, NULL); \
+<span class="lineNum">      40 </span>            : } while (0)
+<span class="lineNum">      41 </span>            : #else
+<span class="lineNum">      42 </span>            : /* WIN32 doesn't support alarm, so we create a thread and sleep there */
+<span class="lineNum">      43 </span>            : #define START_TIMER \
+<span class="lineNum">      44 </span>            : do { \
+<span class="lineNum">      45 </span>            :     alarm_triggered = false; \
+<span class="lineNum">      46 </span>            :     if (CreateThread(NULL, 0, process_alarm, NULL, 0, NULL) == \
+<span class="lineNum">      47 </span>            :         INVALID_HANDLE_VALUE) \
+<span class="lineNum">      48 </span>            :     { \
+<span class="lineNum">      49 </span>            :         pg_log_error(&quot;could not create thread for alarm&quot;); \
+<span class="lineNum">      50 </span>            :         exit(1); \
+<span class="lineNum">      51 </span>            :     } \
+<span class="lineNum">      52 </span>            :     gettimeofday(&amp;start_t, NULL); \
+<span class="lineNum">      53 </span>            : } while (0)
+<span class="lineNum">      54 </span>            : #endif
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : #define STOP_TIMER  \
+<span class="lineNum">      57 </span>            : do { \
+<span class="lineNum">      58 </span>            :     gettimeofday(&amp;stop_t, NULL); \
+<span class="lineNum">      59 </span>            :     print_elapse(start_t, stop_t, ops); \
+<span class="lineNum">      60 </span>            : } while (0)
+<span class="lineNum">      61 </span>            : 
+<span class="lineNum">      62 </span>            : 
+<span class="lineNum">      63 </span>            : static const char *progname;
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            : static int  secs_per_test = 5;
+<span class="lineNum">      66 </span>            : static int  needs_unlink = 0;
+<span class="lineNum">      67 </span>            : static char full_buf[DEFAULT_XLOG_SEG_SIZE],
+<span class="lineNum">      68 </span>            :            *buf,
+<span class="lineNum">      69 </span>            :            *filename = FSYNC_FILENAME;
+<span class="lineNum">      70 </span>            : static struct timeval start_t,
+<span class="lineNum">      71 </span>            :             stop_t;
+<span class="lineNum">      72 </span>            : static bool alarm_triggered = false;
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span>            : 
+<span class="lineNum">      75 </span>            : static void handle_args(int argc, char *argv[]);
+<span class="lineNum">      76 </span>            : static void prepare_buf(void);
+<span class="lineNum">      77 </span>            : static void test_open(void);
+<span class="lineNum">      78 </span>            : static void test_non_sync(void);
+<span class="lineNum">      79 </span>            : static void test_sync(int writes_per_op);
+<span class="lineNum">      80 </span>            : static void test_open_syncs(void);
+<span class="lineNum">      81 </span>            : static void test_open_sync(const char *msg, int writes_size);
+<span class="lineNum">      82 </span>            : static void test_file_descriptor_sync(void);
+<span class="lineNum">      83 </span>            : 
+<span class="lineNum">      84 </span>            : #ifndef WIN32
+<span class="lineNum">      85 </span>            : static void process_alarm(int sig);
+<span class="lineNum">      86 </span>            : #else
+<span class="lineNum">      87 </span>            : static DWORD WINAPI process_alarm(LPVOID param);
+<span class="lineNum">      88 </span>            : #endif
+<span class="lineNum">      89 </span>            : static void signal_cleanup(int sig);
+<span class="lineNum">      90 </span>            : 
+<span class="lineNum">      91 </span>            : #ifdef HAVE_FSYNC_WRITETHROUGH
+<span class="lineNum">      92 </span>            : static int  pg_fsync_writethrough(int fd);
+<span class="lineNum">      93 </span>            : #endif
+<span class="lineNum">      94 </span>            : static void print_elapse(struct timeval start_t, struct timeval stop_t, int ops);
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span>            : #define die(msg) do { pg_log_error(&quot;%s: %m&quot;, _(msg)); exit(1); } while(0)
+<span class="lineNum">      97 </span>            : 
+<a name="98"><span class="lineNum">      98 </span>            : </a>
+<span class="lineNum">      99 </span>            : int
+<span class="lineNum">     100 </span><span class="lineNoCov">          0 : main(int argc, char *argv[])</span>
+<span class="lineNum">     101 </span>            : {
+<span class="lineNum">     102 </span><span class="lineNoCov">          0 :     pg_logging_init(argv[0]);</span>
+<span class="lineNum">     103 </span><span class="lineNoCov">          0 :     set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN(&quot;pg_test_fsync&quot;));</span>
+<span class="lineNum">     104 </span><span class="lineNoCov">          0 :     progname = get_progname(argv[0]);</span>
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span><span class="lineNoCov">          0 :     handle_args(argc, argv);</span>
+<span class="lineNum">     107 </span>            : 
+<span class="lineNum">     108 </span>            :     /* Prevent leaving behind the test file */
+<span class="lineNum">     109 </span><span class="lineNoCov">          0 :     pqsignal(SIGINT, signal_cleanup);</span>
+<span class="lineNum">     110 </span><span class="lineNoCov">          0 :     pqsignal(SIGTERM, signal_cleanup);</span>
+<span class="lineNum">     111 </span>            : #ifndef WIN32
+<span class="lineNum">     112 </span><span class="lineNoCov">          0 :     pqsignal(SIGALRM, process_alarm);</span>
+<span class="lineNum">     113 </span>            : #endif
+<span class="lineNum">     114 </span>            : #ifdef SIGHUP
+<span class="lineNum">     115 </span>            :     /* Not defined on win32 */
+<span class="lineNum">     116 </span><span class="lineNoCov">          0 :     pqsignal(SIGHUP, signal_cleanup);</span>
+<span class="lineNum">     117 </span>            : #endif
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span><span class="lineNoCov">          0 :     prepare_buf();</span>
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span><span class="lineNoCov">          0 :     test_open();</span>
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span>            :     /* Test using 1 XLOG_BLCKSZ write */
+<span class="lineNum">     124 </span><span class="lineNoCov">          0 :     test_sync(1);</span>
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span>            :     /* Test using 2 XLOG_BLCKSZ writes */
+<span class="lineNum">     127 </span><span class="lineNoCov">          0 :     test_sync(2);</span>
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span><span class="lineNoCov">          0 :     test_open_syncs();</span>
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span><span class="lineNoCov">          0 :     test_file_descriptor_sync();</span>
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span><span class="lineNoCov">          0 :     test_non_sync();</span>
+<span class="lineNum">     134 </span>            : 
+<span class="lineNum">     135 </span><span class="lineNoCov">          0 :     unlink(filename);</span>
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span><span class="lineNoCov">          0 :     return 0;</span>
+<span class="lineNum">     138 </span>            : }
+<a name="139"><span class="lineNum">     139 </span>            : </a>
+<span class="lineNum">     140 </span>            : static void
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 : handle_args(int argc, char *argv[])</span>
+<span class="lineNum">     142 </span>            : {
+<span class="lineNum">     143 </span>            :     static struct option long_options[] = {
+<span class="lineNum">     144 </span>            :         {&quot;filename&quot;, required_argument, NULL, 'f'},
+<span class="lineNum">     145 </span>            :         {&quot;secs-per-test&quot;, required_argument, NULL, 's'},
+<span class="lineNum">     146 </span>            :         {NULL, 0, NULL, 0}
+<span class="lineNum">     147 </span>            :     };
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :     int         option;         /* Command line option */
+<span class="lineNum">     150 </span><span class="lineNoCov">          0 :     int         optindex = 0;   /* used by getopt_long */</span>
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineNoCov">          0 :     if (argc &gt; 1)</span>
+<span class="lineNum">     153 </span>            :     {
+<span class="lineNum">     154 </span><span class="lineNoCov">          0 :         if (strcmp(argv[1], &quot;--help&quot;) == 0 || strcmp(argv[1], &quot;-?&quot;) == 0)</span>
+<span class="lineNum">     155 </span>            :         {
+<span class="lineNum">     156 </span><span class="lineNoCov">          0 :             printf(_(&quot;Usage: %s [-f FILENAME] [-s SECS-PER-TEST]\n&quot;), progname);</span>
+<span class="lineNum">     157 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     158 </span>            :         }
+<span class="lineNum">     159 </span><span class="lineNoCov">          0 :         if (strcmp(argv[1], &quot;--version&quot;) == 0 || strcmp(argv[1], &quot;-V&quot;) == 0)</span>
+<span class="lineNum">     160 </span>            :         {
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :             puts(&quot;pg_test_fsync (PostgreSQL) &quot; PG_VERSION);</span>
+<span class="lineNum">     162 </span><span class="lineNoCov">          0 :             exit(0);</span>
+<span class="lineNum">     163 </span>            :         }
+<span class="lineNum">     164 </span>            :     }
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span><span class="lineNoCov">          0 :     while ((option = getopt_long(argc, argv, &quot;f:s:&quot;,</span>
+<span class="lineNum">     167 </span>            :                                  long_options, &amp;optindex)) != -1)
+<span class="lineNum">     168 </span>            :     {
+<span class="lineNum">     169 </span><span class="lineNoCov">          0 :         switch (option)</span>
+<span class="lineNum">     170 </span>            :         {
+<span class="lineNum">     171 </span>            :             case 'f':
+<span class="lineNum">     172 </span><span class="lineNoCov">          0 :                 filename = pg_strdup(optarg);</span>
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span>            :             case 's':
+<span class="lineNum">     176 </span><span class="lineNoCov">          0 :                 secs_per_test = atoi(optarg);</span>
+<span class="lineNum">     177 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span>            :             default:
+<span class="lineNum">     180 </span><span class="lineNoCov">          0 :                 fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     181 </span>            :                         progname);
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :                 exit(1);</span>
+<span class="lineNum">     183 </span>            :                 break;
+<span class="lineNum">     184 </span>            :         }
+<span class="lineNum">     185 </span>            :     }
+<span class="lineNum">     186 </span>            : 
+<span class="lineNum">     187 </span><span class="lineNoCov">          0 :     if (argc &gt; optind)</span>
+<span class="lineNum">     188 </span>            :     {
+<span class="lineNum">     189 </span><span class="lineNoCov">          0 :         pg_log_error(&quot;too many command-line arguments (first is \&quot;%s\&quot;)&quot;,</span>
+<span class="lineNum">     190 </span>            :                      argv[optind]);
+<span class="lineNum">     191 </span><span class="lineNoCov">          0 :         fprintf(stderr, _(&quot;Try \&quot;%s --help\&quot; for more information.\n&quot;),</span>
+<span class="lineNum">     192 </span>            :                 progname);
+<span class="lineNum">     193 </span><span class="lineNoCov">          0 :         exit(1);</span>
+<span class="lineNum">     194 </span>            :     }
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span><span class="lineNoCov">          0 :     printf(ngettext(&quot;%d second per test\n&quot;,</span>
+<span class="lineNum">     197 </span>            :                     &quot;%d seconds per test\n&quot;,
+<span class="lineNum">     198 </span>            :                     secs_per_test),
+<span class="lineNum">     199 </span>            :            secs_per_test);
+<span class="lineNum">     200 </span>            : #if PG_O_DIRECT != 0
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :     printf(_(&quot;O_DIRECT supported on this platform for open_datasync and open_sync.\n&quot;));</span>
+<span class="lineNum">     202 </span>            : #else
+<span class="lineNum">     203 </span>            :     printf(_(&quot;Direct I/O is not supported on this platform.\n&quot;));
+<span class="lineNum">     204 </span>            : #endif
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 : }</span>
+<a name="206"><span class="lineNum">     206 </span>            : </a>
+<span class="lineNum">     207 </span>            : static void
+<span class="lineNum">     208 </span><span class="lineNoCov">          0 : prepare_buf(void)</span>
+<span class="lineNum">     209 </span>            : {
+<span class="lineNum">     210 </span>            :     int         ops;
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span>            :     /* write random data into buffer */
+<span class="lineNum">     213 </span><span class="lineNoCov">          0 :     for (ops = 0; ops &lt; DEFAULT_XLOG_SEG_SIZE; ops++)</span>
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 :         full_buf[ops] = random();</span>
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span><span class="lineNoCov">          0 :     buf = (char *) TYPEALIGN(XLOG_BLCKSZ, full_buf);</span>
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 : }</span>
+<a name="218"><span class="lineNum">     218 </span>            : </a>
+<span class="lineNum">     219 </span>            : static void
+<span class="lineNum">     220 </span><span class="lineNoCov">          0 : test_open(void)</span>
+<span class="lineNum">     221 </span>            : {
+<span class="lineNum">     222 </span>            :     int         tmpfile;
+<span class="lineNum">     223 </span>            : 
+<span class="lineNum">     224 </span>            :     /*
+<span class="lineNum">     225 </span>            :      * test if we can open the target file
+<span class="lineNum">     226 </span>            :      */
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :     if ((tmpfile = open(filename, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1)</span>
+<span class="lineNum">     228 </span><span class="lineNoCov">          0 :         die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     229 </span><span class="lineNoCov">          0 :     needs_unlink = 1;</span>
+<span class="lineNum">     230 </span><span class="lineNoCov">          0 :     if (write(tmpfile, full_buf, DEFAULT_XLOG_SEG_SIZE) !=</span>
+<span class="lineNum">     231 </span>            :         DEFAULT_XLOG_SEG_SIZE)
+<span class="lineNum">     232 </span><span class="lineNoCov">          0 :         die(&quot;write failed&quot;);</span>
+<span class="lineNum">     233 </span>            : 
+<span class="lineNum">     234 </span>            :     /* fsync now so that dirty buffers don't skew later tests */
+<span class="lineNum">     235 </span><span class="lineNoCov">          0 :     if (fsync(tmpfile) != 0)</span>
+<span class="lineNum">     236 </span><span class="lineNoCov">          0 :         die(&quot;fsync failed&quot;);</span>
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span><span class="lineNoCov">          0 :     close(tmpfile);</span>
+<span class="lineNum">     239 </span><span class="lineNoCov">          0 : }</span>
+<a name="240"><span class="lineNum">     240 </span>            : </a>
+<span class="lineNum">     241 </span>            : static void
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 : test_sync(int writes_per_op)</span>
+<span class="lineNum">     243 </span>            : {
+<span class="lineNum">     244 </span>            :     int         tmpfile,
+<span class="lineNum">     245 </span>            :                 ops,
+<span class="lineNum">     246 </span>            :                 writes;
+<span class="lineNum">     247 </span><span class="lineNoCov">          0 :     bool        fs_warning = false;</span>
+<span class="lineNum">     248 </span>            : 
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :     if (writes_per_op == 1)</span>
+<span class="lineNum">     250 </span><span class="lineNoCov">          0 :         printf(_(&quot;\nCompare file sync methods using one %dkB write:\n&quot;), XLOG_BLCKSZ_K);</span>
+<span class="lineNum">     251 </span>            :     else
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :         printf(_(&quot;\nCompare file sync methods using two %dkB writes:\n&quot;), XLOG_BLCKSZ_K);</span>
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 :     printf(_(&quot;(in wal_sync_method preference order, except fdatasync is Linux's default)\n&quot;));</span>
+<span class="lineNum">     254 </span>            : 
+<span class="lineNum">     255 </span>            :     /*
+<span class="lineNum">     256 </span>            :      * Test open_datasync if available
+<span class="lineNum">     257 </span>            :      */
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;open_datasync&quot;);</span>
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span>            : #ifdef OPEN_DATASYNC_FLAG
+<span class="lineNum">     262 </span><span class="lineNoCov">          0 :     if ((tmpfile = open(filename, O_RDWR | O_DSYNC | PG_O_DIRECT, 0)) == -1)</span>
+<span class="lineNum">     263 </span>            :     {
+<span class="lineNum">     264 </span><span class="lineNoCov">          0 :         printf(NA_FORMAT, _(&quot;n/a*&quot;));</span>
+<span class="lineNum">     265 </span><span class="lineNoCov">          0 :         fs_warning = true;</span>
+<span class="lineNum">     266 </span>            :     }
+<span class="lineNum">     267 </span>            :     else
+<span class="lineNum">     268 </span>            :     {
+<span class="lineNum">     269 </span><span class="lineNoCov">          0 :         START_TIMER;</span>
+<span class="lineNum">     270 </span><span class="lineNoCov">          0 :         for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     271 </span>            :         {
+<span class="lineNum">     272 </span><span class="lineNoCov">          0 :             for (writes = 0; writes &lt; writes_per_op; writes++)</span>
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 :                 if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     274 </span><span class="lineNoCov">          0 :                     die(&quot;write failed&quot;);</span>
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :             if (lseek(tmpfile, 0, SEEK_SET) == -1)</span>
+<span class="lineNum">     276 </span><span class="lineNoCov">          0 :                 die(&quot;seek failed&quot;);</span>
+<span class="lineNum">     277 </span>            :         }
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :         STOP_TIMER;</span>
+<span class="lineNum">     279 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     280 </span>            :     }
+<span class="lineNum">     281 </span>            : #else
+<span class="lineNum">     282 </span>            :     printf(NA_FORMAT, _(&quot;n/a&quot;));
+<span class="lineNum">     283 </span>            : #endif
+<span class="lineNum">     284 </span>            : 
+<span class="lineNum">     285 </span>            : /*
+<span class="lineNum">     286 </span>            :  * Test fdatasync if available
+<span class="lineNum">     287 </span>            :  */
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;fdatasync&quot;);</span>
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     290 </span>            : 
+<span class="lineNum">     291 </span>            : #ifdef HAVE_FDATASYNC
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :     if ((tmpfile = open(filename, O_RDWR, 0)) == -1)</span>
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :         die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     294 </span><span class="lineNoCov">          0 :     START_TIMER;</span>
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :     for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     296 </span>            :     {
+<span class="lineNum">     297 </span><span class="lineNoCov">          0 :         for (writes = 0; writes &lt; writes_per_op; writes++)</span>
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :             if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :                 die(&quot;write failed&quot;);</span>
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :         fdatasync(tmpfile);</span>
+<span class="lineNum">     301 </span><span class="lineNoCov">          0 :         if (lseek(tmpfile, 0, SEEK_SET) == -1)</span>
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :             die(&quot;seek failed&quot;);</span>
+<span class="lineNum">     303 </span>            :     }
+<span class="lineNum">     304 </span><span class="lineNoCov">          0 :     STOP_TIMER;</span>
+<span class="lineNum">     305 </span><span class="lineNoCov">          0 :     close(tmpfile);</span>
+<span class="lineNum">     306 </span>            : #else
+<span class="lineNum">     307 </span>            :     printf(NA_FORMAT, _(&quot;n/a&quot;));
+<span class="lineNum">     308 </span>            : #endif
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span>            : /*
+<span class="lineNum">     311 </span>            :  * Test fsync
+<span class="lineNum">     312 </span>            :  */
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;fsync&quot;);</span>
+<span class="lineNum">     314 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     315 </span>            : 
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :     if ((tmpfile = open(filename, O_RDWR, 0)) == -1)</span>
+<span class="lineNum">     317 </span><span class="lineNoCov">          0 :         die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     318 </span><span class="lineNoCov">          0 :     START_TIMER;</span>
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :     for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     320 </span>            :     {
+<span class="lineNum">     321 </span><span class="lineNoCov">          0 :         for (writes = 0; writes &lt; writes_per_op; writes++)</span>
+<span class="lineNum">     322 </span><span class="lineNoCov">          0 :             if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :                 die(&quot;write failed&quot;);</span>
+<span class="lineNum">     324 </span><span class="lineNoCov">          0 :         if (fsync(tmpfile) != 0)</span>
+<span class="lineNum">     325 </span><span class="lineNoCov">          0 :             die(&quot;fsync failed&quot;);</span>
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :         if (lseek(tmpfile, 0, SEEK_SET) == -1)</span>
+<span class="lineNum">     327 </span><span class="lineNoCov">          0 :             die(&quot;seek failed&quot;);</span>
+<span class="lineNum">     328 </span>            :     }
+<span class="lineNum">     329 </span><span class="lineNoCov">          0 :     STOP_TIMER;</span>
+<span class="lineNum">     330 </span><span class="lineNoCov">          0 :     close(tmpfile);</span>
+<span class="lineNum">     331 </span>            : 
+<span class="lineNum">     332 </span>            : /*
+<span class="lineNum">     333 </span>            :  * If fsync_writethrough is available, test as well
+<span class="lineNum">     334 </span>            :  */
+<span class="lineNum">     335 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;fsync_writethrough&quot;);</span>
+<span class="lineNum">     336 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span>            : #ifdef HAVE_FSYNC_WRITETHROUGH
+<span class="lineNum">     339 </span>            :     if ((tmpfile = open(filename, O_RDWR, 0)) == -1)
+<span class="lineNum">     340 </span>            :         die(&quot;could not open output file&quot;);
+<span class="lineNum">     341 </span>            :     START_TIMER;
+<span class="lineNum">     342 </span>            :     for (ops = 0; alarm_triggered == false; ops++)
+<span class="lineNum">     343 </span>            :     {
+<span class="lineNum">     344 </span>            :         for (writes = 0; writes &lt; writes_per_op; writes++)
+<span class="lineNum">     345 </span>            :             if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)
+<span class="lineNum">     346 </span>            :                 die(&quot;write failed&quot;);
+<span class="lineNum">     347 </span>            :         if (pg_fsync_writethrough(tmpfile) != 0)
+<span class="lineNum">     348 </span>            :             die(&quot;fsync failed&quot;);
+<span class="lineNum">     349 </span>            :         if (lseek(tmpfile, 0, SEEK_SET) == -1)
+<span class="lineNum">     350 </span>            :             die(&quot;seek failed&quot;);
+<span class="lineNum">     351 </span>            :     }
+<span class="lineNum">     352 </span>            :     STOP_TIMER;
+<span class="lineNum">     353 </span>            :     close(tmpfile);
+<span class="lineNum">     354 </span>            : #else
+<span class="lineNum">     355 </span><span class="lineNoCov">          0 :     printf(NA_FORMAT, _(&quot;n/a&quot;));</span>
+<span class="lineNum">     356 </span>            : #endif
+<span class="lineNum">     357 </span>            : 
+<span class="lineNum">     358 </span>            : /*
+<span class="lineNum">     359 </span>            :  * Test open_sync if available
+<span class="lineNum">     360 </span>            :  */
+<span class="lineNum">     361 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;open_sync&quot;);</span>
+<span class="lineNum">     362 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span>            : #ifdef OPEN_SYNC_FLAG
+<span class="lineNum">     365 </span><span class="lineNoCov">          0 :     if ((tmpfile = open(filename, O_RDWR | OPEN_SYNC_FLAG | PG_O_DIRECT, 0)) == -1)</span>
+<span class="lineNum">     366 </span>            :     {
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :         printf(NA_FORMAT, _(&quot;n/a*&quot;));</span>
+<span class="lineNum">     368 </span><span class="lineNoCov">          0 :         fs_warning = true;</span>
+<span class="lineNum">     369 </span>            :     }
+<span class="lineNum">     370 </span>            :     else
+<span class="lineNum">     371 </span>            :     {
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :         START_TIMER;</span>
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 :         for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     374 </span>            :         {
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :             for (writes = 0; writes &lt; writes_per_op; writes++)</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :                 if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span>            :                     /*
+<span class="lineNum">     379 </span>            :                      * This can generate write failures if the filesystem has
+<span class="lineNum">     380 </span>            :                      * a large block size, e.g. 4k, and there is no support
+<span class="lineNum">     381 </span>            :                      * for O_DIRECT writes smaller than the file system block
+<span class="lineNum">     382 </span>            :                      * size, e.g. XFS.
+<span class="lineNum">     383 </span>            :                      */
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :                     die(&quot;write failed&quot;);</span>
+<span class="lineNum">     385 </span><span class="lineNoCov">          0 :             if (lseek(tmpfile, 0, SEEK_SET) == -1)</span>
+<span class="lineNum">     386 </span><span class="lineNoCov">          0 :                 die(&quot;seek failed&quot;);</span>
+<span class="lineNum">     387 </span>            :         }
+<span class="lineNum">     388 </span><span class="lineNoCov">          0 :         STOP_TIMER;</span>
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     390 </span>            :     }
+<span class="lineNum">     391 </span>            : #else
+<span class="lineNum">     392 </span>            :     printf(NA_FORMAT, _(&quot;n/a&quot;));
+<span class="lineNum">     393 </span>            : #endif
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span><span class="lineNoCov">          0 :     if (fs_warning)</span>
+<span class="lineNum">     396 </span>            :     {
+<span class="lineNum">     397 </span><span class="lineNoCov">          0 :         printf(_(&quot;* This file system and its mount options do not support direct\n&quot;</span>
+<span class="lineNum">     398 </span>            :                  &quot;  I/O, e.g. ext4 in journaled mode.\n&quot;));
+<span class="lineNum">     399 </span>            :     }
+<span class="lineNum">     400 </span><span class="lineNoCov">          0 : }</span>
+<a name="401"><span class="lineNum">     401 </span>            : </a>
+<span class="lineNum">     402 </span>            : static void
+<span class="lineNum">     403 </span><span class="lineNoCov">          0 : test_open_syncs(void)</span>
+<span class="lineNum">     404 </span>            : {
+<span class="lineNum">     405 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nCompare open_sync with different write sizes:\n&quot;));</span>
+<span class="lineNum">     406 </span><span class="lineNoCov">          0 :     printf(_(&quot;(This is designed to compare the cost of writing 16kB in different write\n&quot;</span>
+<span class="lineNum">     407 </span>            :              &quot;open_sync sizes.)\n&quot;));
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :     test_open_sync(_(&quot; 1 * 16kB open_sync write&quot;), 16);</span>
+<span class="lineNum">     410 </span><span class="lineNoCov">          0 :     test_open_sync(_(&quot; 2 *  8kB open_sync writes&quot;), 8);</span>
+<span class="lineNum">     411 </span><span class="lineNoCov">          0 :     test_open_sync(_(&quot; 4 *  4kB open_sync writes&quot;), 4);</span>
+<span class="lineNum">     412 </span><span class="lineNoCov">          0 :     test_open_sync(_(&quot; 8 *  2kB open_sync writes&quot;), 2);</span>
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :     test_open_sync(_(&quot;16 *  1kB open_sync writes&quot;), 1);</span>
+<span class="lineNum">     414 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span>            : /*
+<span class="lineNum">     417 </span>            :  * Test open_sync with different size files
+<a name="418"><span class="lineNum">     418 </span>            :  */</a>
+<span class="lineNum">     419 </span>            : static void
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 : test_open_sync(const char *msg, int writes_size)</span>
+<span class="lineNum">     421 </span>            : {
+<span class="lineNum">     422 </span>            : #ifdef OPEN_SYNC_FLAG
+<span class="lineNum">     423 </span>            :     int         tmpfile,
+<span class="lineNum">     424 </span>            :                 ops,
+<span class="lineNum">     425 </span>            :                 writes;
+<span class="lineNum">     426 </span>            : #endif
+<span class="lineNum">     427 </span>            : 
+<span class="lineNum">     428 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, msg);</span>
+<span class="lineNum">     429 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span>            : #ifdef OPEN_SYNC_FLAG
+<span class="lineNum">     432 </span><span class="lineNoCov">          0 :     if ((tmpfile = open(filename, O_RDWR | OPEN_SYNC_FLAG | PG_O_DIRECT, 0)) == -1)</span>
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 :         printf(NA_FORMAT, _(&quot;n/a*&quot;));</span>
+<span class="lineNum">     434 </span>            :     else
+<span class="lineNum">     435 </span>            :     {
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :         START_TIMER;</span>
+<span class="lineNum">     437 </span><span class="lineNoCov">          0 :         for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     438 </span>            :         {
+<span class="lineNum">     439 </span><span class="lineNoCov">          0 :             for (writes = 0; writes &lt; 16 / writes_size; writes++)</span>
+<span class="lineNum">     440 </span><span class="lineNoCov">          0 :                 if (write(tmpfile, buf, writes_size * 1024) !=</span>
+<span class="lineNum">     441 </span><span class="lineNoCov">          0 :                     writes_size * 1024)</span>
+<span class="lineNum">     442 </span><span class="lineNoCov">          0 :                     die(&quot;write failed&quot;);</span>
+<span class="lineNum">     443 </span><span class="lineNoCov">          0 :             if (lseek(tmpfile, 0, SEEK_SET) == -1)</span>
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :                 die(&quot;seek failed&quot;);</span>
+<span class="lineNum">     445 </span>            :         }
+<span class="lineNum">     446 </span><span class="lineNoCov">          0 :         STOP_TIMER;</span>
+<span class="lineNum">     447 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     448 </span>            :     }
+<span class="lineNum">     449 </span>            : #else
+<span class="lineNum">     450 </span>            :     printf(NA_FORMAT, _(&quot;n/a&quot;));
+<span class="lineNum">     451 </span>            : #endif
+<span class="lineNum">     452 </span><span class="lineNoCov">          0 : }</span>
+<a name="453"><span class="lineNum">     453 </span>            : </a>
+<span class="lineNum">     454 </span>            : static void
+<span class="lineNum">     455 </span><span class="lineNoCov">          0 : test_file_descriptor_sync(void)</span>
+<span class="lineNum">     456 </span>            : {
+<span class="lineNum">     457 </span>            :     int         tmpfile,
+<span class="lineNum">     458 </span>            :                 ops;
+<span class="lineNum">     459 </span>            : 
+<span class="lineNum">     460 </span>            :     /*
+<span class="lineNum">     461 </span>            :      * Test whether fsync can sync data written on a different descriptor for
+<span class="lineNum">     462 </span>            :      * the same file.  This checks the efficiency of multi-process fsyncs
+<span class="lineNum">     463 </span>            :      * against the same file. Possibly this should be done with writethrough
+<span class="lineNum">     464 </span>            :      * on platforms which support it.
+<span class="lineNum">     465 </span>            :      */
+<span class="lineNum">     466 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nTest if fsync on non-write file descriptor is honored:\n&quot;));</span>
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 :     printf(_(&quot;(If the times are similar, fsync() can sync data written on a different\n&quot;</span>
+<span class="lineNum">     468 </span>            :              &quot;descriptor.)\n&quot;));
+<span class="lineNum">     469 </span>            : 
+<span class="lineNum">     470 </span>            :     /*
+<span class="lineNum">     471 </span>            :      * first write, fsync and close, which is the normal behavior without
+<span class="lineNum">     472 </span>            :      * multiple descriptors
+<span class="lineNum">     473 </span>            :      */
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;write, fsync, close&quot;);</span>
+<span class="lineNum">     475 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :     START_TIMER;</span>
+<span class="lineNum">     478 </span><span class="lineNoCov">          0 :     for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     479 </span>            :     {
+<span class="lineNum">     480 </span><span class="lineNoCov">          0 :         if ((tmpfile = open(filename, O_RDWR, 0)) == -1)</span>
+<span class="lineNum">     481 </span><span class="lineNoCov">          0 :             die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     482 </span><span class="lineNoCov">          0 :         if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     483 </span><span class="lineNoCov">          0 :             die(&quot;write failed&quot;);</span>
+<span class="lineNum">     484 </span><span class="lineNoCov">          0 :         if (fsync(tmpfile) != 0)</span>
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :             die(&quot;fsync failed&quot;);</span>
+<span class="lineNum">     486 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     487 </span>            : 
+<span class="lineNum">     488 </span>            :         /*
+<span class="lineNum">     489 </span>            :          * open and close the file again to be consistent with the following
+<span class="lineNum">     490 </span>            :          * test
+<span class="lineNum">     491 </span>            :          */
+<span class="lineNum">     492 </span><span class="lineNoCov">          0 :         if ((tmpfile = open(filename, O_RDWR, 0)) == -1)</span>
+<span class="lineNum">     493 </span><span class="lineNoCov">          0 :             die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     494 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     495 </span>            :     }
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :     STOP_TIMER;</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span>            :     /*
+<span class="lineNum">     499 </span>            :      * Now open, write, close, open again and fsync This simulates processes
+<span class="lineNum">     500 </span>            :      * fsyncing each other's writes.
+<span class="lineNum">     501 </span>            :      */
+<span class="lineNum">     502 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;write, close, fsync&quot;);</span>
+<span class="lineNum">     503 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span><span class="lineNoCov">          0 :     START_TIMER;</span>
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :     for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     507 </span>            :     {
+<span class="lineNum">     508 </span><span class="lineNoCov">          0 :         if ((tmpfile = open(filename, O_RDWR, 0)) == -1)</span>
+<span class="lineNum">     509 </span><span class="lineNoCov">          0 :             die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     510 </span><span class="lineNoCov">          0 :         if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     511 </span><span class="lineNoCov">          0 :             die(&quot;write failed&quot;);</span>
+<span class="lineNum">     512 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     513 </span>            :         /* reopen file */
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :         if ((tmpfile = open(filename, O_RDWR, 0)) == -1)</span>
+<span class="lineNum">     515 </span><span class="lineNoCov">          0 :             die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     516 </span><span class="lineNoCov">          0 :         if (fsync(tmpfile) != 0)</span>
+<span class="lineNum">     517 </span><span class="lineNoCov">          0 :             die(&quot;fsync failed&quot;);</span>
+<span class="lineNum">     518 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     519 </span>            :     }
+<span class="lineNum">     520 </span><span class="lineNoCov">          0 :     STOP_TIMER;</span>
+<span class="lineNum">     521 </span><span class="lineNoCov">          0 : }</span>
+<a name="522"><span class="lineNum">     522 </span>            : </a>
+<span class="lineNum">     523 </span>            : static void
+<span class="lineNum">     524 </span><span class="lineNoCov">          0 : test_non_sync(void)</span>
+<span class="lineNum">     525 </span>            : {
+<span class="lineNum">     526 </span>            :     int         tmpfile,
+<span class="lineNum">     527 </span>            :                 ops;
+<span class="lineNum">     528 </span>            : 
+<span class="lineNum">     529 </span>            :     /*
+<span class="lineNum">     530 </span>            :      * Test a simple write without fsync
+<span class="lineNum">     531 </span>            :      */
+<span class="lineNum">     532 </span><span class="lineNoCov">          0 :     printf(_(&quot;\nNon-sync'ed %dkB writes:\n&quot;), XLOG_BLCKSZ_K);</span>
+<span class="lineNum">     533 </span><span class="lineNoCov">          0 :     printf(LABEL_FORMAT, &quot;write&quot;);</span>
+<span class="lineNum">     534 </span><span class="lineNoCov">          0 :     fflush(stdout);</span>
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 :     START_TIMER;</span>
+<span class="lineNum">     537 </span><span class="lineNoCov">          0 :     for (ops = 0; alarm_triggered == false; ops++)</span>
+<span class="lineNum">     538 </span>            :     {
+<span class="lineNum">     539 </span><span class="lineNoCov">          0 :         if ((tmpfile = open(filename, O_RDWR, 0)) == -1)</span>
+<span class="lineNum">     540 </span><span class="lineNoCov">          0 :             die(&quot;could not open output file&quot;);</span>
+<span class="lineNum">     541 </span><span class="lineNoCov">          0 :         if (write(tmpfile, buf, XLOG_BLCKSZ) != XLOG_BLCKSZ)</span>
+<span class="lineNum">     542 </span><span class="lineNoCov">          0 :             die(&quot;write failed&quot;);</span>
+<span class="lineNum">     543 </span><span class="lineNoCov">          0 :         close(tmpfile);</span>
+<span class="lineNum">     544 </span>            :     }
+<span class="lineNum">     545 </span><span class="lineNoCov">          0 :     STOP_TIMER;</span>
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 : }</span>
+<a name="547"><span class="lineNum">     547 </span>            : </a>
+<span class="lineNum">     548 </span>            : static void
+<span class="lineNum">     549 </span><span class="lineNoCov">          0 : signal_cleanup(int signum)</span>
+<span class="lineNum">     550 </span>            : {
+<span class="lineNum">     551 </span>            :     /* Delete the file if it exists. Ignore errors */
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :     if (needs_unlink)</span>
+<span class="lineNum">     553 </span><span class="lineNoCov">          0 :         unlink(filename);</span>
+<span class="lineNum">     554 </span>            :     /* Finish incomplete line on stdout */
+<span class="lineNum">     555 </span><span class="lineNoCov">          0 :     puts(&quot;&quot;);</span>
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :     exit(signum);</span>
+<span class="lineNum">     557 </span>            : }
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span>            : #ifdef HAVE_FSYNC_WRITETHROUGH
+<span class="lineNum">     560 </span>            : 
+<span class="lineNum">     561 </span>            : static int
+<span class="lineNum">     562 </span>            : pg_fsync_writethrough(int fd)
+<span class="lineNum">     563 </span>            : {
+<span class="lineNum">     564 </span>            : #ifdef WIN32
+<span class="lineNum">     565 </span>            :     return _commit(fd);
+<span class="lineNum">     566 </span>            : #elif defined(F_FULLFSYNC)
+<span class="lineNum">     567 </span>            :     return (fcntl(fd, F_FULLFSYNC, 0) == -1) ? -1 : 0;
+<span class="lineNum">     568 </span>            : #else
+<span class="lineNum">     569 </span>            :     errno = ENOSYS;
+<span class="lineNum">     570 </span>            :     return -1;
+<span class="lineNum">     571 </span>            : #endif
+<span class="lineNum">     572 </span>            : }
+<span class="lineNum">     573 </span>            : #endif
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span>            : /*
+<span class="lineNum">     576 </span>            :  * print out the writes per second for tests
+<a name="577"><span class="lineNum">     577 </span>            :  */</a>
+<span class="lineNum">     578 </span>            : static void
+<span class="lineNum">     579 </span><span class="lineNoCov">          0 : print_elapse(struct timeval start_t, struct timeval stop_t, int ops)</span>
+<span class="lineNum">     580 </span>            : {
+<span class="lineNum">     581 </span><span class="lineNoCov">          0 :     double      total_time = (stop_t.tv_sec - start_t.tv_sec) +</span>
+<span class="lineNum">     582 </span><span class="lineNoCov">          0 :     (stop_t.tv_usec - start_t.tv_usec) * 0.000001;</span>
+<span class="lineNum">     583 </span><span class="lineNoCov">          0 :     double      per_second = ops / total_time;</span>
+<span class="lineNum">     584 </span><span class="lineNoCov">          0 :     double      avg_op_time_us = (total_time / ops) * USECS_SEC;</span>
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span><span class="lineNoCov">          0 :     printf(_(OPS_FORMAT), per_second, avg_op_time_us);</span>
+<span class="lineNum">     587 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     588 </span>            : 
+<a name="589"><span class="lineNum">     589 </span>            : #ifndef WIN32</a>
+<span class="lineNum">     590 </span>            : static void
+<span class="lineNum">     591 </span><span class="lineNoCov">          0 : process_alarm(int sig)</span>
+<span class="lineNum">     592 </span>            : {
+<span class="lineNum">     593 </span><span class="lineNoCov">          0 :     alarm_triggered = true;</span>
+<span class="lineNum">     594 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     595 </span>            : #else
+<span class="lineNum">     596 </span>            : static DWORD WINAPI
+<span class="lineNum">     597 </span>            : process_alarm(LPVOID param)
+<span class="lineNum">     598 </span>            : {
+<span class="lineNum">     599 </span>            :     /* WIN32 doesn't support alarm, so we create a thread and sleep here */
+<span class="lineNum">     600 </span>            :     Sleep(secs_per_test * 1000);
+<span class="lineNum">     601 </span>            :     alarm_triggered = true;
+<span class="lineNum">     602 </span>            :     ExitThread(0);
+<span class="lineNum">     603 </span>            : }
+<span class="lineNum">     604 </span>            : #endif
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

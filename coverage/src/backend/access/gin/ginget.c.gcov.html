@@ -1,0 +1,1986 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/gin/ginget.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/gin</a> - ginget.c<span style="font-size: 80%;"> (source / <a href="ginget.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">436</td>
+            <td class="headerCovTableEntry">603</td>
+            <td class="headerCovTableEntryLo">72.3 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntry">16</td>
+            <td class="headerCovTableEntryMed">87.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * ginget.c
+<span class="lineNum">       4 </span>            :  *    fetch tuples from a GIN scan.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *          src/backend/access/gin/ginget.c
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : 
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/gin_private.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;access/relscan.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;storage/predicate.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;utils/datum.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : /* GUC parameter */
+<span class="lineNum">      26 </span>            : int         GinFuzzySearchLimit = 0;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : typedef struct pendingPosition
+<span class="lineNum">      29 </span>            : {
+<span class="lineNum">      30 </span>            :     Buffer      pendingBuffer;
+<span class="lineNum">      31 </span>            :     OffsetNumber firstOffset;
+<span class="lineNum">      32 </span>            :     OffsetNumber lastOffset;
+<span class="lineNum">      33 </span>            :     ItemPointerData item;
+<span class="lineNum">      34 </span>            :     bool       *hasMatchKey;
+<span class="lineNum">      35 </span>            : } pendingPosition;
+<span class="lineNum">      36 </span>            : 
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : /*
+<span class="lineNum">      39 </span>            :  * Goes to the next page if current offset is outside of bounds
+<a name="40"><span class="lineNum">      40 </span>            :  */</a>
+<span class="lineNum">      41 </span>            : static bool
+<span class="lineNum">      42 </span><span class="lineCov">      37044 : moveRightIfItNeeded(GinBtreeData *btree, GinBtreeStack *stack, Snapshot snapshot)</span>
+<span class="lineNum">      43 </span>            : {
+<span class="lineNum">      44 </span><span class="lineCov">      37044 :     Page        page = BufferGetPage(stack-&gt;buffer);</span>
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span><span class="lineCov">      37044 :     if (stack-&gt;off &gt; PageGetMaxOffsetNumber(page))</span>
+<span class="lineNum">      47 </span>            :     {
+<span class="lineNum">      48 </span>            :         /*
+<span class="lineNum">      49 </span>            :          * We scanned the whole page, so we should take right page
+<span class="lineNum">      50 </span>            :          */
+<span class="lineNum">      51 </span><span class="lineCov">        334 :         if (GinPageRightMost(page))</span>
+<span class="lineNum">      52 </span><span class="lineCov">         30 :             return false;       /* no more pages */</span>
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span><span class="lineCov">        304 :         stack-&gt;buffer = ginStepRight(stack-&gt;buffer, btree-&gt;index, GIN_SHARE);</span>
+<span class="lineNum">      55 </span><span class="lineCov">        304 :         stack-&gt;blkno = BufferGetBlockNumber(stack-&gt;buffer);</span>
+<span class="lineNum">      56 </span><span class="lineCov">        304 :         stack-&gt;off = FirstOffsetNumber;</span>
+<span class="lineNum">      57 </span><span class="lineCov">        304 :         PredicateLockPage(btree-&gt;index, stack-&gt;blkno, snapshot);</span>
+<span class="lineNum">      58 </span>            :     }
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span><span class="lineCov">      37014 :     return true;</span>
+<span class="lineNum">      61 </span>            : }
+<span class="lineNum">      62 </span>            : 
+<span class="lineNum">      63 </span>            : /*
+<span class="lineNum">      64 </span>            :  * Scan all pages of a posting tree and save all its heap ItemPointers
+<span class="lineNum">      65 </span>            :  * in scanEntry-&gt;matchBitmap
+<a name="66"><span class="lineNum">      66 </span>            :  */</a>
+<span class="lineNum">      67 </span>            : static void
+<span class="lineNum">      68 </span><span class="lineNoCov">          0 : scanPostingTree(Relation index, GinScanEntry scanEntry,</span>
+<span class="lineNum">      69 </span>            :                 BlockNumber rootPostingTree, Snapshot snapshot)
+<span class="lineNum">      70 </span>            : {
+<span class="lineNum">      71 </span>            :     GinBtreeData btree;
+<span class="lineNum">      72 </span>            :     GinBtreeStack *stack;
+<span class="lineNum">      73 </span>            :     Buffer      buffer;
+<span class="lineNum">      74 </span>            :     Page        page;
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            :     /* Descend to the leftmost leaf page */
+<span class="lineNum">      77 </span><span class="lineNoCov">          0 :     stack = ginScanBeginPostingTree(&amp;btree, index, rootPostingTree, snapshot);</span>
+<span class="lineNum">      78 </span><span class="lineNoCov">          0 :     buffer = stack-&gt;buffer;</span>
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span><span class="lineNoCov">          0 :     IncrBufferRefCount(buffer); /* prevent unpin in freeGinBtreeStack */</span>
+<span class="lineNum">      81 </span>            : 
+<span class="lineNum">      82 </span><span class="lineNoCov">          0 :     freeGinBtreeStack(stack);</span>
+<span class="lineNum">      83 </span>            : 
+<span class="lineNum">      84 </span>            :     /*
+<span class="lineNum">      85 </span>            :      * Loop iterates through all leaf pages of posting tree
+<span class="lineNum">      86 </span>            :      */
+<span class="lineNum">      87 </span>            :     for (;;)
+<span class="lineNum">      88 </span>            :     {
+<span class="lineNum">      89 </span><span class="lineNoCov">          0 :         page = BufferGetPage(buffer);</span>
+<span class="lineNum">      90 </span><span class="lineNoCov">          0 :         if ((GinPageGetOpaque(page)-&gt;flags &amp; GIN_DELETED) == 0)</span>
+<span class="lineNum">      91 </span>            :         {
+<span class="lineNum">      92 </span><span class="lineNoCov">          0 :             int         n = GinDataLeafPageGetItemsToTbm(page, scanEntry-&gt;matchBitmap);</span>
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span><span class="lineNoCov">          0 :             scanEntry-&gt;predictNumberResult += n;</span>
+<span class="lineNum">      95 </span>            :         }
+<span class="lineNum">      96 </span>            : 
+<span class="lineNum">      97 </span><span class="lineNoCov">          0 :         if (GinPageRightMost(page))</span>
+<span class="lineNum">      98 </span><span class="lineNoCov">          0 :             break;              /* no more pages */</span>
+<span class="lineNum">      99 </span>            : 
+<span class="lineNum">     100 </span><span class="lineNoCov">          0 :         buffer = ginStepRight(buffer, index, GIN_SHARE);</span>
+<span class="lineNum">     101 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     102 </span>            : 
+<span class="lineNum">     103 </span><span class="lineNoCov">          0 :     UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">     104 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span>            : /*
+<span class="lineNum">     107 </span>            :  * Collects TIDs into scanEntry-&gt;matchBitmap for all heap tuples that
+<span class="lineNum">     108 </span>            :  * match the search entry.  This supports three different match modes:
+<span class="lineNum">     109 </span>            :  *
+<span class="lineNum">     110 </span>            :  * 1. Partial-match support: scan from current point until the
+<span class="lineNum">     111 </span>            :  *    comparePartialFn says we're done.
+<span class="lineNum">     112 </span>            :  * 2. SEARCH_MODE_ALL: scan from current point (which should be first
+<span class="lineNum">     113 </span>            :  *    key for the current attnum) until we hit null items or end of attnum
+<span class="lineNum">     114 </span>            :  * 3. SEARCH_MODE_EVERYTHING: scan from current point (which should be first
+<span class="lineNum">     115 </span>            :  *    key for the current attnum) until we hit end of attnum
+<span class="lineNum">     116 </span>            :  *
+<span class="lineNum">     117 </span>            :  * Returns true if done, false if it's necessary to restart scan from scratch
+<a name="118"><span class="lineNum">     118 </span>            :  */</a>
+<span class="lineNum">     119 </span>            : static bool
+<span class="lineNum">     120 </span><span class="lineCov">         38 : collectMatchBitmap(GinBtreeData *btree, GinBtreeStack *stack,</span>
+<span class="lineNum">     121 </span>            :                    GinScanEntry scanEntry, Snapshot snapshot)
+<span class="lineNum">     122 </span>            : {
+<span class="lineNum">     123 </span>            :     OffsetNumber attnum;
+<span class="lineNum">     124 </span>            :     Form_pg_attribute attr;
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span>            :     /* Initialize empty bitmap result */
+<span class="lineNum">     127 </span><span class="lineCov">         38 :     scanEntry-&gt;matchBitmap = tbm_create(work_mem * 1024L, NULL);</span>
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span>            :     /* Null query cannot partial-match anything */
+<span class="lineNum">     130 </span><span class="lineCov">         42 :     if (scanEntry-&gt;isPartialMatch &amp;&amp;</span>
+<span class="lineNum">     131 </span><span class="lineCov">          4 :         scanEntry-&gt;queryCategory != GIN_CAT_NORM_KEY)</span>
+<span class="lineNum">     132 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span>            :     /* Locate tupdesc entry for key column (for attbyval/attlen data) */
+<span class="lineNum">     135 </span><span class="lineCov">         38 :     attnum = scanEntry-&gt;attnum;</span>
+<span class="lineNum">     136 </span><span class="lineCov">         38 :     attr = TupleDescAttr(btree-&gt;ginstate-&gt;origTupdesc, attnum - 1);</span>
+<span class="lineNum">     137 </span>            : 
+<span class="lineNum">     138 </span>            :     /*
+<span class="lineNum">     139 </span>            :      * Predicate lock entry leaf page, following pages will be locked by
+<span class="lineNum">     140 </span>            :      * moveRightIfItNeeded()
+<span class="lineNum">     141 </span>            :      */
+<span class="lineNum">     142 </span><span class="lineCov">         38 :     PredicateLockPage(btree-&gt;index, stack-&gt;buffer, snapshot);</span>
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span>            :     for (;;)
+<span class="lineNum">     145 </span>            :     {
+<span class="lineNum">     146 </span>            :         Page        page;
+<span class="lineNum">     147 </span>            :         IndexTuple  itup;
+<span class="lineNum">     148 </span>            :         Datum       idatum;
+<span class="lineNum">     149 </span>            :         GinNullCategory icategory;
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span>            :         /*
+<span class="lineNum">     152 </span>            :          * stack-&gt;off points to the interested entry, buffer is already locked
+<span class="lineNum">     153 </span>            :          */
+<span class="lineNum">     154 </span><span class="lineCov">      37044 :         if (moveRightIfItNeeded(btree, stack, snapshot) == false)</span>
+<span class="lineNum">     155 </span><span class="lineCov">         68 :             return true;</span>
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span><span class="lineCov">      37014 :         page = BufferGetPage(stack-&gt;buffer);</span>
+<span class="lineNum">     158 </span><span class="lineCov">      37014 :         TestForOldSnapshot(snapshot, btree-&gt;index, page);</span>
+<span class="lineNum">     159 </span><span class="lineCov">      37014 :         itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, stack-&gt;off));</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span>            :         /*
+<span class="lineNum">     162 </span>            :          * If tuple stores another attribute then stop scan
+<span class="lineNum">     163 </span>            :          */
+<span class="lineNum">     164 </span><span class="lineCov">      37014 :         if (gintuple_get_attrnum(btree-&gt;ginstate, itup) != attnum)</span>
+<span class="lineNum">     165 </span><span class="lineNoCov">          0 :             return true;</span>
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span>            :         /* Safe to fetch attribute value */
+<span class="lineNum">     168 </span><span class="lineCov">      37014 :         idatum = gintuple_get_key(btree-&gt;ginstate, itup, &amp;icategory);</span>
+<span class="lineNum">     169 </span>            : 
+<span class="lineNum">     170 </span>            :         /*
+<span class="lineNum">     171 </span>            :          * Check for appropriate scan stop conditions
+<span class="lineNum">     172 </span>            :          */
+<span class="lineNum">     173 </span><span class="lineCov">      37014 :         if (scanEntry-&gt;isPartialMatch)</span>
+<span class="lineNum">     174 </span>            :         {
+<span class="lineNum">     175 </span>            :             int32       cmp;
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span>            :             /*
+<span class="lineNum">     178 </span>            :              * In partial match, stop scan at any null (including
+<span class="lineNum">     179 </span>            :              * placeholders); partial matches never match nulls
+<span class="lineNum">     180 </span>            :              */
+<span class="lineNum">     181 </span><span class="lineCov">        148 :             if (icategory != GIN_CAT_NORM_KEY)</span>
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :                 return true;</span>
+<span class="lineNum">     183 </span>            : 
+<span class="lineNum">     184 </span>            :             /*----------
+<span class="lineNum">     185 </span>            :              * Check of partial match.
+<span class="lineNum">     186 </span>            :              * case cmp == 0 =&gt; match
+<span class="lineNum">     187 </span>            :              * case cmp &gt; 0 =&gt; not match and finish scan
+<span class="lineNum">     188 </span>            :              * case cmp &lt; 0 =&gt; not match and continue scan
+<span class="lineNum">     189 </span>            :              *----------
+<span class="lineNum">     190 </span>            :              */
+<span class="lineNum">     191 </span><span class="lineCov">        148 :             cmp = DatumGetInt32(FunctionCall4Coll(&amp;btree-&gt;ginstate-&gt;comparePartialFn[attnum - 1],</span>
+<span class="lineNum">     192 </span>            :                                                   btree-&gt;ginstate-&gt;supportCollation[attnum - 1],
+<span class="lineNum">     193 </span>            :                                                   scanEntry-&gt;queryKey,
+<span class="lineNum">     194 </span>            :                                                   idatum,
+<span class="lineNum">     195 </span>            :                                                   UInt16GetDatum(scanEntry-&gt;strategy),
+<span class="lineNum">     196 </span>            :                                                   PointerGetDatum(scanEntry-&gt;extra_data)));
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span><span class="lineCov">        148 :             if (cmp &gt; 0)</span>
+<span class="lineNum">     199 </span><span class="lineCov">          4 :                 return true;</span>
+<span class="lineNum">     200 </span><span class="lineCov">        144 :             else if (cmp &lt; 0)</span>
+<span class="lineNum">     201 </span>            :             {
+<span class="lineNum">     202 </span><span class="lineNoCov">          0 :                 stack-&gt;off++;</span>
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     204 </span>            :             }
+<span class="lineNum">     205 </span>            :         }
+<span class="lineNum">     206 </span><span class="lineCov">      36866 :         else if (scanEntry-&gt;searchMode == GIN_SEARCH_MODE_ALL)</span>
+<span class="lineNum">     207 </span>            :         {
+<span class="lineNum">     208 </span>            :             /*
+<span class="lineNum">     209 </span>            :              * In ALL mode, we are not interested in null items, so we can
+<span class="lineNum">     210 </span>            :              * stop if we get to a null-item placeholder (which will be the
+<span class="lineNum">     211 </span>            :              * last entry for a given attnum).  We do want to include NULL_KEY
+<span class="lineNum">     212 </span>            :              * and EMPTY_ITEM entries, though.
+<span class="lineNum">     213 </span>            :              */
+<span class="lineNum">     214 </span><span class="lineCov">      36866 :             if (icategory == GIN_CAT_NULL_ITEM)</span>
+<span class="lineNum">     215 </span><span class="lineCov">          4 :                 return true;</span>
+<span class="lineNum">     216 </span>            :         }
+<span class="lineNum">     217 </span>            : 
+<span class="lineNum">     218 </span>            :         /*
+<span class="lineNum">     219 </span>            :          * OK, we want to return the TIDs listed in this entry.
+<span class="lineNum">     220 </span>            :          */
+<span class="lineNum">     221 </span><span class="lineCov">      37006 :         if (GinIsPostingTree(itup))</span>
+<span class="lineNum">     222 </span>            :         {
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 :             BlockNumber rootPostingTree = GinGetPostingTree(itup);</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span>            :             /*
+<span class="lineNum">     226 </span>            :              * We should unlock current page (but not unpin) during tree scan
+<span class="lineNum">     227 </span>            :              * to prevent deadlock with vacuum processes.
+<span class="lineNum">     228 </span>            :              *
+<span class="lineNum">     229 </span>            :              * We save current entry value (idatum) to be able to re-find our
+<span class="lineNum">     230 </span>            :              * tuple after re-locking
+<span class="lineNum">     231 </span>            :              */
+<span class="lineNum">     232 </span><span class="lineNoCov">          0 :             if (icategory == GIN_CAT_NORM_KEY)</span>
+<span class="lineNum">     233 </span><span class="lineNoCov">          0 :                 idatum = datumCopy(idatum, attr-&gt;attbyval, attr-&gt;attlen);</span>
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span><span class="lineNoCov">          0 :             LockBuffer(stack-&gt;buffer, GIN_UNLOCK);</span>
+<span class="lineNum">     236 </span>            : 
+<span class="lineNum">     237 </span>            :             /*
+<span class="lineNum">     238 </span>            :              * Acquire predicate lock on the posting tree.  We already hold a
+<span class="lineNum">     239 </span>            :              * lock on the entry page, but insertions to the posting tree
+<span class="lineNum">     240 </span>            :              * don't check for conflicts on that level.
+<span class="lineNum">     241 </span>            :              */
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 :             PredicateLockPage(btree-&gt;index, rootPostingTree, snapshot);</span>
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            :             /* Collect all the TIDs in this entry's posting tree */
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :             scanPostingTree(btree-&gt;index, scanEntry, rootPostingTree,</span>
+<span class="lineNum">     246 </span>            :                             snapshot);
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span>            :             /*
+<span class="lineNum">     249 </span>            :              * We lock again the entry page and while it was unlocked insert
+<span class="lineNum">     250 </span>            :              * might have occurred, so we need to re-find our position.
+<span class="lineNum">     251 </span>            :              */
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :             LockBuffer(stack-&gt;buffer, GIN_SHARE);</span>
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 :             page = BufferGetPage(stack-&gt;buffer);</span>
+<span class="lineNum">     254 </span><span class="lineNoCov">          0 :             if (!GinPageIsLeaf(page))</span>
+<span class="lineNum">     255 </span>            :             {
+<span class="lineNum">     256 </span>            :                 /*
+<span class="lineNum">     257 </span>            :                  * Root page becomes non-leaf while we unlock it. We will
+<span class="lineNum">     258 </span>            :                  * start again, this situation doesn't occur often - root can
+<span class="lineNum">     259 </span>            :                  * became a non-leaf only once per life of index.
+<span class="lineNum">     260 </span>            :                  */
+<span class="lineNum">     261 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">     262 </span>            :             }
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span>            :             /* Search forward to re-find idatum */
+<span class="lineNum">     265 </span>            :             for (;;)
+<span class="lineNum">     266 </span>            :             {
+<span class="lineNum">     267 </span>            :                 Datum       newDatum;
+<span class="lineNum">     268 </span>            :                 GinNullCategory newCategory;
+<span class="lineNum">     269 </span>            : 
+<span class="lineNum">     270 </span><span class="lineNoCov">          0 :                 if (moveRightIfItNeeded(btree, stack, snapshot) == false)</span>
+<span class="lineNum">     271 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;lost saved point in index&quot;); /* must not happen !!! */</span>
+<span class="lineNum">     272 </span>            : 
+<span class="lineNum">     273 </span><span class="lineNoCov">          0 :                 page = BufferGetPage(stack-&gt;buffer);</span>
+<span class="lineNum">     274 </span><span class="lineNoCov">          0 :                 itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, stack-&gt;off));</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span><span class="lineNoCov">          0 :                 if (gintuple_get_attrnum(btree-&gt;ginstate, itup) != attnum)</span>
+<span class="lineNum">     277 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;lost saved point in index&quot;); /* must not happen !!! */</span>
+<span class="lineNum">     278 </span><span class="lineNoCov">          0 :                 newDatum = gintuple_get_key(btree-&gt;ginstate, itup,</span>
+<span class="lineNum">     279 </span>            :                                             &amp;newCategory);
+<span class="lineNum">     280 </span>            : 
+<span class="lineNum">     281 </span><span class="lineNoCov">          0 :                 if (ginCompareEntries(btree-&gt;ginstate, attnum,</span>
+<span class="lineNum">     282 </span>            :                                       newDatum, newCategory,
+<span class="lineNum">     283 </span>            :                                       idatum, icategory) == 0)
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :                     break;      /* Found! */</span>
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span><span class="lineNoCov">          0 :                 stack-&gt;off++;</span>
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :             }</span>
+<span class="lineNum">     288 </span>            : 
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :             if (icategory == GIN_CAT_NORM_KEY &amp;&amp; !attr-&gt;attbyval)</span>
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :                 pfree(DatumGetPointer(idatum));</span>
+<span class="lineNum">     291 </span>            :         }
+<span class="lineNum">     292 </span>            :         else
+<span class="lineNum">     293 </span>            :         {
+<span class="lineNum">     294 </span>            :             ItemPointer ipd;
+<span class="lineNum">     295 </span>            :             int         nipd;
+<span class="lineNum">     296 </span>            : 
+<span class="lineNum">     297 </span><span class="lineCov">      37006 :             ipd = ginReadTuple(btree-&gt;ginstate, scanEntry-&gt;attnum, itup, &amp;nipd);</span>
+<span class="lineNum">     298 </span><span class="lineCov">      37006 :             tbm_add_tuples(scanEntry-&gt;matchBitmap, ipd, nipd, false);</span>
+<span class="lineNum">     299 </span><span class="lineCov">      37006 :             scanEntry-&gt;predictNumberResult += GinGetNPosting(itup);</span>
+<span class="lineNum">     300 </span><span class="lineCov">      37006 :             pfree(ipd);</span>
+<span class="lineNum">     301 </span>            :         }
+<span class="lineNum">     302 </span>            : 
+<span class="lineNum">     303 </span>            :         /*
+<span class="lineNum">     304 </span>            :          * Done with this entry, go to the next
+<span class="lineNum">     305 </span>            :          */
+<span class="lineNum">     306 </span><span class="lineCov">      37006 :         stack-&gt;off++;</span>
+<span class="lineNum">     307 </span><span class="lineCov">      37006 :     }</span>
+<span class="lineNum">     308 </span>            : }
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span>            : /*
+<span class="lineNum">     311 </span>            :  * Start* functions setup beginning state of searches: finds correct buffer and pins it.
+<a name="312"><span class="lineNum">     312 </span>            :  */</a>
+<span class="lineNum">     313 </span>            : static void
+<span class="lineNum">     314 </span><span class="lineCov">        418 : startScanEntry(GinState *ginstate, GinScanEntry entry, Snapshot snapshot)</span>
+<span class="lineNum">     315 </span>            : {
+<span class="lineNum">     316 </span>            :     GinBtreeData btreeEntry;
+<span class="lineNum">     317 </span>            :     GinBtreeStack *stackEntry;
+<span class="lineNum">     318 </span>            :     Page        page;
+<span class="lineNum">     319 </span>            :     bool        needUnlock;
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span>            : restartScanEntry:
+<span class="lineNum">     322 </span><span class="lineCov">        418 :     entry-&gt;buffer = InvalidBuffer;</span>
+<span class="lineNum">     323 </span><span class="lineCov">        418 :     ItemPointerSetMin(&amp;entry-&gt;curItem);</span>
+<span class="lineNum">     324 </span><span class="lineCov">        418 :     entry-&gt;offset = InvalidOffsetNumber;</span>
+<span class="lineNum">     325 </span><span class="lineCov">        418 :     if (entry-&gt;list)</span>
+<span class="lineNum">     326 </span><span class="lineNoCov">          0 :         pfree(entry-&gt;list);</span>
+<span class="lineNum">     327 </span><span class="lineCov">        418 :     entry-&gt;list = NULL;</span>
+<span class="lineNum">     328 </span><span class="lineCov">        418 :     entry-&gt;nlist = 0;</span>
+<span class="lineNum">     329 </span><span class="lineCov">        418 :     entry-&gt;matchBitmap = NULL;</span>
+<span class="lineNum">     330 </span><span class="lineCov">        418 :     entry-&gt;matchResult = NULL;</span>
+<span class="lineNum">     331 </span><span class="lineCov">        418 :     entry-&gt;reduceResult = false;</span>
+<span class="lineNum">     332 </span><span class="lineCov">        418 :     entry-&gt;predictNumberResult = 0;</span>
+<span class="lineNum">     333 </span>            : 
+<span class="lineNum">     334 </span>            :     /*
+<span class="lineNum">     335 </span>            :      * we should find entry, and begin scan of posting tree or just store
+<span class="lineNum">     336 </span>            :      * posting list in memory
+<span class="lineNum">     337 </span>            :      */
+<span class="lineNum">     338 </span><span class="lineCov">        418 :     ginPrepareEntryScan(&amp;btreeEntry, entry-&gt;attnum,</span>
+<span class="lineNum">     339 </span><span class="lineCov">        418 :                         entry-&gt;queryKey, entry-&gt;queryCategory,</span>
+<span class="lineNum">     340 </span>            :                         ginstate);
+<span class="lineNum">     341 </span><span class="lineCov">        418 :     stackEntry = ginFindLeafPage(&amp;btreeEntry, true, false, snapshot);</span>
+<span class="lineNum">     342 </span><span class="lineCov">        418 :     page = BufferGetPage(stackEntry-&gt;buffer);</span>
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span>            :     /* ginFindLeafPage() will have already checked snapshot age. */
+<span class="lineNum">     345 </span><span class="lineCov">        418 :     needUnlock = true;</span>
+<span class="lineNum">     346 </span>            : 
+<span class="lineNum">     347 </span><span class="lineCov">        418 :     entry-&gt;isFinished = true;</span>
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span><span class="lineCov">        832 :     if (entry-&gt;isPartialMatch ||</span>
+<span class="lineNum">     350 </span><span class="lineCov">        414 :         entry-&gt;queryCategory == GIN_CAT_EMPTY_QUERY)</span>
+<span class="lineNum">     351 </span>            :     {
+<span class="lineNum">     352 </span>            :         /*
+<span class="lineNum">     353 </span>            :          * btreeEntry.findItem locates the first item &gt;= given search key.
+<span class="lineNum">     354 </span>            :          * (For GIN_CAT_EMPTY_QUERY, it will find the leftmost index item
+<span class="lineNum">     355 </span>            :          * because of the way the GIN_CAT_EMPTY_QUERY category code is
+<span class="lineNum">     356 </span>            :          * assigned.)  We scan forward from there and collect all TIDs needed
+<span class="lineNum">     357 </span>            :          * for the entry type.
+<span class="lineNum">     358 </span>            :          */
+<span class="lineNum">     359 </span><span class="lineCov">         38 :         btreeEntry.findItem(&amp;btreeEntry, stackEntry);</span>
+<span class="lineNum">     360 </span><span class="lineCov">         76 :         if (collectMatchBitmap(&amp;btreeEntry, stackEntry, entry, snapshot)</span>
+<span class="lineNum">     361 </span><span class="lineCov">         38 :             == false)</span>
+<span class="lineNum">     362 </span>            :         {
+<span class="lineNum">     363 </span>            :             /*
+<span class="lineNum">     364 </span>            :              * GIN tree was seriously restructured, so we will cleanup all
+<span class="lineNum">     365 </span>            :              * found data and rescan. See comments near 'return false' in
+<span class="lineNum">     366 </span>            :              * collectMatchBitmap()
+<span class="lineNum">     367 </span>            :              */
+<span class="lineNum">     368 </span><span class="lineNoCov">          0 :             if (entry-&gt;matchBitmap)</span>
+<span class="lineNum">     369 </span>            :             {
+<span class="lineNum">     370 </span><span class="lineNoCov">          0 :                 if (entry-&gt;matchIterator)</span>
+<span class="lineNum">     371 </span><span class="lineNoCov">          0 :                     tbm_end_iterate(entry-&gt;matchIterator);</span>
+<span class="lineNum">     372 </span><span class="lineNoCov">          0 :                 entry-&gt;matchIterator = NULL;</span>
+<span class="lineNum">     373 </span><span class="lineNoCov">          0 :                 tbm_free(entry-&gt;matchBitmap);</span>
+<span class="lineNum">     374 </span><span class="lineNoCov">          0 :                 entry-&gt;matchBitmap = NULL;</span>
+<span class="lineNum">     375 </span>            :             }
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :             LockBuffer(stackEntry-&gt;buffer, GIN_UNLOCK);</span>
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :             freeGinBtreeStack(stackEntry);</span>
+<span class="lineNum">     378 </span><span class="lineNoCov">          0 :             goto restartScanEntry;</span>
+<span class="lineNum">     379 </span>            :         }
+<span class="lineNum">     380 </span>            : 
+<span class="lineNum">     381 </span><span class="lineCov">         76 :         if (entry-&gt;matchBitmap &amp;&amp; !tbm_is_empty(entry-&gt;matchBitmap))</span>
+<span class="lineNum">     382 </span>            :         {
+<span class="lineNum">     383 </span><span class="lineCov">         38 :             entry-&gt;matchIterator = tbm_begin_iterate(entry-&gt;matchBitmap);</span>
+<span class="lineNum">     384 </span><span class="lineCov">         38 :             entry-&gt;isFinished = false;</span>
+<span class="lineNum">     385 </span>            :         }
+<span class="lineNum">     386 </span>            :     }
+<span class="lineNum">     387 </span><span class="lineCov">        380 :     else if (btreeEntry.findItem(&amp;btreeEntry, stackEntry))</span>
+<span class="lineNum">     388 </span>            :     {
+<span class="lineNum">     389 </span><span class="lineCov">        334 :         IndexTuple  itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, stackEntry-&gt;off));</span>
+<span class="lineNum">     390 </span>            : 
+<span class="lineNum">     391 </span><span class="lineCov">        334 :         if (GinIsPostingTree(itup))</span>
+<span class="lineNum">     392 </span>            :         {
+<span class="lineNum">     393 </span><span class="lineCov">          4 :             BlockNumber rootPostingTree = GinGetPostingTree(itup);</span>
+<span class="lineNum">     394 </span>            :             GinBtreeStack *stack;
+<span class="lineNum">     395 </span>            :             Page        page;
+<span class="lineNum">     396 </span>            :             ItemPointerData minItem;
+<span class="lineNum">     397 </span>            : 
+<span class="lineNum">     398 </span>            :             /*
+<span class="lineNum">     399 </span>            :              * This is an equality scan, so lock the root of the posting tree.
+<span class="lineNum">     400 </span>            :              * It represents a lock on the exact key value, and covers all the
+<span class="lineNum">     401 </span>            :              * items in the posting tree.
+<span class="lineNum">     402 </span>            :              */
+<span class="lineNum">     403 </span><span class="lineCov">          4 :             PredicateLockPage(ginstate-&gt;index, rootPostingTree, snapshot);</span>
+<span class="lineNum">     404 </span>            : 
+<span class="lineNum">     405 </span>            :             /*
+<span class="lineNum">     406 </span>            :              * We should unlock entry page before touching posting tree to
+<span class="lineNum">     407 </span>            :              * prevent deadlocks with vacuum processes. Because entry is never
+<span class="lineNum">     408 </span>            :              * deleted from page and posting tree is never reduced to the
+<span class="lineNum">     409 </span>            :              * posting list, we can unlock page after getting BlockNumber of
+<span class="lineNum">     410 </span>            :              * root of posting tree.
+<span class="lineNum">     411 </span>            :              */
+<span class="lineNum">     412 </span><span class="lineCov">          4 :             LockBuffer(stackEntry-&gt;buffer, GIN_UNLOCK);</span>
+<span class="lineNum">     413 </span><span class="lineCov">          4 :             needUnlock = false;</span>
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span><span class="lineCov">          4 :             stack = ginScanBeginPostingTree(&amp;entry-&gt;btree, ginstate-&gt;index,</span>
+<span class="lineNum">     416 </span>            :                                             rootPostingTree, snapshot);
+<span class="lineNum">     417 </span><span class="lineCov">          4 :             entry-&gt;buffer = stack-&gt;buffer;</span>
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span>            :             /*
+<span class="lineNum">     420 </span>            :              * We keep buffer pinned because we need to prevent deletion of
+<span class="lineNum">     421 </span>            :              * page during scan. See GIN's vacuum implementation. RefCount is
+<span class="lineNum">     422 </span>            :              * increased to keep buffer pinned after freeGinBtreeStack() call.
+<span class="lineNum">     423 </span>            :              */
+<span class="lineNum">     424 </span><span class="lineCov">          4 :             IncrBufferRefCount(entry-&gt;buffer);</span>
+<span class="lineNum">     425 </span>            : 
+<span class="lineNum">     426 </span><span class="lineCov">          4 :             page = BufferGetPage(entry-&gt;buffer);</span>
+<span class="lineNum">     427 </span>            : 
+<span class="lineNum">     428 </span>            :             /*
+<span class="lineNum">     429 </span>            :              * Load the first page into memory.
+<span class="lineNum">     430 </span>            :              */
+<span class="lineNum">     431 </span><span class="lineCov">          4 :             ItemPointerSetMin(&amp;minItem);</span>
+<span class="lineNum">     432 </span><span class="lineCov">          4 :             entry-&gt;list = GinDataLeafPageGetItems(page, &amp;entry-&gt;nlist, minItem);</span>
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span><span class="lineCov">          4 :             entry-&gt;predictNumberResult = stack-&gt;predictNumber * entry-&gt;nlist;</span>
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span><span class="lineCov">          4 :             LockBuffer(entry-&gt;buffer, GIN_UNLOCK);</span>
+<span class="lineNum">     437 </span><span class="lineCov">          4 :             freeGinBtreeStack(stack);</span>
+<span class="lineNum">     438 </span><span class="lineCov">          4 :             entry-&gt;isFinished = false;</span>
+<span class="lineNum">     439 </span>            :         }
+<span class="lineNum">     440 </span>            :         else
+<span class="lineNum">     441 </span>            :         {
+<span class="lineNum">     442 </span>            :             /*
+<span class="lineNum">     443 </span>            :              * Lock the entry leaf page.  This is more coarse-grained than
+<span class="lineNum">     444 </span>            :              * necessary, because it will conflict with any insertions that
+<span class="lineNum">     445 </span>            :              * land on the same leaf page, not only the exact key we searched
+<span class="lineNum">     446 </span>            :              * for.  But locking an individual tuple would require updating
+<span class="lineNum">     447 </span>            :              * that lock whenever it moves because of insertions or vacuums,
+<span class="lineNum">     448 </span>            :              * which seems too complicated.
+<span class="lineNum">     449 </span>            :              */
+<span class="lineNum">     450 </span><span class="lineCov">        330 :             PredicateLockPage(ginstate-&gt;index,</span>
+<span class="lineNum">     451 </span>            :                               BufferGetBlockNumber(stackEntry-&gt;buffer),
+<span class="lineNum">     452 </span>            :                               snapshot);
+<span class="lineNum">     453 </span><span class="lineCov">        330 :             if (GinGetNPosting(itup) &gt; 0)</span>
+<span class="lineNum">     454 </span>            :             {
+<span class="lineNum">     455 </span><span class="lineCov">        330 :                 entry-&gt;list = ginReadTuple(ginstate, entry-&gt;attnum, itup,</span>
+<span class="lineNum">     456 </span>            :                                            &amp;entry-&gt;nlist);
+<span class="lineNum">     457 </span><span class="lineCov">        330 :                 entry-&gt;predictNumberResult = entry-&gt;nlist;</span>
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span><span class="lineCov">        330 :                 entry-&gt;isFinished = false;</span>
+<span class="lineNum">     460 </span>            :             }
+<span class="lineNum">     461 </span>            :         }
+<span class="lineNum">     462 </span>            :     }
+<span class="lineNum">     463 </span>            :     else
+<span class="lineNum">     464 </span>            :     {
+<span class="lineNum">     465 </span>            :         /*
+<span class="lineNum">     466 </span>            :          * No entry found.  Predicate lock the leaf page, to lock the place
+<span class="lineNum">     467 </span>            :          * where the entry would've been, had there been one.
+<span class="lineNum">     468 </span>            :          */
+<span class="lineNum">     469 </span><span class="lineCov">         46 :         PredicateLockPage(ginstate-&gt;index,</span>
+<span class="lineNum">     470 </span>            :                           BufferGetBlockNumber(stackEntry-&gt;buffer), snapshot);
+<span class="lineNum">     471 </span>            :     }
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span><span class="lineCov">        418 :     if (needUnlock)</span>
+<span class="lineNum">     474 </span><span class="lineCov">        414 :         LockBuffer(stackEntry-&gt;buffer, GIN_UNLOCK);</span>
+<span class="lineNum">     475 </span><span class="lineCov">        418 :     freeGinBtreeStack(stackEntry);</span>
+<span class="lineNum">     476 </span><span class="lineCov">        418 : }</span>
+<span class="lineNum">     477 </span>            : 
+<span class="lineNum">     478 </span>            : /*
+<span class="lineNum">     479 </span>            :  * Comparison function for scan entry indexes. Sorts by predictNumberResult,
+<span class="lineNum">     480 </span>            :  * least frequent items first.
+<a name="481"><span class="lineNum">     481 </span>            :  */</a>
+<span class="lineNum">     482 </span>            : static int
+<span class="lineNum">     483 </span><span class="lineCov">        228 : entryIndexByFrequencyCmp(const void *a1, const void *a2, void *arg)</span>
+<span class="lineNum">     484 </span>            : {
+<span class="lineNum">     485 </span><span class="lineCov">        228 :     const GinScanKey key = (const GinScanKey) arg;</span>
+<span class="lineNum">     486 </span><span class="lineCov">        228 :     int         i1 = *(const int *) a1;</span>
+<span class="lineNum">     487 </span><span class="lineCov">        228 :     int         i2 = *(const int *) a2;</span>
+<span class="lineNum">     488 </span><span class="lineCov">        228 :     uint32      n1 = key-&gt;scanEntry[i1]-&gt;predictNumberResult;</span>
+<span class="lineNum">     489 </span><span class="lineCov">        228 :     uint32      n2 = key-&gt;scanEntry[i2]-&gt;predictNumberResult;</span>
+<span class="lineNum">     490 </span>            : 
+<span class="lineNum">     491 </span><span class="lineCov">        228 :     if (n1 &lt; n2)</span>
+<span class="lineNum">     492 </span><span class="lineCov">         62 :         return -1;</span>
+<span class="lineNum">     493 </span><span class="lineCov">        166 :     else if (n1 == n2)</span>
+<span class="lineNum">     494 </span><span class="lineCov">         36 :         return 0;</span>
+<span class="lineNum">     495 </span>            :     else
+<span class="lineNum">     496 </span><span class="lineCov">        130 :         return 1;</span>
+<span class="lineNum">     497 </span>            : }
+<a name="498"><span class="lineNum">     498 </span>            : </a>
+<span class="lineNum">     499 </span>            : static void
+<span class="lineNum">     500 </span><span class="lineCov">        252 : startScanKey(GinState *ginstate, GinScanOpaque so, GinScanKey key)</span>
+<span class="lineNum">     501 </span>            : {
+<span class="lineNum">     502 </span><span class="lineCov">        252 :     MemoryContext oldCtx = CurrentMemoryContext;</span>
+<span class="lineNum">     503 </span>            :     int         i;
+<span class="lineNum">     504 </span>            :     int         j;
+<span class="lineNum">     505 </span>            :     int        *entryIndexes;
+<span class="lineNum">     506 </span>            : 
+<span class="lineNum">     507 </span><span class="lineCov">        252 :     ItemPointerSetMin(&amp;key-&gt;curItem);</span>
+<span class="lineNum">     508 </span><span class="lineCov">        252 :     key-&gt;curItemMatches = false;</span>
+<span class="lineNum">     509 </span><span class="lineCov">        252 :     key-&gt;recheckCurItem = false;</span>
+<span class="lineNum">     510 </span><span class="lineCov">        252 :     key-&gt;isFinished = false;</span>
+<span class="lineNum">     511 </span>            : 
+<span class="lineNum">     512 </span>            :     /*
+<span class="lineNum">     513 </span>            :      * Divide the entries into two distinct sets: required and additional.
+<span class="lineNum">     514 </span>            :      * Additional entries are not enough for a match alone, without any items
+<span class="lineNum">     515 </span>            :      * from the required set, but are needed by the consistent function to
+<span class="lineNum">     516 </span>            :      * decide if an item matches. When scanning, we can skip over items from
+<span class="lineNum">     517 </span>            :      * additional entries that have no corresponding matches in any of the
+<span class="lineNum">     518 </span>            :      * required entries. That speeds up queries like &quot;frequent &amp; rare&quot;
+<span class="lineNum">     519 </span>            :      * considerably, if the frequent term can be put in the additional set.
+<span class="lineNum">     520 </span>            :      *
+<span class="lineNum">     521 </span>            :      * There can be many legal ways to divide them entries into these two
+<span class="lineNum">     522 </span>            :      * sets. A conservative division is to just put everything in the required
+<span class="lineNum">     523 </span>            :      * set, but the more you can put in the additional set, the more you can
+<span class="lineNum">     524 </span>            :      * skip during the scan. To maximize skipping, we try to put as many
+<span class="lineNum">     525 </span>            :      * frequent items as possible into additional, and less frequent ones into
+<span class="lineNum">     526 </span>            :      * required. To do that, sort the entries by frequency
+<span class="lineNum">     527 </span>            :      * (predictNumberResult), and put entries into the required set in that
+<span class="lineNum">     528 </span>            :      * order, until the consistent function says that none of the remaining
+<span class="lineNum">     529 </span>            :      * entries can form a match, without any items from the required set. The
+<span class="lineNum">     530 </span>            :      * rest go to the additional set.
+<span class="lineNum">     531 </span>            :      */
+<span class="lineNum">     532 </span><span class="lineCov">        252 :     if (key-&gt;nentries &gt; 1)</span>
+<span class="lineNum">     533 </span>            :     {
+<span class="lineNum">     534 </span><span class="lineCov">        106 :         MemoryContextSwitchTo(so-&gt;tempCtx);</span>
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span><span class="lineCov">        106 :         entryIndexes = (int *) palloc(sizeof(int) * key-&gt;nentries);</span>
+<span class="lineNum">     537 </span><span class="lineCov">        378 :         for (i = 0; i &lt; key-&gt;nentries; i++)</span>
+<span class="lineNum">     538 </span><span class="lineCov">        272 :             entryIndexes[i] = i;</span>
+<span class="lineNum">     539 </span><span class="lineCov">        106 :         qsort_arg(entryIndexes, key-&gt;nentries, sizeof(int),</span>
+<span class="lineNum">     540 </span>            :                   entryIndexByFrequencyCmp, key);
+<span class="lineNum">     541 </span>            : 
+<span class="lineNum">     542 </span><span class="lineCov">        170 :         for (i = 0; i &lt; key-&gt;nentries - 1; i++)</span>
+<span class="lineNum">     543 </span>            :         {
+<span class="lineNum">     544 </span>            :             /* Pass all entries &lt;= i as FALSE, and the rest as MAYBE */
+<span class="lineNum">     545 </span><span class="lineCov">        378 :             for (j = 0; j &lt;= i; j++)</span>
+<span class="lineNum">     546 </span><span class="lineCov">        226 :                 key-&gt;entryRes[entryIndexes[j]] = GIN_FALSE;</span>
+<span class="lineNum">     547 </span><span class="lineCov">        402 :             for (j = i + 1; j &lt; key-&gt;nentries; j++)</span>
+<span class="lineNum">     548 </span><span class="lineCov">        250 :                 key-&gt;entryRes[entryIndexes[j]] = GIN_MAYBE;</span>
+<span class="lineNum">     549 </span>            : 
+<span class="lineNum">     550 </span><span class="lineCov">        152 :             if (key-&gt;triConsistentFn(key) == GIN_FALSE)</span>
+<span class="lineNum">     551 </span><span class="lineCov">         88 :                 break;</span>
+<span class="lineNum">     552 </span>            :         }
+<span class="lineNum">     553 </span>            :         /* i is now the last required entry. */
+<span class="lineNum">     554 </span>            : 
+<span class="lineNum">     555 </span><span class="lineCov">        106 :         MemoryContextSwitchTo(so-&gt;keyCtx);</span>
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span><span class="lineCov">        106 :         key-&gt;nrequired = i + 1;</span>
+<span class="lineNum">     558 </span><span class="lineCov">        106 :         key-&gt;nadditional = key-&gt;nentries - key-&gt;nrequired;</span>
+<span class="lineNum">     559 </span><span class="lineCov">        106 :         key-&gt;requiredEntries = palloc(key-&gt;nrequired * sizeof(GinScanEntry));</span>
+<span class="lineNum">     560 </span><span class="lineCov">        106 :         key-&gt;additionalEntries = palloc(key-&gt;nadditional * sizeof(GinScanEntry));</span>
+<span class="lineNum">     561 </span>            : 
+<span class="lineNum">     562 </span><span class="lineCov">        106 :         j = 0;</span>
+<span class="lineNum">     563 </span><span class="lineCov">        276 :         for (i = 0; i &lt; key-&gt;nrequired; i++)</span>
+<span class="lineNum">     564 </span><span class="lineCov">        170 :             key-&gt;requiredEntries[i] = key-&gt;scanEntry[entryIndexes[j++]];</span>
+<span class="lineNum">     565 </span><span class="lineCov">        208 :         for (i = 0; i &lt; key-&gt;nadditional; i++)</span>
+<span class="lineNum">     566 </span><span class="lineCov">        102 :             key-&gt;additionalEntries[i] = key-&gt;scanEntry[entryIndexes[j++]];</span>
+<span class="lineNum">     567 </span>            : 
+<span class="lineNum">     568 </span>            :         /* clean up after consistentFn calls (also frees entryIndexes) */
+<span class="lineNum">     569 </span><span class="lineCov">        106 :         MemoryContextReset(so-&gt;tempCtx);</span>
+<span class="lineNum">     570 </span>            :     }
+<span class="lineNum">     571 </span>            :     else
+<span class="lineNum">     572 </span>            :     {
+<span class="lineNum">     573 </span><span class="lineCov">        146 :         MemoryContextSwitchTo(so-&gt;keyCtx);</span>
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span><span class="lineCov">        146 :         key-&gt;nrequired = 1;</span>
+<span class="lineNum">     576 </span><span class="lineCov">        146 :         key-&gt;nadditional = 0;</span>
+<span class="lineNum">     577 </span><span class="lineCov">        146 :         key-&gt;requiredEntries = palloc(1 * sizeof(GinScanEntry));</span>
+<span class="lineNum">     578 </span><span class="lineCov">        146 :         key-&gt;requiredEntries[0] = key-&gt;scanEntry[0];</span>
+<span class="lineNum">     579 </span>            :     }
+<span class="lineNum">     580 </span><span class="lineCov">        252 :     MemoryContextSwitchTo(oldCtx);</span>
+<span class="lineNum">     581 </span><span class="lineCov">        252 : }</span>
+<a name="582"><span class="lineNum">     582 </span>            : </a>
+<span class="lineNum">     583 </span>            : static void
+<span class="lineNum">     584 </span><span class="lineCov">        248 : startScan(IndexScanDesc scan)</span>
+<span class="lineNum">     585 </span>            : {
+<span class="lineNum">     586 </span><span class="lineCov">        248 :     GinScanOpaque so = (GinScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     587 </span><span class="lineCov">        248 :     GinState   *ginstate = &amp;so-&gt;ginstate;</span>
+<span class="lineNum">     588 </span>            :     uint32      i;
+<span class="lineNum">     589 </span>            : 
+<span class="lineNum">     590 </span><span class="lineCov">        666 :     for (i = 0; i &lt; so-&gt;totalentries; i++)</span>
+<span class="lineNum">     591 </span><span class="lineCov">        418 :         startScanEntry(ginstate, so-&gt;entries[i], scan-&gt;xs_snapshot);</span>
+<span class="lineNum">     592 </span>            : 
+<span class="lineNum">     593 </span><span class="lineCov">        248 :     if (GinFuzzySearchLimit &gt; 0)</span>
+<span class="lineNum">     594 </span>            :     {
+<span class="lineNum">     595 </span>            :         /*
+<span class="lineNum">     596 </span>            :          * If all of keys more than threshold we will try to reduce result, we
+<span class="lineNum">     597 </span>            :          * hope (and only hope, for intersection operation of array our
+<span class="lineNum">     598 </span>            :          * supposition isn't true), that total result will not more than
+<span class="lineNum">     599 </span>            :          * minimal predictNumberResult.
+<span class="lineNum">     600 </span>            :          */
+<span class="lineNum">     601 </span><span class="lineNoCov">          0 :         bool        reduce = true;</span>
+<span class="lineNum">     602 </span>            : 
+<span class="lineNum">     603 </span><span class="lineNoCov">          0 :         for (i = 0; i &lt; so-&gt;totalentries; i++)</span>
+<span class="lineNum">     604 </span>            :         {
+<span class="lineNum">     605 </span><span class="lineNoCov">          0 :             if (so-&gt;entries[i]-&gt;predictNumberResult &lt;= so-&gt;totalentries * GinFuzzySearchLimit)</span>
+<span class="lineNum">     606 </span>            :             {
+<span class="lineNum">     607 </span><span class="lineNoCov">          0 :                 reduce = false;</span>
+<span class="lineNum">     608 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     609 </span>            :             }
+<span class="lineNum">     610 </span>            :         }
+<span class="lineNum">     611 </span><span class="lineNoCov">          0 :         if (reduce)</span>
+<span class="lineNum">     612 </span>            :         {
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :             for (i = 0; i &lt; so-&gt;totalentries; i++)</span>
+<span class="lineNum">     614 </span>            :             {
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :                 so-&gt;entries[i]-&gt;predictNumberResult /= so-&gt;totalentries;</span>
+<span class="lineNum">     616 </span><span class="lineNoCov">          0 :                 so-&gt;entries[i]-&gt;reduceResult = true;</span>
+<span class="lineNum">     617 </span>            :             }
+<span class="lineNum">     618 </span>            :         }
+<span class="lineNum">     619 </span>            :     }
+<span class="lineNum">     620 </span>            : 
+<span class="lineNum">     621 </span>            :     /*
+<span class="lineNum">     622 </span>            :      * Now that we have the estimates for the entry frequencies, finish
+<span class="lineNum">     623 </span>            :      * initializing the scan keys.
+<span class="lineNum">     624 </span>            :      */
+<span class="lineNum">     625 </span><span class="lineCov">        500 :     for (i = 0; i &lt; so-&gt;nkeys; i++)</span>
+<span class="lineNum">     626 </span><span class="lineCov">        252 :         startScanKey(ginstate, so, so-&gt;keys + i);</span>
+<span class="lineNum">     627 </span><span class="lineCov">        248 : }</span>
+<span class="lineNum">     628 </span>            : 
+<span class="lineNum">     629 </span>            : /*
+<span class="lineNum">     630 </span>            :  * Load the next batch of item pointers from a posting tree.
+<span class="lineNum">     631 </span>            :  *
+<span class="lineNum">     632 </span>            :  * Note that we copy the page into GinScanEntry-&gt;list array and unlock it, but
+<span class="lineNum">     633 </span>            :  * keep it pinned to prevent interference with vacuum.
+<a name="634"><span class="lineNum">     634 </span>            :  */</a>
+<span class="lineNum">     635 </span>            : static void
+<span class="lineNum">     636 </span><span class="lineCov">          8 : entryLoadMoreItems(GinState *ginstate, GinScanEntry entry,</span>
+<span class="lineNum">     637 </span>            :                    ItemPointerData advancePast, Snapshot snapshot)
+<span class="lineNum">     638 </span>            : {
+<span class="lineNum">     639 </span>            :     Page        page;
+<span class="lineNum">     640 </span>            :     int         i;
+<span class="lineNum">     641 </span>            :     bool        stepright;
+<span class="lineNum">     642 </span>            : 
+<span class="lineNum">     643 </span><span class="lineCov">          8 :     if (!BufferIsValid(entry-&gt;buffer))</span>
+<span class="lineNum">     644 </span>            :     {
+<span class="lineNum">     645 </span><span class="lineNoCov">          0 :         entry-&gt;isFinished = true;</span>
+<span class="lineNum">     646 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">     647 </span>            :     }
+<span class="lineNum">     648 </span>            : 
+<span class="lineNum">     649 </span>            :     /*
+<span class="lineNum">     650 </span>            :      * We have two strategies for finding the correct page: step right from
+<span class="lineNum">     651 </span>            :      * the current page, or descend the tree again from the root. If
+<span class="lineNum">     652 </span>            :      * advancePast equals the current item, the next matching item should be
+<span class="lineNum">     653 </span>            :      * on the next page, so we step right. Otherwise, descend from root.
+<span class="lineNum">     654 </span>            :      */
+<span class="lineNum">     655 </span><span class="lineCov">          8 :     if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;advancePast) == 0)</span>
+<span class="lineNum">     656 </span>            :     {
+<span class="lineNum">     657 </span><span class="lineCov">          8 :         stepright = true;</span>
+<span class="lineNum">     658 </span><span class="lineCov">          8 :         LockBuffer(entry-&gt;buffer, GIN_SHARE);</span>
+<span class="lineNum">     659 </span>            :     }
+<span class="lineNum">     660 </span>            :     else
+<span class="lineNum">     661 </span>            :     {
+<span class="lineNum">     662 </span>            :         GinBtreeStack *stack;
+<span class="lineNum">     663 </span>            : 
+<span class="lineNum">     664 </span><span class="lineNoCov">          0 :         ReleaseBuffer(entry-&gt;buffer);</span>
+<span class="lineNum">     665 </span>            : 
+<span class="lineNum">     666 </span>            :         /*
+<span class="lineNum">     667 </span>            :          * Set the search key, and find the correct leaf page.
+<span class="lineNum">     668 </span>            :          */
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :         if (ItemPointerIsLossyPage(&amp;advancePast))</span>
+<span class="lineNum">     670 </span>            :         {
+<span class="lineNum">     671 </span><span class="lineNoCov">          0 :             ItemPointerSet(&amp;entry-&gt;btree.itemptr,</span>
+<span class="lineNum">     672 </span>            :                            GinItemPointerGetBlockNumber(&amp;advancePast) + 1,
+<span class="lineNum">     673 </span>            :                            FirstOffsetNumber);
+<span class="lineNum">     674 </span>            :         }
+<span class="lineNum">     675 </span>            :         else
+<span class="lineNum">     676 </span>            :         {
+<span class="lineNum">     677 </span><span class="lineNoCov">          0 :             ItemPointerSet(&amp;entry-&gt;btree.itemptr,</span>
+<span class="lineNum">     678 </span>            :                            GinItemPointerGetBlockNumber(&amp;advancePast),
+<span class="lineNum">     679 </span>            :                            OffsetNumberNext(GinItemPointerGetOffsetNumber(&amp;advancePast)));
+<span class="lineNum">     680 </span>            :         }
+<span class="lineNum">     681 </span><span class="lineNoCov">          0 :         entry-&gt;btree.fullScan = false;</span>
+<span class="lineNum">     682 </span><span class="lineNoCov">          0 :         stack = ginFindLeafPage(&amp;entry-&gt;btree, true, false, snapshot);</span>
+<span class="lineNum">     683 </span>            : 
+<span class="lineNum">     684 </span>            :         /* we don't need the stack, just the buffer. */
+<span class="lineNum">     685 </span><span class="lineNoCov">          0 :         entry-&gt;buffer = stack-&gt;buffer;</span>
+<span class="lineNum">     686 </span><span class="lineNoCov">          0 :         IncrBufferRefCount(entry-&gt;buffer);</span>
+<span class="lineNum">     687 </span><span class="lineNoCov">          0 :         freeGinBtreeStack(stack);</span>
+<span class="lineNum">     688 </span><span class="lineNoCov">          0 :         stepright = false;</span>
+<span class="lineNum">     689 </span>            :     }
+<span class="lineNum">     690 </span>            : 
+<span class="lineNum">     691 </span><span class="lineCov">          8 :     elog(DEBUG2, &quot;entryLoadMoreItems, %u/%u, skip: %d&quot;,</span>
+<span class="lineNum">     692 </span>            :          GinItemPointerGetBlockNumber(&amp;advancePast),
+<span class="lineNum">     693 </span>            :          GinItemPointerGetOffsetNumber(&amp;advancePast),
+<span class="lineNum">     694 </span>            :          !stepright);
+<span class="lineNum">     695 </span>            : 
+<span class="lineNum">     696 </span><span class="lineCov">          8 :     page = BufferGetPage(entry-&gt;buffer);</span>
+<span class="lineNum">     697 </span>            :     for (;;)
+<span class="lineNum">     698 </span>            :     {
+<span class="lineNum">     699 </span><span class="lineCov">          8 :         entry-&gt;offset = InvalidOffsetNumber;</span>
+<span class="lineNum">     700 </span><span class="lineCov">          8 :         if (entry-&gt;list)</span>
+<span class="lineNum">     701 </span>            :         {
+<span class="lineNum">     702 </span><span class="lineCov">          8 :             pfree(entry-&gt;list);</span>
+<span class="lineNum">     703 </span><span class="lineCov">          8 :             entry-&gt;list = NULL;</span>
+<span class="lineNum">     704 </span><span class="lineCov">          8 :             entry-&gt;nlist = 0;</span>
+<span class="lineNum">     705 </span>            :         }
+<span class="lineNum">     706 </span>            : 
+<span class="lineNum">     707 </span><span class="lineCov">          8 :         if (stepright)</span>
+<span class="lineNum">     708 </span>            :         {
+<span class="lineNum">     709 </span>            :             /*
+<span class="lineNum">     710 </span>            :              * We've processed all the entries on this page. If it was the
+<span class="lineNum">     711 </span>            :              * last page in the tree, we're done.
+<span class="lineNum">     712 </span>            :              */
+<span class="lineNum">     713 </span><span class="lineCov">          8 :             if (GinPageRightMost(page))</span>
+<span class="lineNum">     714 </span>            :             {
+<span class="lineNum">     715 </span><span class="lineNoCov">          0 :                 UnlockReleaseBuffer(entry-&gt;buffer);</span>
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :                 entry-&gt;buffer = InvalidBuffer;</span>
+<span class="lineNum">     717 </span><span class="lineNoCov">          0 :                 entry-&gt;isFinished = true;</span>
+<span class="lineNum">     718 </span><span class="lineNoCov">          0 :                 return;</span>
+<span class="lineNum">     719 </span>            :             }
+<span class="lineNum">     720 </span>            : 
+<span class="lineNum">     721 </span>            :             /*
+<span class="lineNum">     722 </span>            :              * Step to next page, following the right link. then find the
+<span class="lineNum">     723 </span>            :              * first ItemPointer greater than advancePast.
+<span class="lineNum">     724 </span>            :              */
+<span class="lineNum">     725 </span><span class="lineCov">          8 :             entry-&gt;buffer = ginStepRight(entry-&gt;buffer,</span>
+<span class="lineNum">     726 </span>            :                                          ginstate-&gt;index,
+<span class="lineNum">     727 </span>            :                                          GIN_SHARE);
+<span class="lineNum">     728 </span><span class="lineCov">          8 :             page = BufferGetPage(entry-&gt;buffer);</span>
+<span class="lineNum">     729 </span>            :         }
+<span class="lineNum">     730 </span><span class="lineCov">          8 :         stepright = true;</span>
+<span class="lineNum">     731 </span>            : 
+<span class="lineNum">     732 </span><span class="lineCov">          8 :         if (GinPageGetOpaque(page)-&gt;flags &amp; GIN_DELETED)</span>
+<span class="lineNum">     733 </span><span class="lineNoCov">          0 :             continue;           /* page was deleted by concurrent vacuum */</span>
+<span class="lineNum">     734 </span>            : 
+<span class="lineNum">     735 </span>            :         /*
+<span class="lineNum">     736 </span>            :          * The first item &gt; advancePast might not be on this page, but
+<span class="lineNum">     737 </span>            :          * somewhere to the right, if the page was split, or a non-match from
+<span class="lineNum">     738 </span>            :          * another key in the query allowed us to skip some items from this
+<span class="lineNum">     739 </span>            :          * entry. Keep following the right-links until we re-find the correct
+<span class="lineNum">     740 </span>            :          * page.
+<span class="lineNum">     741 </span>            :          */
+<span class="lineNum">     742 </span><span class="lineCov">         12 :         if (!GinPageRightMost(page) &amp;&amp;</span>
+<span class="lineNum">     743 </span><span class="lineCov">          4 :             ginCompareItemPointers(&amp;advancePast, GinDataPageGetRightBound(page)) &gt;= 0)</span>
+<span class="lineNum">     744 </span>            :         {
+<span class="lineNum">     745 </span>            :             /*
+<span class="lineNum">     746 </span>            :              * the item we're looking is &gt; the right bound of the page, so it
+<span class="lineNum">     747 </span>            :              * can't be on this page.
+<span class="lineNum">     748 </span>            :              */
+<span class="lineNum">     749 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     750 </span>            :         }
+<span class="lineNum">     751 </span>            : 
+<span class="lineNum">     752 </span><span class="lineCov">          8 :         entry-&gt;list = GinDataLeafPageGetItems(page, &amp;entry-&gt;nlist, advancePast);</span>
+<span class="lineNum">     753 </span>            : 
+<span class="lineNum">     754 </span><span class="lineCov">          8 :         for (i = 0; i &lt; entry-&gt;nlist; i++)</span>
+<span class="lineNum">     755 </span>            :         {
+<span class="lineNum">     756 </span><span class="lineCov">          8 :             if (ginCompareItemPointers(&amp;advancePast, &amp;entry-&gt;list[i]) &lt; 0)</span>
+<span class="lineNum">     757 </span>            :             {
+<span class="lineNum">     758 </span><span class="lineCov">          8 :                 entry-&gt;offset = i;</span>
+<span class="lineNum">     759 </span>            : 
+<span class="lineNum">     760 </span><span class="lineCov">          8 :                 if (GinPageRightMost(page))</span>
+<span class="lineNum">     761 </span>            :                 {
+<span class="lineNum">     762 </span>            :                     /* after processing the copied items, we're done. */
+<span class="lineNum">     763 </span><span class="lineCov">          4 :                     UnlockReleaseBuffer(entry-&gt;buffer);</span>
+<span class="lineNum">     764 </span><span class="lineCov">          4 :                     entry-&gt;buffer = InvalidBuffer;</span>
+<span class="lineNum">     765 </span>            :                 }
+<span class="lineNum">     766 </span>            :                 else
+<span class="lineNum">     767 </span><span class="lineCov">          4 :                     LockBuffer(entry-&gt;buffer, GIN_UNLOCK);</span>
+<span class="lineNum">     768 </span><span class="lineCov">          8 :                 return;</span>
+<span class="lineNum">     769 </span>            :             }
+<span class="lineNum">     770 </span>            :         }
+<span class="lineNum">     771 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     772 </span>            : }
+<span class="lineNum">     773 </span>            : 
+<span class="lineNum">     774 </span>            : #define gin_rand() (((double) random()) / ((double) MAX_RANDOM_VALUE))
+<span class="lineNum">     775 </span>            : #define dropItem(e) ( gin_rand() &gt; ((double)GinFuzzySearchLimit)/((double)((e)-&gt;predictNumberResult)) )
+<span class="lineNum">     776 </span>            : 
+<span class="lineNum">     777 </span>            : /*
+<span class="lineNum">     778 </span>            :  * Sets entry-&gt;curItem to next heap item pointer &gt; advancePast, for one entry
+<span class="lineNum">     779 </span>            :  * of one scan key, or sets entry-&gt;isFinished to true if there are no more.
+<span class="lineNum">     780 </span>            :  *
+<span class="lineNum">     781 </span>            :  * Item pointers are returned in ascending order.
+<span class="lineNum">     782 </span>            :  *
+<span class="lineNum">     783 </span>            :  * Note: this can return a &quot;lossy page&quot; item pointer, indicating that the
+<span class="lineNum">     784 </span>            :  * entry potentially matches all items on that heap page.  However, it is
+<span class="lineNum">     785 </span>            :  * not allowed to return both a lossy page pointer and exact (regular)
+<span class="lineNum">     786 </span>            :  * item pointers for the same page.  (Doing so would break the key-combination
+<span class="lineNum">     787 </span>            :  * logic in keyGetItem and scanGetItem; see comment in scanGetItem.)  In the
+<span class="lineNum">     788 </span>            :  * current implementation this is guaranteed by the behavior of tidbitmaps.
+<a name="789"><span class="lineNum">     789 </span>            :  */</a>
+<span class="lineNum">     790 </span>            : static void
+<span class="lineNum">     791 </span><span class="lineCov">     126232 : entryGetItem(GinState *ginstate, GinScanEntry entry,</span>
+<span class="lineNum">     792 </span>            :              ItemPointerData advancePast, Snapshot snapshot)
+<span class="lineNum">     793 </span>            : {
+<span class="lineNum">     794 </span><span class="lineCov">     126232 :     Assert(!entry-&gt;isFinished);</span>
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span><span class="lineCov">     126232 :     Assert(!ItemPointerIsValid(&amp;entry-&gt;curItem) ||</span>
+<span class="lineNum">     797 </span>            :            ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;advancePast) &lt;= 0);
+<span class="lineNum">     798 </span>            : 
+<span class="lineNum">     799 </span><span class="lineCov">     126232 :     if (entry-&gt;matchBitmap)</span>
+<span class="lineNum">     800 </span>            :     {
+<span class="lineNum">     801 </span>            :         /* A bitmap result */
+<span class="lineNum">     802 </span><span class="lineCov">      31710 :         BlockNumber advancePastBlk = GinItemPointerGetBlockNumber(&amp;advancePast);</span>
+<span class="lineNum">     803 </span><span class="lineCov">      31710 :         OffsetNumber advancePastOff = GinItemPointerGetOffsetNumber(&amp;advancePast);</span>
+<span class="lineNum">     804 </span><span class="lineCov">      31710 :         bool        gotitem = false;</span>
+<span class="lineNum">     805 </span>            : 
+<span class="lineNum">     806 </span>            :         do
+<span class="lineNum">     807 </span>            :         {
+<span class="lineNum">     808 </span>            :             /*
+<span class="lineNum">     809 </span>            :              * If we've exhausted all items on this block, move to next block
+<span class="lineNum">     810 </span>            :              * in the bitmap.
+<span class="lineNum">     811 </span>            :              */
+<span class="lineNum">     812 </span><span class="lineCov">      96256 :             while (entry-&gt;matchResult == NULL ||</span>
+<span class="lineNum">     813 </span><span class="lineCov">      64508 :                    (entry-&gt;matchResult-&gt;ntuples &gt;= 0 &amp;&amp;</span>
+<span class="lineNum">     814 </span><span class="lineCov">      63926 :                     entry-&gt;offset &gt;= entry-&gt;matchResult-&gt;ntuples) ||</span>
+<span class="lineNum">     815 </span><span class="lineCov">      63344 :                    entry-&gt;matchResult-&gt;blockno &lt; advancePastBlk ||</span>
+<span class="lineNum">     816 </span><span class="lineCov">      31672 :                    (ItemPointerIsLossyPage(&amp;advancePast) &amp;&amp;</span>
+<span class="lineNum">     817 </span><span class="lineNoCov">          0 :                     entry-&gt;matchResult-&gt;blockno == advancePastBlk))</span>
+<span class="lineNum">     818 </span>            :             {
+<span class="lineNum">     819 </span><span class="lineCov">        620 :                 entry-&gt;matchResult = tbm_iterate(entry-&gt;matchIterator);</span>
+<span class="lineNum">     820 </span>            : 
+<span class="lineNum">     821 </span><span class="lineCov">        620 :                 if (entry-&gt;matchResult == NULL)</span>
+<span class="lineNum">     822 </span>            :                 {
+<span class="lineNum">     823 </span><span class="lineCov">         38 :                     ItemPointerSetInvalid(&amp;entry-&gt;curItem);</span>
+<span class="lineNum">     824 </span><span class="lineCov">         38 :                     tbm_end_iterate(entry-&gt;matchIterator);</span>
+<span class="lineNum">     825 </span><span class="lineCov">         38 :                     entry-&gt;matchIterator = NULL;</span>
+<span class="lineNum">     826 </span><span class="lineCov">         38 :                     entry-&gt;isFinished = true;</span>
+<span class="lineNum">     827 </span><span class="lineCov">         38 :                     break;</span>
+<span class="lineNum">     828 </span>            :                 }
+<span class="lineNum">     829 </span>            : 
+<span class="lineNum">     830 </span>            :                 /*
+<span class="lineNum">     831 </span>            :                  * Reset counter to the beginning of entry-&gt;matchResult. Note:
+<span class="lineNum">     832 </span>            :                  * entry-&gt;offset is still greater than matchResult-&gt;ntuples if
+<span class="lineNum">     833 </span>            :                  * matchResult is lossy.  So, on next call we will get next
+<span class="lineNum">     834 </span>            :                  * result from TIDBitmap.
+<span class="lineNum">     835 </span>            :                  */
+<span class="lineNum">     836 </span><span class="lineCov">        582 :                 entry-&gt;offset = 0;</span>
+<span class="lineNum">     837 </span>            :             }
+<span class="lineNum">     838 </span><span class="lineCov">      31710 :             if (entry-&gt;isFinished)</span>
+<span class="lineNum">     839 </span><span class="lineCov">         38 :                 break;</span>
+<span class="lineNum">     840 </span>            : 
+<span class="lineNum">     841 </span>            :             /*
+<span class="lineNum">     842 </span>            :              * We're now on the first page after advancePast which has any
+<span class="lineNum">     843 </span>            :              * items on it. If it's a lossy result, return that.
+<span class="lineNum">     844 </span>            :              */
+<span class="lineNum">     845 </span><span class="lineCov">      31672 :             if (entry-&gt;matchResult-&gt;ntuples &lt; 0)</span>
+<span class="lineNum">     846 </span>            :             {
+<span class="lineNum">     847 </span><span class="lineNoCov">          0 :                 ItemPointerSetLossyPage(&amp;entry-&gt;curItem,</span>
+<span class="lineNum">     848 </span>            :                                         entry-&gt;matchResult-&gt;blockno);
+<span class="lineNum">     849 </span>            : 
+<span class="lineNum">     850 </span>            :                 /*
+<span class="lineNum">     851 </span>            :                  * We might as well fall out of the loop; we could not
+<span class="lineNum">     852 </span>            :                  * estimate number of results on this page to support correct
+<span class="lineNum">     853 </span>            :                  * reducing of result even if it's enabled.
+<span class="lineNum">     854 </span>            :                  */
+<span class="lineNum">     855 </span><span class="lineNoCov">          0 :                 gotitem = true;</span>
+<span class="lineNum">     856 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     857 </span>            :             }
+<span class="lineNum">     858 </span>            : 
+<span class="lineNum">     859 </span>            :             /*
+<span class="lineNum">     860 </span>            :              * Not a lossy page. Skip over any offsets &lt;= advancePast, and
+<span class="lineNum">     861 </span>            :              * return that.
+<span class="lineNum">     862 </span>            :              */
+<span class="lineNum">     863 </span><span class="lineCov">      31672 :             if (entry-&gt;matchResult-&gt;blockno == advancePastBlk)</span>
+<span class="lineNum">     864 </span>            :             {
+<span class="lineNum">     865 </span>            :                 /*
+<span class="lineNum">     866 </span>            :                  * First, do a quick check against the last offset on the
+<span class="lineNum">     867 </span>            :                  * page. If that's &gt; advancePast, so are all the other
+<span class="lineNum">     868 </span>            :                  * offsets.
+<span class="lineNum">     869 </span>            :                  */
+<span class="lineNum">     870 </span><span class="lineCov">      31128 :                 if (entry-&gt;matchResult-&gt;offsets[entry-&gt;matchResult-&gt;ntuples - 1] &lt;= advancePastOff)</span>
+<span class="lineNum">     871 </span>            :                 {
+<span class="lineNum">     872 </span><span class="lineNoCov">          0 :                     entry-&gt;offset = entry-&gt;matchResult-&gt;ntuples;</span>
+<span class="lineNum">     873 </span><span class="lineNoCov">          0 :                     continue;</span>
+<span class="lineNum">     874 </span>            :                 }
+<span class="lineNum">     875 </span>            : 
+<span class="lineNum">     876 </span>            :                 /* Otherwise scan to find the first item &gt; advancePast */
+<span class="lineNum">     877 </span><span class="lineCov">      62256 :                 while (entry-&gt;matchResult-&gt;offsets[entry-&gt;offset] &lt;= advancePastOff)</span>
+<span class="lineNum">     878 </span><span class="lineNoCov">          0 :                     entry-&gt;offset++;</span>
+<span class="lineNum">     879 </span>            :             }
+<span class="lineNum">     880 </span>            : 
+<span class="lineNum">     881 </span><span class="lineCov">      31672 :             ItemPointerSet(&amp;entry-&gt;curItem,</span>
+<span class="lineNum">     882 </span>            :                            entry-&gt;matchResult-&gt;blockno,
+<span class="lineNum">     883 </span>            :                            entry-&gt;matchResult-&gt;offsets[entry-&gt;offset]);
+<span class="lineNum">     884 </span><span class="lineCov">      31672 :             entry-&gt;offset++;</span>
+<span class="lineNum">     885 </span><span class="lineCov">      31672 :             gotitem = true;</span>
+<span class="lineNum">     886 </span><span class="lineCov">      31672 :         } while (!gotitem || (entry-&gt;reduceResult == true &amp;&amp; dropItem(entry)));</span>
+<span class="lineNum">     887 </span>            :     }
+<span class="lineNum">     888 </span><span class="lineCov">      94522 :     else if (!BufferIsValid(entry-&gt;buffer))</span>
+<span class="lineNum">     889 </span>            :     {
+<span class="lineNum">     890 </span>            :         /*
+<span class="lineNum">     891 </span>            :          * A posting list from an entry tuple, or the last page of a posting
+<span class="lineNum">     892 </span>            :          * tree.
+<span class="lineNum">     893 </span>            :          */
+<span class="lineNum">     894 </span>            :         do
+<span class="lineNum">     895 </span>            :         {
+<span class="lineNum">     896 </span><span class="lineCov">      45030 :             if (entry-&gt;offset &gt;= entry-&gt;nlist)</span>
+<span class="lineNum">     897 </span>            :             {
+<span class="lineNum">     898 </span><span class="lineCov">        244 :                 ItemPointerSetInvalid(&amp;entry-&gt;curItem);</span>
+<span class="lineNum">     899 </span><span class="lineCov">        244 :                 entry-&gt;isFinished = true;</span>
+<span class="lineNum">     900 </span><span class="lineCov">        244 :                 break;</span>
+<span class="lineNum">     901 </span>            :             }
+<span class="lineNum">     902 </span>            : 
+<span class="lineNum">     903 </span><span class="lineCov">      44786 :             entry-&gt;curItem = entry-&gt;list[entry-&gt;offset++];</span>
+<span class="lineNum">     904 </span><span class="lineCov">      44786 :         } while (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;advancePast) &lt;= 0);</span>
+<span class="lineNum">     905 </span>            :         /* XXX: shouldn't we apply the fuzzy search limit here? */
+<span class="lineNum">     906 </span>            :     }
+<span class="lineNum">     907 </span>            :     else
+<span class="lineNum">     908 </span>            :     {
+<span class="lineNum">     909 </span>            :         /* A posting tree */
+<span class="lineNum">     910 </span>            :         do
+<span class="lineNum">     911 </span>            :         {
+<span class="lineNum">     912 </span>            :             /* If we've processed the current batch, load more items */
+<span class="lineNum">     913 </span><span class="lineCov">     112224 :             while (entry-&gt;offset &gt;= entry-&gt;nlist)</span>
+<span class="lineNum">     914 </span>            :             {
+<span class="lineNum">     915 </span><span class="lineCov">          8 :                 entryLoadMoreItems(ginstate, entry, advancePast, snapshot);</span>
+<span class="lineNum">     916 </span>            : 
+<span class="lineNum">     917 </span><span class="lineCov">          8 :                 if (entry-&gt;isFinished)</span>
+<span class="lineNum">     918 </span>            :                 {
+<span class="lineNum">     919 </span><span class="lineNoCov">          0 :                     ItemPointerSetInvalid(&amp;entry-&gt;curItem);</span>
+<span class="lineNum">     920 </span><span class="lineCov">     126232 :                     return;</span>
+<span class="lineNum">     921 </span>            :                 }
+<span class="lineNum">     922 </span>            :             }
+<span class="lineNum">     923 </span>            : 
+<span class="lineNum">     924 </span><span class="lineCov">      56108 :             entry-&gt;curItem = entry-&gt;list[entry-&gt;offset++];</span>
+<span class="lineNum">     925 </span>            : 
+<span class="lineNum">     926 </span><span class="lineCov">     112216 :         } while (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;advancePast) &lt;= 0 ||</span>
+<span class="lineNum">     927 </span><span class="lineCov">      56108 :                  (entry-&gt;reduceResult == true &amp;&amp; dropItem(entry)));</span>
+<span class="lineNum">     928 </span>            :     }
+<span class="lineNum">     929 </span>            : }
+<span class="lineNum">     930 </span>            : 
+<span class="lineNum">     931 </span>            : /*
+<span class="lineNum">     932 </span>            :  * Identify the &quot;current&quot; item among the input entry streams for this scan key
+<span class="lineNum">     933 </span>            :  * that is greater than advancePast, and test whether it passes the scan key
+<span class="lineNum">     934 </span>            :  * qual condition.
+<span class="lineNum">     935 </span>            :  *
+<span class="lineNum">     936 </span>            :  * The current item is the smallest curItem among the inputs.  key-&gt;curItem
+<span class="lineNum">     937 </span>            :  * is set to that value.  key-&gt;curItemMatches is set to indicate whether that
+<span class="lineNum">     938 </span>            :  * TID passes the consistentFn test.  If so, key-&gt;recheckCurItem is set true
+<span class="lineNum">     939 </span>            :  * iff recheck is needed for this item pointer (including the case where the
+<span class="lineNum">     940 </span>            :  * item pointer is a lossy page pointer).
+<span class="lineNum">     941 </span>            :  *
+<span class="lineNum">     942 </span>            :  * If all entry streams are exhausted, sets key-&gt;isFinished to true.
+<span class="lineNum">     943 </span>            :  *
+<span class="lineNum">     944 </span>            :  * Item pointers must be returned in ascending order.
+<span class="lineNum">     945 </span>            :  *
+<span class="lineNum">     946 </span>            :  * Note: this can return a &quot;lossy page&quot; item pointer, indicating that the
+<span class="lineNum">     947 </span>            :  * key potentially matches all items on that heap page.  However, it is
+<span class="lineNum">     948 </span>            :  * not allowed to return both a lossy page pointer and exact (regular)
+<span class="lineNum">     949 </span>            :  * item pointers for the same page.  (Doing so would break the key-combination
+<span class="lineNum">     950 </span>            :  * logic in scanGetItem.)
+<a name="951"><span class="lineNum">     951 </span>            :  */</a>
+<span class="lineNum">     952 </span>            : static void
+<span class="lineNum">     953 </span><span class="lineCov">     122154 : keyGetItem(GinState *ginstate, MemoryContext tempCtx, GinScanKey key,</span>
+<span class="lineNum">     954 </span>            :            ItemPointerData advancePast, Snapshot snapshot)
+<span class="lineNum">     955 </span>            : {
+<span class="lineNum">     956 </span>            :     ItemPointerData minItem;
+<span class="lineNum">     957 </span>            :     ItemPointerData curPageLossy;
+<span class="lineNum">     958 </span>            :     uint32      i;
+<span class="lineNum">     959 </span>            :     bool        haveLossyEntry;
+<span class="lineNum">     960 </span>            :     GinScanEntry entry;
+<span class="lineNum">     961 </span>            :     GinTernaryValue res;
+<span class="lineNum">     962 </span>            :     MemoryContext oldCtx;
+<span class="lineNum">     963 </span>            :     bool        allFinished;
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span><span class="lineCov">     122154 :     Assert(!key-&gt;isFinished);</span>
+<span class="lineNum">     966 </span>            : 
+<span class="lineNum">     967 </span>            :     /*
+<span class="lineNum">     968 </span>            :      * We might have already tested this item; if so, no need to repeat work.
+<span class="lineNum">     969 </span>            :      * (Note: the &quot;&gt;&quot; case can happen, if advancePast is exact but we
+<span class="lineNum">     970 </span>            :      * previously had to set curItem to a lossy-page pointer.)
+<span class="lineNum">     971 </span>            :      */
+<span class="lineNum">     972 </span><span class="lineCov">     122154 :     if (ginCompareItemPointers(&amp;key-&gt;curItem, &amp;advancePast) &gt; 0)</span>
+<span class="lineNum">     973 </span><span class="lineCov">        256 :         return;</span>
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span>            :     /*
+<span class="lineNum">     976 </span>            :      * Find the minimum item &gt; advancePast among the active entry streams.
+<span class="lineNum">     977 </span>            :      *
+<span class="lineNum">     978 </span>            :      * Note: a lossy-page entry is encoded by a ItemPointer with max value for
+<span class="lineNum">     979 </span>            :      * offset (0xffff), so that it will sort after any exact entries for the
+<span class="lineNum">     980 </span>            :      * same page.  So we'll prefer to return exact pointers not lossy
+<span class="lineNum">     981 </span>            :      * pointers, which is good.
+<span class="lineNum">     982 </span>            :      */
+<span class="lineNum">     983 </span><span class="lineCov">     122150 :     ItemPointerSetMax(&amp;minItem);</span>
+<span class="lineNum">     984 </span><span class="lineCov">     122150 :     allFinished = true;</span>
+<span class="lineNum">     985 </span><span class="lineCov">     249820 :     for (i = 0; i &lt; key-&gt;nrequired; i++)</span>
+<span class="lineNum">     986 </span>            :     {
+<span class="lineNum">     987 </span><span class="lineCov">     127670 :         entry = key-&gt;requiredEntries[i];</span>
+<span class="lineNum">     988 </span>            : 
+<span class="lineNum">     989 </span><span class="lineCov">     127670 :         if (entry-&gt;isFinished)</span>
+<span class="lineNum">     990 </span><span class="lineCov">       2120 :             continue;</span>
+<span class="lineNum">     991 </span>            : 
+<span class="lineNum">     992 </span>            :         /*
+<span class="lineNum">     993 </span>            :          * Advance this stream if necessary.
+<span class="lineNum">     994 </span>            :          *
+<span class="lineNum">     995 </span>            :          * In particular, since entry-&gt;curItem was initialized with
+<span class="lineNum">     996 </span>            :          * ItemPointerSetMin, this ensures we fetch the first item for each
+<span class="lineNum">     997 </span>            :          * entry on the first call.
+<span class="lineNum">     998 </span>            :          */
+<span class="lineNum">     999 </span><span class="lineCov">     125550 :         if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;advancePast) &lt;= 0)</span>
+<span class="lineNum">    1000 </span>            :         {
+<span class="lineNum">    1001 </span><span class="lineCov">     123318 :             entryGetItem(ginstate, entry, advancePast, snapshot);</span>
+<span class="lineNum">    1002 </span><span class="lineCov">     123318 :             if (entry-&gt;isFinished)</span>
+<span class="lineNum">    1003 </span><span class="lineCov">        274 :                 continue;</span>
+<span class="lineNum">    1004 </span>            :         }
+<span class="lineNum">    1005 </span>            : 
+<span class="lineNum">    1006 </span><span class="lineCov">     125276 :         allFinished = false;</span>
+<span class="lineNum">    1007 </span><span class="lineCov">     125276 :         if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;minItem) &lt; 0)</span>
+<span class="lineNum">    1008 </span><span class="lineCov">     123110 :             minItem = entry-&gt;curItem;</span>
+<span class="lineNum">    1009 </span>            :     }
+<span class="lineNum">    1010 </span>            : 
+<span class="lineNum">    1011 </span><span class="lineCov">     122150 :     if (allFinished)</span>
+<span class="lineNum">    1012 </span>            :     {
+<span class="lineNum">    1013 </span>            :         /* all entries are finished */
+<span class="lineNum">    1014 </span><span class="lineCov">        248 :         key-&gt;isFinished = true;</span>
+<span class="lineNum">    1015 </span><span class="lineCov">        248 :         return;</span>
+<span class="lineNum">    1016 </span>            :     }
+<span class="lineNum">    1017 </span>            : 
+<span class="lineNum">    1018 </span>            :     /*
+<span class="lineNum">    1019 </span>            :      * Ok, we now know that there are no matches &lt; minItem.
+<span class="lineNum">    1020 </span>            :      *
+<span class="lineNum">    1021 </span>            :      * If minItem is lossy, it means that there were no exact items on the
+<span class="lineNum">    1022 </span>            :      * page among requiredEntries, because lossy pointers sort after exact
+<span class="lineNum">    1023 </span>            :      * items. However, there might be exact items for the same page among
+<span class="lineNum">    1024 </span>            :      * additionalEntries, so we mustn't advance past them.
+<span class="lineNum">    1025 </span>            :      */
+<span class="lineNum">    1026 </span><span class="lineCov">     121902 :     if (ItemPointerIsLossyPage(&amp;minItem))</span>
+<span class="lineNum">    1027 </span>            :     {
+<span class="lineNum">    1028 </span><span class="lineNoCov">          0 :         if (GinItemPointerGetBlockNumber(&amp;advancePast) &lt;</span>
+<span class="lineNum">    1029 </span><span class="lineNoCov">          0 :             GinItemPointerGetBlockNumber(&amp;minItem))</span>
+<span class="lineNum">    1030 </span>            :         {
+<span class="lineNum">    1031 </span><span class="lineNoCov">          0 :             ItemPointerSet(&amp;advancePast,</span>
+<span class="lineNum">    1032 </span>            :                            GinItemPointerGetBlockNumber(&amp;minItem),
+<span class="lineNum">    1033 </span>            :                            InvalidOffsetNumber);
+<span class="lineNum">    1034 </span>            :         }
+<span class="lineNum">    1035 </span>            :     }
+<span class="lineNum">    1036 </span>            :     else
+<span class="lineNum">    1037 </span>            :     {
+<span class="lineNum">    1038 </span><span class="lineCov">     121902 :         Assert(GinItemPointerGetOffsetNumber(&amp;minItem) &gt; 0);</span>
+<span class="lineNum">    1039 </span><span class="lineCov">     121902 :         ItemPointerSet(&amp;advancePast,</span>
+<span class="lineNum">    1040 </span>            :                        GinItemPointerGetBlockNumber(&amp;minItem),
+<span class="lineNum">    1041 </span>            :                        OffsetNumberPrev(GinItemPointerGetOffsetNumber(&amp;minItem)));
+<span class="lineNum">    1042 </span>            :     }
+<span class="lineNum">    1043 </span>            : 
+<span class="lineNum">    1044 </span>            :     /*
+<span class="lineNum">    1045 </span>            :      * We might not have loaded all the entry streams for this TID yet. We
+<span class="lineNum">    1046 </span>            :      * could call the consistent function, passing MAYBE for those entries, to
+<span class="lineNum">    1047 </span>            :      * see if it can decide if this TID matches based on the information we
+<span class="lineNum">    1048 </span>            :      * have. But if the consistent-function is expensive, and cannot in fact
+<span class="lineNum">    1049 </span>            :      * decide with partial information, that could be a big loss. So, load all
+<span class="lineNum">    1050 </span>            :      * the additional entries, before calling the consistent function.
+<span class="lineNum">    1051 </span>            :      */
+<span class="lineNum">    1052 </span><span class="lineCov">     126148 :     for (i = 0; i &lt; key-&gt;nadditional; i++)</span>
+<span class="lineNum">    1053 </span>            :     {
+<span class="lineNum">    1054 </span><span class="lineCov">       4246 :         entry = key-&gt;additionalEntries[i];</span>
+<span class="lineNum">    1055 </span>            : 
+<span class="lineNum">    1056 </span><span class="lineCov">       4246 :         if (entry-&gt;isFinished)</span>
+<span class="lineNum">    1057 </span><span class="lineCov">          2 :             continue;</span>
+<span class="lineNum">    1058 </span>            : 
+<span class="lineNum">    1059 </span><span class="lineCov">       4244 :         if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;advancePast) &lt;= 0)</span>
+<span class="lineNum">    1060 </span>            :         {
+<span class="lineNum">    1061 </span><span class="lineCov">       2914 :             entryGetItem(ginstate, entry, advancePast, snapshot);</span>
+<span class="lineNum">    1062 </span><span class="lineCov">       2914 :             if (entry-&gt;isFinished)</span>
+<span class="lineNum">    1063 </span><span class="lineCov">          8 :                 continue;</span>
+<span class="lineNum">    1064 </span>            :         }
+<span class="lineNum">    1065 </span>            : 
+<span class="lineNum">    1066 </span>            :         /*
+<span class="lineNum">    1067 </span>            :          * Normally, none of the items in additionalEntries can have a curItem
+<span class="lineNum">    1068 </span>            :          * larger than minItem. But if minItem is a lossy page, then there
+<span class="lineNum">    1069 </span>            :          * might be exact items on the same page among additionalEntries.
+<span class="lineNum">    1070 </span>            :          */
+<span class="lineNum">    1071 </span><span class="lineCov">       4236 :         if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;minItem) &lt; 0)</span>
+<span class="lineNum">    1072 </span>            :         {
+<span class="lineNum">    1073 </span><span class="lineNoCov">          0 :             Assert(ItemPointerIsLossyPage(&amp;minItem));</span>
+<span class="lineNum">    1074 </span><span class="lineNoCov">          0 :             minItem = entry-&gt;curItem;</span>
+<span class="lineNum">    1075 </span>            :         }
+<span class="lineNum">    1076 </span>            :     }
+<span class="lineNum">    1077 </span>            : 
+<span class="lineNum">    1078 </span>            :     /*
+<span class="lineNum">    1079 </span>            :      * Ok, we've advanced all the entries up to minItem now. Set key-&gt;curItem,
+<span class="lineNum">    1080 </span>            :      * and perform consistentFn test.
+<span class="lineNum">    1081 </span>            :      *
+<span class="lineNum">    1082 </span>            :      * Lossy-page entries pose a problem, since we don't know the correct
+<span class="lineNum">    1083 </span>            :      * entryRes state to pass to the consistentFn, and we also don't know what
+<span class="lineNum">    1084 </span>            :      * its combining logic will be (could be AND, OR, or even NOT). If the
+<span class="lineNum">    1085 </span>            :      * logic is OR then the consistentFn might succeed for all items in the
+<span class="lineNum">    1086 </span>            :      * lossy page even when none of the other entries match.
+<span class="lineNum">    1087 </span>            :      *
+<span class="lineNum">    1088 </span>            :      * Our strategy is to call the tri-state consistent function, with the
+<span class="lineNum">    1089 </span>            :      * lossy-page entries set to MAYBE, and all the other entries FALSE. If it
+<span class="lineNum">    1090 </span>            :      * returns FALSE, none of the lossy items alone are enough for a match, so
+<span class="lineNum">    1091 </span>            :      * we don't need to return a lossy-page pointer. Otherwise, return a
+<span class="lineNum">    1092 </span>            :      * lossy-page pointer to indicate that the whole heap page must be
+<span class="lineNum">    1093 </span>            :      * checked.  (On subsequent calls, we'll do nothing until minItem is past
+<span class="lineNum">    1094 </span>            :      * the page altogether, thus ensuring that we never return both regular
+<span class="lineNum">    1095 </span>            :      * and lossy pointers for the same page.)
+<span class="lineNum">    1096 </span>            :      *
+<span class="lineNum">    1097 </span>            :      * An exception is that it doesn't matter what we pass for lossy pointers
+<span class="lineNum">    1098 </span>            :      * in &quot;hidden&quot; entries, because the consistentFn's result can't depend on
+<span class="lineNum">    1099 </span>            :      * them. We could pass them as MAYBE as well, but if we're using the
+<span class="lineNum">    1100 </span>            :      * &quot;shim&quot; implementation of a tri-state consistent function (see
+<span class="lineNum">    1101 </span>            :      * ginlogic.c), it's better to pass as few MAYBEs as possible. So pass
+<span class="lineNum">    1102 </span>            :      * them as true.
+<span class="lineNum">    1103 </span>            :      *
+<span class="lineNum">    1104 </span>            :      * Note that only lossy-page entries pointing to the current item's page
+<span class="lineNum">    1105 </span>            :      * should trigger this processing; we might have future lossy pages in the
+<span class="lineNum">    1106 </span>            :      * entry array, but they aren't relevant yet.
+<span class="lineNum">    1107 </span>            :      */
+<span class="lineNum">    1108 </span><span class="lineCov">     121902 :     key-&gt;curItem = minItem;</span>
+<span class="lineNum">    1109 </span><span class="lineCov">     121902 :     ItemPointerSetLossyPage(&amp;curPageLossy,</span>
+<span class="lineNum">    1110 </span>            :                             GinItemPointerGetBlockNumber(&amp;key-&gt;curItem));
+<span class="lineNum">    1111 </span><span class="lineCov">     121902 :     haveLossyEntry = false;</span>
+<span class="lineNum">    1112 </span><span class="lineCov">     253506 :     for (i = 0; i &lt; key-&gt;nentries; i++)</span>
+<span class="lineNum">    1113 </span>            :     {
+<span class="lineNum">    1114 </span><span class="lineCov">     131604 :         entry = key-&gt;scanEntry[i];</span>
+<span class="lineNum">    1115 </span><span class="lineCov">     261116 :         if (entry-&gt;isFinished == false &amp;&amp;</span>
+<span class="lineNum">    1116 </span><span class="lineCov">     129512 :             ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;curPageLossy) == 0)</span>
+<span class="lineNum">    1117 </span>            :         {
+<span class="lineNum">    1118 </span><span class="lineNoCov">          0 :             if (i &lt; key-&gt;nuserentries)</span>
+<span class="lineNum">    1119 </span><span class="lineNoCov">          0 :                 key-&gt;entryRes[i] = GIN_MAYBE;</span>
+<span class="lineNum">    1120 </span>            :             else
+<span class="lineNum">    1121 </span><span class="lineNoCov">          0 :                 key-&gt;entryRes[i] = GIN_TRUE;</span>
+<span class="lineNum">    1122 </span><span class="lineNoCov">          0 :             haveLossyEntry = true;</span>
+<span class="lineNum">    1123 </span>            :         }
+<span class="lineNum">    1124 </span>            :         else
+<span class="lineNum">    1125 </span><span class="lineCov">     131604 :             key-&gt;entryRes[i] = GIN_FALSE;</span>
+<span class="lineNum">    1126 </span>            :     }
+<span class="lineNum">    1127 </span>            : 
+<span class="lineNum">    1128 </span>            :     /* prepare for calling consistentFn in temp context */
+<span class="lineNum">    1129 </span><span class="lineCov">     121902 :     oldCtx = MemoryContextSwitchTo(tempCtx);</span>
+<span class="lineNum">    1130 </span>            : 
+<span class="lineNum">    1131 </span><span class="lineCov">     121902 :     if (haveLossyEntry)</span>
+<span class="lineNum">    1132 </span>            :     {
+<span class="lineNum">    1133 </span>            :         /* Have lossy-page entries, so see if whole page matches */
+<span class="lineNum">    1134 </span><span class="lineNoCov">          0 :         res = key-&gt;triConsistentFn(key);</span>
+<span class="lineNum">    1135 </span>            : 
+<span class="lineNum">    1136 </span><span class="lineNoCov">          0 :         if (res == GIN_TRUE || res == GIN_MAYBE)</span>
+<span class="lineNum">    1137 </span>            :         {
+<span class="lineNum">    1138 </span>            :             /* Yes, so clean up ... */
+<span class="lineNum">    1139 </span><span class="lineNoCov">          0 :             MemoryContextSwitchTo(oldCtx);</span>
+<span class="lineNum">    1140 </span><span class="lineNoCov">          0 :             MemoryContextReset(tempCtx);</span>
+<span class="lineNum">    1141 </span>            : 
+<span class="lineNum">    1142 </span>            :             /* and return lossy pointer for whole page */
+<span class="lineNum">    1143 </span><span class="lineNoCov">          0 :             key-&gt;curItem = curPageLossy;</span>
+<span class="lineNum">    1144 </span><span class="lineNoCov">          0 :             key-&gt;curItemMatches = true;</span>
+<span class="lineNum">    1145 </span><span class="lineNoCov">          0 :             key-&gt;recheckCurItem = true;</span>
+<span class="lineNum">    1146 </span><span class="lineNoCov">          0 :             return;</span>
+<span class="lineNum">    1147 </span>            :         }
+<span class="lineNum">    1148 </span>            :     }
+<span class="lineNum">    1149 </span>            : 
+<span class="lineNum">    1150 </span>            :     /*
+<span class="lineNum">    1151 </span>            :      * At this point we know that we don't need to return a lossy whole-page
+<span class="lineNum">    1152 </span>            :      * pointer, but we might have matches for individual exact item pointers,
+<span class="lineNum">    1153 </span>            :      * possibly in combination with a lossy pointer. Pass lossy pointers as
+<span class="lineNum">    1154 </span>            :      * MAYBE to the ternary consistent function, to let it decide if this
+<span class="lineNum">    1155 </span>            :      * tuple satisfies the overall key, even though we don't know if the lossy
+<span class="lineNum">    1156 </span>            :      * entries match.
+<span class="lineNum">    1157 </span>            :      *
+<span class="lineNum">    1158 </span>            :      * Prepare entryRes array to be passed to consistentFn.
+<span class="lineNum">    1159 </span>            :      */
+<span class="lineNum">    1160 </span><span class="lineCov">     253506 :     for (i = 0; i &lt; key-&gt;nentries; i++)</span>
+<span class="lineNum">    1161 </span>            :     {
+<span class="lineNum">    1162 </span><span class="lineCov">     131604 :         entry = key-&gt;scanEntry[i];</span>
+<span class="lineNum">    1163 </span><span class="lineCov">     131604 :         if (entry-&gt;isFinished)</span>
+<span class="lineNum">    1164 </span><span class="lineCov">       2092 :             key-&gt;entryRes[i] = GIN_FALSE;</span>
+<span class="lineNum">    1165 </span>            : #if 0
+<span class="lineNum">    1166 </span>            : 
+<span class="lineNum">    1167 </span>            :         /*
+<span class="lineNum">    1168 </span>            :          * This case can't currently happen, because we loaded all the entries
+<span class="lineNum">    1169 </span>            :          * for this item earlier.
+<span class="lineNum">    1170 </span>            :          */
+<span class="lineNum">    1171 </span>            :         else if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;advancePast) &lt;= 0)
+<span class="lineNum">    1172 </span>            :             key-&gt;entryRes[i] = GIN_MAYBE;
+<span class="lineNum">    1173 </span>            : #endif
+<span class="lineNum">    1174 </span><span class="lineCov">     129512 :         else if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;curPageLossy) == 0)</span>
+<span class="lineNum">    1175 </span><span class="lineNoCov">          0 :             key-&gt;entryRes[i] = GIN_MAYBE;</span>
+<span class="lineNum">    1176 </span><span class="lineCov">     129512 :         else if (ginCompareItemPointers(&amp;entry-&gt;curItem, &amp;minItem) == 0)</span>
+<span class="lineNum">    1177 </span><span class="lineCov">     124232 :             key-&gt;entryRes[i] = GIN_TRUE;</span>
+<span class="lineNum">    1178 </span>            :         else
+<span class="lineNum">    1179 </span><span class="lineCov">       5280 :             key-&gt;entryRes[i] = GIN_FALSE;</span>
+<span class="lineNum">    1180 </span>            :     }
+<span class="lineNum">    1181 </span>            : 
+<span class="lineNum">    1182 </span><span class="lineCov">     121902 :     res = key-&gt;triConsistentFn(key);</span>
+<span class="lineNum">    1183 </span>            : 
+<span class="lineNum">    1184 </span><span class="lineCov">     121902 :     switch (res)</span>
+<span class="lineNum">    1185 </span>            :     {
+<span class="lineNum">    1186 </span>            :         case GIN_TRUE:
+<span class="lineNum">    1187 </span><span class="lineCov">      89668 :             key-&gt;curItemMatches = true;</span>
+<span class="lineNum">    1188 </span>            :             /* triConsistentFn set recheckCurItem */
+<span class="lineNum">    1189 </span><span class="lineCov">      89668 :             break;</span>
+<span class="lineNum">    1190 </span>            : 
+<span class="lineNum">    1191 </span>            :         case GIN_FALSE:
+<span class="lineNum">    1192 </span><span class="lineCov">       2132 :             key-&gt;curItemMatches = false;</span>
+<span class="lineNum">    1193 </span><span class="lineCov">       2132 :             break;</span>
+<span class="lineNum">    1194 </span>            : 
+<span class="lineNum">    1195 </span>            :         case GIN_MAYBE:
+<span class="lineNum">    1196 </span><span class="lineCov">      30102 :             key-&gt;curItemMatches = true;</span>
+<span class="lineNum">    1197 </span><span class="lineCov">      30102 :             key-&gt;recheckCurItem = true;</span>
+<span class="lineNum">    1198 </span><span class="lineCov">      30102 :             break;</span>
+<span class="lineNum">    1199 </span>            : 
+<span class="lineNum">    1200 </span>            :         default:
+<span class="lineNum">    1201 </span>            : 
+<span class="lineNum">    1202 </span>            :             /*
+<span class="lineNum">    1203 </span>            :              * the 'default' case shouldn't happen, but if the consistent
+<span class="lineNum">    1204 </span>            :              * function returns something bogus, this is the safe result
+<span class="lineNum">    1205 </span>            :              */
+<span class="lineNum">    1206 </span><span class="lineNoCov">          0 :             key-&gt;curItemMatches = true;</span>
+<span class="lineNum">    1207 </span><span class="lineNoCov">          0 :             key-&gt;recheckCurItem = true;</span>
+<span class="lineNum">    1208 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">    1209 </span>            :     }
+<span class="lineNum">    1210 </span>            : 
+<span class="lineNum">    1211 </span>            :     /*
+<span class="lineNum">    1212 </span>            :      * We have a tuple, and we know if it matches or not. If it's a non-match,
+<span class="lineNum">    1213 </span>            :      * we could continue to find the next matching tuple, but let's break out
+<span class="lineNum">    1214 </span>            :      * and give scanGetItem a chance to advance the other keys. They might be
+<span class="lineNum">    1215 </span>            :      * able to skip past to a much higher TID, allowing us to save work.
+<span class="lineNum">    1216 </span>            :      */
+<span class="lineNum">    1217 </span>            : 
+<span class="lineNum">    1218 </span>            :     /* clean up after consistentFn calls */
+<span class="lineNum">    1219 </span><span class="lineCov">     121902 :     MemoryContextSwitchTo(oldCtx);</span>
+<span class="lineNum">    1220 </span><span class="lineCov">     121902 :     MemoryContextReset(tempCtx);</span>
+<span class="lineNum">    1221 </span>            : }
+<span class="lineNum">    1222 </span>            : 
+<span class="lineNum">    1223 </span>            : /*
+<span class="lineNum">    1224 </span>            :  * Get next heap item pointer (after advancePast) from scan.
+<span class="lineNum">    1225 </span>            :  * Returns true if anything found.
+<span class="lineNum">    1226 </span>            :  * On success, *item and *recheck are set.
+<span class="lineNum">    1227 </span>            :  *
+<span class="lineNum">    1228 </span>            :  * Note: this is very nearly the same logic as in keyGetItem(), except
+<span class="lineNum">    1229 </span>            :  * that we know the keys are to be combined with AND logic, whereas in
+<span class="lineNum">    1230 </span>            :  * keyGetItem() the combination logic is known only to the consistentFn.
+<a name="1231"><span class="lineNum">    1231 </span>            :  */</a>
+<span class="lineNum">    1232 </span>            : static bool
+<span class="lineNum">    1233 </span><span class="lineCov">     119986 : scanGetItem(IndexScanDesc scan, ItemPointerData advancePast,</span>
+<span class="lineNum">    1234 </span>            :             ItemPointerData *item, bool *recheck)
+<span class="lineNum">    1235 </span>            : {
+<span class="lineNum">    1236 </span><span class="lineCov">     119986 :     GinScanOpaque so = (GinScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">    1237 </span>            :     uint32      i;
+<span class="lineNum">    1238 </span>            :     bool        match;
+<span class="lineNum">    1239 </span>            : 
+<span class="lineNum">    1240 </span>            :     /*----------
+<span class="lineNum">    1241 </span>            :      * Advance the scan keys in lock-step, until we find an item that matches
+<span class="lineNum">    1242 </span>            :      * all the keys. If any key reports isFinished, meaning its subset of the
+<span class="lineNum">    1243 </span>            :      * entries is exhausted, we can stop.  Otherwise, set *item to the next
+<span class="lineNum">    1244 </span>            :      * matching item.
+<span class="lineNum">    1245 </span>            :      *
+<span class="lineNum">    1246 </span>            :      * This logic works only if a keyGetItem stream can never contain both
+<span class="lineNum">    1247 </span>            :      * exact and lossy pointers for the same page.  Else we could have a
+<span class="lineNum">    1248 </span>            :      * case like
+<span class="lineNum">    1249 </span>            :      *
+<span class="lineNum">    1250 </span>            :      *      stream 1        stream 2
+<span class="lineNum">    1251 </span>            :      *      ...             ...
+<span class="lineNum">    1252 </span>            :      *      42/6            42/7
+<span class="lineNum">    1253 </span>            :      *      50/1            42/0xffff
+<span class="lineNum">    1254 </span>            :      *      ...             ...
+<span class="lineNum">    1255 </span>            :      *
+<span class="lineNum">    1256 </span>            :      * We would conclude that 42/6 is not a match and advance stream 1,
+<span class="lineNum">    1257 </span>            :      * thus never detecting the match to the lossy pointer in stream 2.
+<span class="lineNum">    1258 </span>            :      * (keyGetItem has a similar problem versus entryGetItem.)
+<span class="lineNum">    1259 </span>            :      *----------
+<span class="lineNum">    1260 </span>            :      */
+<span class="lineNum">    1261 </span>            :     do
+<span class="lineNum">    1262 </span>            :     {
+<span class="lineNum">    1263 </span><span class="lineCov">     122134 :         ItemPointerSetMin(item);</span>
+<span class="lineNum">    1264 </span><span class="lineCov">     122134 :         match = true;</span>
+<span class="lineNum">    1265 </span><span class="lineCov">     241908 :         for (i = 0; i &lt; so-&gt;nkeys &amp;&amp; match; i++)</span>
+<span class="lineNum">    1266 </span>            :         {
+<span class="lineNum">    1267 </span><span class="lineCov">     122154 :             GinScanKey  key = so-&gt;keys + i;</span>
+<span class="lineNum">    1268 </span>            : 
+<span class="lineNum">    1269 </span>            :             /* Fetch the next item for this key that is &gt; advancePast. */
+<span class="lineNum">    1270 </span><span class="lineCov">     122154 :             keyGetItem(&amp;so-&gt;ginstate, so-&gt;tempCtx, key, advancePast,</span>
+<span class="lineNum">    1271 </span>            :                        scan-&gt;xs_snapshot);
+<span class="lineNum">    1272 </span>            : 
+<span class="lineNum">    1273 </span><span class="lineCov">     122154 :             if (key-&gt;isFinished)</span>
+<span class="lineNum">    1274 </span><span class="lineCov">        248 :                 return false;</span>
+<span class="lineNum">    1275 </span>            : 
+<span class="lineNum">    1276 </span>            :             /*
+<span class="lineNum">    1277 </span>            :              * If it's not a match, we can immediately conclude that nothing
+<span class="lineNum">    1278 </span>            :              * &lt;= this item matches, without checking the rest of the keys.
+<span class="lineNum">    1279 </span>            :              */
+<span class="lineNum">    1280 </span><span class="lineCov">     121906 :             if (!key-&gt;curItemMatches)</span>
+<span class="lineNum">    1281 </span>            :             {
+<span class="lineNum">    1282 </span><span class="lineCov">       2132 :                 advancePast = key-&gt;curItem;</span>
+<span class="lineNum">    1283 </span><span class="lineCov">       2132 :                 match = false;</span>
+<span class="lineNum">    1284 </span><span class="lineCov">       2132 :                 break;</span>
+<span class="lineNum">    1285 </span>            :             }
+<span class="lineNum">    1286 </span>            : 
+<span class="lineNum">    1287 </span>            :             /*
+<span class="lineNum">    1288 </span>            :              * It's a match. We can conclude that nothing &lt; matches, so the
+<span class="lineNum">    1289 </span>            :              * other key streams can skip to this item.
+<span class="lineNum">    1290 </span>            :              *
+<span class="lineNum">    1291 </span>            :              * Beware of lossy pointers, though; from a lossy pointer, we can
+<span class="lineNum">    1292 </span>            :              * only conclude that nothing smaller than this *block* matches.
+<span class="lineNum">    1293 </span>            :              */
+<span class="lineNum">    1294 </span><span class="lineCov">     119774 :             if (ItemPointerIsLossyPage(&amp;key-&gt;curItem))</span>
+<span class="lineNum">    1295 </span>            :             {
+<span class="lineNum">    1296 </span><span class="lineNoCov">          0 :                 if (GinItemPointerGetBlockNumber(&amp;advancePast) &lt;</span>
+<span class="lineNum">    1297 </span><span class="lineNoCov">          0 :                     GinItemPointerGetBlockNumber(&amp;key-&gt;curItem))</span>
+<span class="lineNum">    1298 </span>            :                 {
+<span class="lineNum">    1299 </span><span class="lineNoCov">          0 :                     ItemPointerSet(&amp;advancePast,</span>
+<span class="lineNum">    1300 </span>            :                                    GinItemPointerGetBlockNumber(&amp;key-&gt;curItem),
+<span class="lineNum">    1301 </span>            :                                    InvalidOffsetNumber);
+<span class="lineNum">    1302 </span>            :                 }
+<span class="lineNum">    1303 </span>            :             }
+<span class="lineNum">    1304 </span>            :             else
+<span class="lineNum">    1305 </span>            :             {
+<span class="lineNum">    1306 </span><span class="lineCov">     119774 :                 Assert(GinItemPointerGetOffsetNumber(&amp;key-&gt;curItem) &gt; 0);</span>
+<span class="lineNum">    1307 </span><span class="lineCov">     119774 :                 ItemPointerSet(&amp;advancePast,</span>
+<span class="lineNum">    1308 </span>            :                                GinItemPointerGetBlockNumber(&amp;key-&gt;curItem),
+<span class="lineNum">    1309 </span>            :                                OffsetNumberPrev(GinItemPointerGetOffsetNumber(&amp;key-&gt;curItem)));
+<span class="lineNum">    1310 </span>            :             }
+<span class="lineNum">    1311 </span>            : 
+<span class="lineNum">    1312 </span>            :             /*
+<span class="lineNum">    1313 </span>            :              * If this is the first key, remember this location as a potential
+<span class="lineNum">    1314 </span>            :              * match, and proceed to check the rest of the keys.
+<span class="lineNum">    1315 </span>            :              *
+<span class="lineNum">    1316 </span>            :              * Otherwise, check if this is the same item that we checked the
+<span class="lineNum">    1317 </span>            :              * previous keys for (or a lossy pointer for the same page). If
+<span class="lineNum">    1318 </span>            :              * not, loop back to check the previous keys for this item (we
+<span class="lineNum">    1319 </span>            :              * will check this key again too, but keyGetItem returns quickly
+<span class="lineNum">    1320 </span>            :              * for that)
+<span class="lineNum">    1321 </span>            :              */
+<span class="lineNum">    1322 </span><span class="lineCov">     119774 :             if (i == 0)</span>
+<span class="lineNum">    1323 </span>            :             {
+<span class="lineNum">    1324 </span><span class="lineCov">     119754 :                 *item = key-&gt;curItem;</span>
+<span class="lineNum">    1325 </span>            :             }
+<span class="lineNum">    1326 </span>            :             else
+<span class="lineNum">    1327 </span>            :             {
+<span class="lineNum">    1328 </span><span class="lineCov">         40 :                 if (ItemPointerIsLossyPage(&amp;key-&gt;curItem) ||</span>
+<span class="lineNum">    1329 </span><span class="lineCov">         20 :                     ItemPointerIsLossyPage(item))</span>
+<span class="lineNum">    1330 </span>            :                 {
+<span class="lineNum">    1331 </span><span class="lineNoCov">          0 :                     Assert(GinItemPointerGetBlockNumber(&amp;key-&gt;curItem) &gt;= GinItemPointerGetBlockNumber(item));</span>
+<span class="lineNum">    1332 </span><span class="lineNoCov">          0 :                     match = (GinItemPointerGetBlockNumber(&amp;key-&gt;curItem) ==</span>
+<span class="lineNum">    1333 </span><span class="lineNoCov">          0 :                              GinItemPointerGetBlockNumber(item));</span>
+<span class="lineNum">    1334 </span>            :                 }
+<span class="lineNum">    1335 </span>            :                 else
+<span class="lineNum">    1336 </span>            :                 {
+<span class="lineNum">    1337 </span><span class="lineCov">         20 :                     Assert(ginCompareItemPointers(&amp;key-&gt;curItem, item) &gt;= 0);</span>
+<span class="lineNum">    1338 </span><span class="lineCov">         20 :                     match = (ginCompareItemPointers(&amp;key-&gt;curItem, item) == 0);</span>
+<span class="lineNum">    1339 </span>            :                 }
+<span class="lineNum">    1340 </span>            :             }
+<span class="lineNum">    1341 </span>            :         }
+<span class="lineNum">    1342 </span><span class="lineCov">     121886 :     } while (!match);</span>
+<span class="lineNum">    1343 </span>            : 
+<span class="lineNum">    1344 </span><span class="lineCov">     119738 :     Assert(!ItemPointerIsMin(item));</span>
+<span class="lineNum">    1345 </span>            : 
+<span class="lineNum">    1346 </span>            :     /*
+<span class="lineNum">    1347 </span>            :      * Now *item contains the first ItemPointer after previous result that
+<span class="lineNum">    1348 </span>            :      * satisfied all the keys for that exact TID, or a lossy reference to the
+<span class="lineNum">    1349 </span>            :      * same page.
+<span class="lineNum">    1350 </span>            :      *
+<span class="lineNum">    1351 </span>            :      * We must return recheck = true if any of the keys are marked recheck.
+<span class="lineNum">    1352 </span>            :      */
+<span class="lineNum">    1353 </span><span class="lineCov">     119738 :     *recheck = false;</span>
+<span class="lineNum">    1354 </span><span class="lineCov">     209378 :     for (i = 0; i &lt; so-&gt;nkeys; i++)</span>
+<span class="lineNum">    1355 </span>            :     {
+<span class="lineNum">    1356 </span><span class="lineCov">     119742 :         GinScanKey  key = so-&gt;keys + i;</span>
+<span class="lineNum">    1357 </span>            : 
+<span class="lineNum">    1358 </span><span class="lineCov">     119742 :         if (key-&gt;recheckCurItem)</span>
+<span class="lineNum">    1359 </span>            :         {
+<span class="lineNum">    1360 </span><span class="lineCov">      30102 :             *recheck = true;</span>
+<span class="lineNum">    1361 </span><span class="lineCov">      30102 :             break;</span>
+<span class="lineNum">    1362 </span>            :         }
+<span class="lineNum">    1363 </span>            :     }
+<span class="lineNum">    1364 </span>            : 
+<span class="lineNum">    1365 </span><span class="lineCov">     119738 :     return true;</span>
+<span class="lineNum">    1366 </span>            : }
+<span class="lineNum">    1367 </span>            : 
+<span class="lineNum">    1368 </span>            : 
+<span class="lineNum">    1369 </span>            : /*
+<span class="lineNum">    1370 </span>            :  * Functions for scanning the pending list
+<span class="lineNum">    1371 </span>            :  */
+<span class="lineNum">    1372 </span>            : 
+<span class="lineNum">    1373 </span>            : 
+<span class="lineNum">    1374 </span>            : /*
+<span class="lineNum">    1375 </span>            :  * Get ItemPointer of next heap row to be checked from pending list.
+<span class="lineNum">    1376 </span>            :  * Returns false if there are no more. On pages with several heap rows
+<span class="lineNum">    1377 </span>            :  * it returns each row separately, on page with part of heap row returns
+<span class="lineNum">    1378 </span>            :  * per page data.  pos-&gt;firstOffset and pos-&gt;lastOffset are set to identify
+<span class="lineNum">    1379 </span>            :  * the range of pending-list tuples belonging to this heap row.
+<span class="lineNum">    1380 </span>            :  *
+<span class="lineNum">    1381 </span>            :  * The pendingBuffer is presumed pinned and share-locked on entry, and is
+<span class="lineNum">    1382 </span>            :  * pinned and share-locked on success exit.  On failure exit it's released.
+<a name="1383"><span class="lineNum">    1383 </span>            :  */</a>
+<span class="lineNum">    1384 </span>            : static bool
+<span class="lineNum">    1385 </span><span class="lineCov">         28 : scanGetCandidate(IndexScanDesc scan, pendingPosition *pos)</span>
+<span class="lineNum">    1386 </span>            : {
+<span class="lineNum">    1387 </span>            :     OffsetNumber maxoff;
+<span class="lineNum">    1388 </span>            :     Page        page;
+<span class="lineNum">    1389 </span>            :     IndexTuple  itup;
+<span class="lineNum">    1390 </span>            : 
+<span class="lineNum">    1391 </span><span class="lineCov">         28 :     ItemPointerSetInvalid(&amp;pos-&gt;item);</span>
+<span class="lineNum">    1392 </span>            :     for (;;)
+<span class="lineNum">    1393 </span>            :     {
+<span class="lineNum">    1394 </span><span class="lineCov">         28 :         page = BufferGetPage(pos-&gt;pendingBuffer);</span>
+<span class="lineNum">    1395 </span><span class="lineCov">         28 :         TestForOldSnapshot(scan-&gt;xs_snapshot, scan-&gt;indexRelation, page);</span>
+<span class="lineNum">    1396 </span>            : 
+<span class="lineNum">    1397 </span><span class="lineCov">         28 :         maxoff = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">    1398 </span><span class="lineCov">         28 :         if (pos-&gt;firstOffset &gt; maxoff)</span>
+<span class="lineNum">    1399 </span>            :         {
+<span class="lineNum">    1400 </span><span class="lineCov">          8 :             BlockNumber blkno = GinPageGetOpaque(page)-&gt;rightlink;</span>
+<span class="lineNum">    1401 </span>            : 
+<span class="lineNum">    1402 </span><span class="lineCov">          8 :             if (blkno == InvalidBlockNumber)</span>
+<span class="lineNum">    1403 </span>            :             {
+<span class="lineNum">    1404 </span><span class="lineCov">          8 :                 UnlockReleaseBuffer(pos-&gt;pendingBuffer);</span>
+<span class="lineNum">    1405 </span><span class="lineCov">          8 :                 pos-&gt;pendingBuffer = InvalidBuffer;</span>
+<span class="lineNum">    1406 </span>            : 
+<span class="lineNum">    1407 </span><span class="lineCov">          8 :                 return false;</span>
+<span class="lineNum">    1408 </span>            :             }
+<span class="lineNum">    1409 </span>            :             else
+<span class="lineNum">    1410 </span>            :             {
+<span class="lineNum">    1411 </span>            :                 /*
+<span class="lineNum">    1412 </span>            :                  * Here we must prevent deletion of next page by insertcleanup
+<span class="lineNum">    1413 </span>            :                  * process, which may be trying to obtain exclusive lock on
+<span class="lineNum">    1414 </span>            :                  * current page.  So, we lock next page before releasing the
+<span class="lineNum">    1415 </span>            :                  * current one
+<span class="lineNum">    1416 </span>            :                  */
+<span class="lineNum">    1417 </span><span class="lineNoCov">          0 :                 Buffer      tmpbuf = ReadBuffer(scan-&gt;indexRelation, blkno);</span>
+<span class="lineNum">    1418 </span>            : 
+<span class="lineNum">    1419 </span><span class="lineNoCov">          0 :                 LockBuffer(tmpbuf, GIN_SHARE);</span>
+<span class="lineNum">    1420 </span><span class="lineNoCov">          0 :                 UnlockReleaseBuffer(pos-&gt;pendingBuffer);</span>
+<span class="lineNum">    1421 </span>            : 
+<span class="lineNum">    1422 </span><span class="lineNoCov">          0 :                 pos-&gt;pendingBuffer = tmpbuf;</span>
+<span class="lineNum">    1423 </span><span class="lineNoCov">          0 :                 pos-&gt;firstOffset = FirstOffsetNumber;</span>
+<span class="lineNum">    1424 </span>            :             }
+<span class="lineNum">    1425 </span>            :         }
+<span class="lineNum">    1426 </span>            :         else
+<span class="lineNum">    1427 </span>            :         {
+<span class="lineNum">    1428 </span><span class="lineCov">         20 :             itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, pos-&gt;firstOffset));</span>
+<span class="lineNum">    1429 </span><span class="lineCov">         20 :             pos-&gt;item = itup-&gt;t_tid;</span>
+<span class="lineNum">    1430 </span><span class="lineCov">         20 :             if (GinPageHasFullRow(page))</span>
+<span class="lineNum">    1431 </span>            :             {
+<span class="lineNum">    1432 </span>            :                 /*
+<span class="lineNum">    1433 </span>            :                  * find itempointer to the next row
+<span class="lineNum">    1434 </span>            :                  */
+<span class="lineNum">    1435 </span><span class="lineCov">         36 :                 for (pos-&gt;lastOffset = pos-&gt;firstOffset + 1; pos-&gt;lastOffset &lt;= maxoff; pos-&gt;lastOffset++)</span>
+<span class="lineNum">    1436 </span>            :                 {
+<span class="lineNum">    1437 </span><span class="lineCov">         28 :                     itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, pos-&gt;lastOffset));</span>
+<span class="lineNum">    1438 </span><span class="lineCov">         28 :                     if (!ItemPointerEquals(&amp;pos-&gt;item, &amp;itup-&gt;t_tid))</span>
+<span class="lineNum">    1439 </span><span class="lineCov">         12 :                         break;</span>
+<span class="lineNum">    1440 </span>            :                 }
+<span class="lineNum">    1441 </span>            :             }
+<span class="lineNum">    1442 </span>            :             else
+<span class="lineNum">    1443 </span>            :             {
+<span class="lineNum">    1444 </span>            :                 /*
+<span class="lineNum">    1445 </span>            :                  * All itempointers are the same on this page
+<span class="lineNum">    1446 </span>            :                  */
+<span class="lineNum">    1447 </span><span class="lineNoCov">          0 :                 pos-&gt;lastOffset = maxoff + 1;</span>
+<span class="lineNum">    1448 </span>            :             }
+<span class="lineNum">    1449 </span>            : 
+<span class="lineNum">    1450 </span>            :             /*
+<span class="lineNum">    1451 </span>            :              * Now pos-&gt;firstOffset points to the first tuple of current heap
+<span class="lineNum">    1452 </span>            :              * row, pos-&gt;lastOffset points to the first tuple of next heap row
+<span class="lineNum">    1453 </span>            :              * (or to the end of page)
+<span class="lineNum">    1454 </span>            :              */
+<span class="lineNum">    1455 </span><span class="lineCov">         20 :             break;</span>
+<span class="lineNum">    1456 </span>            :         }
+<span class="lineNum">    1457 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1458 </span>            : 
+<span class="lineNum">    1459 </span><span class="lineCov">         20 :     return true;</span>
+<span class="lineNum">    1460 </span>            : }
+<span class="lineNum">    1461 </span>            : 
+<span class="lineNum">    1462 </span>            : /*
+<span class="lineNum">    1463 </span>            :  * Scan pending-list page from current tuple (off) up till the first of:
+<span class="lineNum">    1464 </span>            :  * - match is found (then returns true)
+<span class="lineNum">    1465 </span>            :  * - no later match is possible
+<span class="lineNum">    1466 </span>            :  * - tuple's attribute number is not equal to entry's attrnum
+<span class="lineNum">    1467 </span>            :  * - reach end of page
+<span class="lineNum">    1468 </span>            :  *
+<span class="lineNum">    1469 </span>            :  * datum[]/category[]/datumExtracted[] arrays are used to cache the results
+<span class="lineNum">    1470 </span>            :  * of gintuple_get_key() on the current page.
+<a name="1471"><span class="lineNum">    1471 </span>            :  */</a>
+<span class="lineNum">    1472 </span>            : static bool
+<span class="lineNum">    1473 </span><span class="lineNoCov">          0 : matchPartialInPendingList(GinState *ginstate, Page page,</span>
+<span class="lineNum">    1474 </span>            :                           OffsetNumber off, OffsetNumber maxoff,
+<span class="lineNum">    1475 </span>            :                           GinScanEntry entry,
+<span class="lineNum">    1476 </span>            :                           Datum *datum, GinNullCategory *category,
+<span class="lineNum">    1477 </span>            :                           bool *datumExtracted)
+<span class="lineNum">    1478 </span>            : {
+<span class="lineNum">    1479 </span>            :     IndexTuple  itup;
+<span class="lineNum">    1480 </span>            :     int32       cmp;
+<span class="lineNum">    1481 </span>            : 
+<span class="lineNum">    1482 </span>            :     /* Partial match to a null is not possible */
+<span class="lineNum">    1483 </span><span class="lineNoCov">          0 :     if (entry-&gt;queryCategory != GIN_CAT_NORM_KEY)</span>
+<span class="lineNum">    1484 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1485 </span>            : 
+<span class="lineNum">    1486 </span><span class="lineNoCov">          0 :     while (off &lt; maxoff)</span>
+<span class="lineNum">    1487 </span>            :     {
+<span class="lineNum">    1488 </span><span class="lineNoCov">          0 :         itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, off));</span>
+<span class="lineNum">    1489 </span>            : 
+<span class="lineNum">    1490 </span><span class="lineNoCov">          0 :         if (gintuple_get_attrnum(ginstate, itup) != entry-&gt;attnum)</span>
+<span class="lineNum">    1491 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">    1492 </span>            : 
+<span class="lineNum">    1493 </span><span class="lineNoCov">          0 :         if (datumExtracted[off - 1] == false)</span>
+<span class="lineNum">    1494 </span>            :         {
+<span class="lineNum">    1495 </span><span class="lineNoCov">          0 :             datum[off - 1] = gintuple_get_key(ginstate, itup,</span>
+<span class="lineNum">    1496 </span><span class="lineNoCov">          0 :                                               &amp;category[off - 1]);</span>
+<span class="lineNum">    1497 </span><span class="lineNoCov">          0 :             datumExtracted[off - 1] = true;</span>
+<span class="lineNum">    1498 </span>            :         }
+<span class="lineNum">    1499 </span>            : 
+<span class="lineNum">    1500 </span>            :         /* Once we hit nulls, no further match is possible */
+<span class="lineNum">    1501 </span><span class="lineNoCov">          0 :         if (category[off - 1] != GIN_CAT_NORM_KEY)</span>
+<span class="lineNum">    1502 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">    1503 </span>            : 
+<span class="lineNum">    1504 </span>            :         /*----------
+<span class="lineNum">    1505 </span>            :          * Check partial match.
+<span class="lineNum">    1506 </span>            :          * case cmp == 0 =&gt; match
+<span class="lineNum">    1507 </span>            :          * case cmp &gt; 0 =&gt; not match and end scan (no later match possible)
+<span class="lineNum">    1508 </span>            :          * case cmp &lt; 0 =&gt; not match and continue scan
+<span class="lineNum">    1509 </span>            :          *----------
+<span class="lineNum">    1510 </span>            :          */
+<span class="lineNum">    1511 </span><span class="lineNoCov">          0 :         cmp = DatumGetInt32(FunctionCall4Coll(&amp;ginstate-&gt;comparePartialFn[entry-&gt;attnum - 1],</span>
+<span class="lineNum">    1512 </span>            :                                               ginstate-&gt;supportCollation[entry-&gt;attnum - 1],
+<span class="lineNum">    1513 </span>            :                                               entry-&gt;queryKey,
+<span class="lineNum">    1514 </span>            :                                               datum[off - 1],
+<span class="lineNum">    1515 </span>            :                                               UInt16GetDatum(entry-&gt;strategy),
+<span class="lineNum">    1516 </span>            :                                               PointerGetDatum(entry-&gt;extra_data)));
+<span class="lineNum">    1517 </span><span class="lineNoCov">          0 :         if (cmp == 0)</span>
+<span class="lineNum">    1518 </span><span class="lineNoCov">          0 :             return true;</span>
+<span class="lineNum">    1519 </span><span class="lineNoCov">          0 :         else if (cmp &gt; 0)</span>
+<span class="lineNum">    1520 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">    1521 </span>            : 
+<span class="lineNum">    1522 </span><span class="lineNoCov">          0 :         off++;</span>
+<span class="lineNum">    1523 </span>            :     }
+<span class="lineNum">    1524 </span>            : 
+<span class="lineNum">    1525 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">    1526 </span>            : }
+<span class="lineNum">    1527 </span>            : 
+<span class="lineNum">    1528 </span>            : /*
+<span class="lineNum">    1529 </span>            :  * Set up the entryRes array for each key by looking at
+<span class="lineNum">    1530 </span>            :  * every entry for current heap row in pending list.
+<span class="lineNum">    1531 </span>            :  *
+<span class="lineNum">    1532 </span>            :  * Returns true if each scan key has at least one entryRes match.
+<span class="lineNum">    1533 </span>            :  * This corresponds to the situations where the normal index search will
+<span class="lineNum">    1534 </span>            :  * try to apply the key's consistentFn.  (A tuple not meeting that requirement
+<span class="lineNum">    1535 </span>            :  * cannot be returned by the normal search since no entry stream will
+<span class="lineNum">    1536 </span>            :  * source its TID.)
+<span class="lineNum">    1537 </span>            :  *
+<span class="lineNum">    1538 </span>            :  * The pendingBuffer is presumed pinned and share-locked on entry.
+<a name="1539"><span class="lineNum">    1539 </span>            :  */</a>
+<span class="lineNum">    1540 </span>            : static bool
+<span class="lineNum">    1541 </span><span class="lineCov">         20 : collectMatchesForHeapRow(IndexScanDesc scan, pendingPosition *pos)</span>
+<span class="lineNum">    1542 </span>            : {
+<span class="lineNum">    1543 </span><span class="lineCov">         20 :     GinScanOpaque so = (GinScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">    1544 </span>            :     OffsetNumber attrnum;
+<span class="lineNum">    1545 </span>            :     Page        page;
+<span class="lineNum">    1546 </span>            :     IndexTuple  itup;
+<span class="lineNum">    1547 </span>            :     int         i,
+<span class="lineNum">    1548 </span>            :                 j;
+<span class="lineNum">    1549 </span>            : 
+<span class="lineNum">    1550 </span>            :     /*
+<span class="lineNum">    1551 </span>            :      * Reset all entryRes and hasMatchKey flags
+<span class="lineNum">    1552 </span>            :      */
+<span class="lineNum">    1553 </span><span class="lineCov">         40 :     for (i = 0; i &lt; so-&gt;nkeys; i++)</span>
+<span class="lineNum">    1554 </span>            :     {
+<span class="lineNum">    1555 </span><span class="lineCov">         20 :         GinScanKey  key = so-&gt;keys + i;</span>
+<span class="lineNum">    1556 </span>            : 
+<span class="lineNum">    1557 </span><span class="lineCov">         20 :         memset(key-&gt;entryRes, GIN_FALSE, key-&gt;nentries);</span>
+<span class="lineNum">    1558 </span>            :     }
+<span class="lineNum">    1559 </span><span class="lineCov">         20 :     memset(pos-&gt;hasMatchKey, false, so-&gt;nkeys);</span>
+<span class="lineNum">    1560 </span>            : 
+<span class="lineNum">    1561 </span>            :     /*
+<span class="lineNum">    1562 </span>            :      * Outer loop iterates over multiple pending-list pages when a single heap
+<span class="lineNum">    1563 </span>            :      * row has entries spanning those pages.
+<span class="lineNum">    1564 </span>            :      */
+<span class="lineNum">    1565 </span>            :     for (;;)
+<span class="lineNum">    1566 </span>            :     {
+<span class="lineNum">    1567 </span>            :         Datum       datum[BLCKSZ / sizeof(IndexTupleData)];
+<span class="lineNum">    1568 </span>            :         GinNullCategory category[BLCKSZ / sizeof(IndexTupleData)];
+<span class="lineNum">    1569 </span>            :         bool        datumExtracted[BLCKSZ / sizeof(IndexTupleData)];
+<span class="lineNum">    1570 </span>            : 
+<span class="lineNum">    1571 </span><span class="lineCov">         20 :         Assert(pos-&gt;lastOffset &gt; pos-&gt;firstOffset);</span>
+<span class="lineNum">    1572 </span><span class="lineCov">         20 :         memset(datumExtracted + pos-&gt;firstOffset - 1, 0,</span>
+<span class="lineNum">    1573 </span><span class="lineCov">         20 :                sizeof(bool) * (pos-&gt;lastOffset - pos-&gt;firstOffset));</span>
+<span class="lineNum">    1574 </span>            : 
+<span class="lineNum">    1575 </span><span class="lineCov">         20 :         page = BufferGetPage(pos-&gt;pendingBuffer);</span>
+<span class="lineNum">    1576 </span><span class="lineCov">         20 :         TestForOldSnapshot(scan-&gt;xs_snapshot, scan-&gt;indexRelation, page);</span>
+<span class="lineNum">    1577 </span>            : 
+<span class="lineNum">    1578 </span><span class="lineCov">         40 :         for (i = 0; i &lt; so-&gt;nkeys; i++)</span>
+<span class="lineNum">    1579 </span>            :         {
+<span class="lineNum">    1580 </span><span class="lineCov">         20 :             GinScanKey  key = so-&gt;keys + i;</span>
+<span class="lineNum">    1581 </span>            : 
+<span class="lineNum">    1582 </span><span class="lineCov">         60 :             for (j = 0; j &lt; key-&gt;nentries; j++)</span>
+<span class="lineNum">    1583 </span>            :             {
+<span class="lineNum">    1584 </span><span class="lineCov">         40 :                 GinScanEntry entry = key-&gt;scanEntry[j];</span>
+<span class="lineNum">    1585 </span><span class="lineCov">         40 :                 OffsetNumber StopLow = pos-&gt;firstOffset,</span>
+<span class="lineNum">    1586 </span><span class="lineCov">         40 :                             StopHigh = pos-&gt;lastOffset,</span>
+<span class="lineNum">    1587 </span>            :                             StopMiddle;
+<span class="lineNum">    1588 </span>            : 
+<span class="lineNum">    1589 </span>            :                 /* If already matched on earlier page, do no extra work */
+<span class="lineNum">    1590 </span><span class="lineCov">         40 :                 if (key-&gt;entryRes[j])</span>
+<span class="lineNum">    1591 </span><span class="lineNoCov">          0 :                     continue;</span>
+<span class="lineNum">    1592 </span>            : 
+<span class="lineNum">    1593 </span>            :                 /*
+<span class="lineNum">    1594 </span>            :                  * Interesting tuples are from pos-&gt;firstOffset to
+<span class="lineNum">    1595 </span>            :                  * pos-&gt;lastOffset and they are ordered by (attnum, Datum) as
+<span class="lineNum">    1596 </span>            :                  * it's done in entry tree.  So we can use binary search to
+<span class="lineNum">    1597 </span>            :                  * avoid linear scanning.
+<span class="lineNum">    1598 </span>            :                  */
+<span class="lineNum">    1599 </span><span class="lineCov">        120 :                 while (StopLow &lt; StopHigh)</span>
+<span class="lineNum">    1600 </span>            :                 {
+<span class="lineNum">    1601 </span>            :                     int         res;
+<span class="lineNum">    1602 </span>            : 
+<span class="lineNum">    1603 </span><span class="lineCov">         56 :                     StopMiddle = StopLow + ((StopHigh - StopLow) &gt;&gt; 1);</span>
+<span class="lineNum">    1604 </span>            : 
+<span class="lineNum">    1605 </span><span class="lineCov">         56 :                     itup = (IndexTuple) PageGetItem(page, PageGetItemId(page, StopMiddle));</span>
+<span class="lineNum">    1606 </span>            : 
+<span class="lineNum">    1607 </span><span class="lineCov">         56 :                     attrnum = gintuple_get_attrnum(&amp;so-&gt;ginstate, itup);</span>
+<span class="lineNum">    1608 </span>            : 
+<span class="lineNum">    1609 </span><span class="lineCov">         56 :                     if (key-&gt;attnum &lt; attrnum)</span>
+<span class="lineNum">    1610 </span>            :                     {
+<span class="lineNum">    1611 </span><span class="lineNoCov">          0 :                         StopHigh = StopMiddle;</span>
+<span class="lineNum">    1612 </span><span class="lineNoCov">          0 :                         continue;</span>
+<span class="lineNum">    1613 </span>            :                     }
+<span class="lineNum">    1614 </span><span class="lineCov">         56 :                     if (key-&gt;attnum &gt; attrnum)</span>
+<span class="lineNum">    1615 </span>            :                     {
+<span class="lineNum">    1616 </span><span class="lineNoCov">          0 :                         StopLow = StopMiddle + 1;</span>
+<span class="lineNum">    1617 </span><span class="lineNoCov">          0 :                         continue;</span>
+<span class="lineNum">    1618 </span>            :                     }
+<span class="lineNum">    1619 </span>            : 
+<span class="lineNum">    1620 </span><span class="lineCov">         56 :                     if (datumExtracted[StopMiddle - 1] == false)</span>
+<span class="lineNum">    1621 </span>            :                     {
+<span class="lineNum">    1622 </span><span class="lineCov">         72 :                         datum[StopMiddle - 1] =</span>
+<span class="lineNum">    1623 </span><span class="lineCov">         36 :                             gintuple_get_key(&amp;so-&gt;ginstate, itup,</span>
+<span class="lineNum">    1624 </span><span class="lineCov">         36 :                                              &amp;category[StopMiddle - 1]);</span>
+<span class="lineNum">    1625 </span><span class="lineCov">         36 :                         datumExtracted[StopMiddle - 1] = true;</span>
+<span class="lineNum">    1626 </span>            :                     }
+<span class="lineNum">    1627 </span>            : 
+<span class="lineNum">    1628 </span><span class="lineCov">         56 :                     if (entry-&gt;queryCategory == GIN_CAT_EMPTY_QUERY)</span>
+<span class="lineNum">    1629 </span>            :                     {
+<span class="lineNum">    1630 </span>            :                         /* special behavior depending on searchMode */
+<span class="lineNum">    1631 </span><span class="lineNoCov">          0 :                         if (entry-&gt;searchMode == GIN_SEARCH_MODE_ALL)</span>
+<span class="lineNum">    1632 </span>            :                         {
+<span class="lineNum">    1633 </span>            :                             /* match anything except NULL_ITEM */
+<span class="lineNum">    1634 </span><span class="lineNoCov">          0 :                             if (category[StopMiddle - 1] == GIN_CAT_NULL_ITEM)</span>
+<span class="lineNum">    1635 </span><span class="lineNoCov">          0 :                                 res = -1;</span>
+<span class="lineNum">    1636 </span>            :                             else
+<span class="lineNum">    1637 </span><span class="lineNoCov">          0 :                                 res = 0;</span>
+<span class="lineNum">    1638 </span>            :                         }
+<span class="lineNum">    1639 </span>            :                         else
+<span class="lineNum">    1640 </span>            :                         {
+<span class="lineNum">    1641 </span>            :                             /* match everything */
+<span class="lineNum">    1642 </span><span class="lineNoCov">          0 :                             res = 0;</span>
+<span class="lineNum">    1643 </span>            :                         }
+<span class="lineNum">    1644 </span>            :                     }
+<span class="lineNum">    1645 </span>            :                     else
+<span class="lineNum">    1646 </span>            :                     {
+<span class="lineNum">    1647 </span><span class="lineCov">        224 :                         res = ginCompareEntries(&amp;so-&gt;ginstate,</span>
+<span class="lineNum">    1648 </span><span class="lineCov">         56 :                                                 entry-&gt;attnum,</span>
+<span class="lineNum">    1649 </span>            :                                                 entry-&gt;queryKey,
+<span class="lineNum">    1650 </span><span class="lineCov">         56 :                                                 entry-&gt;queryCategory,</span>
+<span class="lineNum">    1651 </span><span class="lineCov">         56 :                                                 datum[StopMiddle - 1],</span>
+<span class="lineNum">    1652 </span><span class="lineCov">         56 :                                                 category[StopMiddle - 1]);</span>
+<span class="lineNum">    1653 </span>            :                     }
+<span class="lineNum">    1654 </span>            : 
+<span class="lineNum">    1655 </span><span class="lineCov">         56 :                     if (res == 0)</span>
+<span class="lineNum">    1656 </span>            :                     {
+<span class="lineNum">    1657 </span>            :                         /*
+<span class="lineNum">    1658 </span>            :                          * Found exact match (there can be only one, except in
+<span class="lineNum">    1659 </span>            :                          * EMPTY_QUERY mode).
+<span class="lineNum">    1660 </span>            :                          *
+<span class="lineNum">    1661 </span>            :                          * If doing partial match, scan forward from here to
+<span class="lineNum">    1662 </span>            :                          * end of page to check for matches.
+<span class="lineNum">    1663 </span>            :                          *
+<span class="lineNum">    1664 </span>            :                          * See comment above about tuple's ordering.
+<span class="lineNum">    1665 </span>            :                          */
+<span class="lineNum">    1666 </span><span class="lineCov">         16 :                         if (entry-&gt;isPartialMatch)</span>
+<span class="lineNum">    1667 </span><span class="lineNoCov">          0 :                             key-&gt;entryRes[j] =</span>
+<span class="lineNum">    1668 </span><span class="lineNoCov">          0 :                                 matchPartialInPendingList(&amp;so-&gt;ginstate,</span>
+<span class="lineNum">    1669 </span>            :                                                           page,
+<span class="lineNum">    1670 </span>            :                                                           StopMiddle,
+<span class="lineNum">    1671 </span><span class="lineNoCov">          0 :                                                           pos-&gt;lastOffset,</span>
+<span class="lineNum">    1672 </span>            :                                                           entry,
+<span class="lineNum">    1673 </span>            :                                                           datum,
+<span class="lineNum">    1674 </span>            :                                                           category,
+<span class="lineNum">    1675 </span>            :                                                           datumExtracted);
+<span class="lineNum">    1676 </span>            :                         else
+<span class="lineNum">    1677 </span><span class="lineCov">         16 :                             key-&gt;entryRes[j] = true;</span>
+<span class="lineNum">    1678 </span>            : 
+<span class="lineNum">    1679 </span>            :                         /* done with binary search */
+<span class="lineNum">    1680 </span><span class="lineCov">         16 :                         break;</span>
+<span class="lineNum">    1681 </span>            :                     }
+<span class="lineNum">    1682 </span><span class="lineCov">         40 :                     else if (res &lt; 0)</span>
+<span class="lineNum">    1683 </span><span class="lineCov">         32 :                         StopHigh = StopMiddle;</span>
+<span class="lineNum">    1684 </span>            :                     else
+<span class="lineNum">    1685 </span><span class="lineCov">          8 :                         StopLow = StopMiddle + 1;</span>
+<span class="lineNum">    1686 </span>            :                 }
+<span class="lineNum">    1687 </span>            : 
+<span class="lineNum">    1688 </span><span class="lineCov">         40 :                 if (StopLow &gt;= StopHigh &amp;&amp; entry-&gt;isPartialMatch)</span>
+<span class="lineNum">    1689 </span>            :                 {
+<span class="lineNum">    1690 </span>            :                     /*
+<span class="lineNum">    1691 </span>            :                      * No exact match on this page.  If doing partial match,
+<span class="lineNum">    1692 </span>            :                      * scan from the first tuple greater than target value to
+<span class="lineNum">    1693 </span>            :                      * end of page.  Note that since we don't remember whether
+<span class="lineNum">    1694 </span>            :                      * the comparePartialFn told us to stop early on a
+<span class="lineNum">    1695 </span>            :                      * previous page, we will uselessly apply comparePartialFn
+<span class="lineNum">    1696 </span>            :                      * to the first tuple on each subsequent page.
+<span class="lineNum">    1697 </span>            :                      */
+<span class="lineNum">    1698 </span><span class="lineNoCov">          0 :                     key-&gt;entryRes[j] =</span>
+<span class="lineNum">    1699 </span><span class="lineNoCov">          0 :                         matchPartialInPendingList(&amp;so-&gt;ginstate,</span>
+<span class="lineNum">    1700 </span>            :                                                   page,
+<span class="lineNum">    1701 </span>            :                                                   StopHigh,
+<span class="lineNum">    1702 </span><span class="lineNoCov">          0 :                                                   pos-&gt;lastOffset,</span>
+<span class="lineNum">    1703 </span>            :                                                   entry,
+<span class="lineNum">    1704 </span>            :                                                   datum,
+<span class="lineNum">    1705 </span>            :                                                   category,
+<span class="lineNum">    1706 </span>            :                                                   datumExtracted);
+<span class="lineNum">    1707 </span>            :                 }
+<span class="lineNum">    1708 </span>            : 
+<span class="lineNum">    1709 </span><span class="lineCov">         40 :                 pos-&gt;hasMatchKey[i] |= key-&gt;entryRes[j];</span>
+<span class="lineNum">    1710 </span>            :             }
+<span class="lineNum">    1711 </span>            :         }
+<span class="lineNum">    1712 </span>            : 
+<span class="lineNum">    1713 </span>            :         /* Advance firstOffset over the scanned tuples */
+<span class="lineNum">    1714 </span><span class="lineCov">         20 :         pos-&gt;firstOffset = pos-&gt;lastOffset;</span>
+<span class="lineNum">    1715 </span>            : 
+<span class="lineNum">    1716 </span><span class="lineCov">         20 :         if (GinPageHasFullRow(page))</span>
+<span class="lineNum">    1717 </span>            :         {
+<span class="lineNum">    1718 </span>            :             /*
+<span class="lineNum">    1719 </span>            :              * We have examined all pending entries for the current heap row.
+<span class="lineNum">    1720 </span>            :              * Break out of loop over pages.
+<span class="lineNum">    1721 </span>            :              */
+<span class="lineNum">    1722 </span><span class="lineCov">         20 :             break;</span>
+<span class="lineNum">    1723 </span>            :         }
+<span class="lineNum">    1724 </span>            :         else
+<span class="lineNum">    1725 </span>            :         {
+<span class="lineNum">    1726 </span>            :             /*
+<span class="lineNum">    1727 </span>            :              * Advance to next page of pending entries for the current heap
+<span class="lineNum">    1728 </span>            :              * row.  Complain if there isn't one.
+<span class="lineNum">    1729 </span>            :              */
+<span class="lineNum">    1730 </span><span class="lineNoCov">          0 :             ItemPointerData item = pos-&gt;item;</span>
+<span class="lineNum">    1731 </span>            : 
+<span class="lineNum">    1732 </span><span class="lineNoCov">          0 :             if (scanGetCandidate(scan, pos) == false ||</span>
+<span class="lineNum">    1733 </span><span class="lineNoCov">          0 :                 !ItemPointerEquals(&amp;pos-&gt;item, &amp;item))</span>
+<span class="lineNum">    1734 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;could not find additional pending pages for same heap tuple&quot;);</span>
+<span class="lineNum">    1735 </span>            :         }
+<span class="lineNum">    1736 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1737 </span>            : 
+<span class="lineNum">    1738 </span>            :     /*
+<span class="lineNum">    1739 </span>            :      * Now return &quot;true&quot; if all scan keys have at least one matching datum
+<span class="lineNum">    1740 </span>            :      */
+<span class="lineNum">    1741 </span><span class="lineCov">         28 :     for (i = 0; i &lt; so-&gt;nkeys; i++)</span>
+<span class="lineNum">    1742 </span>            :     {
+<span class="lineNum">    1743 </span><span class="lineCov">         20 :         if (pos-&gt;hasMatchKey[i] == false)</span>
+<span class="lineNum">    1744 </span><span class="lineCov">         12 :             return false;</span>
+<span class="lineNum">    1745 </span>            :     }
+<span class="lineNum">    1746 </span>            : 
+<span class="lineNum">    1747 </span><span class="lineCov">          8 :     return true;</span>
+<span class="lineNum">    1748 </span>            : }
+<span class="lineNum">    1749 </span>            : 
+<span class="lineNum">    1750 </span>            : /*
+<span class="lineNum">    1751 </span>            :  * Collect all matched rows from pending list into bitmap.
+<a name="1752"><span class="lineNum">    1752 </span>            :  */</a>
+<span class="lineNum">    1753 </span>            : static void
+<span class="lineNum">    1754 </span><span class="lineCov">        248 : scanPendingInsert(IndexScanDesc scan, TIDBitmap *tbm, int64 *ntids)</span>
+<span class="lineNum">    1755 </span>            : {
+<span class="lineNum">    1756 </span><span class="lineCov">        248 :     GinScanOpaque so = (GinScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">    1757 </span>            :     MemoryContext oldCtx;
+<span class="lineNum">    1758 </span>            :     bool        recheck,
+<span class="lineNum">    1759 </span>            :                 match;
+<span class="lineNum">    1760 </span>            :     int         i;
+<span class="lineNum">    1761 </span>            :     pendingPosition pos;
+<span class="lineNum">    1762 </span><span class="lineCov">        248 :     Buffer      metabuffer = ReadBuffer(scan-&gt;indexRelation, GIN_METAPAGE_BLKNO);</span>
+<span class="lineNum">    1763 </span>            :     Page        page;
+<span class="lineNum">    1764 </span>            :     BlockNumber blkno;
+<span class="lineNum">    1765 </span>            : 
+<span class="lineNum">    1766 </span><span class="lineCov">        248 :     *ntids = 0;</span>
+<span class="lineNum">    1767 </span>            : 
+<span class="lineNum">    1768 </span>            :     /*
+<span class="lineNum">    1769 </span>            :      * Acquire predicate lock on the metapage, to conflict with any fastupdate
+<span class="lineNum">    1770 </span>            :      * insertions.
+<span class="lineNum">    1771 </span>            :      */
+<span class="lineNum">    1772 </span><span class="lineCov">        248 :     PredicateLockPage(scan-&gt;indexRelation, GIN_METAPAGE_BLKNO, scan-&gt;xs_snapshot);</span>
+<span class="lineNum">    1773 </span>            : 
+<span class="lineNum">    1774 </span><span class="lineCov">        248 :     LockBuffer(metabuffer, GIN_SHARE);</span>
+<span class="lineNum">    1775 </span><span class="lineCov">        248 :     page = BufferGetPage(metabuffer);</span>
+<span class="lineNum">    1776 </span><span class="lineCov">        248 :     TestForOldSnapshot(scan-&gt;xs_snapshot, scan-&gt;indexRelation, page);</span>
+<span class="lineNum">    1777 </span><span class="lineCov">        248 :     blkno = GinPageGetMeta(page)-&gt;head;</span>
+<span class="lineNum">    1778 </span>            : 
+<span class="lineNum">    1779 </span>            :     /*
+<span class="lineNum">    1780 </span>            :      * fetch head of list before unlocking metapage. head page must be pinned
+<span class="lineNum">    1781 </span>            :      * to prevent deletion by vacuum process
+<span class="lineNum">    1782 </span>            :      */
+<span class="lineNum">    1783 </span><span class="lineCov">        248 :     if (blkno == InvalidBlockNumber)</span>
+<span class="lineNum">    1784 </span>            :     {
+<span class="lineNum">    1785 </span>            :         /* No pending list, so proceed with normal scan */
+<span class="lineNum">    1786 </span><span class="lineCov">        240 :         UnlockReleaseBuffer(metabuffer);</span>
+<span class="lineNum">    1787 </span><span class="lineCov">        488 :         return;</span>
+<span class="lineNum">    1788 </span>            :     }
+<span class="lineNum">    1789 </span>            : 
+<span class="lineNum">    1790 </span><span class="lineCov">          8 :     pos.pendingBuffer = ReadBuffer(scan-&gt;indexRelation, blkno);</span>
+<span class="lineNum">    1791 </span><span class="lineCov">          8 :     LockBuffer(pos.pendingBuffer, GIN_SHARE);</span>
+<span class="lineNum">    1792 </span><span class="lineCov">          8 :     pos.firstOffset = FirstOffsetNumber;</span>
+<span class="lineNum">    1793 </span><span class="lineCov">          8 :     UnlockReleaseBuffer(metabuffer);</span>
+<span class="lineNum">    1794 </span><span class="lineCov">          8 :     pos.hasMatchKey = palloc(sizeof(bool) * so-&gt;nkeys);</span>
+<span class="lineNum">    1795 </span>            : 
+<span class="lineNum">    1796 </span>            :     /*
+<span class="lineNum">    1797 </span>            :      * loop for each heap row. scanGetCandidate returns full row or row's
+<span class="lineNum">    1798 </span>            :      * tuples from first page.
+<span class="lineNum">    1799 </span>            :      */
+<span class="lineNum">    1800 </span><span class="lineCov">         36 :     while (scanGetCandidate(scan, &amp;pos))</span>
+<span class="lineNum">    1801 </span>            :     {
+<span class="lineNum">    1802 </span>            :         /*
+<span class="lineNum">    1803 </span>            :          * Check entries in tuple and set up entryRes array.
+<span class="lineNum">    1804 </span>            :          *
+<span class="lineNum">    1805 </span>            :          * If pending tuples belonging to the current heap row are spread
+<span class="lineNum">    1806 </span>            :          * across several pages, collectMatchesForHeapRow will read all of
+<span class="lineNum">    1807 </span>            :          * those pages.
+<span class="lineNum">    1808 </span>            :          */
+<span class="lineNum">    1809 </span><span class="lineCov">         20 :         if (!collectMatchesForHeapRow(scan, &amp;pos))</span>
+<span class="lineNum">    1810 </span><span class="lineCov">         12 :             continue;</span>
+<span class="lineNum">    1811 </span>            : 
+<span class="lineNum">    1812 </span>            :         /*
+<span class="lineNum">    1813 </span>            :          * Matching of entries of one row is finished, so check row using
+<span class="lineNum">    1814 </span>            :          * consistent functions.
+<span class="lineNum">    1815 </span>            :          */
+<span class="lineNum">    1816 </span><span class="lineCov">          8 :         oldCtx = MemoryContextSwitchTo(so-&gt;tempCtx);</span>
+<span class="lineNum">    1817 </span><span class="lineCov">          8 :         recheck = false;</span>
+<span class="lineNum">    1818 </span><span class="lineCov">          8 :         match = true;</span>
+<span class="lineNum">    1819 </span>            : 
+<span class="lineNum">    1820 </span><span class="lineCov">         16 :         for (i = 0; i &lt; so-&gt;nkeys; i++)</span>
+<span class="lineNum">    1821 </span>            :         {
+<span class="lineNum">    1822 </span><span class="lineCov">          8 :             GinScanKey  key = so-&gt;keys + i;</span>
+<span class="lineNum">    1823 </span>            : 
+<span class="lineNum">    1824 </span><span class="lineCov">          8 :             if (!key-&gt;boolConsistentFn(key))</span>
+<span class="lineNum">    1825 </span>            :             {
+<span class="lineNum">    1826 </span><span class="lineNoCov">          0 :                 match = false;</span>
+<span class="lineNum">    1827 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1828 </span>            :             }
+<span class="lineNum">    1829 </span><span class="lineCov">          8 :             recheck |= key-&gt;recheckCurItem;</span>
+<span class="lineNum">    1830 </span>            :         }
+<span class="lineNum">    1831 </span>            : 
+<span class="lineNum">    1832 </span><span class="lineCov">          8 :         MemoryContextSwitchTo(oldCtx);</span>
+<span class="lineNum">    1833 </span><span class="lineCov">          8 :         MemoryContextReset(so-&gt;tempCtx);</span>
+<span class="lineNum">    1834 </span>            : 
+<span class="lineNum">    1835 </span><span class="lineCov">          8 :         if (match)</span>
+<span class="lineNum">    1836 </span>            :         {
+<span class="lineNum">    1837 </span><span class="lineCov">          8 :             tbm_add_tuples(tbm, &amp;pos.item, 1, recheck);</span>
+<span class="lineNum">    1838 </span><span class="lineCov">          8 :             (*ntids)++;</span>
+<span class="lineNum">    1839 </span>            :         }
+<span class="lineNum">    1840 </span>            :     }
+<span class="lineNum">    1841 </span>            : 
+<span class="lineNum">    1842 </span><span class="lineCov">          8 :     pfree(pos.hasMatchKey);</span>
+<span class="lineNum">    1843 </span>            : }
+<span class="lineNum">    1844 </span>            : 
+<span class="lineNum">    1845 </span>            : 
+<span class="lineNum">    1846 </span>            : #define GinIsVoidRes(s)     ( ((GinScanOpaque) scan-&gt;opaque)-&gt;isVoidRes )
+<a name="1847"><span class="lineNum">    1847 </span>            : </a>
+<span class="lineNum">    1848 </span>            : int64
+<span class="lineNum">    1849 </span><span class="lineCov">        252 : gingetbitmap(IndexScanDesc scan, TIDBitmap *tbm)</span>
+<span class="lineNum">    1850 </span>            : {
+<span class="lineNum">    1851 </span><span class="lineCov">        252 :     GinScanOpaque so = (GinScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">    1852 </span>            :     int64       ntids;
+<span class="lineNum">    1853 </span>            :     ItemPointerData iptr;
+<span class="lineNum">    1854 </span>            :     bool        recheck;
+<span class="lineNum">    1855 </span>            : 
+<span class="lineNum">    1856 </span>            :     /*
+<span class="lineNum">    1857 </span>            :      * Set up the scan keys, and check for unsatisfiable query.
+<span class="lineNum">    1858 </span>            :      */
+<span class="lineNum">    1859 </span><span class="lineCov">        252 :     ginFreeScanKeys(so);        /* there should be no keys yet, but just to be</span>
+<span class="lineNum">    1860 </span>            :                                  * sure */
+<span class="lineNum">    1861 </span><span class="lineCov">        252 :     ginNewScanKey(scan);</span>
+<span class="lineNum">    1862 </span>            : 
+<span class="lineNum">    1863 </span><span class="lineCov">        252 :     if (GinIsVoidRes(scan))</span>
+<span class="lineNum">    1864 </span><span class="lineCov">          4 :         return 0;</span>
+<span class="lineNum">    1865 </span>            : 
+<span class="lineNum">    1866 </span><span class="lineCov">        248 :     ntids = 0;</span>
+<span class="lineNum">    1867 </span>            : 
+<span class="lineNum">    1868 </span>            :     /*
+<span class="lineNum">    1869 </span>            :      * First, scan the pending list and collect any matching entries into the
+<span class="lineNum">    1870 </span>            :      * bitmap.  After we scan a pending item, some other backend could post it
+<span class="lineNum">    1871 </span>            :      * into the main index, and so we might visit it a second time during the
+<span class="lineNum">    1872 </span>            :      * main scan.  This is okay because we'll just re-set the same bit in the
+<span class="lineNum">    1873 </span>            :      * bitmap.  (The possibility of duplicate visits is a major reason why GIN
+<span class="lineNum">    1874 </span>            :      * can't support the amgettuple API, however.) Note that it would not do
+<span class="lineNum">    1875 </span>            :      * to scan the main index before the pending list, since concurrent
+<span class="lineNum">    1876 </span>            :      * cleanup could then make us miss entries entirely.
+<span class="lineNum">    1877 </span>            :      */
+<span class="lineNum">    1878 </span><span class="lineCov">        248 :     scanPendingInsert(scan, tbm, &amp;ntids);</span>
+<span class="lineNum">    1879 </span>            : 
+<span class="lineNum">    1880 </span>            :     /*
+<span class="lineNum">    1881 </span>            :      * Now scan the main index.
+<span class="lineNum">    1882 </span>            :      */
+<span class="lineNum">    1883 </span><span class="lineCov">        248 :     startScan(scan);</span>
+<span class="lineNum">    1884 </span>            : 
+<span class="lineNum">    1885 </span><span class="lineCov">        248 :     ItemPointerSetMin(&amp;iptr);</span>
+<span class="lineNum">    1886 </span>            : 
+<span class="lineNum">    1887 </span>            :     for (;;)
+<span class="lineNum">    1888 </span>            :     {
+<span class="lineNum">    1889 </span><span class="lineCov">     119986 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1890 </span>            : 
+<span class="lineNum">    1891 </span><span class="lineCov">     119986 :         if (!scanGetItem(scan, iptr, &amp;iptr, &amp;recheck))</span>
+<span class="lineNum">    1892 </span><span class="lineCov">        248 :             break;</span>
+<span class="lineNum">    1893 </span>            : 
+<span class="lineNum">    1894 </span><span class="lineCov">     119738 :         if (ItemPointerIsLossyPage(&amp;iptr))</span>
+<span class="lineNum">    1895 </span><span class="lineNoCov">          0 :             tbm_add_page(tbm, ItemPointerGetBlockNumber(&amp;iptr));</span>
+<span class="lineNum">    1896 </span>            :         else
+<span class="lineNum">    1897 </span><span class="lineCov">     119738 :             tbm_add_tuples(tbm, &amp;iptr, 1, recheck);</span>
+<span class="lineNum">    1898 </span><span class="lineCov">     119738 :         ntids++;</span>
+<span class="lineNum">    1899 </span><span class="lineCov">     119738 :     }</span>
+<span class="lineNum">    1900 </span>            : 
+<span class="lineNum">    1901 </span><span class="lineCov">        248 :     return ntids;</span>
+<span class="lineNum">    1902 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

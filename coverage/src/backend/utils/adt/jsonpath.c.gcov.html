@@ -1,0 +1,1159 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/jsonpath.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - jsonpath.c<span style="font-size: 80%;"> (source / <a href="jsonpath.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">376</td>
+            <td class="headerCovTableEntry">401</td>
+            <td class="headerCovTableEntryHi">93.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">20</td>
+            <td class="headerCovTableEntry">22</td>
+            <td class="headerCovTableEntryHi">90.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * jsonpath.c
+<span class="lineNum">       4 </span>            :  *   Input/output and supporting routines for jsonpath
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * jsonpath expression is a chain of path items.  First path item is $, $var,
+<span class="lineNum">       7 </span>            :  * literal or arithmetic expression.  Subsequent path items are accessors
+<span class="lineNum">       8 </span>            :  * (.key, .*, [subscripts], [*]), filters (? (predicate)) and methods (.type(),
+<span class="lineNum">       9 </span>            :  * .size() etc).
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * For instance, structure of path items for simple expression:
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *      $.a[*].type()
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  * is pretty evident:
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  *      $ =&gt; .a =&gt; [*] =&gt; .type()
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  * Some path items such as arithmetic operations, predicates or array
+<span class="lineNum">      20 </span>            :  * subscripts may comprise subtrees.  For instance, more complex expression
+<span class="lineNum">      21 </span>            :  *
+<span class="lineNum">      22 </span>            :  *      ($.a + $[1 to 5, 7] ? (@ &gt; 3).double()).type()
+<span class="lineNum">      23 </span>            :  *
+<span class="lineNum">      24 </span>            :  * have following structure of path items:
+<span class="lineNum">      25 </span>            :  *
+<span class="lineNum">      26 </span>            :  *            +  =&gt;  .type()
+<span class="lineNum">      27 </span>            :  *        ___/ \___
+<span class="lineNum">      28 </span>            :  *       /         \
+<span class="lineNum">      29 </span>            :  *      $ =&gt; .a  $  =&gt;  []  =&gt; ?  =&gt;  .double()
+<span class="lineNum">      30 </span>            :  *                        _||_      |
+<span class="lineNum">      31 </span>            :  *                       /    \     &gt;
+<span class="lineNum">      32 </span>            :  *                      to    to   / \
+<span class="lineNum">      33 </span>            :  *                     / \    /   @   3
+<span class="lineNum">      34 </span>            :  *                    1   5  7
+<span class="lineNum">      35 </span>            :  *
+<span class="lineNum">      36 </span>            :  * Binary encoding of jsonpath constitutes a sequence of 4-bytes aligned
+<span class="lineNum">      37 </span>            :  * variable-length path items connected by links.  Every item has a header
+<span class="lineNum">      38 </span>            :  * consisting of item type (enum JsonPathItemType) and offset of next item
+<span class="lineNum">      39 </span>            :  * (zero means no next item).  After the header, item may have payload
+<span class="lineNum">      40 </span>            :  * depending on item type.  For instance, payload of '.key' accessor item is
+<span class="lineNum">      41 </span>            :  * length of key name and key name itself.  Payload of '&gt;' arithmetic operator
+<span class="lineNum">      42 </span>            :  * item is offsets of right and left operands.
+<span class="lineNum">      43 </span>            :  *
+<span class="lineNum">      44 </span>            :  * So, binary representation of sample expression above is:
+<span class="lineNum">      45 </span>            :  * (bottom arrows are next links, top lines are argument links)
+<span class="lineNum">      46 </span>            :  *
+<span class="lineNum">      47 </span>            :  *                                _____
+<span class="lineNum">      48 </span>            :  *       _____                ___/____ \                __
+<span class="lineNum">      49 </span>            :  *    _ /_    \         _____/__/____ \ \      __    _ /_ \
+<span class="lineNum">      50 </span>            :  *   / /  \    \       /    /  /     \ \ \    /  \  / /  \ \
+<span class="lineNum">      51 </span>            :  * +(LR)  $ .a  $  [](* to *, * to *) 1 5 7 ?(A)  &gt;(LR)   @ 3 .double() .type()
+<span class="lineNum">      52 </span>            :  * |      |  ^  |  ^|                        ^|                   ^        ^
+<span class="lineNum">      53 </span>            :  * |      |__|  |__||________________________||___________________|        |
+<span class="lineNum">      54 </span>            :  * |_______________________________________________________________________|
+<span class="lineNum">      55 </span>            :  *
+<span class="lineNum">      56 </span>            :  * Copyright (c) 2019, PostgreSQL Global Development Group
+<span class="lineNum">      57 </span>            :  *
+<span class="lineNum">      58 </span>            :  * IDENTIFICATION
+<span class="lineNum">      59 </span>            :  *  src/backend/utils/adt/jsonpath.c
+<span class="lineNum">      60 </span>            :  *
+<span class="lineNum">      61 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      62 </span>            :  */
+<span class="lineNum">      63 </span>            : 
+<span class="lineNum">      64 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      65 </span>            : 
+<span class="lineNum">      66 </span>            : #include &quot;funcapi.h&quot;
+<span class="lineNum">      67 </span>            : #include &quot;lib/stringinfo.h&quot;
+<span class="lineNum">      68 </span>            : #include &quot;libpq/pqformat.h&quot;
+<span class="lineNum">      69 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      70 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      71 </span>            : #include &quot;utils/json.h&quot;
+<span class="lineNum">      72 </span>            : #include &quot;utils/jsonpath.h&quot;
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span>            : 
+<span class="lineNum">      75 </span>            : static Datum jsonPathFromCstring(char *in, int len);
+<span class="lineNum">      76 </span>            : static char *jsonPathToCstring(StringInfo out, JsonPath *in,
+<span class="lineNum">      77 </span>            :                                int estimated_len);
+<span class="lineNum">      78 </span>            : static int  flattenJsonPathParseItem(StringInfo buf, JsonPathParseItem *item,
+<span class="lineNum">      79 </span>            :                                      int nestingLevel, bool insideArraySubscript);
+<span class="lineNum">      80 </span>            : static void alignStringInfoInt(StringInfo buf);
+<span class="lineNum">      81 </span>            : static int32 reserveSpaceForItemPointer(StringInfo buf);
+<span class="lineNum">      82 </span>            : static void printJsonPathItem(StringInfo buf, JsonPathItem *v, bool inKey,
+<span class="lineNum">      83 </span>            :                               bool printBracketes);
+<span class="lineNum">      84 </span>            : static int  operationPriority(JsonPathItemType op);
+<span class="lineNum">      85 </span>            : 
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            : /**************************** INPUT/OUTPUT ********************************/
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span>            : /*
+<span class="lineNum">      90 </span>            :  * jsonpath type input function
+<a name="91"><span class="lineNum">      91 </span>            :  */</a>
+<span class="lineNum">      92 </span>            : Datum
+<span class="lineNum">      93 </span><span class="lineCov">       1384 : jsonpath_in(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      94 </span>            : {
+<span class="lineNum">      95 </span><span class="lineCov">       1384 :     char       *in = PG_GETARG_CSTRING(0);</span>
+<span class="lineNum">      96 </span><span class="lineCov">       1384 :     int         len = strlen(in);</span>
+<span class="lineNum">      97 </span>            : 
+<span class="lineNum">      98 </span><span class="lineCov">       1384 :     return jsonPathFromCstring(in, len);</span>
+<span class="lineNum">      99 </span>            : }
+<span class="lineNum">     100 </span>            : 
+<span class="lineNum">     101 </span>            : /*
+<span class="lineNum">     102 </span>            :  * jsonpath type recv function
+<span class="lineNum">     103 </span>            :  *
+<span class="lineNum">     104 </span>            :  * The type is sent as text in binary mode, so this is almost the same
+<span class="lineNum">     105 </span>            :  * as the input function, but it's prefixed with a version number so we
+<span class="lineNum">     106 </span>            :  * can change the binary format sent in future if necessary. For now,
+<span class="lineNum">     107 </span>            :  * only version 1 is supported.
+<a name="108"><span class="lineNum">     108 </span>            :  */</a>
+<span class="lineNum">     109 </span>            : Datum
+<span class="lineNum">     110 </span><span class="lineNoCov">          0 : jsonpath_recv(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     111 </span>            : {
+<span class="lineNum">     112 </span><span class="lineNoCov">          0 :     StringInfo  buf = (StringInfo) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     113 </span><span class="lineNoCov">          0 :     int         version = pq_getmsgint(buf, 1);</span>
+<span class="lineNum">     114 </span>            :     char       *str;
+<span class="lineNum">     115 </span>            :     int         nbytes;
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span><span class="lineNoCov">          0 :     if (version == JSONPATH_VERSION)</span>
+<span class="lineNum">     118 </span><span class="lineNoCov">          0 :         str = pq_getmsgtext(buf, buf-&gt;len - buf-&gt;cursor, &amp;nbytes);</span>
+<span class="lineNum">     119 </span>            :     else
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;unsupported jsonpath version number: %d&quot;, version);</span>
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span><span class="lineNoCov">          0 :     return jsonPathFromCstring(str, nbytes);</span>
+<span class="lineNum">     123 </span>            : }
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            : /*
+<span class="lineNum">     126 </span>            :  * jsonpath type output function
+<a name="127"><span class="lineNum">     127 </span>            :  */</a>
+<span class="lineNum">     128 </span>            : Datum
+<span class="lineNum">     129 </span><span class="lineCov">        322 : jsonpath_out(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     130 </span>            : {
+<span class="lineNum">     131 </span><span class="lineCov">        322 :     JsonPath   *in = PG_GETARG_JSONPATH_P(0);</span>
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span><span class="lineCov">        322 :     PG_RETURN_CSTRING(jsonPathToCstring(NULL, in, VARSIZE(in)));</span>
+<span class="lineNum">     134 </span>            : }
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span>            : /*
+<span class="lineNum">     137 </span>            :  * jsonpath type send function
+<span class="lineNum">     138 </span>            :  *
+<span class="lineNum">     139 </span>            :  * Just send jsonpath as a version number, then a string of text
+<a name="140"><span class="lineNum">     140 </span>            :  */</a>
+<span class="lineNum">     141 </span>            : Datum
+<span class="lineNum">     142 </span><span class="lineNoCov">          0 : jsonpath_send(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     143 </span>            : {
+<span class="lineNum">     144 </span><span class="lineNoCov">          0 :     JsonPath   *in = PG_GETARG_JSONPATH_P(0);</span>
+<span class="lineNum">     145 </span>            :     StringInfoData buf;
+<span class="lineNum">     146 </span>            :     StringInfoData jtext;
+<span class="lineNum">     147 </span><span class="lineNoCov">          0 :     int         version = JSONPATH_VERSION;</span>
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span><span class="lineNoCov">          0 :     initStringInfo(&amp;jtext);</span>
+<span class="lineNum">     150 </span><span class="lineNoCov">          0 :     (void) jsonPathToCstring(&amp;jtext, in, VARSIZE(in));</span>
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineNoCov">          0 :     pq_begintypsend(&amp;buf);</span>
+<span class="lineNum">     153 </span><span class="lineNoCov">          0 :     pq_sendint8(&amp;buf, version);</span>
+<span class="lineNum">     154 </span><span class="lineNoCov">          0 :     pq_sendtext(&amp;buf, jtext.data, jtext.len);</span>
+<span class="lineNum">     155 </span><span class="lineNoCov">          0 :     pfree(jtext.data);</span>
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span><span class="lineNoCov">          0 :     PG_RETURN_BYTEA_P(pq_endtypsend(&amp;buf));</span>
+<span class="lineNum">     158 </span>            : }
+<span class="lineNum">     159 </span>            : 
+<span class="lineNum">     160 </span>            : /*
+<span class="lineNum">     161 </span>            :  * Converts C-string to a jsonpath value.
+<span class="lineNum">     162 </span>            :  *
+<span class="lineNum">     163 </span>            :  * Uses jsonpath parser to turn string into an AST, then
+<span class="lineNum">     164 </span>            :  * flattenJsonPathParseItem() does second pass turning AST into binary
+<span class="lineNum">     165 </span>            :  * representation of jsonpath.
+<a name="166"><span class="lineNum">     166 </span>            :  */</a>
+<span class="lineNum">     167 </span>            : static Datum
+<span class="lineNum">     168 </span><span class="lineCov">       1384 : jsonPathFromCstring(char *in, int len)</span>
+<span class="lineNum">     169 </span>            : {
+<span class="lineNum">     170 </span><span class="lineCov">       1384 :     JsonPathParseResult *jsonpath = parsejsonpath(in, len);</span>
+<span class="lineNum">     171 </span>            :     JsonPath   *res;
+<span class="lineNum">     172 </span>            :     StringInfoData buf;
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span><span class="lineCov">       1304 :     initStringInfo(&amp;buf);</span>
+<span class="lineNum">     175 </span><span class="lineCov">       1304 :     enlargeStringInfo(&amp;buf, 4 * len /* estimation */ );</span>
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span><span class="lineCov">       1304 :     appendStringInfoSpaces(&amp;buf, JSONPATH_HDRSZ);</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span><span class="lineCov">       1304 :     if (!jsonpath)</span>
+<span class="lineNum">     180 </span><span class="lineCov">          2 :         ereport(ERROR,</span>
+<span class="lineNum">     181 </span>            :                 (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+<span class="lineNum">     182 </span>            :                  errmsg(&quot;invalid input syntax for type %s: \&quot;%s\&quot;&quot;, &quot;jsonpath&quot;,
+<span class="lineNum">     183 </span>            :                         in)));
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span><span class="lineCov">       1302 :     flattenJsonPathParseItem(&amp;buf, jsonpath-&gt;expr, 0, false);</span>
+<span class="lineNum">     186 </span>            : 
+<span class="lineNum">     187 </span><span class="lineCov">       1296 :     res = (JsonPath *) buf.data;</span>
+<span class="lineNum">     188 </span><span class="lineCov">       1296 :     SET_VARSIZE(res, buf.len);</span>
+<span class="lineNum">     189 </span><span class="lineCov">       1296 :     res-&gt;header = JSONPATH_VERSION;</span>
+<span class="lineNum">     190 </span><span class="lineCov">       1296 :     if (jsonpath-&gt;lax)</span>
+<span class="lineNum">     191 </span><span class="lineCov">       1178 :         res-&gt;header |= JSONPATH_LAX;</span>
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span><span class="lineCov">       1296 :     PG_RETURN_JSONPATH_P(res);</span>
+<span class="lineNum">     194 </span>            : }
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span>            : /*
+<span class="lineNum">     197 </span>            :  * Converts jsonpath value to a C-string.
+<span class="lineNum">     198 </span>            :  *
+<span class="lineNum">     199 </span>            :  * If 'out' argument is non-null, the resulting C-string is stored inside the
+<span class="lineNum">     200 </span>            :  * StringBuffer.  The resulting string is always returned.
+<a name="201"><span class="lineNum">     201 </span>            :  */</a>
+<span class="lineNum">     202 </span>            : static char *
+<span class="lineNum">     203 </span><span class="lineCov">        322 : jsonPathToCstring(StringInfo out, JsonPath *in, int estimated_len)</span>
+<span class="lineNum">     204 </span>            : {
+<span class="lineNum">     205 </span>            :     StringInfoData buf;
+<span class="lineNum">     206 </span>            :     JsonPathItem v;
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span><span class="lineCov">        322 :     if (!out)</span>
+<span class="lineNum">     209 </span>            :     {
+<span class="lineNum">     210 </span><span class="lineCov">        322 :         out = &amp;buf;</span>
+<span class="lineNum">     211 </span><span class="lineCov">        322 :         initStringInfo(out);</span>
+<span class="lineNum">     212 </span>            :     }
+<span class="lineNum">     213 </span><span class="lineCov">        322 :     enlargeStringInfo(out, estimated_len);</span>
+<span class="lineNum">     214 </span>            : 
+<span class="lineNum">     215 </span><span class="lineCov">        322 :     if (!(in-&gt;header &amp; JSONPATH_LAX))</span>
+<span class="lineNum">     216 </span><span class="lineCov">          2 :         appendBinaryStringInfo(out, &quot;strict &quot;, 7);</span>
+<span class="lineNum">     217 </span>            : 
+<span class="lineNum">     218 </span><span class="lineCov">        322 :     jspInit(&amp;v, in);</span>
+<span class="lineNum">     219 </span><span class="lineCov">        322 :     printJsonPathItem(out, &amp;v, false, true);</span>
+<span class="lineNum">     220 </span>            : 
+<span class="lineNum">     221 </span><span class="lineCov">        322 :     return out-&gt;data;</span>
+<span class="lineNum">     222 </span>            : }
+<span class="lineNum">     223 </span>            : 
+<span class="lineNum">     224 </span>            : /*
+<span class="lineNum">     225 </span>            :  * Recursive function converting given jsonpath parse item and all its
+<span class="lineNum">     226 </span>            :  * children into a binary representation.
+<a name="227"><span class="lineNum">     227 </span>            :  */</a>
+<span class="lineNum">     228 </span>            : static int
+<span class="lineNum">     229 </span><span class="lineCov">       6282 : flattenJsonPathParseItem(StringInfo buf, JsonPathParseItem *item,</span>
+<span class="lineNum">     230 </span>            :                          int nestingLevel, bool insideArraySubscript)
+<span class="lineNum">     231 </span>            : {
+<span class="lineNum">     232 </span>            :     /* position from beginning of jsonpath data */
+<span class="lineNum">     233 </span><span class="lineCov">       6282 :     int32       pos = buf-&gt;len - JSONPATH_HDRSZ;</span>
+<span class="lineNum">     234 </span>            :     int32       chld;
+<span class="lineNum">     235 </span>            :     int32       next;
+<span class="lineNum">     236 </span><span class="lineCov">       6282 :     int         argNestingLevel = 0;</span>
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span><span class="lineCov">       6282 :     check_stack_depth();</span>
+<span class="lineNum">     239 </span><span class="lineCov">       6282 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span><span class="lineCov">       6282 :     appendStringInfoChar(buf, (char) (item-&gt;type));</span>
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span>            :     /*
+<span class="lineNum">     244 </span>            :      * We align buffer to int32 because a series of int32 values often goes
+<span class="lineNum">     245 </span>            :      * after the header, and we want to read them directly by dereferencing
+<span class="lineNum">     246 </span>            :      * int32 pointer (see jspInitByBuffer()).
+<span class="lineNum">     247 </span>            :      */
+<span class="lineNum">     248 </span><span class="lineCov">       6282 :     alignStringInfoInt(buf);</span>
+<span class="lineNum">     249 </span>            : 
+<span class="lineNum">     250 </span>            :     /*
+<span class="lineNum">     251 </span>            :      * Reserve space for next item pointer.  Actual value will be recorded
+<span class="lineNum">     252 </span>            :      * later, after next and children items processing.
+<span class="lineNum">     253 </span>            :      */
+<span class="lineNum">     254 </span><span class="lineCov">       6282 :     next = reserveSpaceForItemPointer(buf);</span>
+<span class="lineNum">     255 </span>            : 
+<span class="lineNum">     256 </span><span class="lineCov">       6282 :     switch (item-&gt;type)</span>
+<span class="lineNum">     257 </span>            :     {
+<span class="lineNum">     258 </span>            :         case jpiString:
+<span class="lineNum">     259 </span>            :         case jpiVariable:
+<span class="lineNum">     260 </span>            :         case jpiKey:
+<span class="lineNum">     261 </span><span class="lineCov">       1258 :             appendBinaryStringInfo(buf, (char *) &amp;item-&gt;value.string.len,</span>
+<span class="lineNum">     262 </span>            :                                    sizeof(item-&gt;value.string.len));
+<span class="lineNum">     263 </span><span class="lineCov">       1258 :             appendBinaryStringInfo(buf, item-&gt;value.string.val,</span>
+<span class="lineNum">     264 </span><span class="lineCov">       1258 :                                    item-&gt;value.string.len);</span>
+<span class="lineNum">     265 </span><span class="lineCov">       1258 :             appendStringInfoChar(buf, '\0');</span>
+<span class="lineNum">     266 </span><span class="lineCov">       1258 :             break;</span>
+<span class="lineNum">     267 </span>            :         case jpiNumeric:
+<span class="lineNum">     268 </span><span class="lineCov">        512 :             appendBinaryStringInfo(buf, (char *) item-&gt;value.numeric,</span>
+<span class="lineNum">     269 </span><span class="lineCov">        512 :                                    VARSIZE(item-&gt;value.numeric));</span>
+<span class="lineNum">     270 </span><span class="lineCov">        512 :             break;</span>
+<span class="lineNum">     271 </span>            :         case jpiBool:
+<span class="lineNum">     272 </span><span class="lineCov">         52 :             appendBinaryStringInfo(buf, (char *) &amp;item-&gt;value.boolean,</span>
+<span class="lineNum">     273 </span>            :                                    sizeof(item-&gt;value.boolean));
+<span class="lineNum">     274 </span><span class="lineCov">         52 :             break;</span>
+<span class="lineNum">     275 </span>            :         case jpiAnd:
+<span class="lineNum">     276 </span>            :         case jpiOr:
+<span class="lineNum">     277 </span>            :         case jpiEqual:
+<span class="lineNum">     278 </span>            :         case jpiNotEqual:
+<span class="lineNum">     279 </span>            :         case jpiLess:
+<span class="lineNum">     280 </span>            :         case jpiGreater:
+<span class="lineNum">     281 </span>            :         case jpiLessOrEqual:
+<span class="lineNum">     282 </span>            :         case jpiGreaterOrEqual:
+<span class="lineNum">     283 </span>            :         case jpiAdd:
+<span class="lineNum">     284 </span>            :         case jpiSub:
+<span class="lineNum">     285 </span>            :         case jpiMul:
+<span class="lineNum">     286 </span>            :         case jpiDiv:
+<span class="lineNum">     287 </span>            :         case jpiMod:
+<span class="lineNum">     288 </span>            :         case jpiStartsWith:
+<span class="lineNum">     289 </span>            :             {
+<span class="lineNum">     290 </span>            :                 /*
+<span class="lineNum">     291 </span>            :                  * First, reserve place for left/right arg's positions, then
+<span class="lineNum">     292 </span>            :                  * record both args and sets actual position in reserved
+<span class="lineNum">     293 </span>            :                  * places.
+<span class="lineNum">     294 </span>            :                  */
+<span class="lineNum">     295 </span><span class="lineCov">        816 :                 int32       left = reserveSpaceForItemPointer(buf);</span>
+<span class="lineNum">     296 </span><span class="lineCov">        816 :                 int32       right = reserveSpaceForItemPointer(buf);</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span><span class="lineCov">       1632 :                 chld = !item-&gt;value.args.left ? pos :</span>
+<span class="lineNum">     299 </span><span class="lineCov">        816 :                     flattenJsonPathParseItem(buf, item-&gt;value.args.left,</span>
+<span class="lineNum">     300 </span>            :                                              nestingLevel + argNestingLevel,
+<span class="lineNum">     301 </span>            :                                              insideArraySubscript);
+<span class="lineNum">     302 </span><span class="lineCov">        812 :                 *(int32 *) (buf-&gt;data + left) = chld - pos;</span>
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span><span class="lineCov">       1624 :                 chld = !item-&gt;value.args.right ? pos :</span>
+<span class="lineNum">     305 </span><span class="lineCov">        812 :                     flattenJsonPathParseItem(buf, item-&gt;value.args.right,</span>
+<span class="lineNum">     306 </span>            :                                              nestingLevel + argNestingLevel,
+<span class="lineNum">     307 </span>            :                                              insideArraySubscript);
+<span class="lineNum">     308 </span><span class="lineCov">        812 :                 *(int32 *) (buf-&gt;data + right) = chld - pos;</span>
+<span class="lineNum">     309 </span>            :             }
+<span class="lineNum">     310 </span><span class="lineCov">        812 :             break;</span>
+<span class="lineNum">     311 </span>            :         case jpiLikeRegex:
+<span class="lineNum">     312 </span>            :             {
+<span class="lineNum">     313 </span>            :                 int32       offs;
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span><span class="lineCov">         36 :                 appendBinaryStringInfo(buf,</span>
+<span class="lineNum">     316 </span><span class="lineCov">         36 :                                        (char *) &amp;item-&gt;value.like_regex.flags,</span>
+<span class="lineNum">     317 </span>            :                                        sizeof(item-&gt;value.like_regex.flags));
+<span class="lineNum">     318 </span><span class="lineCov">         36 :                 offs = reserveSpaceForItemPointer(buf);</span>
+<span class="lineNum">     319 </span><span class="lineCov">         36 :                 appendBinaryStringInfo(buf,</span>
+<span class="lineNum">     320 </span><span class="lineCov">         36 :                                        (char *) &amp;item-&gt;value.like_regex.patternlen,</span>
+<span class="lineNum">     321 </span>            :                                        sizeof(item-&gt;value.like_regex.patternlen));
+<span class="lineNum">     322 </span><span class="lineCov">         36 :                 appendBinaryStringInfo(buf, item-&gt;value.like_regex.pattern,</span>
+<span class="lineNum">     323 </span><span class="lineCov">         36 :                                        item-&gt;value.like_regex.patternlen);</span>
+<span class="lineNum">     324 </span><span class="lineCov">         36 :                 appendStringInfoChar(buf, '\0');</span>
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span><span class="lineCov">         36 :                 chld = flattenJsonPathParseItem(buf, item-&gt;value.like_regex.expr,</span>
+<span class="lineNum">     327 </span>            :                                                 nestingLevel,
+<span class="lineNum">     328 </span>            :                                                 insideArraySubscript);
+<span class="lineNum">     329 </span><span class="lineCov">         36 :                 *(int32 *) (buf-&gt;data + offs) = chld - pos;</span>
+<span class="lineNum">     330 </span>            :             }
+<span class="lineNum">     331 </span><span class="lineCov">         36 :             break;</span>
+<span class="lineNum">     332 </span>            :         case jpiFilter:
+<span class="lineNum">     333 </span><span class="lineCov">        514 :             argNestingLevel++;</span>
+<span class="lineNum">     334 </span>            :             /* FALLTHROUGH */
+<span class="lineNum">     335 </span>            :         case jpiIsUnknown:
+<span class="lineNum">     336 </span>            :         case jpiNot:
+<span class="lineNum">     337 </span>            :         case jpiPlus:
+<span class="lineNum">     338 </span>            :         case jpiMinus:
+<span class="lineNum">     339 </span>            :         case jpiExists:
+<span class="lineNum">     340 </span>            :         case jpiDatetime:
+<span class="lineNum">     341 </span>            :             {
+<span class="lineNum">     342 </span><span class="lineCov">        928 :                 int32       arg = reserveSpaceForItemPointer(buf);</span>
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span><span class="lineCov">       1748 :                 chld = !item-&gt;value.arg ? pos :</span>
+<span class="lineNum">     345 </span><span class="lineCov">        820 :                     flattenJsonPathParseItem(buf, item-&gt;value.arg,</span>
+<span class="lineNum">     346 </span>            :                                              nestingLevel + argNestingLevel,
+<span class="lineNum">     347 </span>            :                                              insideArraySubscript);
+<span class="lineNum">     348 </span><span class="lineCov">        926 :                 *(int32 *) (buf-&gt;data + arg) = chld - pos;</span>
+<span class="lineNum">     349 </span>            :             }
+<span class="lineNum">     350 </span><span class="lineCov">        926 :             break;</span>
+<span class="lineNum">     351 </span>            :         case jpiNull:
+<span class="lineNum">     352 </span><span class="lineCov">         38 :             break;</span>
+<span class="lineNum">     353 </span>            :         case jpiRoot:
+<span class="lineNum">     354 </span><span class="lineCov">       1240 :             break;</span>
+<span class="lineNum">     355 </span>            :         case jpiAnyArray:
+<span class="lineNum">     356 </span>            :         case jpiAnyKey:
+<span class="lineNum">     357 </span><span class="lineCov">        368 :             break;</span>
+<span class="lineNum">     358 </span>            :         case jpiCurrent:
+<span class="lineNum">     359 </span><span class="lineCov">        602 :             if (nestingLevel &lt;= 0)</span>
+<span class="lineNum">     360 </span><span class="lineCov">          2 :                 ereport(ERROR,</span>
+<span class="lineNum">     361 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     362 </span>            :                          errmsg(&quot;@ is not allowed in root expressions&quot;)));
+<span class="lineNum">     363 </span><span class="lineCov">        600 :             break;</span>
+<span class="lineNum">     364 </span>            :         case jpiLast:
+<span class="lineNum">     365 </span><span class="lineCov">         30 :             if (!insideArraySubscript)</span>
+<span class="lineNum">     366 </span><span class="lineCov">          4 :                 ereport(ERROR,</span>
+<span class="lineNum">     367 </span>            :                         (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     368 </span>            :                          errmsg(&quot;LAST is allowed only in array subscripts&quot;)));
+<span class="lineNum">     369 </span><span class="lineCov">         26 :             break;</span>
+<span class="lineNum">     370 </span>            :         case jpiIndexArray:
+<span class="lineNum">     371 </span>            :             {
+<span class="lineNum">     372 </span><span class="lineCov">        112 :                 int32       nelems = item-&gt;value.array.nelems;</span>
+<span class="lineNum">     373 </span>            :                 int         offset;
+<span class="lineNum">     374 </span>            :                 int         i;
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span><span class="lineCov">        112 :                 appendBinaryStringInfo(buf, (char *) &amp;nelems, sizeof(nelems));</span>
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span><span class="lineCov">        112 :                 offset = buf-&gt;len;</span>
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span><span class="lineCov">        112 :                 appendStringInfoSpaces(buf, sizeof(int32) * 2 * nelems);</span>
+<span class="lineNum">     381 </span>            : 
+<span class="lineNum">     382 </span><span class="lineCov">        234 :                 for (i = 0; i &lt; nelems; i++)</span>
+<span class="lineNum">     383 </span>            :                 {
+<span class="lineNum">     384 </span>            :                     int32      *ppos;
+<span class="lineNum">     385 </span>            :                     int32       topos;
+<span class="lineNum">     386 </span><span class="lineCov">        122 :                     int32       frompos =</span>
+<span class="lineNum">     387 </span><span class="lineCov">        122 :                     flattenJsonPathParseItem(buf,</span>
+<span class="lineNum">     388 </span><span class="lineCov">        122 :                                              item-&gt;value.array.elems[i].from,</span>
+<span class="lineNum">     389 </span>            :                                              nestingLevel, true) - pos;
+<span class="lineNum">     390 </span>            : 
+<span class="lineNum">     391 </span><span class="lineCov">        122 :                     if (item-&gt;value.array.elems[i].to)</span>
+<span class="lineNum">     392 </span><span class="lineCov">         14 :                         topos = flattenJsonPathParseItem(buf,</span>
+<span class="lineNum">     393 </span><span class="lineCov">         14 :                                                          item-&gt;value.array.elems[i].to,</span>
+<span class="lineNum">     394 </span>            :                                                          nestingLevel, true) - pos;
+<span class="lineNum">     395 </span>            :                     else
+<span class="lineNum">     396 </span><span class="lineCov">        108 :                         topos = 0;</span>
+<span class="lineNum">     397 </span>            : 
+<span class="lineNum">     398 </span><span class="lineCov">        122 :                     ppos = (int32 *) &amp;buf-&gt;data[offset + i * 2 * sizeof(int32)];</span>
+<span class="lineNum">     399 </span>            : 
+<span class="lineNum">     400 </span><span class="lineCov">        122 :                     ppos[0] = frompos;</span>
+<span class="lineNum">     401 </span><span class="lineCov">        122 :                     ppos[1] = topos;</span>
+<span class="lineNum">     402 </span>            :                 }
+<span class="lineNum">     403 </span>            :             }
+<span class="lineNum">     404 </span><span class="lineCov">        112 :             break;</span>
+<span class="lineNum">     405 </span>            :         case jpiAny:
+<span class="lineNum">     406 </span><span class="lineCov">        118 :             appendBinaryStringInfo(buf,</span>
+<span class="lineNum">     407 </span><span class="lineCov">        118 :                                    (char *) &amp;item-&gt;value.anybounds.first,</span>
+<span class="lineNum">     408 </span>            :                                    sizeof(item-&gt;value.anybounds.first));
+<span class="lineNum">     409 </span><span class="lineCov">        118 :             appendBinaryStringInfo(buf,</span>
+<span class="lineNum">     410 </span><span class="lineCov">        118 :                                    (char *) &amp;item-&gt;value.anybounds.last,</span>
+<span class="lineNum">     411 </span>            :                                    sizeof(item-&gt;value.anybounds.last));
+<span class="lineNum">     412 </span><span class="lineCov">        118 :             break;</span>
+<span class="lineNum">     413 </span>            :         case jpiType:
+<span class="lineNum">     414 </span>            :         case jpiSize:
+<span class="lineNum">     415 </span>            :         case jpiAbs:
+<span class="lineNum">     416 </span>            :         case jpiFloor:
+<span class="lineNum">     417 </span>            :         case jpiCeiling:
+<span class="lineNum">     418 </span>            :         case jpiDouble:
+<span class="lineNum">     419 </span>            :         case jpiKeyValue:
+<span class="lineNum">     420 </span><span class="lineCov">        172 :             break;</span>
+<span class="lineNum">     421 </span>            :         default:
+<span class="lineNum">     422 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized jsonpath item type: %d&quot;, item-&gt;type);</span>
+<span class="lineNum">     423 </span>            :     }
+<span class="lineNum">     424 </span>            : 
+<span class="lineNum">     425 </span><span class="lineCov">       6270 :     if (item-&gt;next)</span>
+<span class="lineNum">     426 </span>            :     {
+<span class="lineNum">     427 </span><span class="lineCov">       2360 :         chld = flattenJsonPathParseItem(buf, item-&gt;next, nestingLevel,</span>
+<span class="lineNum">     428 </span>            :                                         insideArraySubscript) - pos;
+<span class="lineNum">     429 </span><span class="lineCov">       2358 :         *(int32 *) (buf-&gt;data + next) = chld;</span>
+<span class="lineNum">     430 </span>            :     }
+<span class="lineNum">     431 </span>            : 
+<span class="lineNum">     432 </span><span class="lineCov">       6268 :     return pos;</span>
+<span class="lineNum">     433 </span>            : }
+<span class="lineNum">     434 </span>            : 
+<span class="lineNum">     435 </span>            : /*
+<span class="lineNum">     436 </span>            :  * Align StringInfo to int by adding zero padding bytes
+<a name="437"><span class="lineNum">     437 </span>            :  */</a>
+<span class="lineNum">     438 </span>            : static void
+<span class="lineNum">     439 </span><span class="lineCov">       6282 : alignStringInfoInt(StringInfo buf)</span>
+<span class="lineNum">     440 </span>            : {
+<span class="lineNum">     441 </span><span class="lineCov">       6282 :     switch (INTALIGN(buf-&gt;len) - buf-&gt;len)</span>
+<span class="lineNum">     442 </span>            :     {
+<span class="lineNum">     443 </span>            :         case 3:
+<span class="lineNum">     444 </span><span class="lineCov">       5508 :             appendStringInfoCharMacro(buf, 0);</span>
+<span class="lineNum">     445 </span>            :             /* FALLTHROUGH */
+<span class="lineNum">     446 </span>            :         case 2:
+<span class="lineNum">     447 </span><span class="lineCov">       5620 :             appendStringInfoCharMacro(buf, 0);</span>
+<span class="lineNum">     448 </span>            :             /* FALLTHROUGH */
+<span class="lineNum">     449 </span>            :         case 1:
+<span class="lineNum">     450 </span><span class="lineCov">       6214 :             appendStringInfoCharMacro(buf, 0);</span>
+<span class="lineNum">     451 </span>            :             /* FALLTHROUGH */
+<span class="lineNum">     452 </span>            :         default:
+<span class="lineNum">     453 </span><span class="lineCov">       6282 :             break;</span>
+<span class="lineNum">     454 </span>            :     }
+<span class="lineNum">     455 </span><span class="lineCov">       6282 : }</span>
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span>            : /*
+<span class="lineNum">     458 </span>            :  * Reserve space for int32 JsonPathItem pointer.  Now zero pointer is written,
+<span class="lineNum">     459 </span>            :  * actual value will be recorded at '(int32 *) &amp;buf-&gt;data[pos]' later.
+<a name="460"><span class="lineNum">     460 </span>            :  */</a>
+<span class="lineNum">     461 </span>            : static int32
+<span class="lineNum">     462 </span><span class="lineCov">       8878 : reserveSpaceForItemPointer(StringInfo buf)</span>
+<span class="lineNum">     463 </span>            : {
+<span class="lineNum">     464 </span><span class="lineCov">       8878 :     int32       pos = buf-&gt;len;</span>
+<span class="lineNum">     465 </span><span class="lineCov">       8878 :     int32       ptr = 0;</span>
+<span class="lineNum">     466 </span>            : 
+<span class="lineNum">     467 </span><span class="lineCov">       8878 :     appendBinaryStringInfo(buf, (char *) &amp;ptr, sizeof(ptr));</span>
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span><span class="lineCov">       8878 :     return pos;</span>
+<span class="lineNum">     470 </span>            : }
+<span class="lineNum">     471 </span>            : 
+<span class="lineNum">     472 </span>            : /*
+<span class="lineNum">     473 </span>            :  * Prints text representation of given jsonpath item and all its children.
+<a name="474"><span class="lineNum">     474 </span>            :  */</a>
+<span class="lineNum">     475 </span>            : static void
+<span class="lineNum">     476 </span><span class="lineCov">       1534 : printJsonPathItem(StringInfo buf, JsonPathItem *v, bool inKey,</span>
+<span class="lineNum">     477 </span>            :                   bool printBracketes)
+<span class="lineNum">     478 </span>            : {
+<span class="lineNum">     479 </span>            :     JsonPathItem elem;
+<span class="lineNum">     480 </span>            :     int         i;
+<span class="lineNum">     481 </span>            : 
+<span class="lineNum">     482 </span><span class="lineCov">       1534 :     check_stack_depth();</span>
+<span class="lineNum">     483 </span><span class="lineCov">       1534 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span><span class="lineCov">       1534 :     switch (v-&gt;type)</span>
+<span class="lineNum">     486 </span>            :     {
+<span class="lineNum">     487 </span>            :         case jpiNull:
+<span class="lineNum">     488 </span><span class="lineCov">         14 :             appendStringInfoString(buf, &quot;null&quot;);</span>
+<span class="lineNum">     489 </span><span class="lineCov">         14 :             break;</span>
+<span class="lineNum">     490 </span>            :         case jpiKey:
+<span class="lineNum">     491 </span><span class="lineCov">        328 :             if (inKey)</span>
+<span class="lineNum">     492 </span><span class="lineCov">        328 :                 appendStringInfoChar(buf, '.');</span>
+<span class="lineNum">     493 </span><span class="lineCov">        328 :             escape_json(buf, jspGetString(v, NULL));</span>
+<span class="lineNum">     494 </span><span class="lineCov">        328 :             break;</span>
+<span class="lineNum">     495 </span>            :         case jpiString:
+<span class="lineNum">     496 </span><span class="lineCov">         28 :             escape_json(buf, jspGetString(v, NULL));</span>
+<span class="lineNum">     497 </span><span class="lineCov">         28 :             break;</span>
+<span class="lineNum">     498 </span>            :         case jpiVariable:
+<span class="lineNum">     499 </span><span class="lineCov">         16 :             appendStringInfoChar(buf, '$');</span>
+<span class="lineNum">     500 </span><span class="lineCov">         16 :             escape_json(buf, jspGetString(v, NULL));</span>
+<span class="lineNum">     501 </span><span class="lineCov">         16 :             break;</span>
+<span class="lineNum">     502 </span>            :         case jpiNumeric:
+<span class="lineNum">     503 </span><span class="lineCov">        226 :             appendStringInfoString(buf,</span>
+<span class="lineNum">     504 </span><span class="lineCov">        226 :                                    DatumGetCString(DirectFunctionCall1(numeric_out,</span>
+<span class="lineNum">     505 </span>            :                                                                        NumericGetDatum(jspGetNumeric(v)))));
+<span class="lineNum">     506 </span><span class="lineCov">        226 :             break;</span>
+<span class="lineNum">     507 </span>            :         case jpiBool:
+<span class="lineNum">     508 </span><span class="lineCov">          4 :             if (jspGetBool(v))</span>
+<span class="lineNum">     509 </span><span class="lineCov">          2 :                 appendBinaryStringInfo(buf, &quot;true&quot;, 4);</span>
+<span class="lineNum">     510 </span>            :             else
+<span class="lineNum">     511 </span><span class="lineCov">          2 :                 appendBinaryStringInfo(buf, &quot;false&quot;, 5);</span>
+<span class="lineNum">     512 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">     513 </span>            :         case jpiAnd:
+<span class="lineNum">     514 </span>            :         case jpiOr:
+<span class="lineNum">     515 </span>            :         case jpiEqual:
+<span class="lineNum">     516 </span>            :         case jpiNotEqual:
+<span class="lineNum">     517 </span>            :         case jpiLess:
+<span class="lineNum">     518 </span>            :         case jpiGreater:
+<span class="lineNum">     519 </span>            :         case jpiLessOrEqual:
+<span class="lineNum">     520 </span>            :         case jpiGreaterOrEqual:
+<span class="lineNum">     521 </span>            :         case jpiAdd:
+<span class="lineNum">     522 </span>            :         case jpiSub:
+<span class="lineNum">     523 </span>            :         case jpiMul:
+<span class="lineNum">     524 </span>            :         case jpiDiv:
+<span class="lineNum">     525 </span>            :         case jpiMod:
+<span class="lineNum">     526 </span>            :         case jpiStartsWith:
+<span class="lineNum">     527 </span><span class="lineCov">        218 :             if (printBracketes)</span>
+<span class="lineNum">     528 </span><span class="lineCov">         38 :                 appendStringInfoChar(buf, '(');</span>
+<span class="lineNum">     529 </span><span class="lineCov">        218 :             jspGetLeftArg(v, &amp;elem);</span>
+<span class="lineNum">     530 </span><span class="lineCov">        218 :             printJsonPathItem(buf, &amp;elem, false,</span>
+<span class="lineNum">     531 </span><span class="lineCov">        218 :                               operationPriority(elem.type) &lt;=</span>
+<span class="lineNum">     532 </span><span class="lineCov">        218 :                               operationPriority(v-&gt;type));</span>
+<span class="lineNum">     533 </span><span class="lineCov">        218 :             appendStringInfoChar(buf, ' ');</span>
+<span class="lineNum">     534 </span><span class="lineCov">        218 :             appendStringInfoString(buf, jspOperationName(v-&gt;type));</span>
+<span class="lineNum">     535 </span><span class="lineCov">        218 :             appendStringInfoChar(buf, ' ');</span>
+<span class="lineNum">     536 </span><span class="lineCov">        218 :             jspGetRightArg(v, &amp;elem);</span>
+<span class="lineNum">     537 </span><span class="lineCov">        218 :             printJsonPathItem(buf, &amp;elem, false,</span>
+<span class="lineNum">     538 </span><span class="lineCov">        218 :                               operationPriority(elem.type) &lt;=</span>
+<span class="lineNum">     539 </span><span class="lineCov">        218 :                               operationPriority(v-&gt;type));</span>
+<span class="lineNum">     540 </span><span class="lineCov">        218 :             if (printBracketes)</span>
+<span class="lineNum">     541 </span><span class="lineCov">         38 :                 appendStringInfoChar(buf, ')');</span>
+<span class="lineNum">     542 </span><span class="lineCov">        218 :             break;</span>
+<span class="lineNum">     543 </span>            :         case jpiLikeRegex:
+<span class="lineNum">     544 </span><span class="lineCov">         16 :             if (printBracketes)</span>
+<span class="lineNum">     545 </span><span class="lineNoCov">          0 :                 appendStringInfoChar(buf, '(');</span>
+<span class="lineNum">     546 </span>            : 
+<span class="lineNum">     547 </span><span class="lineCov">         16 :             jspInitByBuffer(&amp;elem, v-&gt;base, v-&gt;content.like_regex.expr);</span>
+<span class="lineNum">     548 </span><span class="lineCov">         16 :             printJsonPathItem(buf, &amp;elem, false,</span>
+<span class="lineNum">     549 </span><span class="lineCov">         16 :                               operationPriority(elem.type) &lt;=</span>
+<span class="lineNum">     550 </span><span class="lineCov">         16 :                               operationPriority(v-&gt;type));</span>
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span><span class="lineCov">         16 :             appendBinaryStringInfo(buf, &quot; like_regex &quot;, 12);</span>
+<span class="lineNum">     553 </span>            : 
+<span class="lineNum">     554 </span><span class="lineCov">         16 :             escape_json(buf, v-&gt;content.like_regex.pattern);</span>
+<span class="lineNum">     555 </span>            : 
+<span class="lineNum">     556 </span><span class="lineCov">         16 :             if (v-&gt;content.like_regex.flags)</span>
+<span class="lineNum">     557 </span>            :             {
+<span class="lineNum">     558 </span><span class="lineCov">         12 :                 appendBinaryStringInfo(buf, &quot; flag \&quot;&quot;, 7);</span>
+<span class="lineNum">     559 </span>            : 
+<span class="lineNum">     560 </span><span class="lineCov">         12 :                 if (v-&gt;content.like_regex.flags &amp; JSP_REGEX_ICASE)</span>
+<span class="lineNum">     561 </span><span class="lineCov">         10 :                     appendStringInfoChar(buf, 'i');</span>
+<span class="lineNum">     562 </span><span class="lineCov">         12 :                 if (v-&gt;content.like_regex.flags &amp; JSP_REGEX_DOTALL)</span>
+<span class="lineNum">     563 </span><span class="lineCov">          6 :                     appendStringInfoChar(buf, 's');</span>
+<span class="lineNum">     564 </span><span class="lineCov">         12 :                 if (v-&gt;content.like_regex.flags &amp; JSP_REGEX_MLINE)</span>
+<span class="lineNum">     565 </span><span class="lineCov">          4 :                     appendStringInfoChar(buf, 'm');</span>
+<span class="lineNum">     566 </span><span class="lineCov">         12 :                 if (v-&gt;content.like_regex.flags &amp; JSP_REGEX_WSPACE)</span>
+<span class="lineNum">     567 </span><span class="lineCov">          2 :                     appendStringInfoChar(buf, 'x');</span>
+<span class="lineNum">     568 </span><span class="lineCov">         12 :                 if (v-&gt;content.like_regex.flags &amp; JSP_REGEX_QUOTE)</span>
+<span class="lineNum">     569 </span><span class="lineCov">          6 :                     appendStringInfoChar(buf, 'q');</span>
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span><span class="lineCov">         12 :                 appendStringInfoChar(buf, '&quot;');</span>
+<span class="lineNum">     572 </span>            :             }
+<span class="lineNum">     573 </span>            : 
+<span class="lineNum">     574 </span><span class="lineCov">         16 :             if (printBracketes)</span>
+<span class="lineNum">     575 </span><span class="lineNoCov">          0 :                 appendStringInfoChar(buf, ')');</span>
+<span class="lineNum">     576 </span><span class="lineCov">         16 :             break;</span>
+<span class="lineNum">     577 </span>            :         case jpiPlus:
+<span class="lineNum">     578 </span>            :         case jpiMinus:
+<span class="lineNum">     579 </span><span class="lineCov">         16 :             if (printBracketes)</span>
+<span class="lineNum">     580 </span><span class="lineCov">          6 :                 appendStringInfoChar(buf, '(');</span>
+<span class="lineNum">     581 </span><span class="lineCov">         16 :             appendStringInfoChar(buf, v-&gt;type == jpiPlus ? '+' : '-');</span>
+<span class="lineNum">     582 </span><span class="lineCov">         16 :             jspGetArg(v, &amp;elem);</span>
+<span class="lineNum">     583 </span><span class="lineCov">         16 :             printJsonPathItem(buf, &amp;elem, false,</span>
+<span class="lineNum">     584 </span><span class="lineCov">         16 :                               operationPriority(elem.type) &lt;=</span>
+<span class="lineNum">     585 </span><span class="lineCov">         16 :                               operationPriority(v-&gt;type));</span>
+<span class="lineNum">     586 </span><span class="lineCov">         16 :             if (printBracketes)</span>
+<span class="lineNum">     587 </span><span class="lineCov">          6 :                 appendStringInfoChar(buf, ')');</span>
+<span class="lineNum">     588 </span><span class="lineCov">         16 :             break;</span>
+<span class="lineNum">     589 </span>            :         case jpiFilter:
+<span class="lineNum">     590 </span><span class="lineCov">        140 :             appendBinaryStringInfo(buf, &quot;?(&quot;, 2);</span>
+<span class="lineNum">     591 </span><span class="lineCov">        140 :             jspGetArg(v, &amp;elem);</span>
+<span class="lineNum">     592 </span><span class="lineCov">        140 :             printJsonPathItem(buf, &amp;elem, false, false);</span>
+<span class="lineNum">     593 </span><span class="lineCov">        140 :             appendStringInfoChar(buf, ')');</span>
+<span class="lineNum">     594 </span><span class="lineCov">        140 :             break;</span>
+<span class="lineNum">     595 </span>            :         case jpiNot:
+<span class="lineNum">     596 </span><span class="lineCov">          4 :             appendBinaryStringInfo(buf, &quot;!(&quot;, 2);</span>
+<span class="lineNum">     597 </span><span class="lineCov">          4 :             jspGetArg(v, &amp;elem);</span>
+<span class="lineNum">     598 </span><span class="lineCov">          4 :             printJsonPathItem(buf, &amp;elem, false, false);</span>
+<span class="lineNum">     599 </span><span class="lineCov">          4 :             appendStringInfoChar(buf, ')');</span>
+<span class="lineNum">     600 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">     601 </span>            :         case jpiIsUnknown:
+<span class="lineNum">     602 </span><span class="lineCov">          2 :             appendStringInfoChar(buf, '(');</span>
+<span class="lineNum">     603 </span><span class="lineCov">          2 :             jspGetArg(v, &amp;elem);</span>
+<span class="lineNum">     604 </span><span class="lineCov">          2 :             printJsonPathItem(buf, &amp;elem, false, false);</span>
+<span class="lineNum">     605 </span><span class="lineCov">          2 :             appendBinaryStringInfo(buf, &quot;) is unknown&quot;, 12);</span>
+<span class="lineNum">     606 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     607 </span>            :         case jpiExists:
+<span class="lineNum">     608 </span><span class="lineCov">          8 :             appendBinaryStringInfo(buf, &quot;exists (&quot;, 8);</span>
+<span class="lineNum">     609 </span><span class="lineCov">          8 :             jspGetArg(v, &amp;elem);</span>
+<span class="lineNum">     610 </span><span class="lineCov">          8 :             printJsonPathItem(buf, &amp;elem, false, false);</span>
+<span class="lineNum">     611 </span><span class="lineCov">          8 :             appendStringInfoChar(buf, ')');</span>
+<span class="lineNum">     612 </span><span class="lineCov">          8 :             break;</span>
+<span class="lineNum">     613 </span>            :         case jpiCurrent:
+<span class="lineNum">     614 </span><span class="lineCov">        166 :             Assert(!inKey);</span>
+<span class="lineNum">     615 </span><span class="lineCov">        166 :             appendStringInfoChar(buf, '@');</span>
+<span class="lineNum">     616 </span><span class="lineCov">        166 :             break;</span>
+<span class="lineNum">     617 </span>            :         case jpiRoot:
+<span class="lineNum">     618 </span><span class="lineCov">        254 :             Assert(!inKey);</span>
+<span class="lineNum">     619 </span><span class="lineCov">        254 :             appendStringInfoChar(buf, '$');</span>
+<span class="lineNum">     620 </span><span class="lineCov">        254 :             break;</span>
+<span class="lineNum">     621 </span>            :         case jpiLast:
+<span class="lineNum">     622 </span><span class="lineCov">          4 :             appendBinaryStringInfo(buf, &quot;last&quot;, 4);</span>
+<span class="lineNum">     623 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">     624 </span>            :         case jpiAnyArray:
+<span class="lineNum">     625 </span><span class="lineCov">         22 :             appendBinaryStringInfo(buf, &quot;[*]&quot;, 3);</span>
+<span class="lineNum">     626 </span><span class="lineCov">         22 :             break;</span>
+<span class="lineNum">     627 </span>            :         case jpiAnyKey:
+<span class="lineNum">     628 </span><span class="lineCov">          4 :             if (inKey)</span>
+<span class="lineNum">     629 </span><span class="lineCov">          4 :                 appendStringInfoChar(buf, '.');</span>
+<span class="lineNum">     630 </span><span class="lineCov">          4 :             appendStringInfoChar(buf, '*');</span>
+<span class="lineNum">     631 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">     632 </span>            :         case jpiIndexArray:
+<span class="lineNum">     633 </span><span class="lineCov">         20 :             appendStringInfoChar(buf, '[');</span>
+<span class="lineNum">     634 </span><span class="lineCov">         46 :             for (i = 0; i &lt; v-&gt;content.array.nelems; i++)</span>
+<span class="lineNum">     635 </span>            :             {
+<span class="lineNum">     636 </span>            :                 JsonPathItem from;
+<span class="lineNum">     637 </span>            :                 JsonPathItem to;
+<span class="lineNum">     638 </span><span class="lineCov">         26 :                 bool        range = jspGetArraySubscript(v, &amp;from, &amp;to, i);</span>
+<span class="lineNum">     639 </span>            : 
+<span class="lineNum">     640 </span><span class="lineCov">         26 :                 if (i)</span>
+<span class="lineNum">     641 </span><span class="lineCov">          6 :                     appendStringInfoChar(buf, ',');</span>
+<span class="lineNum">     642 </span>            : 
+<span class="lineNum">     643 </span><span class="lineCov">         26 :                 printJsonPathItem(buf, &amp;from, false, false);</span>
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span><span class="lineCov">         26 :                 if (range)</span>
+<span class="lineNum">     646 </span>            :                 {
+<span class="lineNum">     647 </span><span class="lineCov">          4 :                     appendBinaryStringInfo(buf, &quot; to &quot;, 4);</span>
+<span class="lineNum">     648 </span><span class="lineCov">          4 :                     printJsonPathItem(buf, &amp;to, false, false);</span>
+<span class="lineNum">     649 </span>            :                 }
+<span class="lineNum">     650 </span>            :             }
+<span class="lineNum">     651 </span><span class="lineCov">         20 :             appendStringInfoChar(buf, ']');</span>
+<span class="lineNum">     652 </span><span class="lineCov">         20 :             break;</span>
+<span class="lineNum">     653 </span>            :         case jpiAny:
+<span class="lineNum">     654 </span><span class="lineCov">         16 :             if (inKey)</span>
+<span class="lineNum">     655 </span><span class="lineCov">         16 :                 appendStringInfoChar(buf, '.');</span>
+<span class="lineNum">     656 </span>            : 
+<span class="lineNum">     657 </span><span class="lineCov">         20 :             if (v-&gt;content.anybounds.first == 0 &amp;&amp;</span>
+<span class="lineNum">     658 </span><span class="lineCov">          4 :                 v-&gt;content.anybounds.last == PG_UINT32_MAX)</span>
+<span class="lineNum">     659 </span><span class="lineCov">          2 :                 appendBinaryStringInfo(buf, &quot;**&quot;, 2);</span>
+<span class="lineNum">     660 </span><span class="lineCov">         14 :             else if (v-&gt;content.anybounds.first == v-&gt;content.anybounds.last)</span>
+<span class="lineNum">     661 </span>            :             {
+<span class="lineNum">     662 </span><span class="lineCov">          6 :                 if (v-&gt;content.anybounds.first == PG_UINT32_MAX)</span>
+<span class="lineNum">     663 </span><span class="lineCov">          2 :                     appendStringInfo(buf, &quot;**{last}&quot;);</span>
+<span class="lineNum">     664 </span>            :                 else
+<span class="lineNum">     665 </span><span class="lineCov">          4 :                     appendStringInfo(buf, &quot;**{%u}&quot;,</span>
+<span class="lineNum">     666 </span>            :                                      v-&gt;content.anybounds.first);
+<span class="lineNum">     667 </span>            :             }
+<span class="lineNum">     668 </span><span class="lineCov">          8 :             else if (v-&gt;content.anybounds.first == PG_UINT32_MAX)</span>
+<span class="lineNum">     669 </span><span class="lineCov">          2 :                 appendStringInfo(buf, &quot;**{last to %u}&quot;,</span>
+<span class="lineNum">     670 </span>            :                                  v-&gt;content.anybounds.last);
+<span class="lineNum">     671 </span><span class="lineCov">          6 :             else if (v-&gt;content.anybounds.last == PG_UINT32_MAX)</span>
+<span class="lineNum">     672 </span><span class="lineCov">          2 :                 appendStringInfo(buf, &quot;**{%u to last}&quot;,</span>
+<span class="lineNum">     673 </span>            :                                  v-&gt;content.anybounds.first);
+<span class="lineNum">     674 </span>            :             else
+<span class="lineNum">     675 </span><span class="lineCov">          4 :                 appendStringInfo(buf, &quot;**{%u to %u}&quot;,</span>
+<span class="lineNum">     676 </span>            :                                  v-&gt;content.anybounds.first,
+<span class="lineNum">     677 </span>            :                                  v-&gt;content.anybounds.last);
+<span class="lineNum">     678 </span><span class="lineCov">         16 :             break;</span>
+<span class="lineNum">     679 </span>            :         case jpiType:
+<span class="lineNum">     680 </span><span class="lineCov">         12 :             appendBinaryStringInfo(buf, &quot;.type()&quot;, 7);</span>
+<span class="lineNum">     681 </span><span class="lineCov">         12 :             break;</span>
+<span class="lineNum">     682 </span>            :         case jpiSize:
+<span class="lineNum">     683 </span><span class="lineCov">          2 :             appendBinaryStringInfo(buf, &quot;.size()&quot;, 7);</span>
+<span class="lineNum">     684 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     685 </span>            :         case jpiAbs:
+<span class="lineNum">     686 </span><span class="lineCov">          2 :             appendBinaryStringInfo(buf, &quot;.abs()&quot;, 6);</span>
+<span class="lineNum">     687 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     688 </span>            :         case jpiFloor:
+<span class="lineNum">     689 </span><span class="lineCov">          2 :             appendBinaryStringInfo(buf, &quot;.floor()&quot;, 8);</span>
+<span class="lineNum">     690 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     691 </span>            :         case jpiCeiling:
+<span class="lineNum">     692 </span><span class="lineCov">          2 :             appendBinaryStringInfo(buf, &quot;.ceiling()&quot;, 10);</span>
+<span class="lineNum">     693 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     694 </span>            :         case jpiDouble:
+<span class="lineNum">     695 </span><span class="lineCov">          2 :             appendBinaryStringInfo(buf, &quot;.double()&quot;, 9);</span>
+<span class="lineNum">     696 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     697 </span>            :         case jpiDatetime:
+<span class="lineNum">     698 </span><span class="lineCov">          4 :             appendBinaryStringInfo(buf, &quot;.datetime(&quot;, 10);</span>
+<span class="lineNum">     699 </span><span class="lineCov">          4 :             if (v-&gt;content.arg)</span>
+<span class="lineNum">     700 </span>            :             {
+<span class="lineNum">     701 </span><span class="lineCov">          2 :                 jspGetArg(v, &amp;elem);</span>
+<span class="lineNum">     702 </span><span class="lineCov">          2 :                 printJsonPathItem(buf, &amp;elem, false, false);</span>
+<span class="lineNum">     703 </span>            :             }
+<span class="lineNum">     704 </span><span class="lineCov">          4 :             appendStringInfoChar(buf, ')');</span>
+<span class="lineNum">     705 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">     706 </span>            :         case jpiKeyValue:
+<span class="lineNum">     707 </span><span class="lineCov">          2 :             appendBinaryStringInfo(buf, &quot;.keyvalue()&quot;, 11);</span>
+<span class="lineNum">     708 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     709 </span>            :         default:
+<span class="lineNum">     710 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized jsonpath item type: %d&quot;, v-&gt;type);</span>
+<span class="lineNum">     711 </span>            :     }
+<span class="lineNum">     712 </span>            : 
+<span class="lineNum">     713 </span><span class="lineCov">       1534 :     if (jspGetNext(v, &amp;elem))</span>
+<span class="lineNum">     714 </span><span class="lineCov">        558 :         printJsonPathItem(buf, &amp;elem, true, true);</span>
+<span class="lineNum">     715 </span><span class="lineCov">       1534 : }</span>
+<a name="716"><span class="lineNum">     716 </span>            : </a>
+<span class="lineNum">     717 </span>            : const char *
+<span class="lineNum">     718 </span><span class="lineCov">        266 : jspOperationName(JsonPathItemType type)</span>
+<span class="lineNum">     719 </span>            : {
+<span class="lineNum">     720 </span><span class="lineCov">        266 :     switch (type)</span>
+<span class="lineNum">     721 </span>            :     {
+<span class="lineNum">     722 </span>            :         case jpiAnd:
+<span class="lineNum">     723 </span><span class="lineCov">         10 :             return &quot;&amp;&amp;&quot;;</span>
+<span class="lineNum">     724 </span>            :         case jpiOr:
+<span class="lineNum">     725 </span><span class="lineCov">         18 :             return &quot;||&quot;;</span>
+<span class="lineNum">     726 </span>            :         case jpiEqual:
+<span class="lineNum">     727 </span><span class="lineCov">         54 :             return &quot;==&quot;;</span>
+<span class="lineNum">     728 </span>            :         case jpiNotEqual:
+<span class="lineNum">     729 </span><span class="lineCov">          2 :             return &quot;!=&quot;;</span>
+<span class="lineNum">     730 </span>            :         case jpiLess:
+<span class="lineNum">     731 </span><span class="lineCov">         76 :             return &quot;&lt;&quot;;</span>
+<span class="lineNum">     732 </span>            :         case jpiGreater:
+<span class="lineNum">     733 </span><span class="lineCov">          8 :             return &quot;&gt;&quot;;</span>
+<span class="lineNum">     734 </span>            :         case jpiLessOrEqual:
+<span class="lineNum">     735 </span><span class="lineCov">          2 :             return &quot;&lt;=&quot;;</span>
+<span class="lineNum">     736 </span>            :         case jpiGreaterOrEqual:
+<span class="lineNum">     737 </span><span class="lineCov">         10 :             return &quot;&gt;=&quot;;</span>
+<span class="lineNum">     738 </span>            :         case jpiPlus:
+<span class="lineNum">     739 </span>            :         case jpiAdd:
+<span class="lineNum">     740 </span><span class="lineCov">         24 :             return &quot;+&quot;;</span>
+<span class="lineNum">     741 </span>            :         case jpiMinus:
+<span class="lineNum">     742 </span>            :         case jpiSub:
+<span class="lineNum">     743 </span><span class="lineCov">          8 :             return &quot;-&quot;;</span>
+<span class="lineNum">     744 </span>            :         case jpiMul:
+<span class="lineNum">     745 </span><span class="lineCov">          8 :             return &quot;*&quot;;</span>
+<span class="lineNum">     746 </span>            :         case jpiDiv:
+<span class="lineNum">     747 </span><span class="lineCov">          2 :             return &quot;/&quot;;</span>
+<span class="lineNum">     748 </span>            :         case jpiMod:
+<span class="lineNum">     749 </span><span class="lineCov">          2 :             return &quot;%&quot;;</span>
+<span class="lineNum">     750 </span>            :         case jpiStartsWith:
+<span class="lineNum">     751 </span><span class="lineCov">          4 :             return &quot;starts with&quot;;</span>
+<span class="lineNum">     752 </span>            :         case jpiLikeRegex:
+<span class="lineNum">     753 </span><span class="lineNoCov">          0 :             return &quot;like_regex&quot;;</span>
+<span class="lineNum">     754 </span>            :         case jpiType:
+<span class="lineNum">     755 </span><span class="lineNoCov">          0 :             return &quot;type&quot;;</span>
+<span class="lineNum">     756 </span>            :         case jpiSize:
+<span class="lineNum">     757 </span><span class="lineCov">          2 :             return &quot;size&quot;;</span>
+<span class="lineNum">     758 </span>            :         case jpiKeyValue:
+<span class="lineNum">     759 </span><span class="lineCov">          6 :             return &quot;keyvalue&quot;;</span>
+<span class="lineNum">     760 </span>            :         case jpiDouble:
+<span class="lineNum">     761 </span><span class="lineCov">         14 :             return &quot;double&quot;;</span>
+<span class="lineNum">     762 </span>            :         case jpiAbs:
+<span class="lineNum">     763 </span><span class="lineCov">          2 :             return &quot;abs&quot;;</span>
+<span class="lineNum">     764 </span>            :         case jpiFloor:
+<span class="lineNum">     765 </span><span class="lineCov">          2 :             return &quot;floor&quot;;</span>
+<span class="lineNum">     766 </span>            :         case jpiCeiling:
+<span class="lineNum">     767 </span><span class="lineCov">          2 :             return &quot;ceiling&quot;;</span>
+<span class="lineNum">     768 </span>            :         case jpiDatetime:
+<span class="lineNum">     769 </span><span class="lineCov">         10 :             return &quot;datetime&quot;;</span>
+<span class="lineNum">     770 </span>            :         default:
+<span class="lineNum">     771 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized jsonpath item type: %d&quot;, type);</span>
+<span class="lineNum">     772 </span>            :             return NULL;
+<span class="lineNum">     773 </span>            :     }
+<span class="lineNum">     774 </span>            : }
+<a name="775"><span class="lineNum">     775 </span>            : </a>
+<span class="lineNum">     776 </span>            : static int
+<span class="lineNum">     777 </span><span class="lineCov">        936 : operationPriority(JsonPathItemType op)</span>
+<span class="lineNum">     778 </span>            : {
+<span class="lineNum">     779 </span><span class="lineCov">        936 :     switch (op)</span>
+<span class="lineNum">     780 </span>            :     {
+<span class="lineNum">     781 </span>            :         case jpiOr:
+<span class="lineNum">     782 </span><span class="lineCov">         38 :             return 0;</span>
+<span class="lineNum">     783 </span>            :         case jpiAnd:
+<span class="lineNum">     784 </span><span class="lineCov">         26 :             return 1;</span>
+<span class="lineNum">     785 </span>            :         case jpiEqual:
+<span class="lineNum">     786 </span>            :         case jpiNotEqual:
+<span class="lineNum">     787 </span>            :         case jpiLess:
+<span class="lineNum">     788 </span>            :         case jpiGreater:
+<span class="lineNum">     789 </span>            :         case jpiLessOrEqual:
+<span class="lineNum">     790 </span>            :         case jpiGreaterOrEqual:
+<span class="lineNum">     791 </span>            :         case jpiStartsWith:
+<span class="lineNum">     792 </span><span class="lineCov">        354 :             return 2;</span>
+<span class="lineNum">     793 </span>            :         case jpiAdd:
+<span class="lineNum">     794 </span>            :         case jpiSub:
+<span class="lineNum">     795 </span><span class="lineCov">         60 :             return 3;</span>
+<span class="lineNum">     796 </span>            :         case jpiMul:
+<span class="lineNum">     797 </span>            :         case jpiDiv:
+<span class="lineNum">     798 </span>            :         case jpiMod:
+<span class="lineNum">     799 </span><span class="lineCov">         22 :             return 4;</span>
+<span class="lineNum">     800 </span>            :         case jpiPlus:
+<span class="lineNum">     801 </span>            :         case jpiMinus:
+<span class="lineNum">     802 </span><span class="lineCov">         28 :             return 5;</span>
+<span class="lineNum">     803 </span>            :         default:
+<span class="lineNum">     804 </span><span class="lineCov">        408 :             return 6;</span>
+<span class="lineNum">     805 </span>            :     }
+<span class="lineNum">     806 </span>            : }
+<span class="lineNum">     807 </span>            : 
+<span class="lineNum">     808 </span>            : /******************* Support functions for JsonPath *************************/
+<span class="lineNum">     809 </span>            : 
+<span class="lineNum">     810 </span>            : /*
+<span class="lineNum">     811 </span>            :  * Support macros to read stored values
+<span class="lineNum">     812 </span>            :  */
+<span class="lineNum">     813 </span>            : 
+<span class="lineNum">     814 </span>            : #define read_byte(v, b, p) do {         \
+<span class="lineNum">     815 </span>            :     (v) = *(uint8*)((b) + (p));         \
+<span class="lineNum">     816 </span>            :     (p) += 1;                           \
+<span class="lineNum">     817 </span>            : } while(0)                              \
+<span class="lineNum">     818 </span>            : 
+<span class="lineNum">     819 </span>            : #define read_int32(v, b, p) do {        \
+<span class="lineNum">     820 </span>            :     (v) = *(uint32*)((b) + (p));        \
+<span class="lineNum">     821 </span>            :     (p) += sizeof(int32);               \
+<span class="lineNum">     822 </span>            : } while(0)                              \
+<span class="lineNum">     823 </span>            : 
+<span class="lineNum">     824 </span>            : #define read_int32_n(v, b, p, n) do {   \
+<span class="lineNum">     825 </span>            :     (v) = (void *)((b) + (p));          \
+<span class="lineNum">     826 </span>            :     (p) += sizeof(int32) * (n);         \
+<span class="lineNum">     827 </span>            : } while(0)                              \
+<span class="lineNum">     828 </span>            : 
+<span class="lineNum">     829 </span>            : /*
+<span class="lineNum">     830 </span>            :  * Read root node and fill root node representation
+<a name="831"><span class="lineNum">     831 </span>            :  */</a>
+<span class="lineNum">     832 </span>            : void
+<span class="lineNum">     833 </span><span class="lineCov">      63910 : jspInit(JsonPathItem *v, JsonPath *js)</span>
+<span class="lineNum">     834 </span>            : {
+<span class="lineNum">     835 </span><span class="lineCov">      63910 :     Assert((js-&gt;header &amp; ~JSONPATH_LAX) == JSONPATH_VERSION);</span>
+<span class="lineNum">     836 </span><span class="lineCov">      63910 :     jspInitByBuffer(v, js-&gt;data, 0);</span>
+<span class="lineNum">     837 </span><span class="lineCov">      63910 : }</span>
+<span class="lineNum">     838 </span>            : 
+<span class="lineNum">     839 </span>            : /*
+<span class="lineNum">     840 </span>            :  * Read node from buffer and fill its representation
+<a name="841"><span class="lineNum">     841 </span>            :  */</a>
+<span class="lineNum">     842 </span>            : void
+<span class="lineNum">     843 </span><span class="lineCov">     215752 : jspInitByBuffer(JsonPathItem *v, char *base, int32 pos)</span>
+<span class="lineNum">     844 </span>            : {
+<span class="lineNum">     845 </span><span class="lineCov">     215752 :     v-&gt;base = base + pos;</span>
+<span class="lineNum">     846 </span>            : 
+<span class="lineNum">     847 </span><span class="lineCov">     215752 :     read_byte(v-&gt;type, base, pos);</span>
+<span class="lineNum">     848 </span><span class="lineCov">     215752 :     pos = INTALIGN((uintptr_t) (base + pos)) - (uintptr_t) base;</span>
+<span class="lineNum">     849 </span><span class="lineCov">     215752 :     read_int32(v-&gt;nextPos, base, pos);</span>
+<span class="lineNum">     850 </span>            : 
+<span class="lineNum">     851 </span><span class="lineCov">     215752 :     switch (v-&gt;type)</span>
+<span class="lineNum">     852 </span>            :     {
+<span class="lineNum">     853 </span>            :         case jpiNull:
+<span class="lineNum">     854 </span>            :         case jpiRoot:
+<span class="lineNum">     855 </span>            :         case jpiCurrent:
+<span class="lineNum">     856 </span>            :         case jpiAnyArray:
+<span class="lineNum">     857 </span>            :         case jpiAnyKey:
+<span class="lineNum">     858 </span>            :         case jpiType:
+<span class="lineNum">     859 </span>            :         case jpiSize:
+<span class="lineNum">     860 </span>            :         case jpiAbs:
+<span class="lineNum">     861 </span>            :         case jpiFloor:
+<span class="lineNum">     862 </span>            :         case jpiCeiling:
+<span class="lineNum">     863 </span>            :         case jpiDouble:
+<span class="lineNum">     864 </span>            :         case jpiKeyValue:
+<span class="lineNum">     865 </span>            :         case jpiLast:
+<span class="lineNum">     866 </span><span class="lineCov">      78018 :             break;</span>
+<span class="lineNum">     867 </span>            :         case jpiKey:
+<span class="lineNum">     868 </span>            :         case jpiString:
+<span class="lineNum">     869 </span>            :         case jpiVariable:
+<span class="lineNum">     870 </span><span class="lineCov">      65230 :             read_int32(v-&gt;content.value.datalen, base, pos);</span>
+<span class="lineNum">     871 </span>            :             /* FALLTHROUGH */
+<span class="lineNum">     872 </span>            :         case jpiNumeric:
+<span class="lineNum">     873 </span>            :         case jpiBool:
+<span class="lineNum">     874 </span><span class="lineCov">      72436 :             v-&gt;content.value.data = base + pos;</span>
+<span class="lineNum">     875 </span><span class="lineCov">      72436 :             break;</span>
+<span class="lineNum">     876 </span>            :         case jpiAnd:
+<span class="lineNum">     877 </span>            :         case jpiOr:
+<span class="lineNum">     878 </span>            :         case jpiAdd:
+<span class="lineNum">     879 </span>            :         case jpiSub:
+<span class="lineNum">     880 </span>            :         case jpiMul:
+<span class="lineNum">     881 </span>            :         case jpiDiv:
+<span class="lineNum">     882 </span>            :         case jpiMod:
+<span class="lineNum">     883 </span>            :         case jpiEqual:
+<span class="lineNum">     884 </span>            :         case jpiNotEqual:
+<span class="lineNum">     885 </span>            :         case jpiLess:
+<span class="lineNum">     886 </span>            :         case jpiGreater:
+<span class="lineNum">     887 </span>            :         case jpiLessOrEqual:
+<span class="lineNum">     888 </span>            :         case jpiGreaterOrEqual:
+<span class="lineNum">     889 </span>            :         case jpiStartsWith:
+<span class="lineNum">     890 </span><span class="lineCov">      31552 :             read_int32(v-&gt;content.args.left, base, pos);</span>
+<span class="lineNum">     891 </span><span class="lineCov">      31552 :             read_int32(v-&gt;content.args.right, base, pos);</span>
+<span class="lineNum">     892 </span><span class="lineCov">      31552 :             break;</span>
+<span class="lineNum">     893 </span>            :         case jpiLikeRegex:
+<span class="lineNum">     894 </span><span class="lineCov">        148 :             read_int32(v-&gt;content.like_regex.flags, base, pos);</span>
+<span class="lineNum">     895 </span><span class="lineCov">        148 :             read_int32(v-&gt;content.like_regex.expr, base, pos);</span>
+<span class="lineNum">     896 </span><span class="lineCov">        148 :             read_int32(v-&gt;content.like_regex.patternlen, base, pos);</span>
+<span class="lineNum">     897 </span><span class="lineCov">        148 :             v-&gt;content.like_regex.pattern = base + pos;</span>
+<span class="lineNum">     898 </span><span class="lineCov">        148 :             break;</span>
+<span class="lineNum">     899 </span>            :         case jpiNot:
+<span class="lineNum">     900 </span>            :         case jpiExists:
+<span class="lineNum">     901 </span>            :         case jpiIsUnknown:
+<span class="lineNum">     902 </span>            :         case jpiPlus:
+<span class="lineNum">     903 </span>            :         case jpiMinus:
+<span class="lineNum">     904 </span>            :         case jpiFilter:
+<span class="lineNum">     905 </span>            :         case jpiDatetime:
+<span class="lineNum">     906 </span><span class="lineCov">      33364 :             read_int32(v-&gt;content.arg, base, pos);</span>
+<span class="lineNum">     907 </span><span class="lineCov">      33364 :             break;</span>
+<span class="lineNum">     908 </span>            :         case jpiIndexArray:
+<span class="lineNum">     909 </span><span class="lineCov">        116 :             read_int32(v-&gt;content.array.nelems, base, pos);</span>
+<span class="lineNum">     910 </span><span class="lineCov">        116 :             read_int32_n(v-&gt;content.array.elems, base, pos,</span>
+<span class="lineNum">     911 </span>            :                          v-&gt;content.array.nelems * 2);
+<span class="lineNum">     912 </span><span class="lineCov">        116 :             break;</span>
+<span class="lineNum">     913 </span>            :         case jpiAny:
+<span class="lineNum">     914 </span><span class="lineCov">        118 :             read_int32(v-&gt;content.anybounds.first, base, pos);</span>
+<span class="lineNum">     915 </span><span class="lineCov">        118 :             read_int32(v-&gt;content.anybounds.last, base, pos);</span>
+<span class="lineNum">     916 </span><span class="lineCov">        118 :             break;</span>
+<span class="lineNum">     917 </span>            :         default:
+<span class="lineNum">     918 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized jsonpath item type: %d&quot;, v-&gt;type);</span>
+<span class="lineNum">     919 </span>            :     }
+<span class="lineNum">     920 </span><span class="lineCov">     215752 : }</span>
+<a name="921"><span class="lineNum">     921 </span>            : </a>
+<span class="lineNum">     922 </span>            : void
+<span class="lineNum">     923 </span><span class="lineCov">      33612 : jspGetArg(JsonPathItem *v, JsonPathItem *a)</span>
+<span class="lineNum">     924 </span>            : {
+<span class="lineNum">     925 </span><span class="lineCov">      33612 :     Assert(v-&gt;type == jpiFilter ||</span>
+<span class="lineNum">     926 </span>            :            v-&gt;type == jpiNot ||
+<span class="lineNum">     927 </span>            :            v-&gt;type == jpiIsUnknown ||
+<span class="lineNum">     928 </span>            :            v-&gt;type == jpiExists ||
+<span class="lineNum">     929 </span>            :            v-&gt;type == jpiPlus ||
+<span class="lineNum">     930 </span>            :            v-&gt;type == jpiMinus ||
+<span class="lineNum">     931 </span>            :            v-&gt;type == jpiDatetime);
+<span class="lineNum">     932 </span>            : 
+<span class="lineNum">     933 </span><span class="lineCov">      33612 :     jspInitByBuffer(a, v-&gt;base, v-&gt;content.arg);</span>
+<span class="lineNum">     934 </span><span class="lineCov">      33612 : }</span>
+<a name="935"><span class="lineNum">     935 </span>            : </a>
+<span class="lineNum">     936 </span>            : bool
+<span class="lineNum">     937 </span><span class="lineCov">     140086 : jspGetNext(JsonPathItem *v, JsonPathItem *a)</span>
+<span class="lineNum">     938 </span>            : {
+<span class="lineNum">     939 </span><span class="lineCov">     140086 :     if (jspHasNext(v))</span>
+<span class="lineNum">     940 </span>            :     {
+<span class="lineNum">     941 </span><span class="lineCov">      63164 :         Assert(v-&gt;type == jpiString ||</span>
+<span class="lineNum">     942 </span>            :                v-&gt;type == jpiNumeric ||
+<span class="lineNum">     943 </span>            :                v-&gt;type == jpiBool ||
+<span class="lineNum">     944 </span>            :                v-&gt;type == jpiNull ||
+<span class="lineNum">     945 </span>            :                v-&gt;type == jpiKey ||
+<span class="lineNum">     946 </span>            :                v-&gt;type == jpiAny ||
+<span class="lineNum">     947 </span>            :                v-&gt;type == jpiAnyArray ||
+<span class="lineNum">     948 </span>            :                v-&gt;type == jpiAnyKey ||
+<span class="lineNum">     949 </span>            :                v-&gt;type == jpiIndexArray ||
+<span class="lineNum">     950 </span>            :                v-&gt;type == jpiFilter ||
+<span class="lineNum">     951 </span>            :                v-&gt;type == jpiCurrent ||
+<span class="lineNum">     952 </span>            :                v-&gt;type == jpiExists ||
+<span class="lineNum">     953 </span>            :                v-&gt;type == jpiRoot ||
+<span class="lineNum">     954 </span>            :                v-&gt;type == jpiVariable ||
+<span class="lineNum">     955 </span>            :                v-&gt;type == jpiLast ||
+<span class="lineNum">     956 </span>            :                v-&gt;type == jpiAdd ||
+<span class="lineNum">     957 </span>            :                v-&gt;type == jpiSub ||
+<span class="lineNum">     958 </span>            :                v-&gt;type == jpiMul ||
+<span class="lineNum">     959 </span>            :                v-&gt;type == jpiDiv ||
+<span class="lineNum">     960 </span>            :                v-&gt;type == jpiMod ||
+<span class="lineNum">     961 </span>            :                v-&gt;type == jpiPlus ||
+<span class="lineNum">     962 </span>            :                v-&gt;type == jpiMinus ||
+<span class="lineNum">     963 </span>            :                v-&gt;type == jpiEqual ||
+<span class="lineNum">     964 </span>            :                v-&gt;type == jpiNotEqual ||
+<span class="lineNum">     965 </span>            :                v-&gt;type == jpiGreater ||
+<span class="lineNum">     966 </span>            :                v-&gt;type == jpiGreaterOrEqual ||
+<span class="lineNum">     967 </span>            :                v-&gt;type == jpiLess ||
+<span class="lineNum">     968 </span>            :                v-&gt;type == jpiLessOrEqual ||
+<span class="lineNum">     969 </span>            :                v-&gt;type == jpiAnd ||
+<span class="lineNum">     970 </span>            :                v-&gt;type == jpiOr ||
+<span class="lineNum">     971 </span>            :                v-&gt;type == jpiNot ||
+<span class="lineNum">     972 </span>            :                v-&gt;type == jpiIsUnknown ||
+<span class="lineNum">     973 </span>            :                v-&gt;type == jpiType ||
+<span class="lineNum">     974 </span>            :                v-&gt;type == jpiSize ||
+<span class="lineNum">     975 </span>            :                v-&gt;type == jpiAbs ||
+<span class="lineNum">     976 </span>            :                v-&gt;type == jpiFloor ||
+<span class="lineNum">     977 </span>            :                v-&gt;type == jpiCeiling ||
+<span class="lineNum">     978 </span>            :                v-&gt;type == jpiDouble ||
+<span class="lineNum">     979 </span>            :                v-&gt;type == jpiDatetime ||
+<span class="lineNum">     980 </span>            :                v-&gt;type == jpiKeyValue ||
+<span class="lineNum">     981 </span>            :                v-&gt;type == jpiStartsWith);
+<span class="lineNum">     982 </span>            : 
+<span class="lineNum">     983 </span><span class="lineCov">      63164 :         if (a)</span>
+<span class="lineNum">     984 </span><span class="lineCov">      63164 :             jspInitByBuffer(a, v-&gt;base, v-&gt;nextPos);</span>
+<span class="lineNum">     985 </span><span class="lineCov">      63164 :         return true;</span>
+<span class="lineNum">     986 </span>            :     }
+<span class="lineNum">     987 </span>            : 
+<span class="lineNum">     988 </span><span class="lineCov">      76922 :     return false;</span>
+<span class="lineNum">     989 </span>            : }
+<a name="990"><span class="lineNum">     990 </span>            : </a>
+<span class="lineNum">     991 </span>            : void
+<span class="lineNum">     992 </span><span class="lineCov">      31552 : jspGetLeftArg(JsonPathItem *v, JsonPathItem *a)</span>
+<span class="lineNum">     993 </span>            : {
+<span class="lineNum">     994 </span><span class="lineCov">      31552 :     Assert(v-&gt;type == jpiAnd ||</span>
+<span class="lineNum">     995 </span>            :            v-&gt;type == jpiOr ||
+<span class="lineNum">     996 </span>            :            v-&gt;type == jpiEqual ||
+<span class="lineNum">     997 </span>            :            v-&gt;type == jpiNotEqual ||
+<span class="lineNum">     998 </span>            :            v-&gt;type == jpiLess ||
+<span class="lineNum">     999 </span>            :            v-&gt;type == jpiGreater ||
+<span class="lineNum">    1000 </span>            :            v-&gt;type == jpiLessOrEqual ||
+<span class="lineNum">    1001 </span>            :            v-&gt;type == jpiGreaterOrEqual ||
+<span class="lineNum">    1002 </span>            :            v-&gt;type == jpiAdd ||
+<span class="lineNum">    1003 </span>            :            v-&gt;type == jpiSub ||
+<span class="lineNum">    1004 </span>            :            v-&gt;type == jpiMul ||
+<span class="lineNum">    1005 </span>            :            v-&gt;type == jpiDiv ||
+<span class="lineNum">    1006 </span>            :            v-&gt;type == jpiMod ||
+<span class="lineNum">    1007 </span>            :            v-&gt;type == jpiStartsWith);
+<span class="lineNum">    1008 </span>            : 
+<span class="lineNum">    1009 </span><span class="lineCov">      31552 :     jspInitByBuffer(a, v-&gt;base, v-&gt;content.args.left);</span>
+<span class="lineNum">    1010 </span><span class="lineCov">      31552 : }</span>
+<a name="1011"><span class="lineNum">    1011 </span>            : </a>
+<span class="lineNum">    1012 </span>            : void
+<span class="lineNum">    1013 </span><span class="lineCov">      23230 : jspGetRightArg(JsonPathItem *v, JsonPathItem *a)</span>
+<span class="lineNum">    1014 </span>            : {
+<span class="lineNum">    1015 </span><span class="lineCov">      23230 :     Assert(v-&gt;type == jpiAnd ||</span>
+<span class="lineNum">    1016 </span>            :            v-&gt;type == jpiOr ||
+<span class="lineNum">    1017 </span>            :            v-&gt;type == jpiEqual ||
+<span class="lineNum">    1018 </span>            :            v-&gt;type == jpiNotEqual ||
+<span class="lineNum">    1019 </span>            :            v-&gt;type == jpiLess ||
+<span class="lineNum">    1020 </span>            :            v-&gt;type == jpiGreater ||
+<span class="lineNum">    1021 </span>            :            v-&gt;type == jpiLessOrEqual ||
+<span class="lineNum">    1022 </span>            :            v-&gt;type == jpiGreaterOrEqual ||
+<span class="lineNum">    1023 </span>            :            v-&gt;type == jpiAdd ||
+<span class="lineNum">    1024 </span>            :            v-&gt;type == jpiSub ||
+<span class="lineNum">    1025 </span>            :            v-&gt;type == jpiMul ||
+<span class="lineNum">    1026 </span>            :            v-&gt;type == jpiDiv ||
+<span class="lineNum">    1027 </span>            :            v-&gt;type == jpiMod ||
+<span class="lineNum">    1028 </span>            :            v-&gt;type == jpiStartsWith);
+<span class="lineNum">    1029 </span>            : 
+<span class="lineNum">    1030 </span><span class="lineCov">      23230 :     jspInitByBuffer(a, v-&gt;base, v-&gt;content.args.right);</span>
+<span class="lineNum">    1031 </span><span class="lineCov">      23230 : }</span>
+<a name="1032"><span class="lineNum">    1032 </span>            : </a>
+<span class="lineNum">    1033 </span>            : bool
+<span class="lineNum">    1034 </span><span class="lineCov">        472 : jspGetBool(JsonPathItem *v)</span>
+<span class="lineNum">    1035 </span>            : {
+<span class="lineNum">    1036 </span><span class="lineCov">        472 :     Assert(v-&gt;type == jpiBool);</span>
+<span class="lineNum">    1037 </span>            : 
+<span class="lineNum">    1038 </span><span class="lineCov">        472 :     return (bool) *v-&gt;content.value.data;</span>
+<span class="lineNum">    1039 </span>            : }
+<a name="1040"><span class="lineNum">    1040 </span>            : </a>
+<span class="lineNum">    1041 </span>            : Numeric
+<span class="lineNum">    1042 </span><span class="lineCov">       6678 : jspGetNumeric(JsonPathItem *v)</span>
+<span class="lineNum">    1043 </span>            : {
+<span class="lineNum">    1044 </span><span class="lineCov">       6678 :     Assert(v-&gt;type == jpiNumeric);</span>
+<span class="lineNum">    1045 </span>            : 
+<span class="lineNum">    1046 </span><span class="lineCov">       6678 :     return (Numeric) v-&gt;content.value.data;</span>
+<span class="lineNum">    1047 </span>            : }
+<a name="1048"><span class="lineNum">    1048 </span>            : </a>
+<span class="lineNum">    1049 </span>            : char *
+<span class="lineNum">    1050 </span><span class="lineCov">      65190 : jspGetString(JsonPathItem *v, int32 *len)</span>
+<span class="lineNum">    1051 </span>            : {
+<span class="lineNum">    1052 </span><span class="lineCov">      65190 :     Assert(v-&gt;type == jpiKey ||</span>
+<span class="lineNum">    1053 </span>            :            v-&gt;type == jpiString ||
+<span class="lineNum">    1054 </span>            :            v-&gt;type == jpiVariable);
+<span class="lineNum">    1055 </span>            : 
+<span class="lineNum">    1056 </span><span class="lineCov">      65190 :     if (len)</span>
+<span class="lineNum">    1057 </span><span class="lineCov">      64818 :         *len = v-&gt;content.value.datalen;</span>
+<span class="lineNum">    1058 </span><span class="lineCov">      65190 :     return v-&gt;content.value.data;</span>
+<span class="lineNum">    1059 </span>            : }
+<a name="1060"><span class="lineNum">    1060 </span>            : </a>
+<span class="lineNum">    1061 </span>            : bool
+<span class="lineNum">    1062 </span><span class="lineCov">        122 : jspGetArraySubscript(JsonPathItem *v, JsonPathItem *from, JsonPathItem *to,</span>
+<span class="lineNum">    1063 </span>            :                      int i)
+<span class="lineNum">    1064 </span>            : {
+<span class="lineNum">    1065 </span><span class="lineCov">        122 :     Assert(v-&gt;type == jpiIndexArray);</span>
+<span class="lineNum">    1066 </span>            : 
+<span class="lineNum">    1067 </span><span class="lineCov">        122 :     jspInitByBuffer(from, v-&gt;base, v-&gt;content.array.elems[i].from);</span>
+<span class="lineNum">    1068 </span>            : 
+<span class="lineNum">    1069 </span><span class="lineCov">        122 :     if (!v-&gt;content.array.elems[i].to)</span>
+<span class="lineNum">    1070 </span><span class="lineCov">        108 :         return false;</span>
+<span class="lineNum">    1071 </span>            : 
+<span class="lineNum">    1072 </span><span class="lineCov">         14 :     jspInitByBuffer(to, v-&gt;base, v-&gt;content.array.elems[i].to);</span>
+<span class="lineNum">    1073 </span>            : 
+<span class="lineNum">    1074 </span><span class="lineCov">         14 :     return true;</span>
+<span class="lineNum">    1075 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

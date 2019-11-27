@@ -1,0 +1,1717 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/expandedrecord.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - expandedrecord.c<span style="font-size: 80%;"> (source / <a href="expandedrecord.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">310</td>
+            <td class="headerCovTableEntry">485</td>
+            <td class="headerCovTableEntryLo">63.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">14</td>
+            <td class="headerCovTableEntry">20</td>
+            <td class="headerCovTableEntryLo">70.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * expandedrecord.c
+<span class="lineNum">       4 </span>            :  *    Functions for manipulating composite expanded objects.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * This module supports &quot;expanded objects&quot; (cf. expandeddatum.h) that can
+<span class="lineNum">       7 </span>            :  * store values of named composite types, domains over named composite types,
+<span class="lineNum">       8 </span>            :  * and record types (registered or anonymous).
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      11 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * IDENTIFICATION
+<span class="lineNum">      15 </span>            :  *    src/backend/utils/adt/expandedrecord.c
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      18 </span>            :  */
+<span class="lineNum">      19 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      20 </span>            : 
+<span class="lineNum">      21 </span>            : #include &quot;access/detoast.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;access/heaptoast.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;catalog/heap.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;utils/datum.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;utils/expandedrecord.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;utils/typcache.h&quot;
+<span class="lineNum">      31 </span>            : 
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /* &quot;Methods&quot; required for an expanded object */
+<span class="lineNum">      34 </span>            : static Size ER_get_flat_size(ExpandedObjectHeader *eohptr);
+<span class="lineNum">      35 </span>            : static void ER_flatten_into(ExpandedObjectHeader *eohptr,
+<span class="lineNum">      36 </span>            :                             void *result, Size allocated_size);
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : static const ExpandedObjectMethods ER_methods =
+<span class="lineNum">      39 </span>            : {
+<span class="lineNum">      40 </span>            :     ER_get_flat_size,
+<span class="lineNum">      41 </span>            :     ER_flatten_into
+<span class="lineNum">      42 </span>            : };
+<span class="lineNum">      43 </span>            : 
+<span class="lineNum">      44 </span>            : /* Other local functions */
+<span class="lineNum">      45 </span>            : static void ER_mc_callback(void *arg);
+<span class="lineNum">      46 </span>            : static MemoryContext get_short_term_cxt(ExpandedRecordHeader *erh);
+<span class="lineNum">      47 </span>            : static void build_dummy_expanded_header(ExpandedRecordHeader *main_erh);
+<span class="lineNum">      48 </span>            : static pg_noinline void check_domain_for_new_field(ExpandedRecordHeader *erh,
+<span class="lineNum">      49 </span>            :                                                    int fnumber,
+<span class="lineNum">      50 </span>            :                                                    Datum newValue, bool isnull);
+<span class="lineNum">      51 </span>            : static pg_noinline void check_domain_for_new_tuple(ExpandedRecordHeader *erh,
+<span class="lineNum">      52 </span>            :                                                    HeapTuple tuple);
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            : 
+<span class="lineNum">      55 </span>            : /*
+<span class="lineNum">      56 </span>            :  * Build an expanded record of the specified composite type
+<span class="lineNum">      57 </span>            :  *
+<span class="lineNum">      58 </span>            :  * type_id can be RECORDOID, but only if a positive typmod is given.
+<span class="lineNum">      59 </span>            :  *
+<span class="lineNum">      60 </span>            :  * The expanded record is initially &quot;empty&quot;, having a state logically
+<span class="lineNum">      61 </span>            :  * equivalent to a NULL composite value (not ROW(NULL, NULL, ...)).
+<span class="lineNum">      62 </span>            :  * Note that this might not be a valid state for a domain type;
+<span class="lineNum">      63 </span>            :  * if the caller needs to check that, call
+<span class="lineNum">      64 </span>            :  * expanded_record_set_tuple(erh, NULL, false, false).
+<span class="lineNum">      65 </span>            :  *
+<span class="lineNum">      66 </span>            :  * The expanded object will be a child of parentcontext.
+<a name="67"><span class="lineNum">      67 </span>            :  */</a>
+<span class="lineNum">      68 </span>            : ExpandedRecordHeader *
+<span class="lineNum">      69 </span><span class="lineCov">        132 : make_expanded_record_from_typeid(Oid type_id, int32 typmod,</span>
+<span class="lineNum">      70 </span>            :                                  MemoryContext parentcontext)
+<span class="lineNum">      71 </span>            : {
+<span class="lineNum">      72 </span>            :     ExpandedRecordHeader *erh;
+<span class="lineNum">      73 </span><span class="lineCov">        132 :     int         flags = 0;</span>
+<span class="lineNum">      74 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">      75 </span>            :     uint64      tupdesc_id;
+<span class="lineNum">      76 </span>            :     MemoryContext objcxt;
+<span class="lineNum">      77 </span>            :     char       *chunk;
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span><span class="lineCov">        132 :     if (type_id != RECORDOID)</span>
+<span class="lineNum">      80 </span>            :     {
+<span class="lineNum">      81 </span>            :         /*
+<span class="lineNum">      82 </span>            :          * Consult the typcache to see if it's a domain over composite, and in
+<span class="lineNum">      83 </span>            :          * any case to get the tupdesc and tupdesc identifier.
+<span class="lineNum">      84 </span>            :          */
+<span class="lineNum">      85 </span>            :         TypeCacheEntry *typentry;
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span><span class="lineCov">        128 :         typentry = lookup_type_cache(type_id,</span>
+<span class="lineNum">      88 </span>            :                                      TYPECACHE_TUPDESC |
+<span class="lineNum">      89 </span>            :                                      TYPECACHE_DOMAIN_BASE_INFO);
+<span class="lineNum">      90 </span><span class="lineCov">        128 :         if (typentry-&gt;typtype == TYPTYPE_DOMAIN)</span>
+<span class="lineNum">      91 </span>            :         {
+<span class="lineNum">      92 </span><span class="lineNoCov">          0 :             flags |= ER_FLAG_IS_DOMAIN;</span>
+<span class="lineNum">      93 </span><span class="lineNoCov">          0 :             typentry = lookup_type_cache(typentry-&gt;domainBaseType,</span>
+<span class="lineNum">      94 </span>            :                                          TYPECACHE_TUPDESC);
+<span class="lineNum">      95 </span>            :         }
+<span class="lineNum">      96 </span><span class="lineCov">        128 :         if (typentry-&gt;tupDesc == NULL)</span>
+<span class="lineNum">      97 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">      98 </span>            :                     (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+<span class="lineNum">      99 </span>            :                      errmsg(&quot;type %s is not composite&quot;,
+<span class="lineNum">     100 </span>            :                             format_type_be(type_id))));
+<span class="lineNum">     101 </span><span class="lineCov">        128 :         tupdesc = typentry-&gt;tupDesc;</span>
+<span class="lineNum">     102 </span><span class="lineCov">        128 :         tupdesc_id = typentry-&gt;tupDesc_identifier;</span>
+<span class="lineNum">     103 </span>            :     }
+<span class="lineNum">     104 </span>            :     else
+<span class="lineNum">     105 </span>            :     {
+<span class="lineNum">     106 </span>            :         /*
+<span class="lineNum">     107 </span>            :          * For RECORD types, get the tupdesc and identifier from typcache.
+<span class="lineNum">     108 </span>            :          */
+<span class="lineNum">     109 </span><span class="lineCov">          4 :         tupdesc = lookup_rowtype_tupdesc(type_id, typmod);</span>
+<span class="lineNum">     110 </span><span class="lineCov">          4 :         tupdesc_id = assign_record_type_identifier(type_id, typmod);</span>
+<span class="lineNum">     111 </span>            :     }
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span>            :     /*
+<span class="lineNum">     114 </span>            :      * Allocate private context for expanded object.  We use a regular-size
+<span class="lineNum">     115 </span>            :      * context, not a small one, to improve the odds that we can fit a tupdesc
+<span class="lineNum">     116 </span>            :      * into it without needing an extra malloc block.  (This code path doesn't
+<span class="lineNum">     117 </span>            :      * ever need to copy a tupdesc into the expanded record, but let's be
+<span class="lineNum">     118 </span>            :      * consistent with the other ways of making an expanded record.)
+<span class="lineNum">     119 </span>            :      */
+<span class="lineNum">     120 </span><span class="lineCov">        132 :     objcxt = AllocSetContextCreate(parentcontext,</span>
+<span class="lineNum">     121 </span>            :                                    &quot;expanded record&quot;,
+<span class="lineNum">     122 </span>            :                                    ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span>            :     /*
+<span class="lineNum">     125 </span>            :      * Since we already know the number of fields in the tupdesc, we can
+<span class="lineNum">     126 </span>            :      * allocate the dvalues/dnulls arrays along with the record header.  This
+<span class="lineNum">     127 </span>            :      * is useless if we never need those arrays, but it costs almost nothing,
+<span class="lineNum">     128 </span>            :      * and it will save a palloc cycle if we do need them.
+<span class="lineNum">     129 </span>            :      */
+<span class="lineNum">     130 </span><span class="lineCov">        132 :     erh = (ExpandedRecordHeader *)</span>
+<span class="lineNum">     131 </span><span class="lineCov">        132 :         MemoryContextAlloc(objcxt, MAXALIGN(sizeof(ExpandedRecordHeader))</span>
+<span class="lineNum">     132 </span><span class="lineCov">        132 :                            + tupdesc-&gt;natts * (sizeof(Datum) + sizeof(bool)));</span>
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span>            :     /* Ensure all header fields are initialized to 0/null */
+<span class="lineNum">     135 </span><span class="lineCov">        132 :     memset(erh, 0, sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span><span class="lineCov">        132 :     EOH_init_header(&amp;erh-&gt;hdr, &amp;ER_methods, objcxt);</span>
+<span class="lineNum">     138 </span><span class="lineCov">        132 :     erh-&gt;er_magic = ER_MAGIC;</span>
+<span class="lineNum">     139 </span>            : 
+<span class="lineNum">     140 </span>            :     /* Set up dvalues/dnulls, with no valid contents as yet */
+<span class="lineNum">     141 </span><span class="lineCov">        132 :     chunk = (char *) erh + MAXALIGN(sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">     142 </span><span class="lineCov">        132 :     erh-&gt;dvalues = (Datum *) chunk;</span>
+<span class="lineNum">     143 </span><span class="lineCov">        132 :     erh-&gt;dnulls = (bool *) (chunk + tupdesc-&gt;natts * sizeof(Datum));</span>
+<span class="lineNum">     144 </span><span class="lineCov">        132 :     erh-&gt;nfields = tupdesc-&gt;natts;</span>
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span>            :     /* Fill in composite-type identification info */
+<span class="lineNum">     147 </span><span class="lineCov">        132 :     erh-&gt;er_decltypeid = type_id;</span>
+<span class="lineNum">     148 </span><span class="lineCov">        132 :     erh-&gt;er_typeid = tupdesc-&gt;tdtypeid;</span>
+<span class="lineNum">     149 </span><span class="lineCov">        132 :     erh-&gt;er_typmod = tupdesc-&gt;tdtypmod;</span>
+<span class="lineNum">     150 </span><span class="lineCov">        132 :     erh-&gt;er_tupdesc_id = tupdesc_id;</span>
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineCov">        132 :     erh-&gt;flags = flags;</span>
+<span class="lineNum">     153 </span>            : 
+<span class="lineNum">     154 </span>            :     /*
+<span class="lineNum">     155 </span>            :      * If what we got from the typcache is a refcounted tupdesc, we need to
+<span class="lineNum">     156 </span>            :      * acquire our own refcount on it.  We manage the refcount with a memory
+<span class="lineNum">     157 </span>            :      * context callback rather than assuming that the CurrentResourceOwner is
+<span class="lineNum">     158 </span>            :      * longer-lived than this expanded object.
+<span class="lineNum">     159 </span>            :      */
+<span class="lineNum">     160 </span><span class="lineCov">        132 :     if (tupdesc-&gt;tdrefcount &gt;= 0)</span>
+<span class="lineNum">     161 </span>            :     {
+<span class="lineNum">     162 </span>            :         /* Register callback to release the refcount */
+<span class="lineNum">     163 </span><span class="lineCov">        132 :         erh-&gt;er_mcb.func = ER_mc_callback;</span>
+<span class="lineNum">     164 </span><span class="lineCov">        132 :         erh-&gt;er_mcb.arg = (void *) erh;</span>
+<span class="lineNum">     165 </span><span class="lineCov">        132 :         MemoryContextRegisterResetCallback(erh-&gt;hdr.eoh_context,</span>
+<span class="lineNum">     166 </span>            :                                            &amp;erh-&gt;er_mcb);
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            :         /* And save the pointer */
+<span class="lineNum">     169 </span><span class="lineCov">        132 :         erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">     170 </span><span class="lineCov">        132 :         tupdesc-&gt;tdrefcount++;</span>
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span>            :         /* If we called lookup_rowtype_tupdesc, release the pin it took */
+<span class="lineNum">     173 </span><span class="lineCov">        132 :         if (type_id == RECORDOID)</span>
+<span class="lineNum">     174 </span><span class="lineCov">          4 :             DecrTupleDescRefCount(tupdesc);</span>
+<span class="lineNum">     175 </span>            :     }
+<span class="lineNum">     176 </span>            :     else
+<span class="lineNum">     177 </span>            :     {
+<span class="lineNum">     178 </span>            :         /*
+<span class="lineNum">     179 </span>            :          * If it's not refcounted, just assume it will outlive the expanded
+<span class="lineNum">     180 </span>            :          * object.  (This can happen for shared record types, for instance.)
+<span class="lineNum">     181 </span>            :          */
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :         erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">     183 </span>            :     }
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span>            :     /*
+<span class="lineNum">     186 </span>            :      * We don't set ER_FLAG_DVALUES_VALID or ER_FLAG_FVALUE_VALID, so the
+<span class="lineNum">     187 </span>            :      * record remains logically empty.
+<span class="lineNum">     188 </span>            :      */
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span><span class="lineCov">        132 :     return erh;</span>
+<span class="lineNum">     191 </span>            : }
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            : /*
+<span class="lineNum">     194 </span>            :  * Build an expanded record of the rowtype defined by the tupdesc
+<span class="lineNum">     195 </span>            :  *
+<span class="lineNum">     196 </span>            :  * The tupdesc is copied if necessary (i.e., if we can't just bump its
+<span class="lineNum">     197 </span>            :  * reference count instead).
+<span class="lineNum">     198 </span>            :  *
+<span class="lineNum">     199 </span>            :  * The expanded record is initially &quot;empty&quot;, having a state logically
+<span class="lineNum">     200 </span>            :  * equivalent to a NULL composite value (not ROW(NULL, NULL, ...)).
+<span class="lineNum">     201 </span>            :  *
+<span class="lineNum">     202 </span>            :  * The expanded object will be a child of parentcontext.
+<a name="203"><span class="lineNum">     203 </span>            :  */</a>
+<span class="lineNum">     204 </span>            : ExpandedRecordHeader *
+<span class="lineNum">     205 </span><span class="lineCov">       5020 : make_expanded_record_from_tupdesc(TupleDesc tupdesc,</span>
+<span class="lineNum">     206 </span>            :                                   MemoryContext parentcontext)
+<span class="lineNum">     207 </span>            : {
+<span class="lineNum">     208 </span>            :     ExpandedRecordHeader *erh;
+<span class="lineNum">     209 </span>            :     uint64      tupdesc_id;
+<span class="lineNum">     210 </span>            :     MemoryContext objcxt;
+<span class="lineNum">     211 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">     212 </span>            :     char       *chunk;
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span><span class="lineCov">       5020 :     if (tupdesc-&gt;tdtypeid != RECORDOID)</span>
+<span class="lineNum">     215 </span>            :     {
+<span class="lineNum">     216 </span>            :         /*
+<span class="lineNum">     217 </span>            :          * If it's a named composite type (not RECORD), we prefer to reference
+<span class="lineNum">     218 </span>            :          * the typcache's copy of the tupdesc, which is guaranteed to be
+<span class="lineNum">     219 </span>            :          * refcounted (the given tupdesc might not be).  In any case, we need
+<span class="lineNum">     220 </span>            :          * to consult the typcache to get the correct tupdesc identifier.
+<span class="lineNum">     221 </span>            :          *
+<span class="lineNum">     222 </span>            :          * Note that tdtypeid couldn't be a domain type, so we need not
+<span class="lineNum">     223 </span>            :          * consider that case here.
+<span class="lineNum">     224 </span>            :          */
+<span class="lineNum">     225 </span>            :         TypeCacheEntry *typentry;
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span><span class="lineCov">       4002 :         typentry = lookup_type_cache(tupdesc-&gt;tdtypeid, TYPECACHE_TUPDESC);</span>
+<span class="lineNum">     228 </span><span class="lineCov">       4002 :         if (typentry-&gt;tupDesc == NULL)</span>
+<span class="lineNum">     229 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     230 </span>            :                     (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+<span class="lineNum">     231 </span>            :                      errmsg(&quot;type %s is not composite&quot;,
+<span class="lineNum">     232 </span>            :                             format_type_be(tupdesc-&gt;tdtypeid))));
+<span class="lineNum">     233 </span><span class="lineCov">       4002 :         tupdesc = typentry-&gt;tupDesc;</span>
+<span class="lineNum">     234 </span><span class="lineCov">       4002 :         tupdesc_id = typentry-&gt;tupDesc_identifier;</span>
+<span class="lineNum">     235 </span>            :     }
+<span class="lineNum">     236 </span>            :     else
+<span class="lineNum">     237 </span>            :     {
+<span class="lineNum">     238 </span>            :         /*
+<span class="lineNum">     239 </span>            :          * For RECORD types, get the appropriate unique identifier (possibly
+<span class="lineNum">     240 </span>            :          * freshly assigned).
+<span class="lineNum">     241 </span>            :          */
+<span class="lineNum">     242 </span><span class="lineCov">       1018 :         tupdesc_id = assign_record_type_identifier(tupdesc-&gt;tdtypeid,</span>
+<span class="lineNum">     243 </span>            :                                                    tupdesc-&gt;tdtypmod);
+<span class="lineNum">     244 </span>            :     }
+<span class="lineNum">     245 </span>            : 
+<span class="lineNum">     246 </span>            :     /*
+<span class="lineNum">     247 </span>            :      * Allocate private context for expanded object.  We use a regular-size
+<span class="lineNum">     248 </span>            :      * context, not a small one, to improve the odds that we can fit a tupdesc
+<span class="lineNum">     249 </span>            :      * into it without needing an extra malloc block.
+<span class="lineNum">     250 </span>            :      */
+<span class="lineNum">     251 </span><span class="lineCov">       5020 :     objcxt = AllocSetContextCreate(parentcontext,</span>
+<span class="lineNum">     252 </span>            :                                    &quot;expanded record&quot;,
+<span class="lineNum">     253 </span>            :                                    ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     254 </span>            : 
+<span class="lineNum">     255 </span>            :     /*
+<span class="lineNum">     256 </span>            :      * Since we already know the number of fields in the tupdesc, we can
+<span class="lineNum">     257 </span>            :      * allocate the dvalues/dnulls arrays along with the record header.  This
+<span class="lineNum">     258 </span>            :      * is useless if we never need those arrays, but it costs almost nothing,
+<span class="lineNum">     259 </span>            :      * and it will save a palloc cycle if we do need them.
+<span class="lineNum">     260 </span>            :      */
+<span class="lineNum">     261 </span><span class="lineCov">       5020 :     erh = (ExpandedRecordHeader *)</span>
+<span class="lineNum">     262 </span><span class="lineCov">       5020 :         MemoryContextAlloc(objcxt, MAXALIGN(sizeof(ExpandedRecordHeader))</span>
+<span class="lineNum">     263 </span><span class="lineCov">       5020 :                            + tupdesc-&gt;natts * (sizeof(Datum) + sizeof(bool)));</span>
+<span class="lineNum">     264 </span>            : 
+<span class="lineNum">     265 </span>            :     /* Ensure all header fields are initialized to 0/null */
+<span class="lineNum">     266 </span><span class="lineCov">       5020 :     memset(erh, 0, sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">     267 </span>            : 
+<span class="lineNum">     268 </span><span class="lineCov">       5020 :     EOH_init_header(&amp;erh-&gt;hdr, &amp;ER_methods, objcxt);</span>
+<span class="lineNum">     269 </span><span class="lineCov">       5020 :     erh-&gt;er_magic = ER_MAGIC;</span>
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span>            :     /* Set up dvalues/dnulls, with no valid contents as yet */
+<span class="lineNum">     272 </span><span class="lineCov">       5020 :     chunk = (char *) erh + MAXALIGN(sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">     273 </span><span class="lineCov">       5020 :     erh-&gt;dvalues = (Datum *) chunk;</span>
+<span class="lineNum">     274 </span><span class="lineCov">       5020 :     erh-&gt;dnulls = (bool *) (chunk + tupdesc-&gt;natts * sizeof(Datum));</span>
+<span class="lineNum">     275 </span><span class="lineCov">       5020 :     erh-&gt;nfields = tupdesc-&gt;natts;</span>
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span>            :     /* Fill in composite-type identification info */
+<span class="lineNum">     278 </span><span class="lineCov">       5020 :     erh-&gt;er_decltypeid = erh-&gt;er_typeid = tupdesc-&gt;tdtypeid;</span>
+<span class="lineNum">     279 </span><span class="lineCov">       5020 :     erh-&gt;er_typmod = tupdesc-&gt;tdtypmod;</span>
+<span class="lineNum">     280 </span><span class="lineCov">       5020 :     erh-&gt;er_tupdesc_id = tupdesc_id;</span>
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span>            :     /*
+<span class="lineNum">     283 </span>            :      * Copy tupdesc if needed, but we prefer to bump its refcount if possible.
+<span class="lineNum">     284 </span>            :      * We manage the refcount with a memory context callback rather than
+<span class="lineNum">     285 </span>            :      * assuming that the CurrentResourceOwner is longer-lived than this
+<span class="lineNum">     286 </span>            :      * expanded object.
+<span class="lineNum">     287 </span>            :      */
+<span class="lineNum">     288 </span><span class="lineCov">       5020 :     if (tupdesc-&gt;tdrefcount &gt;= 0)</span>
+<span class="lineNum">     289 </span>            :     {
+<span class="lineNum">     290 </span>            :         /* Register callback to release the refcount */
+<span class="lineNum">     291 </span><span class="lineCov">       4002 :         erh-&gt;er_mcb.func = ER_mc_callback;</span>
+<span class="lineNum">     292 </span><span class="lineCov">       4002 :         erh-&gt;er_mcb.arg = (void *) erh;</span>
+<span class="lineNum">     293 </span><span class="lineCov">       4002 :         MemoryContextRegisterResetCallback(erh-&gt;hdr.eoh_context,</span>
+<span class="lineNum">     294 </span>            :                                            &amp;erh-&gt;er_mcb);
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span>            :         /* And save the pointer */
+<span class="lineNum">     297 </span><span class="lineCov">       4002 :         erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">     298 </span><span class="lineCov">       4002 :         tupdesc-&gt;tdrefcount++;</span>
+<span class="lineNum">     299 </span>            :     }
+<span class="lineNum">     300 </span>            :     else
+<span class="lineNum">     301 </span>            :     {
+<span class="lineNum">     302 </span>            :         /* Just copy it */
+<span class="lineNum">     303 </span><span class="lineCov">       1018 :         oldcxt = MemoryContextSwitchTo(objcxt);</span>
+<span class="lineNum">     304 </span><span class="lineCov">       1018 :         erh-&gt;er_tupdesc = CreateTupleDescCopy(tupdesc);</span>
+<span class="lineNum">     305 </span><span class="lineCov">       1018 :         erh-&gt;flags |= ER_FLAG_TUPDESC_ALLOCED;</span>
+<span class="lineNum">     306 </span><span class="lineCov">       1018 :         MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     307 </span>            :     }
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span>            :     /*
+<span class="lineNum">     310 </span>            :      * We don't set ER_FLAG_DVALUES_VALID or ER_FLAG_FVALUE_VALID, so the
+<span class="lineNum">     311 </span>            :      * record remains logically empty.
+<span class="lineNum">     312 </span>            :      */
+<span class="lineNum">     313 </span>            : 
+<span class="lineNum">     314 </span><span class="lineCov">       5020 :     return erh;</span>
+<span class="lineNum">     315 </span>            : }
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            : /*
+<span class="lineNum">     318 </span>            :  * Build an expanded record of the same rowtype as the given expanded record
+<span class="lineNum">     319 </span>            :  *
+<span class="lineNum">     320 </span>            :  * This is faster than either of the above routines because we can bypass
+<span class="lineNum">     321 </span>            :  * typcache lookup(s).
+<span class="lineNum">     322 </span>            :  *
+<span class="lineNum">     323 </span>            :  * The expanded record is initially &quot;empty&quot; --- we do not copy whatever
+<span class="lineNum">     324 </span>            :  * tuple might be in the source expanded record.
+<span class="lineNum">     325 </span>            :  *
+<span class="lineNum">     326 </span>            :  * The expanded object will be a child of parentcontext.
+<a name="327"><span class="lineNum">     327 </span>            :  */</a>
+<span class="lineNum">     328 </span>            : ExpandedRecordHeader *
+<span class="lineNum">     329 </span><span class="lineCov">       4002 : make_expanded_record_from_exprecord(ExpandedRecordHeader *olderh,</span>
+<span class="lineNum">     330 </span>            :                                     MemoryContext parentcontext)
+<span class="lineNum">     331 </span>            : {
+<span class="lineNum">     332 </span>            :     ExpandedRecordHeader *erh;
+<span class="lineNum">     333 </span><span class="lineCov">       4002 :     TupleDesc   tupdesc = expanded_record_get_tupdesc(olderh);</span>
+<span class="lineNum">     334 </span>            :     MemoryContext objcxt;
+<span class="lineNum">     335 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">     336 </span>            :     char       *chunk;
+<span class="lineNum">     337 </span>            : 
+<span class="lineNum">     338 </span>            :     /*
+<span class="lineNum">     339 </span>            :      * Allocate private context for expanded object.  We use a regular-size
+<span class="lineNum">     340 </span>            :      * context, not a small one, to improve the odds that we can fit a tupdesc
+<span class="lineNum">     341 </span>            :      * into it without needing an extra malloc block.
+<span class="lineNum">     342 </span>            :      */
+<span class="lineNum">     343 </span><span class="lineCov">       4002 :     objcxt = AllocSetContextCreate(parentcontext,</span>
+<span class="lineNum">     344 </span>            :                                    &quot;expanded record&quot;,
+<span class="lineNum">     345 </span>            :                                    ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     346 </span>            : 
+<span class="lineNum">     347 </span>            :     /*
+<span class="lineNum">     348 </span>            :      * Since we already know the number of fields in the tupdesc, we can
+<span class="lineNum">     349 </span>            :      * allocate the dvalues/dnulls arrays along with the record header.  This
+<span class="lineNum">     350 </span>            :      * is useless if we never need those arrays, but it costs almost nothing,
+<span class="lineNum">     351 </span>            :      * and it will save a palloc cycle if we do need them.
+<span class="lineNum">     352 </span>            :      */
+<span class="lineNum">     353 </span><span class="lineCov">       4002 :     erh = (ExpandedRecordHeader *)</span>
+<span class="lineNum">     354 </span><span class="lineCov">       4002 :         MemoryContextAlloc(objcxt, MAXALIGN(sizeof(ExpandedRecordHeader))</span>
+<span class="lineNum">     355 </span><span class="lineCov">       4002 :                            + tupdesc-&gt;natts * (sizeof(Datum) + sizeof(bool)));</span>
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span>            :     /* Ensure all header fields are initialized to 0/null */
+<span class="lineNum">     358 </span><span class="lineCov">       4002 :     memset(erh, 0, sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span><span class="lineCov">       4002 :     EOH_init_header(&amp;erh-&gt;hdr, &amp;ER_methods, objcxt);</span>
+<span class="lineNum">     361 </span><span class="lineCov">       4002 :     erh-&gt;er_magic = ER_MAGIC;</span>
+<span class="lineNum">     362 </span>            : 
+<span class="lineNum">     363 </span>            :     /* Set up dvalues/dnulls, with no valid contents as yet */
+<span class="lineNum">     364 </span><span class="lineCov">       4002 :     chunk = (char *) erh + MAXALIGN(sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">     365 </span><span class="lineCov">       4002 :     erh-&gt;dvalues = (Datum *) chunk;</span>
+<span class="lineNum">     366 </span><span class="lineCov">       4002 :     erh-&gt;dnulls = (bool *) (chunk + tupdesc-&gt;natts * sizeof(Datum));</span>
+<span class="lineNum">     367 </span><span class="lineCov">       4002 :     erh-&gt;nfields = tupdesc-&gt;natts;</span>
+<span class="lineNum">     368 </span>            : 
+<span class="lineNum">     369 </span>            :     /* Fill in composite-type identification info */
+<span class="lineNum">     370 </span><span class="lineCov">       4002 :     erh-&gt;er_decltypeid = olderh-&gt;er_decltypeid;</span>
+<span class="lineNum">     371 </span><span class="lineCov">       4002 :     erh-&gt;er_typeid = olderh-&gt;er_typeid;</span>
+<span class="lineNum">     372 </span><span class="lineCov">       4002 :     erh-&gt;er_typmod = olderh-&gt;er_typmod;</span>
+<span class="lineNum">     373 </span><span class="lineCov">       4002 :     erh-&gt;er_tupdesc_id = olderh-&gt;er_tupdesc_id;</span>
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span>            :     /* The only flag bit that transfers over is IS_DOMAIN */
+<span class="lineNum">     376 </span><span class="lineCov">       4002 :     erh-&gt;flags = olderh-&gt;flags &amp; ER_FLAG_IS_DOMAIN;</span>
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span>            :     /*
+<span class="lineNum">     379 </span>            :      * Copy tupdesc if needed, but we prefer to bump its refcount if possible.
+<span class="lineNum">     380 </span>            :      * We manage the refcount with a memory context callback rather than
+<span class="lineNum">     381 </span>            :      * assuming that the CurrentResourceOwner is longer-lived than this
+<span class="lineNum">     382 </span>            :      * expanded object.
+<span class="lineNum">     383 </span>            :      */
+<span class="lineNum">     384 </span><span class="lineCov">       4002 :     if (tupdesc-&gt;tdrefcount &gt;= 0)</span>
+<span class="lineNum">     385 </span>            :     {
+<span class="lineNum">     386 </span>            :         /* Register callback to release the refcount */
+<span class="lineNum">     387 </span><span class="lineCov">       4002 :         erh-&gt;er_mcb.func = ER_mc_callback;</span>
+<span class="lineNum">     388 </span><span class="lineCov">       4002 :         erh-&gt;er_mcb.arg = (void *) erh;</span>
+<span class="lineNum">     389 </span><span class="lineCov">       4002 :         MemoryContextRegisterResetCallback(erh-&gt;hdr.eoh_context,</span>
+<span class="lineNum">     390 </span>            :                                            &amp;erh-&gt;er_mcb);
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span>            :         /* And save the pointer */
+<span class="lineNum">     393 </span><span class="lineCov">       4002 :         erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">     394 </span><span class="lineCov">       4002 :         tupdesc-&gt;tdrefcount++;</span>
+<span class="lineNum">     395 </span>            :     }
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :     else if (olderh-&gt;flags &amp; ER_FLAG_TUPDESC_ALLOCED)</span>
+<span class="lineNum">     397 </span>            :     {
+<span class="lineNum">     398 </span>            :         /* We need to make our own copy of the tupdesc */
+<span class="lineNum">     399 </span><span class="lineNoCov">          0 :         oldcxt = MemoryContextSwitchTo(objcxt);</span>
+<span class="lineNum">     400 </span><span class="lineNoCov">          0 :         erh-&gt;er_tupdesc = CreateTupleDescCopy(tupdesc);</span>
+<span class="lineNum">     401 </span><span class="lineNoCov">          0 :         erh-&gt;flags |= ER_FLAG_TUPDESC_ALLOCED;</span>
+<span class="lineNum">     402 </span><span class="lineNoCov">          0 :         MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     403 </span>            :     }
+<span class="lineNum">     404 </span>            :     else
+<span class="lineNum">     405 </span>            :     {
+<span class="lineNum">     406 </span>            :         /*
+<span class="lineNum">     407 </span>            :          * Assume the tupdesc will outlive this expanded object, just like
+<span class="lineNum">     408 </span>            :          * we're assuming it will outlive the source object.
+<span class="lineNum">     409 </span>            :          */
+<span class="lineNum">     410 </span><span class="lineNoCov">          0 :         erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">     411 </span>            :     }
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            :     /*
+<span class="lineNum">     414 </span>            :      * We don't set ER_FLAG_DVALUES_VALID or ER_FLAG_FVALUE_VALID, so the
+<span class="lineNum">     415 </span>            :      * record remains logically empty.
+<span class="lineNum">     416 </span>            :      */
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span><span class="lineCov">       4002 :     return erh;</span>
+<span class="lineNum">     419 </span>            : }
+<span class="lineNum">     420 </span>            : 
+<span class="lineNum">     421 </span>            : /*
+<span class="lineNum">     422 </span>            :  * Insert given tuple as the value of the expanded record
+<span class="lineNum">     423 </span>            :  *
+<span class="lineNum">     424 </span>            :  * It is caller's responsibility that the tuple matches the record's
+<span class="lineNum">     425 </span>            :  * previously-assigned rowtype.  (However domain constraints, if any,
+<span class="lineNum">     426 </span>            :  * will be checked here.)
+<span class="lineNum">     427 </span>            :  *
+<span class="lineNum">     428 </span>            :  * The tuple is physically copied into the expanded record's local storage
+<span class="lineNum">     429 </span>            :  * if &quot;copy&quot; is true, otherwise it's caller's responsibility that the tuple
+<span class="lineNum">     430 </span>            :  * will live as long as the expanded record does.
+<span class="lineNum">     431 </span>            :  *
+<span class="lineNum">     432 </span>            :  * Out-of-line field values in the tuple are automatically inlined if
+<span class="lineNum">     433 </span>            :  * &quot;expand_external&quot; is true, otherwise not.  (The combination copy = false,
+<span class="lineNum">     434 </span>            :  * expand_external = true is not sensible and not supported.)
+<span class="lineNum">     435 </span>            :  *
+<span class="lineNum">     436 </span>            :  * Alternatively, tuple can be NULL, in which case we just set the expanded
+<span class="lineNum">     437 </span>            :  * record to be empty.
+<a name="438"><span class="lineNum">     438 </span>            :  */</a>
+<span class="lineNum">     439 </span>            : void
+<span class="lineNum">     440 </span><span class="lineCov">       7248 : expanded_record_set_tuple(ExpandedRecordHeader *erh,</span>
+<span class="lineNum">     441 </span>            :                           HeapTuple tuple,
+<span class="lineNum">     442 </span>            :                           bool copy,
+<span class="lineNum">     443 </span>            :                           bool expand_external)
+<span class="lineNum">     444 </span>            : {
+<span class="lineNum">     445 </span>            :     int         oldflags;
+<span class="lineNum">     446 </span>            :     HeapTuple   oldtuple;
+<span class="lineNum">     447 </span>            :     char       *oldfstartptr;
+<span class="lineNum">     448 </span>            :     char       *oldfendptr;
+<span class="lineNum">     449 </span>            :     int         newflags;
+<span class="lineNum">     450 </span>            :     HeapTuple   newtuple;
+<span class="lineNum">     451 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span>            :     /* Shouldn't ever be trying to assign new data to a dummy header */
+<span class="lineNum">     454 </span><span class="lineCov">       7248 :     Assert(!(erh-&gt;flags &amp; ER_FLAG_IS_DUMMY));</span>
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span>            :     /*
+<span class="lineNum">     457 </span>            :      * Before performing the assignment, see if result will satisfy domain.
+<span class="lineNum">     458 </span>            :      */
+<span class="lineNum">     459 </span><span class="lineCov">       7248 :     if (erh-&gt;flags &amp; ER_FLAG_IS_DOMAIN)</span>
+<span class="lineNum">     460 </span><span class="lineNoCov">          0 :         check_domain_for_new_tuple(erh, tuple);</span>
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span>            :     /*
+<span class="lineNum">     463 </span>            :      * If we need to get rid of out-of-line field values, do so, using the
+<span class="lineNum">     464 </span>            :      * short-term context to avoid leaking whatever cruft the toast fetch
+<span class="lineNum">     465 </span>            :      * might generate.
+<span class="lineNum">     466 </span>            :      */
+<span class="lineNum">     467 </span><span class="lineCov">       7248 :     if (expand_external &amp;&amp; tuple)</span>
+<span class="lineNum">     468 </span>            :     {
+<span class="lineNum">     469 </span>            :         /* Assert caller didn't ask for unsupported case */
+<span class="lineNum">     470 </span><span class="lineCov">        516 :         Assert(copy);</span>
+<span class="lineNum">     471 </span><span class="lineCov">        516 :         if (HeapTupleHasExternal(tuple))</span>
+<span class="lineNum">     472 </span>            :         {
+<span class="lineNum">     473 </span><span class="lineNoCov">          0 :             oldcxt = MemoryContextSwitchTo(get_short_term_cxt(erh));</span>
+<span class="lineNum">     474 </span><span class="lineNoCov">          0 :             tuple = toast_flatten_tuple(tuple, erh-&gt;er_tupdesc);</span>
+<span class="lineNum">     475 </span><span class="lineNoCov">          0 :             MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     476 </span>            :         }
+<span class="lineNum">     477 </span>            :         else
+<span class="lineNum">     478 </span><span class="lineCov">        516 :             expand_external = false;    /* need not clean up below */</span>
+<span class="lineNum">     479 </span>            :     }
+<span class="lineNum">     480 </span>            : 
+<span class="lineNum">     481 </span>            :     /*
+<span class="lineNum">     482 </span>            :      * Initialize new flags, keeping only non-data status bits.
+<span class="lineNum">     483 </span>            :      */
+<span class="lineNum">     484 </span><span class="lineCov">       7248 :     oldflags = erh-&gt;flags;</span>
+<span class="lineNum">     485 </span><span class="lineCov">       7248 :     newflags = oldflags &amp; ER_FLAGS_NON_DATA;</span>
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            :     /*
+<span class="lineNum">     488 </span>            :      * Copy tuple into local storage if needed.  We must be sure this succeeds
+<span class="lineNum">     489 </span>            :      * before we start to modify the expanded record's state.
+<span class="lineNum">     490 </span>            :      */
+<span class="lineNum">     491 </span><span class="lineCov">       7248 :     if (copy &amp;&amp; tuple)</span>
+<span class="lineNum">     492 </span>            :     {
+<span class="lineNum">     493 </span><span class="lineCov">       1962 :         oldcxt = MemoryContextSwitchTo(erh-&gt;hdr.eoh_context);</span>
+<span class="lineNum">     494 </span><span class="lineCov">       1962 :         newtuple = heap_copytuple(tuple);</span>
+<span class="lineNum">     495 </span><span class="lineCov">       1962 :         newflags |= ER_FLAG_FVALUE_ALLOCED;</span>
+<span class="lineNum">     496 </span><span class="lineCov">       1962 :         MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span>            :         /* We can now flush anything that detoasting might have leaked. */
+<span class="lineNum">     499 </span><span class="lineCov">       3924 :         if (expand_external)</span>
+<span class="lineNum">     500 </span><span class="lineNoCov">          0 :             MemoryContextReset(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">     501 </span>            :     }
+<span class="lineNum">     502 </span>            :     else
+<span class="lineNum">     503 </span><span class="lineCov">       5286 :         newtuple = tuple;</span>
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span>            :     /* Make copies of fields we're about to overwrite */
+<span class="lineNum">     506 </span><span class="lineCov">       7248 :     oldtuple = erh-&gt;fvalue;</span>
+<span class="lineNum">     507 </span><span class="lineCov">       7248 :     oldfstartptr = erh-&gt;fstartptr;</span>
+<span class="lineNum">     508 </span><span class="lineCov">       7248 :     oldfendptr = erh-&gt;fendptr;</span>
+<span class="lineNum">     509 </span>            : 
+<span class="lineNum">     510 </span>            :     /*
+<span class="lineNum">     511 </span>            :      * It's now safe to update the expanded record's state.
+<span class="lineNum">     512 </span>            :      */
+<span class="lineNum">     513 </span><span class="lineCov">       7248 :     if (newtuple)</span>
+<span class="lineNum">     514 </span>            :     {
+<span class="lineNum">     515 </span>            :         /* Save flat representation */
+<span class="lineNum">     516 </span><span class="lineCov">       7248 :         erh-&gt;fvalue = newtuple;</span>
+<span class="lineNum">     517 </span><span class="lineCov">       7248 :         erh-&gt;fstartptr = (char *) newtuple-&gt;t_data;</span>
+<span class="lineNum">     518 </span><span class="lineCov">       7248 :         erh-&gt;fendptr = ((char *) newtuple-&gt;t_data) + newtuple-&gt;t_len;</span>
+<span class="lineNum">     519 </span><span class="lineCov">       7248 :         newflags |= ER_FLAG_FVALUE_VALID;</span>
+<span class="lineNum">     520 </span>            : 
+<span class="lineNum">     521 </span>            :         /* Remember if we have any out-of-line field values */
+<span class="lineNum">     522 </span><span class="lineCov">       7248 :         if (HeapTupleHasExternal(newtuple))</span>
+<span class="lineNum">     523 </span><span class="lineCov">         66 :             newflags |= ER_FLAG_HAVE_EXTERNAL;</span>
+<span class="lineNum">     524 </span>            :     }
+<span class="lineNum">     525 </span>            :     else
+<span class="lineNum">     526 </span>            :     {
+<span class="lineNum">     527 </span><span class="lineNoCov">          0 :         erh-&gt;fvalue = NULL;</span>
+<span class="lineNum">     528 </span><span class="lineNoCov">          0 :         erh-&gt;fstartptr = erh-&gt;fendptr = NULL;</span>
+<span class="lineNum">     529 </span>            :     }
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span><span class="lineCov">       7248 :     erh-&gt;flags = newflags;</span>
+<span class="lineNum">     532 </span>            : 
+<span class="lineNum">     533 </span>            :     /* Reset flat-size info; we don't bother to make it valid now */
+<span class="lineNum">     534 </span><span class="lineCov">       7248 :     erh-&gt;flat_size = 0;</span>
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span>            :     /*
+<span class="lineNum">     537 </span>            :      * Now, release any storage belonging to old field values.  It's safe to
+<span class="lineNum">     538 </span>            :      * do this because ER_FLAG_DVALUES_VALID is no longer set in erh-&gt;flags;
+<span class="lineNum">     539 </span>            :      * even if we fail partway through, the record is valid, and at worst
+<span class="lineNum">     540 </span>            :      * we've failed to reclaim some space.
+<span class="lineNum">     541 </span>            :      */
+<span class="lineNum">     542 </span><span class="lineCov">       7248 :     if (oldflags &amp; ER_FLAG_DVALUES_ALLOCED)</span>
+<span class="lineNum">     543 </span>            :     {
+<span class="lineNum">     544 </span><span class="lineCov">         16 :         TupleDesc   tupdesc = erh-&gt;er_tupdesc;</span>
+<span class="lineNum">     545 </span>            :         int         i;
+<span class="lineNum">     546 </span>            : 
+<span class="lineNum">     547 </span><span class="lineCov">         80 :         for (i = 0; i &lt; erh-&gt;nfields; i++)</span>
+<span class="lineNum">     548 </span>            :         {
+<span class="lineNum">     549 </span><span class="lineCov">        120 :             if (!erh-&gt;dnulls[i] &amp;&amp;</span>
+<span class="lineNum">     550 </span><span class="lineCov">         56 :                 !(TupleDescAttr(tupdesc, i)-&gt;attbyval))</span>
+<span class="lineNum">     551 </span>            :             {
+<span class="lineNum">     552 </span><span class="lineCov">         40 :                 char       *oldValue = (char *) DatumGetPointer(erh-&gt;dvalues[i]);</span>
+<span class="lineNum">     553 </span>            : 
+<span class="lineNum">     554 </span><span class="lineCov">         40 :                 if (oldValue &lt; oldfstartptr || oldValue &gt;= oldfendptr)</span>
+<span class="lineNum">     555 </span><span class="lineCov">         20 :                     pfree(oldValue);</span>
+<span class="lineNum">     556 </span>            :             }
+<span class="lineNum">     557 </span>            :         }
+<span class="lineNum">     558 </span>            :     }
+<span class="lineNum">     559 </span>            : 
+<span class="lineNum">     560 </span>            :     /* Likewise free the old tuple, if it was locally allocated */
+<span class="lineNum">     561 </span><span class="lineCov">       7248 :     if (oldflags &amp; ER_FLAG_FVALUE_ALLOCED)</span>
+<span class="lineNum">     562 </span><span class="lineCov">        828 :         heap_freetuple(oldtuple);</span>
+<span class="lineNum">     563 </span>            : 
+<span class="lineNum">     564 </span>            :     /* We won't make a new deconstructed representation until/unless needed */
+<span class="lineNum">     565 </span><span class="lineCov">       7248 : }</span>
+<span class="lineNum">     566 </span>            : 
+<span class="lineNum">     567 </span>            : /*
+<span class="lineNum">     568 </span>            :  * make_expanded_record_from_datum: build expanded record from composite Datum
+<span class="lineNum">     569 </span>            :  *
+<span class="lineNum">     570 </span>            :  * This combines the functions of make_expanded_record_from_typeid and
+<span class="lineNum">     571 </span>            :  * expanded_record_set_tuple.  However, we do not force a lookup of the
+<span class="lineNum">     572 </span>            :  * tupdesc immediately, reasoning that it might never be needed.
+<span class="lineNum">     573 </span>            :  *
+<span class="lineNum">     574 </span>            :  * The expanded object will be a child of parentcontext.
+<span class="lineNum">     575 </span>            :  *
+<span class="lineNum">     576 </span>            :  * Note: a composite datum cannot self-identify as being of a domain type,
+<span class="lineNum">     577 </span>            :  * so we need not consider domain cases here.
+<a name="578"><span class="lineNum">     578 </span>            :  */</a>
+<span class="lineNum">     579 </span>            : Datum
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 : make_expanded_record_from_datum(Datum recorddatum, MemoryContext parentcontext)</span>
+<span class="lineNum">     581 </span>            : {
+<span class="lineNum">     582 </span>            :     ExpandedRecordHeader *erh;
+<span class="lineNum">     583 </span>            :     HeapTupleHeader tuphdr;
+<span class="lineNum">     584 </span>            :     HeapTupleData tmptup;
+<span class="lineNum">     585 </span>            :     HeapTuple   newtuple;
+<span class="lineNum">     586 </span>            :     MemoryContext objcxt;
+<span class="lineNum">     587 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">     588 </span>            : 
+<span class="lineNum">     589 </span>            :     /*
+<span class="lineNum">     590 </span>            :      * Allocate private context for expanded object.  We use a regular-size
+<span class="lineNum">     591 </span>            :      * context, not a small one, to improve the odds that we can fit a tupdesc
+<span class="lineNum">     592 </span>            :      * into it without needing an extra malloc block.
+<span class="lineNum">     593 </span>            :      */
+<span class="lineNum">     594 </span><span class="lineNoCov">          0 :     objcxt = AllocSetContextCreate(parentcontext,</span>
+<span class="lineNum">     595 </span>            :                                    &quot;expanded record&quot;,
+<span class="lineNum">     596 </span>            :                                    ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span>            :     /* Set up expanded record header, initializing fields to 0/null */
+<span class="lineNum">     599 </span><span class="lineNoCov">          0 :     erh = (ExpandedRecordHeader *)</span>
+<span class="lineNum">     600 </span>            :         MemoryContextAllocZero(objcxt, sizeof(ExpandedRecordHeader));
+<span class="lineNum">     601 </span>            : 
+<span class="lineNum">     602 </span><span class="lineNoCov">          0 :     EOH_init_header(&amp;erh-&gt;hdr, &amp;ER_methods, objcxt);</span>
+<span class="lineNum">     603 </span><span class="lineNoCov">          0 :     erh-&gt;er_magic = ER_MAGIC;</span>
+<span class="lineNum">     604 </span>            : 
+<span class="lineNum">     605 </span>            :     /*
+<span class="lineNum">     606 </span>            :      * Detoast and copy source record into private context, as a HeapTuple.
+<span class="lineNum">     607 </span>            :      * (If we actually have to detoast the source, we'll leak some memory in
+<span class="lineNum">     608 </span>            :      * the caller's context, but it doesn't seem worth worrying about.)
+<span class="lineNum">     609 </span>            :      */
+<span class="lineNum">     610 </span><span class="lineNoCov">          0 :     tuphdr = DatumGetHeapTupleHeader(recorddatum);</span>
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :     tmptup.t_len = HeapTupleHeaderGetDatumLength(tuphdr);</span>
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :     ItemPointerSetInvalid(&amp;(tmptup.t_self));</span>
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :     tmptup.t_tableOid = InvalidOid;</span>
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :     tmptup.t_data = tuphdr;</span>
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :     oldcxt = MemoryContextSwitchTo(objcxt);</span>
+<span class="lineNum">     618 </span><span class="lineNoCov">          0 :     newtuple = heap_copytuple(&amp;tmptup);</span>
+<span class="lineNum">     619 </span><span class="lineNoCov">          0 :     erh-&gt;flags |= ER_FLAG_FVALUE_ALLOCED;</span>
+<span class="lineNum">     620 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     621 </span>            : 
+<span class="lineNum">     622 </span>            :     /* Fill in composite-type identification info */
+<span class="lineNum">     623 </span><span class="lineNoCov">          0 :     erh-&gt;er_decltypeid = erh-&gt;er_typeid = HeapTupleHeaderGetTypeId(tuphdr);</span>
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :     erh-&gt;er_typmod = HeapTupleHeaderGetTypMod(tuphdr);</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span>            :     /* remember we have a flat representation */
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :     erh-&gt;fvalue = newtuple;</span>
+<span class="lineNum">     628 </span><span class="lineNoCov">          0 :     erh-&gt;fstartptr = (char *) newtuple-&gt;t_data;</span>
+<span class="lineNum">     629 </span><span class="lineNoCov">          0 :     erh-&gt;fendptr = ((char *) newtuple-&gt;t_data) + newtuple-&gt;t_len;</span>
+<span class="lineNum">     630 </span><span class="lineNoCov">          0 :     erh-&gt;flags |= ER_FLAG_FVALUE_VALID;</span>
+<span class="lineNum">     631 </span>            : 
+<span class="lineNum">     632 </span>            :     /* Shouldn't need to set ER_FLAG_HAVE_EXTERNAL */
+<span class="lineNum">     633 </span><span class="lineNoCov">          0 :     Assert(!HeapTupleHeaderHasExternal(tuphdr));</span>
+<span class="lineNum">     634 </span>            : 
+<span class="lineNum">     635 </span>            :     /*
+<span class="lineNum">     636 </span>            :      * We won't look up the tupdesc till we have to, nor make a deconstructed
+<span class="lineNum">     637 </span>            :      * representation.  We don't have enough info to fill flat_size and
+<span class="lineNum">     638 </span>            :      * friends, either.
+<span class="lineNum">     639 </span>            :      */
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span>            :     /* return a R/W pointer to the expanded record */
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :     return EOHPGetRWDatum(&amp;erh-&gt;hdr);</span>
+<span class="lineNum">     643 </span>            : }
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span>            : /*
+<span class="lineNum">     646 </span>            :  * get_flat_size method for expanded records
+<span class="lineNum">     647 </span>            :  *
+<span class="lineNum">     648 </span>            :  * Note: call this in a reasonably short-lived memory context, in case of
+<span class="lineNum">     649 </span>            :  * memory leaks from activities such as detoasting.
+<a name="650"><span class="lineNum">     650 </span>            :  */</a>
+<span class="lineNum">     651 </span>            : static Size
+<span class="lineNum">     652 </span><span class="lineCov">        348 : ER_get_flat_size(ExpandedObjectHeader *eohptr)</span>
+<span class="lineNum">     653 </span>            : {
+<span class="lineNum">     654 </span><span class="lineCov">        348 :     ExpandedRecordHeader *erh = (ExpandedRecordHeader *) eohptr;</span>
+<span class="lineNum">     655 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">     656 </span>            :     Size        len;
+<span class="lineNum">     657 </span>            :     Size        data_len;
+<span class="lineNum">     658 </span>            :     int         hoff;
+<span class="lineNum">     659 </span>            :     bool        hasnull;
+<span class="lineNum">     660 </span>            :     int         i;
+<span class="lineNum">     661 </span>            : 
+<span class="lineNum">     662 </span><span class="lineCov">        348 :     Assert(erh-&gt;er_magic == ER_MAGIC);</span>
+<span class="lineNum">     663 </span>            : 
+<span class="lineNum">     664 </span>            :     /*
+<span class="lineNum">     665 </span>            :      * The flat representation has to be a valid composite datum.  Make sure
+<span class="lineNum">     666 </span>            :      * that we have a registered, not anonymous, RECORD type.
+<span class="lineNum">     667 </span>            :      */
+<span class="lineNum">     668 </span><span class="lineCov">        356 :     if (erh-&gt;er_typeid == RECORDOID &amp;&amp;</span>
+<span class="lineNum">     669 </span><span class="lineCov">          8 :         erh-&gt;er_typmod &lt; 0)</span>
+<span class="lineNum">     670 </span>            :     {
+<span class="lineNum">     671 </span><span class="lineCov">          4 :         tupdesc = expanded_record_get_tupdesc(erh);</span>
+<span class="lineNum">     672 </span><span class="lineCov">          4 :         assign_record_type_typmod(tupdesc);</span>
+<span class="lineNum">     673 </span><span class="lineCov">          4 :         erh-&gt;er_typmod = tupdesc-&gt;tdtypmod;</span>
+<span class="lineNum">     674 </span>            :     }
+<span class="lineNum">     675 </span>            : 
+<span class="lineNum">     676 </span>            :     /*
+<span class="lineNum">     677 </span>            :      * If we have a valid flattened value without out-of-line fields, we can
+<span class="lineNum">     678 </span>            :      * just use it as-is.
+<span class="lineNum">     679 </span>            :      */
+<span class="lineNum">     680 </span><span class="lineCov">        632 :     if (erh-&gt;flags &amp; ER_FLAG_FVALUE_VALID &amp;&amp;</span>
+<span class="lineNum">     681 </span><span class="lineCov">        284 :         !(erh-&gt;flags &amp; ER_FLAG_HAVE_EXTERNAL))</span>
+<span class="lineNum">     682 </span><span class="lineCov">        268 :         return erh-&gt;fvalue-&gt;t_len;</span>
+<span class="lineNum">     683 </span>            : 
+<span class="lineNum">     684 </span>            :     /* If we have a cached size value, believe that */
+<span class="lineNum">     685 </span><span class="lineCov">         80 :     if (erh-&gt;flat_size)</span>
+<span class="lineNum">     686 </span><span class="lineNoCov">          0 :         return erh-&gt;flat_size;</span>
+<span class="lineNum">     687 </span>            : 
+<span class="lineNum">     688 </span>            :     /* If we haven't yet deconstructed the tuple, do that */
+<span class="lineNum">     689 </span><span class="lineCov">         80 :     if (!(erh-&gt;flags &amp; ER_FLAG_DVALUES_VALID))</span>
+<span class="lineNum">     690 </span><span class="lineCov">         16 :         deconstruct_expanded_record(erh);</span>
+<span class="lineNum">     691 </span>            : 
+<span class="lineNum">     692 </span>            :     /* Tuple descriptor must be valid by now */
+<span class="lineNum">     693 </span><span class="lineCov">         80 :     tupdesc = erh-&gt;er_tupdesc;</span>
+<span class="lineNum">     694 </span>            : 
+<span class="lineNum">     695 </span>            :     /*
+<span class="lineNum">     696 </span>            :      * Composite datums mustn't contain any out-of-line values.
+<span class="lineNum">     697 </span>            :      */
+<span class="lineNum">     698 </span><span class="lineCov">         80 :     if (erh-&gt;flags &amp; ER_FLAG_HAVE_EXTERNAL)</span>
+<span class="lineNum">     699 </span>            :     {
+<span class="lineNum">     700 </span><span class="lineCov">         80 :         for (i = 0; i &lt; erh-&gt;nfields; i++)</span>
+<span class="lineNum">     701 </span>            :         {
+<span class="lineNum">     702 </span><span class="lineCov">         64 :             Form_pg_attribute attr = TupleDescAttr(tupdesc, i);</span>
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span><span class="lineCov">        120 :             if (!erh-&gt;dnulls[i] &amp;&amp;</span>
+<span class="lineNum">     705 </span><span class="lineCov">        136 :                 !attr-&gt;attbyval &amp;&amp; attr-&gt;attlen == -1 &amp;&amp;</span>
+<span class="lineNum">     706 </span><span class="lineCov">         40 :                 VARATT_IS_EXTERNAL(DatumGetPointer(erh-&gt;dvalues[i])))</span>
+<span class="lineNum">     707 </span>            :             {
+<span class="lineNum">     708 </span>            :                 /*
+<span class="lineNum">     709 </span>            :                  * expanded_record_set_field_internal can do the actual work
+<span class="lineNum">     710 </span>            :                  * of detoasting.  It needn't recheck domain constraints.
+<span class="lineNum">     711 </span>            :                  */
+<span class="lineNum">     712 </span><span class="lineCov">         20 :                 expanded_record_set_field_internal(erh, i + 1,</span>
+<span class="lineNum">     713 </span><span class="lineCov">         20 :                                                    erh-&gt;dvalues[i], false,</span>
+<span class="lineNum">     714 </span>            :                                                    true,
+<span class="lineNum">     715 </span>            :                                                    false);
+<span class="lineNum">     716 </span>            :             }
+<span class="lineNum">     717 </span>            :         }
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span>            :         /*
+<span class="lineNum">     720 </span>            :          * We have now removed all external field values, so we can clear the
+<span class="lineNum">     721 </span>            :          * flag about them.  This won't cause ER_flatten_into() to mistakenly
+<span class="lineNum">     722 </span>            :          * take the fast path, since expanded_record_set_field() will have
+<span class="lineNum">     723 </span>            :          * cleared ER_FLAG_FVALUE_VALID.
+<span class="lineNum">     724 </span>            :          */
+<span class="lineNum">     725 </span><span class="lineCov">         16 :         erh-&gt;flags &amp;= ~ER_FLAG_HAVE_EXTERNAL;</span>
+<span class="lineNum">     726 </span>            :     }
+<span class="lineNum">     727 </span>            : 
+<span class="lineNum">     728 </span>            :     /* Test if we currently have any null values */
+<span class="lineNum">     729 </span><span class="lineCov">         80 :     hasnull = false;</span>
+<span class="lineNum">     730 </span><span class="lineCov">        250 :     for (i = 0; i &lt; erh-&gt;nfields; i++)</span>
+<span class="lineNum">     731 </span>            :     {
+<span class="lineNum">     732 </span><span class="lineCov">        184 :         if (erh-&gt;dnulls[i])</span>
+<span class="lineNum">     733 </span>            :         {
+<span class="lineNum">     734 </span><span class="lineCov">         14 :             hasnull = true;</span>
+<span class="lineNum">     735 </span><span class="lineCov">         14 :             break;</span>
+<span class="lineNum">     736 </span>            :         }
+<span class="lineNum">     737 </span>            :     }
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span>            :     /* Determine total space needed */
+<span class="lineNum">     740 </span><span class="lineCov">         80 :     len = offsetof(HeapTupleHeaderData, t_bits);</span>
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span><span class="lineCov">         80 :     if (hasnull)</span>
+<span class="lineNum">     743 </span><span class="lineCov">         14 :         len += BITMAPLEN(tupdesc-&gt;natts);</span>
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span><span class="lineCov">         80 :     hoff = len = MAXALIGN(len); /* align user data safely */</span>
+<span class="lineNum">     746 </span>            : 
+<span class="lineNum">     747 </span><span class="lineCov">         80 :     data_len = heap_compute_data_size(tupdesc, erh-&gt;dvalues, erh-&gt;dnulls);</span>
+<span class="lineNum">     748 </span>            : 
+<span class="lineNum">     749 </span><span class="lineCov">         80 :     len += data_len;</span>
+<span class="lineNum">     750 </span>            : 
+<span class="lineNum">     751 </span>            :     /* Cache for next time */
+<span class="lineNum">     752 </span><span class="lineCov">         80 :     erh-&gt;flat_size = len;</span>
+<span class="lineNum">     753 </span><span class="lineCov">         80 :     erh-&gt;data_len = data_len;</span>
+<span class="lineNum">     754 </span><span class="lineCov">         80 :     erh-&gt;hoff = hoff;</span>
+<span class="lineNum">     755 </span><span class="lineCov">         80 :     erh-&gt;hasnull = hasnull;</span>
+<span class="lineNum">     756 </span>            : 
+<span class="lineNum">     757 </span><span class="lineCov">         80 :     return len;</span>
+<span class="lineNum">     758 </span>            : }
+<span class="lineNum">     759 </span>            : 
+<span class="lineNum">     760 </span>            : /*
+<span class="lineNum">     761 </span>            :  * flatten_into method for expanded records
+<a name="762"><span class="lineNum">     762 </span>            :  */</a>
+<span class="lineNum">     763 </span>            : static void
+<span class="lineNum">     764 </span><span class="lineCov">        348 : ER_flatten_into(ExpandedObjectHeader *eohptr,</span>
+<span class="lineNum">     765 </span>            :                 void *result, Size allocated_size)
+<span class="lineNum">     766 </span>            : {
+<span class="lineNum">     767 </span><span class="lineCov">        348 :     ExpandedRecordHeader *erh = (ExpandedRecordHeader *) eohptr;</span>
+<span class="lineNum">     768 </span><span class="lineCov">        348 :     HeapTupleHeader tuphdr = (HeapTupleHeader) result;</span>
+<span class="lineNum">     769 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">     770 </span>            : 
+<span class="lineNum">     771 </span><span class="lineCov">        348 :     Assert(erh-&gt;er_magic == ER_MAGIC);</span>
+<span class="lineNum">     772 </span>            : 
+<span class="lineNum">     773 </span>            :     /* Easy if we have a valid flattened value without out-of-line fields */
+<span class="lineNum">     774 </span><span class="lineCov">        616 :     if (erh-&gt;flags &amp; ER_FLAG_FVALUE_VALID &amp;&amp;</span>
+<span class="lineNum">     775 </span><span class="lineCov">        268 :         !(erh-&gt;flags &amp; ER_FLAG_HAVE_EXTERNAL))</span>
+<span class="lineNum">     776 </span>            :     {
+<span class="lineNum">     777 </span><span class="lineCov">        268 :         Assert(allocated_size == erh-&gt;fvalue-&gt;t_len);</span>
+<span class="lineNum">     778 </span><span class="lineCov">        268 :         memcpy(tuphdr, erh-&gt;fvalue-&gt;t_data, allocated_size);</span>
+<span class="lineNum">     779 </span>            :         /* The original flattened value might not have datum header fields */
+<span class="lineNum">     780 </span><span class="lineCov">        268 :         HeapTupleHeaderSetDatumLength(tuphdr, allocated_size);</span>
+<span class="lineNum">     781 </span><span class="lineCov">        268 :         HeapTupleHeaderSetTypeId(tuphdr, erh-&gt;er_typeid);</span>
+<span class="lineNum">     782 </span><span class="lineCov">        268 :         HeapTupleHeaderSetTypMod(tuphdr, erh-&gt;er_typmod);</span>
+<span class="lineNum">     783 </span><span class="lineCov">        616 :         return;</span>
+<span class="lineNum">     784 </span>            :     }
+<span class="lineNum">     785 </span>            : 
+<span class="lineNum">     786 </span>            :     /* Else allocation should match previous get_flat_size result */
+<span class="lineNum">     787 </span><span class="lineCov">         80 :     Assert(allocated_size == erh-&gt;flat_size);</span>
+<span class="lineNum">     788 </span>            : 
+<span class="lineNum">     789 </span>            :     /* We'll need the tuple descriptor */
+<span class="lineNum">     790 </span><span class="lineCov">         80 :     tupdesc = expanded_record_get_tupdesc(erh);</span>
+<span class="lineNum">     791 </span>            : 
+<span class="lineNum">     792 </span>            :     /* We must ensure that any pad space is zero-filled */
+<span class="lineNum">     793 </span><span class="lineCov">         80 :     memset(tuphdr, 0, allocated_size);</span>
+<span class="lineNum">     794 </span>            : 
+<span class="lineNum">     795 </span>            :     /* Set up header fields of composite Datum */
+<span class="lineNum">     796 </span><span class="lineCov">         80 :     HeapTupleHeaderSetDatumLength(tuphdr, allocated_size);</span>
+<span class="lineNum">     797 </span><span class="lineCov">         80 :     HeapTupleHeaderSetTypeId(tuphdr, erh-&gt;er_typeid);</span>
+<span class="lineNum">     798 </span><span class="lineCov">         80 :     HeapTupleHeaderSetTypMod(tuphdr, erh-&gt;er_typmod);</span>
+<span class="lineNum">     799 </span>            :     /* We also make sure that t_ctid is invalid unless explicitly set */
+<span class="lineNum">     800 </span><span class="lineCov">         80 :     ItemPointerSetInvalid(&amp;(tuphdr-&gt;t_ctid));</span>
+<span class="lineNum">     801 </span>            : 
+<span class="lineNum">     802 </span><span class="lineCov">         80 :     HeapTupleHeaderSetNatts(tuphdr, tupdesc-&gt;natts);</span>
+<span class="lineNum">     803 </span><span class="lineCov">         80 :     tuphdr-&gt;t_hoff = erh-&gt;hoff;</span>
+<span class="lineNum">     804 </span>            : 
+<span class="lineNum">     805 </span>            :     /* And fill the data area from dvalues/dnulls */
+<span class="lineNum">     806 </span><span class="lineCov">        160 :     heap_fill_tuple(tupdesc,</span>
+<span class="lineNum">     807 </span>            :                     erh-&gt;dvalues,
+<span class="lineNum">     808 </span>            :                     erh-&gt;dnulls,
+<span class="lineNum">     809 </span><span class="lineCov">         80 :                     (char *) tuphdr + erh-&gt;hoff,</span>
+<span class="lineNum">     810 </span>            :                     erh-&gt;data_len,
+<span class="lineNum">     811 </span>            :                     &amp;tuphdr-&gt;t_infomask,
+<span class="lineNum">     812 </span><span class="lineCov">         80 :                     (erh-&gt;hasnull ? tuphdr-&gt;t_bits : NULL));</span>
+<span class="lineNum">     813 </span>            : }
+<span class="lineNum">     814 </span>            : 
+<span class="lineNum">     815 </span>            : /*
+<span class="lineNum">     816 </span>            :  * Look up the tupdesc for the expanded record's actual type
+<span class="lineNum">     817 </span>            :  *
+<span class="lineNum">     818 </span>            :  * Note: code internal to this module is allowed to just fetch
+<span class="lineNum">     819 </span>            :  * erh-&gt;er_tupdesc if ER_FLAG_DVALUES_VALID is set; otherwise it should call
+<span class="lineNum">     820 </span>            :  * expanded_record_get_tupdesc.  This function is the out-of-line portion
+<span class="lineNum">     821 </span>            :  * of expanded_record_get_tupdesc.
+<a name="822"><span class="lineNum">     822 </span>            :  */</a>
+<span class="lineNum">     823 </span>            : TupleDesc
+<span class="lineNum">     824 </span><span class="lineNoCov">          0 : expanded_record_fetch_tupdesc(ExpandedRecordHeader *erh)</span>
+<span class="lineNum">     825 </span>            : {
+<span class="lineNum">     826 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">     827 </span>            : 
+<span class="lineNum">     828 </span>            :     /* Easy if we already have it (but caller should have checked already) */
+<span class="lineNum">     829 </span><span class="lineNoCov">          0 :     if (erh-&gt;er_tupdesc)</span>
+<span class="lineNum">     830 </span><span class="lineNoCov">          0 :         return erh-&gt;er_tupdesc;</span>
+<span class="lineNum">     831 </span>            : 
+<span class="lineNum">     832 </span>            :     /* Lookup the composite type's tupdesc using the typcache */
+<span class="lineNum">     833 </span><span class="lineNoCov">          0 :     tupdesc = lookup_rowtype_tupdesc(erh-&gt;er_typeid, erh-&gt;er_typmod);</span>
+<span class="lineNum">     834 </span>            : 
+<span class="lineNum">     835 </span>            :     /*
+<span class="lineNum">     836 </span>            :      * If it's a refcounted tupdesc rather than a statically allocated one, we
+<span class="lineNum">     837 </span>            :      * want to manage the refcount with a memory context callback rather than
+<span class="lineNum">     838 </span>            :      * assuming that the CurrentResourceOwner is longer-lived than this
+<span class="lineNum">     839 </span>            :      * expanded object.
+<span class="lineNum">     840 </span>            :      */
+<span class="lineNum">     841 </span><span class="lineNoCov">          0 :     if (tupdesc-&gt;tdrefcount &gt;= 0)</span>
+<span class="lineNum">     842 </span>            :     {
+<span class="lineNum">     843 </span>            :         /* Register callback if we didn't already */
+<span class="lineNum">     844 </span><span class="lineNoCov">          0 :         if (erh-&gt;er_mcb.arg == NULL)</span>
+<span class="lineNum">     845 </span>            :         {
+<span class="lineNum">     846 </span><span class="lineNoCov">          0 :             erh-&gt;er_mcb.func = ER_mc_callback;</span>
+<span class="lineNum">     847 </span><span class="lineNoCov">          0 :             erh-&gt;er_mcb.arg = (void *) erh;</span>
+<span class="lineNum">     848 </span><span class="lineNoCov">          0 :             MemoryContextRegisterResetCallback(erh-&gt;hdr.eoh_context,</span>
+<span class="lineNum">     849 </span>            :                                                &amp;erh-&gt;er_mcb);
+<span class="lineNum">     850 </span>            :         }
+<span class="lineNum">     851 </span>            : 
+<span class="lineNum">     852 </span>            :         /* Remember our own pointer */
+<span class="lineNum">     853 </span><span class="lineNoCov">          0 :         erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :         tupdesc-&gt;tdrefcount++;</span>
+<span class="lineNum">     855 </span>            : 
+<span class="lineNum">     856 </span>            :         /* Release the pin lookup_rowtype_tupdesc acquired */
+<span class="lineNum">     857 </span><span class="lineNoCov">          0 :         DecrTupleDescRefCount(tupdesc);</span>
+<span class="lineNum">     858 </span>            :     }
+<span class="lineNum">     859 </span>            :     else
+<span class="lineNum">     860 </span>            :     {
+<span class="lineNum">     861 </span>            :         /* Just remember the pointer */
+<span class="lineNum">     862 </span><span class="lineNoCov">          0 :         erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">     863 </span>            :     }
+<span class="lineNum">     864 </span>            : 
+<span class="lineNum">     865 </span>            :     /* In either case, fetch the process-global ID for this tupdesc */
+<span class="lineNum">     866 </span><span class="lineNoCov">          0 :     erh-&gt;er_tupdesc_id = assign_record_type_identifier(tupdesc-&gt;tdtypeid,</span>
+<span class="lineNum">     867 </span>            :                                                        tupdesc-&gt;tdtypmod);
+<span class="lineNum">     868 </span>            : 
+<span class="lineNum">     869 </span><span class="lineNoCov">          0 :     return tupdesc;</span>
+<span class="lineNum">     870 </span>            : }
+<span class="lineNum">     871 </span>            : 
+<span class="lineNum">     872 </span>            : /*
+<span class="lineNum">     873 </span>            :  * Get a HeapTuple representing the current value of the expanded record
+<span class="lineNum">     874 </span>            :  *
+<span class="lineNum">     875 </span>            :  * If valid, the originally stored tuple is returned, so caller must not
+<span class="lineNum">     876 </span>            :  * scribble on it.  Otherwise, we return a HeapTuple created in the current
+<span class="lineNum">     877 </span>            :  * memory context.  In either case, no attempt has been made to inline
+<span class="lineNum">     878 </span>            :  * out-of-line toasted values, so the tuple isn't usable as a composite
+<span class="lineNum">     879 </span>            :  * datum.
+<span class="lineNum">     880 </span>            :  *
+<span class="lineNum">     881 </span>            :  * Returns NULL if expanded record is empty.
+<a name="882"><span class="lineNum">     882 </span>            :  */</a>
+<span class="lineNum">     883 </span>            : HeapTuple
+<span class="lineNum">     884 </span><span class="lineCov">       3488 : expanded_record_get_tuple(ExpandedRecordHeader *erh)</span>
+<span class="lineNum">     885 </span>            : {
+<span class="lineNum">     886 </span>            :     /* Easy case if we still have original tuple */
+<span class="lineNum">     887 </span><span class="lineCov">       3488 :     if (erh-&gt;flags &amp; ER_FLAG_FVALUE_VALID)</span>
+<span class="lineNum">     888 </span><span class="lineCov">       3254 :         return erh-&gt;fvalue;</span>
+<span class="lineNum">     889 </span>            : 
+<span class="lineNum">     890 </span>            :     /* Else just build a tuple from datums */
+<span class="lineNum">     891 </span><span class="lineCov">        234 :     if (erh-&gt;flags &amp; ER_FLAG_DVALUES_VALID)</span>
+<span class="lineNum">     892 </span><span class="lineCov">        234 :         return heap_form_tuple(erh-&gt;er_tupdesc, erh-&gt;dvalues, erh-&gt;dnulls);</span>
+<span class="lineNum">     893 </span>            : 
+<span class="lineNum">     894 </span>            :     /* Expanded record is empty */
+<span class="lineNum">     895 </span><span class="lineNoCov">          0 :     return NULL;</span>
+<span class="lineNum">     896 </span>            : }
+<span class="lineNum">     897 </span>            : 
+<span class="lineNum">     898 </span>            : /*
+<span class="lineNum">     899 </span>            :  * Memory context reset callback for cleaning up external resources
+<a name="900"><span class="lineNum">     900 </span>            :  */</a>
+<span class="lineNum">     901 </span>            : static void
+<span class="lineNum">     902 </span><span class="lineCov">       8136 : ER_mc_callback(void *arg)</span>
+<span class="lineNum">     903 </span>            : {
+<span class="lineNum">     904 </span><span class="lineCov">       8136 :     ExpandedRecordHeader *erh = (ExpandedRecordHeader *) arg;</span>
+<span class="lineNum">     905 </span><span class="lineCov">       8136 :     TupleDesc   tupdesc = erh-&gt;er_tupdesc;</span>
+<span class="lineNum">     906 </span>            : 
+<span class="lineNum">     907 </span>            :     /* Release our privately-managed tupdesc refcount, if any */
+<span class="lineNum">     908 </span><span class="lineCov">       8136 :     if (tupdesc)</span>
+<span class="lineNum">     909 </span>            :     {
+<span class="lineNum">     910 </span><span class="lineCov">       8136 :         erh-&gt;er_tupdesc = NULL; /* just for luck */</span>
+<span class="lineNum">     911 </span><span class="lineCov">       8136 :         if (tupdesc-&gt;tdrefcount &gt; 0)</span>
+<span class="lineNum">     912 </span>            :         {
+<span class="lineNum">     913 </span><span class="lineCov">       8136 :             if (--tupdesc-&gt;tdrefcount == 0)</span>
+<span class="lineNum">     914 </span><span class="lineNoCov">          0 :                 FreeTupleDesc(tupdesc);</span>
+<span class="lineNum">     915 </span>            :         }
+<span class="lineNum">     916 </span>            :     }
+<span class="lineNum">     917 </span><span class="lineCov">       8136 : }</span>
+<span class="lineNum">     918 </span>            : 
+<span class="lineNum">     919 </span>            : /*
+<span class="lineNum">     920 </span>            :  * DatumGetExpandedRecord: get a writable expanded record from an input argument
+<span class="lineNum">     921 </span>            :  *
+<span class="lineNum">     922 </span>            :  * Caution: if the input is a read/write pointer, this returns the input
+<span class="lineNum">     923 </span>            :  * argument; so callers must be sure that their changes are &quot;safe&quot;, that is
+<span class="lineNum">     924 </span>            :  * they cannot leave the record in a corrupt state.
+<a name="925"><span class="lineNum">     925 </span>            :  */</a>
+<span class="lineNum">     926 </span>            : ExpandedRecordHeader *
+<span class="lineNum">     927 </span><span class="lineNoCov">          0 : DatumGetExpandedRecord(Datum d)</span>
+<span class="lineNum">     928 </span>            : {
+<span class="lineNum">     929 </span>            :     /* If it's a writable expanded record already, just return it */
+<span class="lineNum">     930 </span><span class="lineNoCov">          0 :     if (VARATT_IS_EXTERNAL_EXPANDED_RW(DatumGetPointer(d)))</span>
+<span class="lineNum">     931 </span>            :     {
+<span class="lineNum">     932 </span><span class="lineNoCov">          0 :         ExpandedRecordHeader *erh = (ExpandedRecordHeader *) DatumGetEOHP(d);</span>
+<span class="lineNum">     933 </span>            : 
+<span class="lineNum">     934 </span><span class="lineNoCov">          0 :         Assert(erh-&gt;er_magic == ER_MAGIC);</span>
+<span class="lineNum">     935 </span><span class="lineNoCov">          0 :         return erh;</span>
+<span class="lineNum">     936 </span>            :     }
+<span class="lineNum">     937 </span>            : 
+<span class="lineNum">     938 </span>            :     /* Else expand the hard way */
+<span class="lineNum">     939 </span><span class="lineNoCov">          0 :     d = make_expanded_record_from_datum(d, CurrentMemoryContext);</span>
+<span class="lineNum">     940 </span><span class="lineNoCov">          0 :     return (ExpandedRecordHeader *) DatumGetEOHP(d);</span>
+<span class="lineNum">     941 </span>            : }
+<span class="lineNum">     942 </span>            : 
+<span class="lineNum">     943 </span>            : /*
+<span class="lineNum">     944 </span>            :  * Create the Datum/isnull representation of an expanded record object
+<span class="lineNum">     945 </span>            :  * if we didn't do so already.  After calling this, it's OK to read the
+<span class="lineNum">     946 </span>            :  * dvalues/dnulls arrays directly, rather than going through get_field.
+<span class="lineNum">     947 </span>            :  *
+<span class="lineNum">     948 </span>            :  * Note that if the object is currently empty (&quot;null&quot;), this will change
+<span class="lineNum">     949 </span>            :  * it to represent a row of nulls.
+<a name="950"><span class="lineNum">     950 </span>            :  */</a>
+<span class="lineNum">     951 </span>            : void
+<span class="lineNum">     952 </span><span class="lineCov">       5684 : deconstruct_expanded_record(ExpandedRecordHeader *erh)</span>
+<span class="lineNum">     953 </span>            : {
+<span class="lineNum">     954 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">     955 </span>            :     Datum      *dvalues;
+<span class="lineNum">     956 </span>            :     bool       *dnulls;
+<span class="lineNum">     957 </span>            :     int         nfields;
+<span class="lineNum">     958 </span>            : 
+<span class="lineNum">     959 </span><span class="lineCov">       5684 :     if (erh-&gt;flags &amp; ER_FLAG_DVALUES_VALID)</span>
+<span class="lineNum">     960 </span><span class="lineCov">       5684 :         return;                 /* already valid, nothing to do */</span>
+<span class="lineNum">     961 </span>            : 
+<span class="lineNum">     962 </span>            :     /* We'll need the tuple descriptor */
+<span class="lineNum">     963 </span><span class="lineCov">       5684 :     tupdesc = expanded_record_get_tupdesc(erh);</span>
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span>            :     /*
+<span class="lineNum">     966 </span>            :      * Allocate arrays in private context, if we don't have them already.  We
+<span class="lineNum">     967 </span>            :      * don't expect to see a change in nfields here, so while we cope if it
+<span class="lineNum">     968 </span>            :      * happens, we don't bother avoiding a leak of the old arrays (which might
+<span class="lineNum">     969 </span>            :      * not be separately palloc'd, anyway).
+<span class="lineNum">     970 </span>            :      */
+<span class="lineNum">     971 </span><span class="lineCov">       5684 :     nfields = tupdesc-&gt;natts;</span>
+<span class="lineNum">     972 </span><span class="lineCov">       5684 :     if (erh-&gt;dvalues == NULL || erh-&gt;nfields != nfields)</span>
+<span class="lineNum">     973 </span><span class="lineNoCov">          0 :     {</span>
+<span class="lineNum">     974 </span>            :         char       *chunk;
+<span class="lineNum">     975 </span>            : 
+<span class="lineNum">     976 </span>            :         /*
+<span class="lineNum">     977 </span>            :          * To save a palloc cycle, we allocate both the Datum and isnull
+<span class="lineNum">     978 </span>            :          * arrays in one palloc chunk.
+<span class="lineNum">     979 </span>            :          */
+<span class="lineNum">     980 </span><span class="lineNoCov">          0 :         chunk = MemoryContextAlloc(erh-&gt;hdr.eoh_context,</span>
+<span class="lineNum">     981 </span>            :                                    nfields * (sizeof(Datum) + sizeof(bool)));
+<span class="lineNum">     982 </span><span class="lineNoCov">          0 :         dvalues = (Datum *) chunk;</span>
+<span class="lineNum">     983 </span><span class="lineNoCov">          0 :         dnulls = (bool *) (chunk + nfields * sizeof(Datum));</span>
+<span class="lineNum">     984 </span><span class="lineNoCov">          0 :         erh-&gt;dvalues = dvalues;</span>
+<span class="lineNum">     985 </span><span class="lineNoCov">          0 :         erh-&gt;dnulls = dnulls;</span>
+<span class="lineNum">     986 </span><span class="lineNoCov">          0 :         erh-&gt;nfields = nfields;</span>
+<span class="lineNum">     987 </span>            :     }
+<span class="lineNum">     988 </span>            :     else
+<span class="lineNum">     989 </span>            :     {
+<span class="lineNum">     990 </span><span class="lineCov">       5684 :         dvalues = erh-&gt;dvalues;</span>
+<span class="lineNum">     991 </span><span class="lineCov">       5684 :         dnulls = erh-&gt;dnulls;</span>
+<span class="lineNum">     992 </span>            :     }
+<span class="lineNum">     993 </span>            : 
+<span class="lineNum">     994 </span><span class="lineCov">       5684 :     if (erh-&gt;flags &amp; ER_FLAG_FVALUE_VALID)</span>
+<span class="lineNum">     995 </span>            :     {
+<span class="lineNum">     996 </span>            :         /* Deconstruct tuple */
+<span class="lineNum">     997 </span><span class="lineCov">       5638 :         heap_deform_tuple(erh-&gt;fvalue, tupdesc, dvalues, dnulls);</span>
+<span class="lineNum">     998 </span>            :     }
+<span class="lineNum">     999 </span>            :     else
+<span class="lineNum">    1000 </span>            :     {
+<span class="lineNum">    1001 </span>            :         /* If record was empty, instantiate it as a row of nulls */
+<span class="lineNum">    1002 </span><span class="lineCov">         46 :         memset(dvalues, 0, nfields * sizeof(Datum));</span>
+<span class="lineNum">    1003 </span><span class="lineCov">         46 :         memset(dnulls, true, nfields * sizeof(bool));</span>
+<span class="lineNum">    1004 </span>            :     }
+<span class="lineNum">    1005 </span>            : 
+<span class="lineNum">    1006 </span>            :     /* Mark the dvalues as valid */
+<span class="lineNum">    1007 </span><span class="lineCov">       5684 :     erh-&gt;flags |= ER_FLAG_DVALUES_VALID;</span>
+<span class="lineNum">    1008 </span>            : }
+<span class="lineNum">    1009 </span>            : 
+<span class="lineNum">    1010 </span>            : /*
+<span class="lineNum">    1011 </span>            :  * Look up a record field by name
+<span class="lineNum">    1012 </span>            :  *
+<span class="lineNum">    1013 </span>            :  * If there is a field named &quot;fieldname&quot;, fill in the contents of finfo
+<span class="lineNum">    1014 </span>            :  * and return &quot;true&quot;.  Else return &quot;false&quot; without changing *finfo.
+<a name="1015"><span class="lineNum">    1015 </span>            :  */</a>
+<span class="lineNum">    1016 </span>            : bool
+<span class="lineNum">    1017 </span><span class="lineCov">       1376 : expanded_record_lookup_field(ExpandedRecordHeader *erh, const char *fieldname,</span>
+<span class="lineNum">    1018 </span>            :                              ExpandedRecordFieldInfo *finfo)
+<span class="lineNum">    1019 </span>            : {
+<span class="lineNum">    1020 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">    1021 </span>            :     int         fno;
+<span class="lineNum">    1022 </span>            :     Form_pg_attribute attr;
+<span class="lineNum">    1023 </span>            :     const FormData_pg_attribute *sysattr;
+<span class="lineNum">    1024 </span>            : 
+<span class="lineNum">    1025 </span><span class="lineCov">       1376 :     tupdesc = expanded_record_get_tupdesc(erh);</span>
+<span class="lineNum">    1026 </span>            : 
+<span class="lineNum">    1027 </span>            :     /* First, check user-defined attributes */
+<span class="lineNum">    1028 </span><span class="lineCov">       4594 :     for (fno = 0; fno &lt; tupdesc-&gt;natts; fno++)</span>
+<span class="lineNum">    1029 </span>            :     {
+<span class="lineNum">    1030 </span><span class="lineCov">       4594 :         attr = TupleDescAttr(tupdesc, fno);</span>
+<span class="lineNum">    1031 </span><span class="lineCov">       5970 :         if (namestrcmp(&amp;attr-&gt;attname, fieldname) == 0 &amp;&amp;</span>
+<span class="lineNum">    1032 </span><span class="lineCov">       1376 :             !attr-&gt;attisdropped)</span>
+<span class="lineNum">    1033 </span>            :         {
+<span class="lineNum">    1034 </span><span class="lineCov">       1376 :             finfo-&gt;fnumber = attr-&gt;attnum;</span>
+<span class="lineNum">    1035 </span><span class="lineCov">       1376 :             finfo-&gt;ftypeid = attr-&gt;atttypid;</span>
+<span class="lineNum">    1036 </span><span class="lineCov">       1376 :             finfo-&gt;ftypmod = attr-&gt;atttypmod;</span>
+<span class="lineNum">    1037 </span><span class="lineCov">       1376 :             finfo-&gt;fcollation = attr-&gt;attcollation;</span>
+<span class="lineNum">    1038 </span><span class="lineCov">       1376 :             return true;</span>
+<span class="lineNum">    1039 </span>            :         }
+<span class="lineNum">    1040 </span>            :     }
+<span class="lineNum">    1041 </span>            : 
+<span class="lineNum">    1042 </span>            :     /* How about system attributes? */
+<span class="lineNum">    1043 </span><span class="lineNoCov">          0 :     sysattr = SystemAttributeByName(fieldname);</span>
+<span class="lineNum">    1044 </span><span class="lineNoCov">          0 :     if (sysattr != NULL)</span>
+<span class="lineNum">    1045 </span>            :     {
+<span class="lineNum">    1046 </span><span class="lineNoCov">          0 :         finfo-&gt;fnumber = sysattr-&gt;attnum;</span>
+<span class="lineNum">    1047 </span><span class="lineNoCov">          0 :         finfo-&gt;ftypeid = sysattr-&gt;atttypid;</span>
+<span class="lineNum">    1048 </span><span class="lineNoCov">          0 :         finfo-&gt;ftypmod = sysattr-&gt;atttypmod;</span>
+<span class="lineNum">    1049 </span><span class="lineNoCov">          0 :         finfo-&gt;fcollation = sysattr-&gt;attcollation;</span>
+<span class="lineNum">    1050 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">    1051 </span>            :     }
+<span class="lineNum">    1052 </span>            : 
+<span class="lineNum">    1053 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">    1054 </span>            : }
+<span class="lineNum">    1055 </span>            : 
+<span class="lineNum">    1056 </span>            : /*
+<span class="lineNum">    1057 </span>            :  * Fetch value of record field
+<span class="lineNum">    1058 </span>            :  *
+<span class="lineNum">    1059 </span>            :  * expanded_record_get_field is the frontend for this; it handles the
+<span class="lineNum">    1060 </span>            :  * easy inline-able cases.
+<a name="1061"><span class="lineNum">    1061 </span>            :  */</a>
+<span class="lineNum">    1062 </span>            : Datum
+<span class="lineNum">    1063 </span><span class="lineCov">       5536 : expanded_record_fetch_field(ExpandedRecordHeader *erh, int fnumber,</span>
+<span class="lineNum">    1064 </span>            :                             bool *isnull)
+<span class="lineNum">    1065 </span>            : {
+<span class="lineNum">    1066 </span><span class="lineCov">       5536 :     if (fnumber &gt; 0)</span>
+<span class="lineNum">    1067 </span>            :     {
+<span class="lineNum">    1068 </span>            :         /* Empty record has null fields */
+<span class="lineNum">    1069 </span><span class="lineCov">       5536 :         if (ExpandedRecordIsEmpty(erh))</span>
+<span class="lineNum">    1070 </span>            :         {
+<span class="lineNum">    1071 </span><span class="lineNoCov">          0 :             *isnull = true;</span>
+<span class="lineNum">    1072 </span><span class="lineNoCov">          0 :             return (Datum) 0;</span>
+<span class="lineNum">    1073 </span>            :         }
+<span class="lineNum">    1074 </span>            :         /* Make sure we have deconstructed form */
+<span class="lineNum">    1075 </span><span class="lineCov">       5536 :         deconstruct_expanded_record(erh);</span>
+<span class="lineNum">    1076 </span>            :         /* Out-of-range field number reads as null */
+<span class="lineNum">    1077 </span><span class="lineCov">       5536 :         if (unlikely(fnumber &gt; erh-&gt;nfields))</span>
+<span class="lineNum">    1078 </span>            :         {
+<span class="lineNum">    1079 </span><span class="lineNoCov">          0 :             *isnull = true;</span>
+<span class="lineNum">    1080 </span><span class="lineNoCov">          0 :             return (Datum) 0;</span>
+<span class="lineNum">    1081 </span>            :         }
+<span class="lineNum">    1082 </span><span class="lineCov">       5536 :         *isnull = erh-&gt;dnulls[fnumber - 1];</span>
+<span class="lineNum">    1083 </span><span class="lineCov">       5536 :         return erh-&gt;dvalues[fnumber - 1];</span>
+<span class="lineNum">    1084 </span>            :     }
+<span class="lineNum">    1085 </span>            :     else
+<span class="lineNum">    1086 </span>            :     {
+<span class="lineNum">    1087 </span>            :         /* System columns read as null if we haven't got flat tuple */
+<span class="lineNum">    1088 </span><span class="lineNoCov">          0 :         if (erh-&gt;fvalue == NULL)</span>
+<span class="lineNum">    1089 </span>            :         {
+<span class="lineNum">    1090 </span><span class="lineNoCov">          0 :             *isnull = true;</span>
+<span class="lineNum">    1091 </span><span class="lineNoCov">          0 :             return (Datum) 0;</span>
+<span class="lineNum">    1092 </span>            :         }
+<span class="lineNum">    1093 </span>            :         /* heap_getsysattr doesn't actually use tupdesc, so just pass null */
+<span class="lineNum">    1094 </span><span class="lineNoCov">          0 :         return heap_getsysattr(erh-&gt;fvalue, fnumber, NULL, isnull);</span>
+<span class="lineNum">    1095 </span>            :     }
+<span class="lineNum">    1096 </span>            : }
+<span class="lineNum">    1097 </span>            : 
+<span class="lineNum">    1098 </span>            : /*
+<span class="lineNum">    1099 </span>            :  * Set value of record field
+<span class="lineNum">    1100 </span>            :  *
+<span class="lineNum">    1101 </span>            :  * If the expanded record is of domain type, the assignment will be rejected
+<span class="lineNum">    1102 </span>            :  * (without changing the record's state) if the domain's constraints would
+<span class="lineNum">    1103 </span>            :  * be violated.
+<span class="lineNum">    1104 </span>            :  *
+<span class="lineNum">    1105 </span>            :  * If expand_external is true and newValue is an out-of-line value, we'll
+<span class="lineNum">    1106 </span>            :  * forcibly detoast it so that the record does not depend on external storage.
+<span class="lineNum">    1107 </span>            :  *
+<span class="lineNum">    1108 </span>            :  * Internal callers can pass check_constraints = false to skip application
+<span class="lineNum">    1109 </span>            :  * of domain constraints.  External callers should never do that.
+<a name="1110"><span class="lineNum">    1110 </span>            :  */</a>
+<span class="lineNum">    1111 </span>            : void
+<span class="lineNum">    1112 </span><span class="lineCov">        372 : expanded_record_set_field_internal(ExpandedRecordHeader *erh, int fnumber,</span>
+<span class="lineNum">    1113 </span>            :                                    Datum newValue, bool isnull,
+<span class="lineNum">    1114 </span>            :                                    bool expand_external,
+<span class="lineNum">    1115 </span>            :                                    bool check_constraints)
+<span class="lineNum">    1116 </span>            : {
+<span class="lineNum">    1117 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">    1118 </span>            :     Form_pg_attribute attr;
+<span class="lineNum">    1119 </span>            :     Datum      *dvalues;
+<span class="lineNum">    1120 </span>            :     bool       *dnulls;
+<span class="lineNum">    1121 </span>            :     char       *oldValue;
+<span class="lineNum">    1122 </span>            : 
+<span class="lineNum">    1123 </span>            :     /*
+<span class="lineNum">    1124 </span>            :      * Shouldn't ever be trying to assign new data to a dummy header, except
+<span class="lineNum">    1125 </span>            :      * in the case of an internal call for field inlining.
+<span class="lineNum">    1126 </span>            :      */
+<span class="lineNum">    1127 </span><span class="lineCov">        372 :     Assert(!(erh-&gt;flags &amp; ER_FLAG_IS_DUMMY) || !check_constraints);</span>
+<span class="lineNum">    1128 </span>            : 
+<span class="lineNum">    1129 </span>            :     /* Before performing the assignment, see if result will satisfy domain */
+<span class="lineNum">    1130 </span><span class="lineCov">        372 :     if ((erh-&gt;flags &amp; ER_FLAG_IS_DOMAIN) &amp;&amp; check_constraints)</span>
+<span class="lineNum">    1131 </span><span class="lineNoCov">          0 :         check_domain_for_new_field(erh, fnumber, newValue, isnull);</span>
+<span class="lineNum">    1132 </span>            : 
+<span class="lineNum">    1133 </span>            :     /* If we haven't yet deconstructed the tuple, do that */
+<span class="lineNum">    1134 </span><span class="lineCov">        372 :     if (!(erh-&gt;flags &amp; ER_FLAG_DVALUES_VALID))</span>
+<span class="lineNum">    1135 </span><span class="lineCov">        104 :         deconstruct_expanded_record(erh);</span>
+<span class="lineNum">    1136 </span>            : 
+<span class="lineNum">    1137 </span>            :     /* Tuple descriptor must be valid by now */
+<span class="lineNum">    1138 </span><span class="lineCov">        372 :     tupdesc = erh-&gt;er_tupdesc;</span>
+<span class="lineNum">    1139 </span><span class="lineCov">        372 :     Assert(erh-&gt;nfields == tupdesc-&gt;natts);</span>
+<span class="lineNum">    1140 </span>            : 
+<span class="lineNum">    1141 </span>            :     /* Caller error if fnumber is system column or nonexistent column */
+<span class="lineNum">    1142 </span><span class="lineCov">        372 :     if (unlikely(fnumber &lt;= 0 || fnumber &gt; erh-&gt;nfields))</span>
+<span class="lineNum">    1143 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot assign to field %d of expanded record&quot;, fnumber);</span>
+<span class="lineNum">    1144 </span>            : 
+<span class="lineNum">    1145 </span>            :     /*
+<span class="lineNum">    1146 </span>            :      * Copy new field value into record's context, and deal with detoasting,
+<span class="lineNum">    1147 </span>            :      * if needed.
+<span class="lineNum">    1148 </span>            :      */
+<span class="lineNum">    1149 </span><span class="lineCov">        372 :     attr = TupleDescAttr(tupdesc, fnumber - 1);</span>
+<span class="lineNum">    1150 </span><span class="lineCov">        372 :     if (!isnull &amp;&amp; !attr-&gt;attbyval)</span>
+<span class="lineNum">    1151 </span>            :     {
+<span class="lineNum">    1152 </span>            :         MemoryContext oldcxt;
+<span class="lineNum">    1153 </span>            : 
+<span class="lineNum">    1154 </span>            :         /* If requested, detoast any external value */
+<span class="lineNum">    1155 </span><span class="lineCov">        160 :         if (expand_external)</span>
+<span class="lineNum">    1156 </span>            :         {
+<span class="lineNum">    1157 </span><span class="lineCov">         40 :             if (attr-&gt;attlen == -1 &amp;&amp;</span>
+<span class="lineNum">    1158 </span><span class="lineCov">         20 :                 VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))</span>
+<span class="lineNum">    1159 </span>            :             {
+<span class="lineNum">    1160 </span>            :                 /* Detoasting should be done in short-lived context. */
+<span class="lineNum">    1161 </span><span class="lineCov">         20 :                 oldcxt = MemoryContextSwitchTo(get_short_term_cxt(erh));</span>
+<span class="lineNum">    1162 </span><span class="lineCov">         20 :                 newValue = PointerGetDatum(detoast_external_attr((struct varlena *) DatumGetPointer(newValue)));</span>
+<span class="lineNum">    1163 </span><span class="lineCov">         20 :                 MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1164 </span>            :             }
+<span class="lineNum">    1165 </span>            :             else
+<span class="lineNum">    1166 </span><span class="lineNoCov">          0 :                 expand_external = false;    /* need not clean up below */</span>
+<span class="lineNum">    1167 </span>            :         }
+<span class="lineNum">    1168 </span>            : 
+<span class="lineNum">    1169 </span>            :         /* Copy value into record's context */
+<span class="lineNum">    1170 </span><span class="lineCov">        160 :         oldcxt = MemoryContextSwitchTo(erh-&gt;hdr.eoh_context);</span>
+<span class="lineNum">    1171 </span><span class="lineCov">        160 :         newValue = datumCopy(newValue, false, attr-&gt;attlen);</span>
+<span class="lineNum">    1172 </span><span class="lineCov">        160 :         MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1173 </span>            : 
+<span class="lineNum">    1174 </span>            :         /* We can now flush anything that detoasting might have leaked */
+<span class="lineNum">    1175 </span><span class="lineCov">        160 :         if (expand_external)</span>
+<span class="lineNum">    1176 </span><span class="lineCov">         20 :             MemoryContextReset(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1177 </span>            : 
+<span class="lineNum">    1178 </span>            :         /* Remember that we have field(s) that may need to be pfree'd */
+<span class="lineNum">    1179 </span><span class="lineCov">        160 :         erh-&gt;flags |= ER_FLAG_DVALUES_ALLOCED;</span>
+<span class="lineNum">    1180 </span>            : 
+<span class="lineNum">    1181 </span>            :         /*
+<span class="lineNum">    1182 </span>            :          * While we're here, note whether it's an external toasted value,
+<span class="lineNum">    1183 </span>            :          * because that could mean we need to inline it later.  (Think not to
+<span class="lineNum">    1184 </span>            :          * merge this into the previous expand_external logic: datumCopy could
+<span class="lineNum">    1185 </span>            :          * by itself have made the value non-external.)
+<span class="lineNum">    1186 </span>            :          */
+<span class="lineNum">    1187 </span><span class="lineCov">        320 :         if (attr-&gt;attlen == -1 &amp;&amp;</span>
+<span class="lineNum">    1188 </span><span class="lineCov">        160 :             VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))</span>
+<span class="lineNum">    1189 </span><span class="lineNoCov">          0 :             erh-&gt;flags |= ER_FLAG_HAVE_EXTERNAL;</span>
+<span class="lineNum">    1190 </span>            :     }
+<span class="lineNum">    1191 </span>            : 
+<span class="lineNum">    1192 </span>            :     /*
+<span class="lineNum">    1193 </span>            :      * We're ready to make irreversible changes.
+<span class="lineNum">    1194 </span>            :      */
+<span class="lineNum">    1195 </span><span class="lineCov">        372 :     dvalues = erh-&gt;dvalues;</span>
+<span class="lineNum">    1196 </span><span class="lineCov">        372 :     dnulls = erh-&gt;dnulls;</span>
+<span class="lineNum">    1197 </span>            : 
+<span class="lineNum">    1198 </span>            :     /* Flattened value will no longer represent record accurately */
+<span class="lineNum">    1199 </span><span class="lineCov">        372 :     erh-&gt;flags &amp;= ~ER_FLAG_FVALUE_VALID;</span>
+<span class="lineNum">    1200 </span>            :     /* And we don't know the flattened size either */
+<span class="lineNum">    1201 </span><span class="lineCov">        372 :     erh-&gt;flat_size = 0;</span>
+<span class="lineNum">    1202 </span>            : 
+<span class="lineNum">    1203 </span>            :     /* Grab old field value for pfree'ing, if needed. */
+<span class="lineNum">    1204 </span><span class="lineCov">        372 :     if (!attr-&gt;attbyval &amp;&amp; !dnulls[fnumber - 1])</span>
+<span class="lineNum">    1205 </span><span class="lineCov">        132 :         oldValue = (char *) DatumGetPointer(dvalues[fnumber - 1]);</span>
+<span class="lineNum">    1206 </span>            :     else
+<span class="lineNum">    1207 </span><span class="lineCov">        240 :         oldValue = NULL;</span>
+<span class="lineNum">    1208 </span>            : 
+<span class="lineNum">    1209 </span>            :     /* And finally we can insert the new field. */
+<span class="lineNum">    1210 </span><span class="lineCov">        372 :     dvalues[fnumber - 1] = newValue;</span>
+<span class="lineNum">    1211 </span><span class="lineCov">        372 :     dnulls[fnumber - 1] = isnull;</span>
+<span class="lineNum">    1212 </span>            : 
+<span class="lineNum">    1213 </span>            :     /*
+<span class="lineNum">    1214 </span>            :      * Free old field if needed; this keeps repeated field replacements from
+<span class="lineNum">    1215 </span>            :      * bloating the record's storage.  If the pfree somehow fails, it won't
+<span class="lineNum">    1216 </span>            :      * corrupt the record.
+<span class="lineNum">    1217 </span>            :      *
+<span class="lineNum">    1218 </span>            :      * If we're updating a dummy header, we can't risk pfree'ing the old
+<span class="lineNum">    1219 </span>            :      * value, because most likely the expanded record's main header still has
+<span class="lineNum">    1220 </span>            :      * a pointer to it.  This won't result in any sustained memory leak, since
+<span class="lineNum">    1221 </span>            :      * whatever we just allocated here is in the short-lived domain check
+<span class="lineNum">    1222 </span>            :      * context.
+<span class="lineNum">    1223 </span>            :      */
+<span class="lineNum">    1224 </span><span class="lineCov">        372 :     if (oldValue &amp;&amp; !(erh-&gt;flags &amp; ER_FLAG_IS_DUMMY))</span>
+<span class="lineNum">    1225 </span>            :     {
+<span class="lineNum">    1226 </span>            :         /* Don't try to pfree a part of the original flat record */
+<span class="lineNum">    1227 </span><span class="lineCov">        132 :         if (oldValue &lt; erh-&gt;fstartptr || oldValue &gt;= erh-&gt;fendptr)</span>
+<span class="lineNum">    1228 </span><span class="lineNoCov">          0 :             pfree(oldValue);</span>
+<span class="lineNum">    1229 </span>            :     }
+<span class="lineNum">    1230 </span><span class="lineCov">        372 : }</span>
+<span class="lineNum">    1231 </span>            : 
+<span class="lineNum">    1232 </span>            : /*
+<span class="lineNum">    1233 </span>            :  * Set all record field(s)
+<span class="lineNum">    1234 </span>            :  *
+<span class="lineNum">    1235 </span>            :  * Caller must ensure that the provided datums are of the right types
+<span class="lineNum">    1236 </span>            :  * to match the record's previously assigned rowtype.
+<span class="lineNum">    1237 </span>            :  *
+<span class="lineNum">    1238 </span>            :  * If expand_external is true, we'll forcibly detoast out-of-line field values
+<span class="lineNum">    1239 </span>            :  * so that the record does not depend on external storage.
+<span class="lineNum">    1240 </span>            :  *
+<span class="lineNum">    1241 </span>            :  * Unlike repeated application of expanded_record_set_field(), this does not
+<span class="lineNum">    1242 </span>            :  * guarantee to leave the expanded record in a non-corrupt state in event
+<span class="lineNum">    1243 </span>            :  * of an error.  Typically it would only be used for initializing a new
+<span class="lineNum">    1244 </span>            :  * expanded record.  Also, because we expect this to be applied at most once
+<span class="lineNum">    1245 </span>            :  * in the lifespan of an expanded record, we do not worry about any cruft
+<span class="lineNum">    1246 </span>            :  * that detoasting might leak.
+<a name="1247"><span class="lineNum">    1247 </span>            :  */</a>
+<span class="lineNum">    1248 </span>            : void
+<span class="lineNum">    1249 </span><span class="lineCov">          6 : expanded_record_set_fields(ExpandedRecordHeader *erh,</span>
+<span class="lineNum">    1250 </span>            :                            const Datum *newValues, const bool *isnulls,
+<span class="lineNum">    1251 </span>            :                            bool expand_external)
+<span class="lineNum">    1252 </span>            : {
+<span class="lineNum">    1253 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">    1254 </span>            :     Datum      *dvalues;
+<span class="lineNum">    1255 </span>            :     bool       *dnulls;
+<span class="lineNum">    1256 </span>            :     int         fnumber;
+<span class="lineNum">    1257 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">    1258 </span>            : 
+<span class="lineNum">    1259 </span>            :     /* Shouldn't ever be trying to assign new data to a dummy header */
+<span class="lineNum">    1260 </span><span class="lineCov">          6 :     Assert(!(erh-&gt;flags &amp; ER_FLAG_IS_DUMMY));</span>
+<span class="lineNum">    1261 </span>            : 
+<span class="lineNum">    1262 </span>            :     /* If we haven't yet deconstructed the tuple, do that */
+<span class="lineNum">    1263 </span><span class="lineCov">          6 :     if (!(erh-&gt;flags &amp; ER_FLAG_DVALUES_VALID))</span>
+<span class="lineNum">    1264 </span><span class="lineCov">          6 :         deconstruct_expanded_record(erh);</span>
+<span class="lineNum">    1265 </span>            : 
+<span class="lineNum">    1266 </span>            :     /* Tuple descriptor must be valid by now */
+<span class="lineNum">    1267 </span><span class="lineCov">          6 :     tupdesc = erh-&gt;er_tupdesc;</span>
+<span class="lineNum">    1268 </span><span class="lineCov">          6 :     Assert(erh-&gt;nfields == tupdesc-&gt;natts);</span>
+<span class="lineNum">    1269 </span>            : 
+<span class="lineNum">    1270 </span>            :     /* Flattened value will no longer represent record accurately */
+<span class="lineNum">    1271 </span><span class="lineCov">          6 :     erh-&gt;flags &amp;= ~ER_FLAG_FVALUE_VALID;</span>
+<span class="lineNum">    1272 </span>            :     /* And we don't know the flattened size either */
+<span class="lineNum">    1273 </span><span class="lineCov">          6 :     erh-&gt;flat_size = 0;</span>
+<span class="lineNum">    1274 </span>            : 
+<span class="lineNum">    1275 </span><span class="lineCov">          6 :     oldcxt = MemoryContextSwitchTo(erh-&gt;hdr.eoh_context);</span>
+<span class="lineNum">    1276 </span>            : 
+<span class="lineNum">    1277 </span><span class="lineCov">          6 :     dvalues = erh-&gt;dvalues;</span>
+<span class="lineNum">    1278 </span><span class="lineCov">          6 :     dnulls = erh-&gt;dnulls;</span>
+<span class="lineNum">    1279 </span>            : 
+<span class="lineNum">    1280 </span><span class="lineCov">         20 :     for (fnumber = 0; fnumber &lt; erh-&gt;nfields; fnumber++)</span>
+<span class="lineNum">    1281 </span>            :     {
+<span class="lineNum">    1282 </span><span class="lineCov">         14 :         Form_pg_attribute attr = TupleDescAttr(tupdesc, fnumber);</span>
+<span class="lineNum">    1283 </span>            :         Datum       newValue;
+<span class="lineNum">    1284 </span>            :         bool        isnull;
+<span class="lineNum">    1285 </span>            : 
+<span class="lineNum">    1286 </span>            :         /* Ignore dropped columns */
+<span class="lineNum">    1287 </span><span class="lineCov">         14 :         if (attr-&gt;attisdropped)</span>
+<span class="lineNum">    1288 </span><span class="lineCov">          2 :             continue;</span>
+<span class="lineNum">    1289 </span>            : 
+<span class="lineNum">    1290 </span><span class="lineCov">         12 :         newValue = newValues[fnumber];</span>
+<span class="lineNum">    1291 </span><span class="lineCov">         12 :         isnull = isnulls[fnumber];</span>
+<span class="lineNum">    1292 </span>            : 
+<span class="lineNum">    1293 </span><span class="lineCov">         12 :         if (!attr-&gt;attbyval)</span>
+<span class="lineNum">    1294 </span>            :         {
+<span class="lineNum">    1295 </span>            :             /*
+<span class="lineNum">    1296 </span>            :              * Copy new field value into record's context, and deal with
+<span class="lineNum">    1297 </span>            :              * detoasting, if needed.
+<span class="lineNum">    1298 </span>            :              */
+<span class="lineNum">    1299 </span><span class="lineCov">          4 :             if (!isnull)</span>
+<span class="lineNum">    1300 </span>            :             {
+<span class="lineNum">    1301 </span>            :                 /* Is it an external toasted value? */
+<span class="lineNum">    1302 </span><span class="lineCov">          8 :                 if (attr-&gt;attlen == -1 &amp;&amp;</span>
+<span class="lineNum">    1303 </span><span class="lineCov">          4 :                     VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))</span>
+<span class="lineNum">    1304 </span>            :                 {
+<span class="lineNum">    1305 </span><span class="lineNoCov">          0 :                     if (expand_external)</span>
+<span class="lineNum">    1306 </span>            :                     {
+<span class="lineNum">    1307 </span>            :                         /* Detoast as requested while copying the value */
+<span class="lineNum">    1308 </span><span class="lineNoCov">          0 :                         newValue = PointerGetDatum(detoast_external_attr((struct varlena *) DatumGetPointer(newValue)));</span>
+<span class="lineNum">    1309 </span>            :                     }
+<span class="lineNum">    1310 </span>            :                     else
+<span class="lineNum">    1311 </span>            :                     {
+<span class="lineNum">    1312 </span>            :                         /* Just copy the value */
+<span class="lineNum">    1313 </span><span class="lineNoCov">          0 :                         newValue = datumCopy(newValue, false, -1);</span>
+<span class="lineNum">    1314 </span>            :                         /* If it's still external, remember that */
+<span class="lineNum">    1315 </span><span class="lineNoCov">          0 :                         if (VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))</span>
+<span class="lineNum">    1316 </span><span class="lineNoCov">          0 :                             erh-&gt;flags |= ER_FLAG_HAVE_EXTERNAL;</span>
+<span class="lineNum">    1317 </span>            :                     }
+<span class="lineNum">    1318 </span>            :                 }
+<span class="lineNum">    1319 </span>            :                 else
+<span class="lineNum">    1320 </span>            :                 {
+<span class="lineNum">    1321 </span>            :                     /* Not an external value, just copy it */
+<span class="lineNum">    1322 </span><span class="lineCov">          4 :                     newValue = datumCopy(newValue, false, attr-&gt;attlen);</span>
+<span class="lineNum">    1323 </span>            :                 }
+<span class="lineNum">    1324 </span>            : 
+<span class="lineNum">    1325 </span>            :                 /* Remember that we have field(s) that need to be pfree'd */
+<span class="lineNum">    1326 </span><span class="lineCov">          4 :                 erh-&gt;flags |= ER_FLAG_DVALUES_ALLOCED;</span>
+<span class="lineNum">    1327 </span>            :             }
+<span class="lineNum">    1328 </span>            : 
+<span class="lineNum">    1329 </span>            :             /*
+<span class="lineNum">    1330 </span>            :              * Free old field value, if any (not likely, since really we ought
+<span class="lineNum">    1331 </span>            :              * to be inserting into an empty record).
+<span class="lineNum">    1332 </span>            :              */
+<span class="lineNum">    1333 </span><span class="lineCov">          4 :             if (unlikely(!dnulls[fnumber]))</span>
+<span class="lineNum">    1334 </span>            :             {
+<span class="lineNum">    1335 </span>            :                 char       *oldValue;
+<span class="lineNum">    1336 </span>            : 
+<span class="lineNum">    1337 </span><span class="lineNoCov">          0 :                 oldValue = (char *) DatumGetPointer(dvalues[fnumber]);</span>
+<span class="lineNum">    1338 </span>            :                 /* Don't try to pfree a part of the original flat record */
+<span class="lineNum">    1339 </span><span class="lineNoCov">          0 :                 if (oldValue &lt; erh-&gt;fstartptr || oldValue &gt;= erh-&gt;fendptr)</span>
+<span class="lineNum">    1340 </span><span class="lineNoCov">          0 :                     pfree(oldValue);</span>
+<span class="lineNum">    1341 </span>            :             }
+<span class="lineNum">    1342 </span>            :         }
+<span class="lineNum">    1343 </span>            : 
+<span class="lineNum">    1344 </span>            :         /* And finally we can insert the new field. */
+<span class="lineNum">    1345 </span><span class="lineCov">         12 :         dvalues[fnumber] = newValue;</span>
+<span class="lineNum">    1346 </span><span class="lineCov">         12 :         dnulls[fnumber] = isnull;</span>
+<span class="lineNum">    1347 </span>            :     }
+<span class="lineNum">    1348 </span>            : 
+<span class="lineNum">    1349 </span>            :     /*
+<span class="lineNum">    1350 </span>            :      * Because we don't guarantee atomicity of set_fields(), we can just leave
+<span class="lineNum">    1351 </span>            :      * checking of domain constraints to occur as the final step; if it throws
+<span class="lineNum">    1352 </span>            :      * an error, too bad.
+<span class="lineNum">    1353 </span>            :      */
+<span class="lineNum">    1354 </span><span class="lineCov">          6 :     if (erh-&gt;flags &amp; ER_FLAG_IS_DOMAIN)</span>
+<span class="lineNum">    1355 </span>            :     {
+<span class="lineNum">    1356 </span>            :         /* We run domain_check in a short-lived context to limit cruft */
+<span class="lineNum">    1357 </span><span class="lineNoCov">          0 :         MemoryContextSwitchTo(get_short_term_cxt(erh));</span>
+<span class="lineNum">    1358 </span>            : 
+<span class="lineNum">    1359 </span><span class="lineNoCov">          0 :         domain_check(ExpandedRecordGetRODatum(erh), false,</span>
+<span class="lineNum">    1360 </span>            :                      erh-&gt;er_decltypeid,
+<span class="lineNum">    1361 </span>            :                      &amp;erh-&gt;er_domaininfo,
+<span class="lineNum">    1362 </span>            :                      erh-&gt;hdr.eoh_context);
+<span class="lineNum">    1363 </span>            :     }
+<span class="lineNum">    1364 </span>            : 
+<span class="lineNum">    1365 </span><span class="lineCov">          6 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1366 </span><span class="lineCov">          6 : }</span>
+<span class="lineNum">    1367 </span>            : 
+<span class="lineNum">    1368 </span>            : /*
+<span class="lineNum">    1369 </span>            :  * Construct (or reset) working memory context for short-term operations.
+<span class="lineNum">    1370 </span>            :  *
+<span class="lineNum">    1371 </span>            :  * This context is used for domain check evaluation and for detoasting.
+<span class="lineNum">    1372 </span>            :  *
+<span class="lineNum">    1373 </span>            :  * If we don't have a short-lived memory context, make one; if we have one,
+<span class="lineNum">    1374 </span>            :  * reset it to get rid of any leftover cruft.  (It is a tad annoying to need a
+<span class="lineNum">    1375 </span>            :  * whole context for this, since it will often go unused --- but it's hard to
+<span class="lineNum">    1376 </span>            :  * avoid memory leaks otherwise.  We can make the context small, at least.)
+<a name="1377"><span class="lineNum">    1377 </span>            :  */</a>
+<span class="lineNum">    1378 </span>            : static MemoryContext
+<span class="lineNum">    1379 </span><span class="lineCov">         20 : get_short_term_cxt(ExpandedRecordHeader *erh)</span>
+<span class="lineNum">    1380 </span>            : {
+<span class="lineNum">    1381 </span><span class="lineCov">         20 :     if (erh-&gt;er_short_term_cxt == NULL)</span>
+<span class="lineNum">    1382 </span><span class="lineCov">         16 :         erh-&gt;er_short_term_cxt =</span>
+<span class="lineNum">    1383 </span><span class="lineCov">         16 :             AllocSetContextCreate(erh-&gt;hdr.eoh_context,</span>
+<span class="lineNum">    1384 </span>            :                                   &quot;expanded record short-term context&quot;,
+<span class="lineNum">    1385 </span>            :                                   ALLOCSET_SMALL_SIZES);
+<span class="lineNum">    1386 </span>            :     else
+<span class="lineNum">    1387 </span><span class="lineCov">          4 :         MemoryContextReset(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1388 </span><span class="lineCov">         20 :     return erh-&gt;er_short_term_cxt;</span>
+<span class="lineNum">    1389 </span>            : }
+<span class="lineNum">    1390 </span>            : 
+<span class="lineNum">    1391 </span>            : /*
+<span class="lineNum">    1392 </span>            :  * Construct &quot;dummy header&quot; for checking domain constraints.
+<span class="lineNum">    1393 </span>            :  *
+<span class="lineNum">    1394 </span>            :  * Since we don't want to modify the state of the expanded record until
+<span class="lineNum">    1395 </span>            :  * we've validated the constraints, our approach is to set up a dummy
+<span class="lineNum">    1396 </span>            :  * record header containing the new field value(s) and then pass that to
+<span class="lineNum">    1397 </span>            :  * domain_check.  We retain the dummy header as part of the expanded
+<span class="lineNum">    1398 </span>            :  * record's state to save palloc cycles, but reinitialize (most of)
+<span class="lineNum">    1399 </span>            :  * its contents on each use.
+<a name="1400"><span class="lineNum">    1400 </span>            :  */</a>
+<span class="lineNum">    1401 </span>            : static void
+<span class="lineNum">    1402 </span><span class="lineNoCov">          0 : build_dummy_expanded_header(ExpandedRecordHeader *main_erh)</span>
+<span class="lineNum">    1403 </span>            : {
+<span class="lineNum">    1404 </span>            :     ExpandedRecordHeader *erh;
+<span class="lineNum">    1405 </span><span class="lineNoCov">          0 :     TupleDesc   tupdesc = expanded_record_get_tupdesc(main_erh);</span>
+<span class="lineNum">    1406 </span>            : 
+<span class="lineNum">    1407 </span>            :     /* Ensure we have a short-lived context */
+<span class="lineNum">    1408 </span><span class="lineNoCov">          0 :     (void) get_short_term_cxt(main_erh);</span>
+<span class="lineNum">    1409 </span>            : 
+<span class="lineNum">    1410 </span>            :     /*
+<span class="lineNum">    1411 </span>            :      * Allocate dummy header on first time through, or in the unlikely event
+<span class="lineNum">    1412 </span>            :      * that the number of fields changes (in which case we just leak the old
+<span class="lineNum">    1413 </span>            :      * one).  Include space for its field values in the request.
+<span class="lineNum">    1414 </span>            :      */
+<span class="lineNum">    1415 </span><span class="lineNoCov">          0 :     erh = main_erh-&gt;er_dummy_header;</span>
+<span class="lineNum">    1416 </span><span class="lineNoCov">          0 :     if (erh == NULL || erh-&gt;nfields != tupdesc-&gt;natts)</span>
+<span class="lineNum">    1417 </span>            :     {
+<span class="lineNum">    1418 </span>            :         char       *chunk;
+<span class="lineNum">    1419 </span>            : 
+<span class="lineNum">    1420 </span><span class="lineNoCov">          0 :         erh = (ExpandedRecordHeader *)</span>
+<span class="lineNum">    1421 </span><span class="lineNoCov">          0 :             MemoryContextAlloc(main_erh-&gt;hdr.eoh_context,</span>
+<span class="lineNum">    1422 </span>            :                                MAXALIGN(sizeof(ExpandedRecordHeader))
+<span class="lineNum">    1423 </span><span class="lineNoCov">          0 :                                + tupdesc-&gt;natts * (sizeof(Datum) + sizeof(bool)));</span>
+<span class="lineNum">    1424 </span>            : 
+<span class="lineNum">    1425 </span>            :         /* Ensure all header fields are initialized to 0/null */
+<span class="lineNum">    1426 </span><span class="lineNoCov">          0 :         memset(erh, 0, sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">    1427 </span>            : 
+<span class="lineNum">    1428 </span>            :         /*
+<span class="lineNum">    1429 </span>            :          * We set up the dummy header with an indication that its memory
+<span class="lineNum">    1430 </span>            :          * context is the short-lived context.  This is so that, if any
+<span class="lineNum">    1431 </span>            :          * detoasting of out-of-line values happens due to an attempt to
+<span class="lineNum">    1432 </span>            :          * extract a composite datum from the dummy header, the detoasted
+<span class="lineNum">    1433 </span>            :          * stuff will end up in the short-lived context and not cause a leak.
+<span class="lineNum">    1434 </span>            :          * This is cheating a bit on the expanded-object protocol; but since
+<span class="lineNum">    1435 </span>            :          * we never pass a R/W pointer to the dummy object to any other code,
+<span class="lineNum">    1436 </span>            :          * nothing else is authorized to delete or transfer ownership of the
+<span class="lineNum">    1437 </span>            :          * object's context, so it should be safe enough.
+<span class="lineNum">    1438 </span>            :          */
+<span class="lineNum">    1439 </span><span class="lineNoCov">          0 :         EOH_init_header(&amp;erh-&gt;hdr, &amp;ER_methods, main_erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1440 </span><span class="lineNoCov">          0 :         erh-&gt;er_magic = ER_MAGIC;</span>
+<span class="lineNum">    1441 </span>            : 
+<span class="lineNum">    1442 </span>            :         /* Set up dvalues/dnulls, with no valid contents as yet */
+<span class="lineNum">    1443 </span><span class="lineNoCov">          0 :         chunk = (char *) erh + MAXALIGN(sizeof(ExpandedRecordHeader));</span>
+<span class="lineNum">    1444 </span><span class="lineNoCov">          0 :         erh-&gt;dvalues = (Datum *) chunk;</span>
+<span class="lineNum">    1445 </span><span class="lineNoCov">          0 :         erh-&gt;dnulls = (bool *) (chunk + tupdesc-&gt;natts * sizeof(Datum));</span>
+<span class="lineNum">    1446 </span><span class="lineNoCov">          0 :         erh-&gt;nfields = tupdesc-&gt;natts;</span>
+<span class="lineNum">    1447 </span>            : 
+<span class="lineNum">    1448 </span>            :         /*
+<span class="lineNum">    1449 </span>            :          * The fields we just set are assumed to remain constant through
+<span class="lineNum">    1450 </span>            :          * multiple uses of the dummy header to check domain constraints.  All
+<span class="lineNum">    1451 </span>            :          * other dummy header fields should be explicitly reset below, to
+<span class="lineNum">    1452 </span>            :          * ensure there's not accidental effects of one check on the next one.
+<span class="lineNum">    1453 </span>            :          */
+<span class="lineNum">    1454 </span>            : 
+<span class="lineNum">    1455 </span><span class="lineNoCov">          0 :         main_erh-&gt;er_dummy_header = erh;</span>
+<span class="lineNum">    1456 </span>            :     }
+<span class="lineNum">    1457 </span>            : 
+<span class="lineNum">    1458 </span>            :     /*
+<span class="lineNum">    1459 </span>            :      * If anything inquires about the dummy header's declared type, it should
+<span class="lineNum">    1460 </span>            :      * report the composite base type, not the domain type (since the VALUE in
+<span class="lineNum">    1461 </span>            :      * a domain check constraint is of the base type not the domain).  Hence
+<span class="lineNum">    1462 </span>            :      * we do not transfer over the IS_DOMAIN flag, nor indeed any of the main
+<span class="lineNum">    1463 </span>            :      * header's flags, since the dummy header is empty of data at this point.
+<span class="lineNum">    1464 </span>            :      * But don't forget to mark header as dummy.
+<span class="lineNum">    1465 </span>            :      */
+<span class="lineNum">    1466 </span><span class="lineNoCov">          0 :     erh-&gt;flags = ER_FLAG_IS_DUMMY;</span>
+<span class="lineNum">    1467 </span>            : 
+<span class="lineNum">    1468 </span>            :     /* Copy composite-type identification info */
+<span class="lineNum">    1469 </span><span class="lineNoCov">          0 :     erh-&gt;er_decltypeid = erh-&gt;er_typeid = main_erh-&gt;er_typeid;</span>
+<span class="lineNum">    1470 </span><span class="lineNoCov">          0 :     erh-&gt;er_typmod = main_erh-&gt;er_typmod;</span>
+<span class="lineNum">    1471 </span>            : 
+<span class="lineNum">    1472 </span>            :     /* Dummy header does not need its own tupdesc refcount */
+<span class="lineNum">    1473 </span><span class="lineNoCov">          0 :     erh-&gt;er_tupdesc = tupdesc;</span>
+<span class="lineNum">    1474 </span><span class="lineNoCov">          0 :     erh-&gt;er_tupdesc_id = main_erh-&gt;er_tupdesc_id;</span>
+<span class="lineNum">    1475 </span>            : 
+<span class="lineNum">    1476 </span>            :     /*
+<span class="lineNum">    1477 </span>            :      * It's tempting to copy over whatever we know about the flat size, but
+<span class="lineNum">    1478 </span>            :      * there's no point since we're surely about to modify the dummy record's
+<span class="lineNum">    1479 </span>            :      * field(s).  Instead just clear anything left over from a previous usage
+<span class="lineNum">    1480 </span>            :      * cycle.
+<span class="lineNum">    1481 </span>            :      */
+<span class="lineNum">    1482 </span><span class="lineNoCov">          0 :     erh-&gt;flat_size = 0;</span>
+<span class="lineNum">    1483 </span>            : 
+<span class="lineNum">    1484 </span>            :     /* Copy over fvalue if we have it, so that system columns are available */
+<span class="lineNum">    1485 </span><span class="lineNoCov">          0 :     erh-&gt;fvalue = main_erh-&gt;fvalue;</span>
+<span class="lineNum">    1486 </span><span class="lineNoCov">          0 :     erh-&gt;fstartptr = main_erh-&gt;fstartptr;</span>
+<span class="lineNum">    1487 </span><span class="lineNoCov">          0 :     erh-&gt;fendptr = main_erh-&gt;fendptr;</span>
+<span class="lineNum">    1488 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1489 </span>            : 
+<span class="lineNum">    1490 </span>            : /*
+<span class="lineNum">    1491 </span>            :  * Precheck domain constraints for a set_field operation
+<a name="1492"><span class="lineNum">    1492 </span>            :  */</a>
+<span class="lineNum">    1493 </span>            : static pg_noinline void
+<span class="lineNum">    1494 </span><span class="lineNoCov">          0 : check_domain_for_new_field(ExpandedRecordHeader *erh, int fnumber,</span>
+<span class="lineNum">    1495 </span>            :                            Datum newValue, bool isnull)
+<span class="lineNum">    1496 </span>            : {
+<span class="lineNum">    1497 </span>            :     ExpandedRecordHeader *dummy_erh;
+<span class="lineNum">    1498 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">    1499 </span>            : 
+<span class="lineNum">    1500 </span>            :     /* Construct dummy header to contain proposed new field set */
+<span class="lineNum">    1501 </span><span class="lineNoCov">          0 :     build_dummy_expanded_header(erh);</span>
+<span class="lineNum">    1502 </span><span class="lineNoCov">          0 :     dummy_erh = erh-&gt;er_dummy_header;</span>
+<span class="lineNum">    1503 </span>            : 
+<span class="lineNum">    1504 </span>            :     /*
+<span class="lineNum">    1505 </span>            :      * If record isn't empty, just deconstruct it (if needed) and copy over
+<span class="lineNum">    1506 </span>            :      * the existing field values.  If it is empty, just fill fields with nulls
+<span class="lineNum">    1507 </span>            :      * manually --- don't call deconstruct_expanded_record prematurely.
+<span class="lineNum">    1508 </span>            :      */
+<span class="lineNum">    1509 </span><span class="lineNoCov">          0 :     if (!ExpandedRecordIsEmpty(erh))</span>
+<span class="lineNum">    1510 </span>            :     {
+<span class="lineNum">    1511 </span><span class="lineNoCov">          0 :         deconstruct_expanded_record(erh);</span>
+<span class="lineNum">    1512 </span><span class="lineNoCov">          0 :         memcpy(dummy_erh-&gt;dvalues, erh-&gt;dvalues,</span>
+<span class="lineNum">    1513 </span><span class="lineNoCov">          0 :                dummy_erh-&gt;nfields * sizeof(Datum));</span>
+<span class="lineNum">    1514 </span><span class="lineNoCov">          0 :         memcpy(dummy_erh-&gt;dnulls, erh-&gt;dnulls,</span>
+<span class="lineNum">    1515 </span><span class="lineNoCov">          0 :                dummy_erh-&gt;nfields * sizeof(bool));</span>
+<span class="lineNum">    1516 </span>            :         /* There might be some external values in there... */
+<span class="lineNum">    1517 </span><span class="lineNoCov">          0 :         dummy_erh-&gt;flags |= erh-&gt;flags &amp; ER_FLAG_HAVE_EXTERNAL;</span>
+<span class="lineNum">    1518 </span>            :     }
+<span class="lineNum">    1519 </span>            :     else
+<span class="lineNum">    1520 </span>            :     {
+<span class="lineNum">    1521 </span><span class="lineNoCov">          0 :         memset(dummy_erh-&gt;dvalues, 0, dummy_erh-&gt;nfields * sizeof(Datum));</span>
+<span class="lineNum">    1522 </span><span class="lineNoCov">          0 :         memset(dummy_erh-&gt;dnulls, true, dummy_erh-&gt;nfields * sizeof(bool));</span>
+<span class="lineNum">    1523 </span>            :     }
+<span class="lineNum">    1524 </span>            : 
+<span class="lineNum">    1525 </span>            :     /* Either way, we now have valid dvalues */
+<span class="lineNum">    1526 </span><span class="lineNoCov">          0 :     dummy_erh-&gt;flags |= ER_FLAG_DVALUES_VALID;</span>
+<span class="lineNum">    1527 </span>            : 
+<span class="lineNum">    1528 </span>            :     /* Caller error if fnumber is system column or nonexistent column */
+<span class="lineNum">    1529 </span><span class="lineNoCov">          0 :     if (unlikely(fnumber &lt;= 0 || fnumber &gt; dummy_erh-&gt;nfields))</span>
+<span class="lineNum">    1530 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot assign to field %d of expanded record&quot;, fnumber);</span>
+<span class="lineNum">    1531 </span>            : 
+<span class="lineNum">    1532 </span>            :     /* Insert proposed new value into dummy field array */
+<span class="lineNum">    1533 </span><span class="lineNoCov">          0 :     dummy_erh-&gt;dvalues[fnumber - 1] = newValue;</span>
+<span class="lineNum">    1534 </span><span class="lineNoCov">          0 :     dummy_erh-&gt;dnulls[fnumber - 1] = isnull;</span>
+<span class="lineNum">    1535 </span>            : 
+<span class="lineNum">    1536 </span>            :     /*
+<span class="lineNum">    1537 </span>            :      * The proposed new value might be external, in which case we'd better set
+<span class="lineNum">    1538 </span>            :      * the flag for that in dummy_erh.  (This matters in case something in the
+<span class="lineNum">    1539 </span>            :      * domain check expressions tries to extract a flat value from the dummy
+<span class="lineNum">    1540 </span>            :      * header.)
+<span class="lineNum">    1541 </span>            :      */
+<span class="lineNum">    1542 </span><span class="lineNoCov">          0 :     if (!isnull)</span>
+<span class="lineNum">    1543 </span>            :     {
+<span class="lineNum">    1544 </span><span class="lineNoCov">          0 :         Form_pg_attribute attr = TupleDescAttr(erh-&gt;er_tupdesc, fnumber - 1);</span>
+<span class="lineNum">    1545 </span>            : 
+<span class="lineNum">    1546 </span><span class="lineNoCov">          0 :         if (!attr-&gt;attbyval &amp;&amp; attr-&gt;attlen == -1 &amp;&amp;</span>
+<span class="lineNum">    1547 </span><span class="lineNoCov">          0 :             VARATT_IS_EXTERNAL(DatumGetPointer(newValue)))</span>
+<span class="lineNum">    1548 </span><span class="lineNoCov">          0 :             dummy_erh-&gt;flags |= ER_FLAG_HAVE_EXTERNAL;</span>
+<span class="lineNum">    1549 </span>            :     }
+<span class="lineNum">    1550 </span>            : 
+<span class="lineNum">    1551 </span>            :     /*
+<span class="lineNum">    1552 </span>            :      * We call domain_check in the short-lived context, so that any cruft
+<span class="lineNum">    1553 </span>            :      * leaked by expression evaluation can be reclaimed.
+<span class="lineNum">    1554 </span>            :      */
+<span class="lineNum">    1555 </span><span class="lineNoCov">          0 :     oldcxt = MemoryContextSwitchTo(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1556 </span>            : 
+<span class="lineNum">    1557 </span>            :     /*
+<span class="lineNum">    1558 </span>            :      * And now we can apply the check.  Note we use main header's domain cache
+<span class="lineNum">    1559 </span>            :      * space, so that caching carries across repeated uses.
+<span class="lineNum">    1560 </span>            :      */
+<span class="lineNum">    1561 </span><span class="lineNoCov">          0 :     domain_check(ExpandedRecordGetRODatum(dummy_erh), false,</span>
+<span class="lineNum">    1562 </span>            :                  erh-&gt;er_decltypeid,
+<span class="lineNum">    1563 </span>            :                  &amp;erh-&gt;er_domaininfo,
+<span class="lineNum">    1564 </span>            :                  erh-&gt;hdr.eoh_context);
+<span class="lineNum">    1565 </span>            : 
+<span class="lineNum">    1566 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1567 </span>            : 
+<span class="lineNum">    1568 </span>            :     /* We might as well clean up cruft immediately. */
+<span class="lineNum">    1569 </span><span class="lineNoCov">          0 :     MemoryContextReset(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1570 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1571 </span>            : 
+<span class="lineNum">    1572 </span>            : /*
+<span class="lineNum">    1573 </span>            :  * Precheck domain constraints for a set_tuple operation
+<a name="1574"><span class="lineNum">    1574 </span>            :  */</a>
+<span class="lineNum">    1575 </span>            : static pg_noinline void
+<span class="lineNum">    1576 </span><span class="lineNoCov">          0 : check_domain_for_new_tuple(ExpandedRecordHeader *erh, HeapTuple tuple)</span>
+<span class="lineNum">    1577 </span>            : {
+<span class="lineNum">    1578 </span>            :     ExpandedRecordHeader *dummy_erh;
+<span class="lineNum">    1579 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">    1580 </span>            : 
+<span class="lineNum">    1581 </span>            :     /* If we're being told to set record to empty, just see if NULL is OK */
+<span class="lineNum">    1582 </span><span class="lineNoCov">          0 :     if (tuple == NULL)</span>
+<span class="lineNum">    1583 </span>            :     {
+<span class="lineNum">    1584 </span>            :         /* We run domain_check in a short-lived context to limit cruft */
+<span class="lineNum">    1585 </span><span class="lineNoCov">          0 :         oldcxt = MemoryContextSwitchTo(get_short_term_cxt(erh));</span>
+<span class="lineNum">    1586 </span>            : 
+<span class="lineNum">    1587 </span><span class="lineNoCov">          0 :         domain_check((Datum) 0, true,</span>
+<span class="lineNum">    1588 </span>            :                      erh-&gt;er_decltypeid,
+<span class="lineNum">    1589 </span>            :                      &amp;erh-&gt;er_domaininfo,
+<span class="lineNum">    1590 </span>            :                      erh-&gt;hdr.eoh_context);
+<span class="lineNum">    1591 </span>            : 
+<span class="lineNum">    1592 </span><span class="lineNoCov">          0 :         MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1593 </span>            : 
+<span class="lineNum">    1594 </span>            :         /* We might as well clean up cruft immediately. */
+<span class="lineNum">    1595 </span><span class="lineNoCov">          0 :         MemoryContextReset(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1596 </span>            : 
+<span class="lineNum">    1597 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1598 </span>            :     }
+<span class="lineNum">    1599 </span>            : 
+<span class="lineNum">    1600 </span>            :     /* Construct dummy header to contain replacement tuple */
+<span class="lineNum">    1601 </span><span class="lineNoCov">          0 :     build_dummy_expanded_header(erh);</span>
+<span class="lineNum">    1602 </span><span class="lineNoCov">          0 :     dummy_erh = erh-&gt;er_dummy_header;</span>
+<span class="lineNum">    1603 </span>            : 
+<span class="lineNum">    1604 </span>            :     /* Insert tuple, but don't bother to deconstruct its fields for now */
+<span class="lineNum">    1605 </span><span class="lineNoCov">          0 :     dummy_erh-&gt;fvalue = tuple;</span>
+<span class="lineNum">    1606 </span><span class="lineNoCov">          0 :     dummy_erh-&gt;fstartptr = (char *) tuple-&gt;t_data;</span>
+<span class="lineNum">    1607 </span><span class="lineNoCov">          0 :     dummy_erh-&gt;fendptr = ((char *) tuple-&gt;t_data) + tuple-&gt;t_len;</span>
+<span class="lineNum">    1608 </span><span class="lineNoCov">          0 :     dummy_erh-&gt;flags |= ER_FLAG_FVALUE_VALID;</span>
+<span class="lineNum">    1609 </span>            : 
+<span class="lineNum">    1610 </span>            :     /* Remember if we have any out-of-line field values */
+<span class="lineNum">    1611 </span><span class="lineNoCov">          0 :     if (HeapTupleHasExternal(tuple))</span>
+<span class="lineNum">    1612 </span><span class="lineNoCov">          0 :         dummy_erh-&gt;flags |= ER_FLAG_HAVE_EXTERNAL;</span>
+<span class="lineNum">    1613 </span>            : 
+<span class="lineNum">    1614 </span>            :     /*
+<span class="lineNum">    1615 </span>            :      * We call domain_check in the short-lived context, so that any cruft
+<span class="lineNum">    1616 </span>            :      * leaked by expression evaluation can be reclaimed.
+<span class="lineNum">    1617 </span>            :      */
+<span class="lineNum">    1618 </span><span class="lineNoCov">          0 :     oldcxt = MemoryContextSwitchTo(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1619 </span>            : 
+<span class="lineNum">    1620 </span>            :     /*
+<span class="lineNum">    1621 </span>            :      * And now we can apply the check.  Note we use main header's domain cache
+<span class="lineNum">    1622 </span>            :      * space, so that caching carries across repeated uses.
+<span class="lineNum">    1623 </span>            :      */
+<span class="lineNum">    1624 </span><span class="lineNoCov">          0 :     domain_check(ExpandedRecordGetRODatum(dummy_erh), false,</span>
+<span class="lineNum">    1625 </span>            :                  erh-&gt;er_decltypeid,
+<span class="lineNum">    1626 </span>            :                  &amp;erh-&gt;er_domaininfo,
+<span class="lineNum">    1627 </span>            :                  erh-&gt;hdr.eoh_context);
+<span class="lineNum">    1628 </span>            : 
+<span class="lineNum">    1629 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1630 </span>            : 
+<span class="lineNum">    1631 </span>            :     /* We might as well clean up cruft immediately. */
+<span class="lineNum">    1632 </span><span class="lineNoCov">          0 :     MemoryContextReset(erh-&gt;er_short_term_cxt);</span>
+<span class="lineNum">    1633 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

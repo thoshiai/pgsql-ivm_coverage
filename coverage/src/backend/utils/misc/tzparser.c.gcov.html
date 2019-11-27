@@ -1,0 +1,559 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/misc/tzparser.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/misc</a> - tzparser.c<span style="font-size: 80%;"> (source / <a href="tzparser.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">112</td>
+            <td class="headerCovTableEntry">158</td>
+            <td class="headerCovTableEntryLo">70.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">5</td>
+            <td class="headerCovTableEntry">5</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * tzparser.c
+<span class="lineNum">       4 </span>            :  *    Functions for parsing timezone offset files
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Note: this code is invoked from the check_hook for the GUC variable
+<span class="lineNum">       7 </span>            :  * timezone_abbreviations.  Therefore, it should report problems using
+<span class="lineNum">       8 </span>            :  * GUC_check_errmsg() and related functions, and try to avoid throwing
+<span class="lineNum">       9 </span>            :  * elog(ERROR).  This is not completely bulletproof at present --- in
+<span class="lineNum">      10 </span>            :  * particular out-of-memory will throw an error.  Could probably fix with
+<span class="lineNum">      11 </span>            :  * PG_TRY if necessary.
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      15 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  * IDENTIFICATION
+<span class="lineNum">      18 </span>            :  *    src/backend/utils/misc/tzparser.c
+<span class="lineNum">      19 </span>            :  *
+<span class="lineNum">      20 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      21 </span>            :  */
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : #include &lt;ctype.h&gt;
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;storage/fd.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/guc.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;utils/tzparser.h&quot;
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : 
+<span class="lineNum">      34 </span>            : #define WHITESPACE &quot; \t\n\r&quot;
+<span class="lineNum">      35 </span>            : 
+<span class="lineNum">      36 </span>            : static bool validateTzEntry(tzEntry *tzentry);
+<span class="lineNum">      37 </span>            : static bool splitTzLine(const char *filename, int lineno,
+<span class="lineNum">      38 </span>            :                         char *line, tzEntry *tzentry);
+<span class="lineNum">      39 </span>            : static int  addToArray(tzEntry **base, int *arraysize, int n,
+<span class="lineNum">      40 </span>            :                        tzEntry *entry, bool override);
+<span class="lineNum">      41 </span>            : static int  ParseTzFile(const char *filename, int depth,
+<span class="lineNum">      42 </span>            :                         tzEntry **base, int *arraysize, int n);
+<span class="lineNum">      43 </span>            : 
+<span class="lineNum">      44 </span>            : 
+<span class="lineNum">      45 </span>            : /*
+<span class="lineNum">      46 </span>            :  * Apply additional validation checks to a tzEntry
+<span class="lineNum">      47 </span>            :  *
+<span class="lineNum">      48 </span>            :  * Returns true if OK, else false
+<a name="49"><span class="lineNum">      49 </span>            :  */</a>
+<span class="lineNum">      50 </span>            : static bool
+<span class="lineNum">      51 </span><span class="lineCov">     622510 : validateTzEntry(tzEntry *tzentry)</span>
+<span class="lineNum">      52 </span>            : {
+<span class="lineNum">      53 </span>            :     unsigned char *p;
+<span class="lineNum">      54 </span>            : 
+<span class="lineNum">      55 </span>            :     /*
+<span class="lineNum">      56 </span>            :      * Check restrictions imposed by datetktbl storage format (see datetime.c)
+<span class="lineNum">      57 </span>            :      */
+<span class="lineNum">      58 </span><span class="lineCov">     622510 :     if (strlen(tzentry-&gt;abbrev) &gt; TOKMAXLEN)</span>
+<span class="lineNum">      59 </span>            :     {
+<span class="lineNum">      60 </span><span class="lineNoCov">          0 :         GUC_check_errmsg(&quot;time zone abbreviation \&quot;%s\&quot; is too long (maximum %d characters) in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">      61 </span>            :                          tzentry-&gt;abbrev, TOKMAXLEN,
+<span class="lineNum">      62 </span>            :                          tzentry-&gt;filename, tzentry-&gt;lineno);
+<span class="lineNum">      63 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">      64 </span>            :     }
+<span class="lineNum">      65 </span>            : 
+<span class="lineNum">      66 </span>            :     /*
+<span class="lineNum">      67 </span>            :      * Sanity-check the offset: shouldn't exceed 14 hours
+<span class="lineNum">      68 </span>            :      */
+<span class="lineNum">      69 </span><span class="lineCov">    1245020 :     if (tzentry-&gt;offset &gt; 14 * 60 * 60 ||</span>
+<span class="lineNum">      70 </span><span class="lineCov">     622510 :         tzentry-&gt;offset &lt; -14 * 60 * 60)</span>
+<span class="lineNum">      71 </span>            :     {
+<span class="lineNum">      72 </span><span class="lineNoCov">          0 :         GUC_check_errmsg(&quot;time zone offset %d is out of range in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">      73 </span>            :                          tzentry-&gt;offset,
+<span class="lineNum">      74 </span>            :                          tzentry-&gt;filename, tzentry-&gt;lineno);
+<span class="lineNum">      75 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">      76 </span>            :     }
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            :     /*
+<span class="lineNum">      79 </span>            :      * Convert abbrev to lowercase (must match datetime.c's conversion)
+<span class="lineNum">      80 </span>            :      */
+<span class="lineNum">      81 </span><span class="lineCov">    2887044 :     for (p = (unsigned char *) tzentry-&gt;abbrev; *p; p++)</span>
+<span class="lineNum">      82 </span><span class="lineCov">    2264534 :         *p = pg_tolower(*p);</span>
+<span class="lineNum">      83 </span>            : 
+<span class="lineNum">      84 </span><span class="lineCov">     622510 :     return true;</span>
+<span class="lineNum">      85 </span>            : }
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            : /*
+<span class="lineNum">      88 </span>            :  * Attempt to parse the line as a timezone abbrev spec
+<span class="lineNum">      89 </span>            :  *
+<span class="lineNum">      90 </span>            :  * Valid formats are:
+<span class="lineNum">      91 </span>            :  *  name  zone
+<span class="lineNum">      92 </span>            :  *  name  offset  dst
+<span class="lineNum">      93 </span>            :  *
+<span class="lineNum">      94 </span>            :  * Returns true if OK, else false; data is stored in *tzentry
+<a name="95"><span class="lineNum">      95 </span>            :  */</a>
+<span class="lineNum">      96 </span>            : static bool
+<span class="lineNum">      97 </span><span class="lineCov">     622510 : splitTzLine(const char *filename, int lineno, char *line, tzEntry *tzentry)</span>
+<span class="lineNum">      98 </span>            : {
+<span class="lineNum">      99 </span>            :     char       *abbrev;
+<span class="lineNum">     100 </span>            :     char       *offset;
+<span class="lineNum">     101 </span>            :     char       *offset_endptr;
+<span class="lineNum">     102 </span>            :     char       *remain;
+<span class="lineNum">     103 </span>            :     char       *is_dst;
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span><span class="lineCov">     622510 :     tzentry-&gt;lineno = lineno;</span>
+<span class="lineNum">     106 </span><span class="lineCov">     622510 :     tzentry-&gt;filename = filename;</span>
+<span class="lineNum">     107 </span>            : 
+<span class="lineNum">     108 </span><span class="lineCov">     622510 :     abbrev = strtok(line, WHITESPACE);</span>
+<span class="lineNum">     109 </span><span class="lineCov">     622510 :     if (!abbrev)</span>
+<span class="lineNum">     110 </span>            :     {
+<span class="lineNum">     111 </span><span class="lineNoCov">          0 :         GUC_check_errmsg(&quot;missing time zone abbreviation in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">     112 </span>            :                          filename, lineno);
+<span class="lineNum">     113 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     114 </span>            :     }
+<span class="lineNum">     115 </span><span class="lineCov">     622510 :     tzentry-&gt;abbrev = pstrdup(abbrev);</span>
+<span class="lineNum">     116 </span>            : 
+<span class="lineNum">     117 </span><span class="lineCov">     622510 :     offset = strtok(NULL, WHITESPACE);</span>
+<span class="lineNum">     118 </span><span class="lineCov">     622510 :     if (!offset)</span>
+<span class="lineNum">     119 </span>            :     {
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :         GUC_check_errmsg(&quot;missing time zone offset in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">     121 </span>            :                          filename, lineno);
+<span class="lineNum">     122 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     123 </span>            :     }
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            :     /* We assume zone names don't begin with a digit or sign */
+<span class="lineNum">     126 </span><span class="lineCov">     622510 :     if (isdigit((unsigned char) *offset) || *offset == '+' || *offset == '-')</span>
+<span class="lineNum">     127 </span>            :     {
+<span class="lineNum">     128 </span><span class="lineCov">     460534 :         tzentry-&gt;zone = NULL;</span>
+<span class="lineNum">     129 </span><span class="lineCov">     460534 :         tzentry-&gt;offset = strtol(offset, &amp;offset_endptr, 10);</span>
+<span class="lineNum">     130 </span><span class="lineCov">     460534 :         if (offset_endptr == offset || *offset_endptr != '\0')</span>
+<span class="lineNum">     131 </span>            :         {
+<span class="lineNum">     132 </span><span class="lineNoCov">          0 :             GUC_check_errmsg(&quot;invalid number for time zone offset in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">     133 </span>            :                              filename, lineno);
+<span class="lineNum">     134 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     135 </span>            :         }
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span><span class="lineCov">     460534 :         is_dst = strtok(NULL, WHITESPACE);</span>
+<span class="lineNum">     138 </span><span class="lineCov">     921068 :         if (is_dst &amp;&amp; pg_strcasecmp(is_dst, &quot;D&quot;) == 0)</span>
+<span class="lineNum">     139 </span>            :         {
+<span class="lineNum">     140 </span><span class="lineCov">     152448 :             tzentry-&gt;is_dst = true;</span>
+<span class="lineNum">     141 </span><span class="lineCov">     152448 :             remain = strtok(NULL, WHITESPACE);</span>
+<span class="lineNum">     142 </span>            :         }
+<span class="lineNum">     143 </span>            :         else
+<span class="lineNum">     144 </span>            :         {
+<span class="lineNum">     145 </span>            :             /* there was no 'D' dst specifier */
+<span class="lineNum">     146 </span><span class="lineCov">     308086 :             tzentry-&gt;is_dst = false;</span>
+<span class="lineNum">     147 </span><span class="lineCov">     308086 :             remain = is_dst;</span>
+<span class="lineNum">     148 </span>            :         }
+<span class="lineNum">     149 </span>            :     }
+<span class="lineNum">     150 </span>            :     else
+<span class="lineNum">     151 </span>            :     {
+<span class="lineNum">     152 </span>            :         /*
+<span class="lineNum">     153 </span>            :          * Assume entry is a zone name.  We do not try to validate it by
+<span class="lineNum">     154 </span>            :          * looking up the zone, because that would force loading of a lot of
+<span class="lineNum">     155 </span>            :          * zones that probably will never be used in the current session.
+<span class="lineNum">     156 </span>            :          */
+<span class="lineNum">     157 </span><span class="lineCov">     161976 :         tzentry-&gt;zone = pstrdup(offset);</span>
+<span class="lineNum">     158 </span><span class="lineCov">     161976 :         tzentry-&gt;offset = 0;</span>
+<span class="lineNum">     159 </span><span class="lineCov">     161976 :         tzentry-&gt;is_dst = false;</span>
+<span class="lineNum">     160 </span><span class="lineCov">     161976 :         remain = strtok(NULL, WHITESPACE);</span>
+<span class="lineNum">     161 </span>            :     }
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span><span class="lineCov">     622510 :     if (!remain)                /* no more non-whitespace chars */</span>
+<span class="lineNum">     164 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span><span class="lineCov">     622510 :     if (remain[0] != '#')       /* must be a comment */</span>
+<span class="lineNum">     167 </span>            :     {
+<span class="lineNum">     168 </span><span class="lineNoCov">          0 :         GUC_check_errmsg(&quot;invalid syntax in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">     169 </span>            :                          filename, lineno);
+<span class="lineNum">     170 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     171 </span>            :     }
+<span class="lineNum">     172 </span><span class="lineCov">     622510 :     return true;</span>
+<span class="lineNum">     173 </span>            : }
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span>            : /*
+<span class="lineNum">     176 </span>            :  * Insert entry into sorted array
+<span class="lineNum">     177 </span>            :  *
+<span class="lineNum">     178 </span>            :  * *base: base address of array (changeable if must enlarge array)
+<span class="lineNum">     179 </span>            :  * *arraysize: allocated length of array (changeable if must enlarge array)
+<span class="lineNum">     180 </span>            :  * n: current number of valid elements in array
+<span class="lineNum">     181 </span>            :  * entry: new data to insert
+<span class="lineNum">     182 </span>            :  * override: true if OK to override
+<span class="lineNum">     183 </span>            :  *
+<span class="lineNum">     184 </span>            :  * Returns the new array length (new value for n), or -1 if error
+<a name="185"><span class="lineNum">     185 </span>            :  */</a>
+<span class="lineNum">     186 </span>            : static int
+<span class="lineNum">     187 </span><span class="lineCov">     622510 : addToArray(tzEntry **base, int *arraysize, int n,</span>
+<span class="lineNum">     188 </span>            :            tzEntry *entry, bool override)
+<span class="lineNum">     189 </span>            : {
+<span class="lineNum">     190 </span>            :     tzEntry    *arrayptr;
+<span class="lineNum">     191 </span>            :     int         low;
+<span class="lineNum">     192 </span>            :     int         high;
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span>            :     /*
+<span class="lineNum">     195 </span>            :      * Search the array for a duplicate; as a useful side effect, the array is
+<span class="lineNum">     196 </span>            :      * maintained in sorted order.  We use strcmp() to ensure we match the
+<span class="lineNum">     197 </span>            :      * sort order datetime.c expects.
+<span class="lineNum">     198 </span>            :      */
+<span class="lineNum">     199 </span><span class="lineCov">     622510 :     arrayptr = *base;</span>
+<span class="lineNum">     200 </span><span class="lineCov">     622510 :     low = 0;</span>
+<span class="lineNum">     201 </span><span class="lineCov">     622510 :     high = n - 1;</span>
+<span class="lineNum">     202 </span><span class="lineCov">    5177000 :     while (low &lt;= high)</span>
+<span class="lineNum">     203 </span>            :     {
+<span class="lineNum">     204 </span><span class="lineCov">    3931990 :         int         mid = (low + high) &gt;&gt; 1;</span>
+<span class="lineNum">     205 </span><span class="lineCov">    3931990 :         tzEntry    *midptr = arrayptr + mid;</span>
+<span class="lineNum">     206 </span>            :         int         cmp;
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span><span class="lineCov">    3931990 :         cmp = strcmp(entry-&gt;abbrev, midptr-&gt;abbrev);</span>
+<span class="lineNum">     209 </span><span class="lineCov">    3931990 :         if (cmp &lt; 0)</span>
+<span class="lineNum">     210 </span><span class="lineCov">    1568988 :             high = mid - 1;</span>
+<span class="lineNum">     211 </span><span class="lineCov">    2363002 :         else if (cmp &gt; 0)</span>
+<span class="lineNum">     212 </span><span class="lineCov">    2362992 :             low = mid + 1;</span>
+<span class="lineNum">     213 </span>            :         else
+<span class="lineNum">     214 </span>            :         {
+<span class="lineNum">     215 </span>            :             /*
+<span class="lineNum">     216 </span>            :              * Found a duplicate entry; complain unless it's the same.
+<span class="lineNum">     217 </span>            :              */
+<span class="lineNum">     218 </span><span class="lineCov">         18 :             if ((midptr-&gt;zone == NULL &amp;&amp; entry-&gt;zone == NULL &amp;&amp;</span>
+<span class="lineNum">     219 </span><span class="lineCov">          8 :                  midptr-&gt;offset == entry-&gt;offset &amp;&amp;</span>
+<span class="lineNum">     220 </span><span class="lineCov">         10 :                  midptr-&gt;is_dst == entry-&gt;is_dst) ||</span>
+<span class="lineNum">     221 </span><span class="lineCov">         12 :                 (midptr-&gt;zone != NULL &amp;&amp; entry-&gt;zone != NULL &amp;&amp;</span>
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :                  strcmp(midptr-&gt;zone, entry-&gt;zone) == 0))</span>
+<span class="lineNum">     223 </span>            :             {
+<span class="lineNum">     224 </span>            :                 /* return unchanged array */
+<span class="lineNum">     225 </span><span class="lineNoCov">          0 :                 return n;</span>
+<span class="lineNum">     226 </span>            :             }
+<span class="lineNum">     227 </span><span class="lineCov">         10 :             if (override)</span>
+<span class="lineNum">     228 </span>            :             {
+<span class="lineNum">     229 </span>            :                 /* same abbrev but something is different, override */
+<span class="lineNum">     230 </span><span class="lineCov">         10 :                 midptr-&gt;zone = entry-&gt;zone;</span>
+<span class="lineNum">     231 </span><span class="lineCov">         10 :                 midptr-&gt;offset = entry-&gt;offset;</span>
+<span class="lineNum">     232 </span><span class="lineCov">         10 :                 midptr-&gt;is_dst = entry-&gt;is_dst;</span>
+<span class="lineNum">     233 </span><span class="lineCov">         10 :                 return n;</span>
+<span class="lineNum">     234 </span>            :             }
+<span class="lineNum">     235 </span>            :             /* same abbrev but something is different, complain */
+<span class="lineNum">     236 </span><span class="lineNoCov">          0 :             GUC_check_errmsg(&quot;time zone abbreviation \&quot;%s\&quot; is multiply defined&quot;,</span>
+<span class="lineNum">     237 </span>            :                              entry-&gt;abbrev);
+<span class="lineNum">     238 </span><span class="lineNoCov">          0 :             GUC_check_errdetail(&quot;Entry in time zone file \&quot;%s\&quot;, line %d, conflicts with entry in file \&quot;%s\&quot;, line %d.&quot;,</span>
+<span class="lineNum">     239 </span>            :                                 midptr-&gt;filename, midptr-&gt;lineno,
+<span class="lineNum">     240 </span>            :                                 entry-&gt;filename, entry-&gt;lineno);
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     242 </span>            :         }
+<span class="lineNum">     243 </span>            :     }
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span>            :     /*
+<span class="lineNum">     246 </span>            :      * No match, insert at position &quot;low&quot;.
+<span class="lineNum">     247 </span>            :      */
+<span class="lineNum">     248 </span><span class="lineCov">     622500 :     if (n &gt;= *arraysize)</span>
+<span class="lineNum">     249 </span>            :     {
+<span class="lineNum">     250 </span><span class="lineCov">       3176 :         *arraysize *= 2;</span>
+<span class="lineNum">     251 </span><span class="lineCov">       3176 :         *base = (tzEntry *) repalloc(*base, *arraysize * sizeof(tzEntry));</span>
+<span class="lineNum">     252 </span>            :     }
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span><span class="lineCov">     622500 :     arrayptr = *base + low;</span>
+<span class="lineNum">     255 </span>            : 
+<span class="lineNum">     256 </span><span class="lineCov">     622500 :     memmove(arrayptr + 1, arrayptr, (n - low) * sizeof(tzEntry));</span>
+<span class="lineNum">     257 </span>            : 
+<span class="lineNum">     258 </span><span class="lineCov">     622500 :     memcpy(arrayptr, entry, sizeof(tzEntry));</span>
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span><span class="lineCov">     622500 :     return n + 1;</span>
+<span class="lineNum">     261 </span>            : }
+<span class="lineNum">     262 </span>            : 
+<span class="lineNum">     263 </span>            : /*
+<span class="lineNum">     264 </span>            :  * Parse a single timezone abbrev file --- can recurse to handle @INCLUDE
+<span class="lineNum">     265 </span>            :  *
+<span class="lineNum">     266 </span>            :  * filename: user-specified file name (does not include path)
+<span class="lineNum">     267 </span>            :  * depth: current recursion depth
+<span class="lineNum">     268 </span>            :  * *base: array for results (changeable if must enlarge array)
+<span class="lineNum">     269 </span>            :  * *arraysize: allocated length of array (changeable if must enlarge array)
+<span class="lineNum">     270 </span>            :  * n: current number of valid elements in array
+<span class="lineNum">     271 </span>            :  *
+<span class="lineNum">     272 </span>            :  * Returns the new array length (new value for n), or -1 if error
+<a name="273"><span class="lineNum">     273 </span>            :  */</a>
+<span class="lineNum">     274 </span>            : static int
+<span class="lineNum">     275 </span><span class="lineCov">       3180 : ParseTzFile(const char *filename, int depth,</span>
+<span class="lineNum">     276 </span>            :             tzEntry **base, int *arraysize, int n)
+<span class="lineNum">     277 </span>            : {
+<span class="lineNum">     278 </span>            :     char        share_path[MAXPGPATH];
+<span class="lineNum">     279 </span>            :     char        file_path[MAXPGPATH];
+<span class="lineNum">     280 </span>            :     FILE       *tzFile;
+<span class="lineNum">     281 </span>            :     char        tzbuf[1024];
+<span class="lineNum">     282 </span>            :     char       *line;
+<span class="lineNum">     283 </span>            :     tzEntry     tzentry;
+<span class="lineNum">     284 </span><span class="lineCov">       3180 :     int         lineno = 0;</span>
+<span class="lineNum">     285 </span><span class="lineCov">       3180 :     bool        override = false;</span>
+<span class="lineNum">     286 </span>            :     const char *p;
+<span class="lineNum">     287 </span>            : 
+<span class="lineNum">     288 </span>            :     /*
+<span class="lineNum">     289 </span>            :      * We enforce that the filename is all alpha characters.  This may be
+<span class="lineNum">     290 </span>            :      * overly restrictive, but we don't want to allow access to anything
+<span class="lineNum">     291 </span>            :      * outside the timezonesets directory, so for instance '/' *must* be
+<span class="lineNum">     292 </span>            :      * rejected.
+<span class="lineNum">     293 </span>            :      */
+<span class="lineNum">     294 </span><span class="lineCov">      25440 :     for (p = filename; *p; p++)</span>
+<span class="lineNum">     295 </span>            :     {
+<span class="lineNum">     296 </span><span class="lineCov">      22260 :         if (!isalpha((unsigned char) *p))</span>
+<span class="lineNum">     297 </span>            :         {
+<span class="lineNum">     298 </span>            :             /* at level 0, just use guc.c's regular &quot;invalid value&quot; message */
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :             if (depth &gt; 0)</span>
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :                 GUC_check_errmsg(&quot;invalid time zone file name \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">     301 </span>            :                                  filename);
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     303 </span>            :         }
+<span class="lineNum">     304 </span>            :     }
+<span class="lineNum">     305 </span>            : 
+<span class="lineNum">     306 </span>            :     /*
+<span class="lineNum">     307 </span>            :      * The maximal recursion depth is a pretty arbitrary setting. It is hard
+<span class="lineNum">     308 </span>            :      * to imagine that someone needs more than 3 levels so stick with this
+<span class="lineNum">     309 </span>            :      * conservative setting until someone complains.
+<span class="lineNum">     310 </span>            :      */
+<span class="lineNum">     311 </span><span class="lineCov">       3180 :     if (depth &gt; 3)</span>
+<span class="lineNum">     312 </span>            :     {
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :         GUC_check_errmsg(&quot;time zone file recursion limit exceeded in file \&quot;%s\&quot;&quot;,</span>
+<span class="lineNum">     314 </span>            :                          filename);
+<span class="lineNum">     315 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     316 </span>            :     }
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span><span class="lineCov">       3180 :     get_share_path(my_exec_path, share_path);</span>
+<span class="lineNum">     319 </span><span class="lineCov">       3180 :     snprintf(file_path, sizeof(file_path), &quot;%s/timezonesets/%s&quot;,</span>
+<span class="lineNum">     320 </span>            :              share_path, filename);
+<span class="lineNum">     321 </span><span class="lineCov">       3180 :     tzFile = AllocateFile(file_path, &quot;r&quot;);</span>
+<span class="lineNum">     322 </span><span class="lineCov">       3180 :     if (!tzFile)</span>
+<span class="lineNum">     323 </span>            :     {
+<span class="lineNum">     324 </span>            :         /*
+<span class="lineNum">     325 </span>            :          * Check to see if the problem is not the filename but the directory.
+<span class="lineNum">     326 </span>            :          * This is worth troubling over because if the installation share/
+<span class="lineNum">     327 </span>            :          * directory is missing or unreadable, this is likely to be the first
+<span class="lineNum">     328 </span>            :          * place we notice a problem during postmaster startup.
+<span class="lineNum">     329 </span>            :          */
+<span class="lineNum">     330 </span><span class="lineNoCov">          0 :         int         save_errno = errno;</span>
+<span class="lineNum">     331 </span>            :         DIR        *tzdir;
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span><span class="lineNoCov">          0 :         snprintf(file_path, sizeof(file_path), &quot;%s/timezonesets&quot;,</span>
+<span class="lineNum">     334 </span>            :                  share_path);
+<span class="lineNum">     335 </span><span class="lineNoCov">          0 :         tzdir = AllocateDir(file_path);</span>
+<span class="lineNum">     336 </span><span class="lineNoCov">          0 :         if (tzdir == NULL)</span>
+<span class="lineNum">     337 </span>            :         {
+<span class="lineNum">     338 </span><span class="lineNoCov">          0 :             GUC_check_errmsg(&quot;could not open directory \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     339 </span>            :                              file_path);
+<span class="lineNum">     340 </span><span class="lineNoCov">          0 :             GUC_check_errhint(&quot;This may indicate an incomplete PostgreSQL installation, or that the file \&quot;%s\&quot; has been moved away from its proper location.&quot;,</span>
+<span class="lineNum">     341 </span>            :                               my_exec_path);
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     343 </span>            :         }
+<span class="lineNum">     344 </span><span class="lineNoCov">          0 :         FreeDir(tzdir);</span>
+<span class="lineNum">     345 </span><span class="lineNoCov">          0 :         errno = save_errno;</span>
+<span class="lineNum">     346 </span>            : 
+<span class="lineNum">     347 </span>            :         /*
+<span class="lineNum">     348 </span>            :          * otherwise, if file doesn't exist and it's level 0, guc.c's
+<span class="lineNum">     349 </span>            :          * complaint is enough
+<span class="lineNum">     350 </span>            :          */
+<span class="lineNum">     351 </span><span class="lineNoCov">          0 :         if (errno != ENOENT || depth &gt; 0)</span>
+<span class="lineNum">     352 </span><span class="lineNoCov">          0 :             GUC_check_errmsg(&quot;could not read time zone file \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     353 </span>            :                              filename);
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     356 </span>            :     }
+<span class="lineNum">     357 </span>            : 
+<span class="lineNum">     358 </span><span class="lineCov">    2013684 :     while (!feof(tzFile))</span>
+<span class="lineNum">     359 </span>            :     {
+<span class="lineNum">     360 </span><span class="lineCov">    2010504 :         lineno++;</span>
+<span class="lineNum">     361 </span><span class="lineCov">    2010504 :         if (fgets(tzbuf, sizeof(tzbuf), tzFile) == NULL)</span>
+<span class="lineNum">     362 </span>            :         {
+<span class="lineNum">     363 </span><span class="lineCov">       3180 :             if (ferror(tzFile))</span>
+<span class="lineNum">     364 </span>            :             {
+<span class="lineNum">     365 </span><span class="lineNoCov">          0 :                 GUC_check_errmsg(&quot;could not read time zone file \&quot;%s\&quot;: %m&quot;,</span>
+<span class="lineNum">     366 </span>            :                                  filename);
+<span class="lineNum">     367 </span><span class="lineNoCov">          0 :                 return -1;</span>
+<span class="lineNum">     368 </span>            :             }
+<span class="lineNum">     369 </span>            :             /* else we're at EOF after all */
+<span class="lineNum">     370 </span><span class="lineCov">       3180 :             break;</span>
+<span class="lineNum">     371 </span>            :         }
+<span class="lineNum">     372 </span><span class="lineCov">    2007324 :         if (strlen(tzbuf) == sizeof(tzbuf) - 1)</span>
+<span class="lineNum">     373 </span>            :         {
+<span class="lineNum">     374 </span>            :             /* the line is too long for tzbuf */
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :             GUC_check_errmsg(&quot;line is too long in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">     376 </span>            :                              filename, lineno);
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     378 </span>            :         }
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span>            :         /* skip over whitespace */
+<span class="lineNum">     381 </span><span class="lineCov">    2007324 :         line = tzbuf;</span>
+<span class="lineNum">     382 </span><span class="lineCov">   23305728 :         while (*line &amp;&amp; isspace((unsigned char) *line))</span>
+<span class="lineNum">     383 </span><span class="lineCov">   19291080 :             line++;</span>
+<span class="lineNum">     384 </span>            : 
+<span class="lineNum">     385 </span><span class="lineCov">    2007324 :         if (*line == '\0')      /* empty line */</span>
+<span class="lineNum">     386 </span><span class="lineCov">      69894 :             continue;</span>
+<span class="lineNum">     387 </span><span class="lineCov">    1937430 :         if (*line == '#')       /* comment line */</span>
+<span class="lineNum">     388 </span><span class="lineCov">    1314912 :             continue;</span>
+<span class="lineNum">     389 </span>            : 
+<span class="lineNum">     390 </span><span class="lineCov">     622518 :         if (pg_strncasecmp(line, &quot;@INCLUDE&quot;, strlen(&quot;@INCLUDE&quot;)) == 0)</span>
+<span class="lineNum">     391 </span>            :         {
+<span class="lineNum">     392 </span>            :             /* pstrdup so we can use filename in result data structure */
+<span class="lineNum">     393 </span><span class="lineCov">          4 :             char       *includeFile = pstrdup(line + strlen(&quot;@INCLUDE&quot;));</span>
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span><span class="lineCov">          4 :             includeFile = strtok(includeFile, WHITESPACE);</span>
+<span class="lineNum">     396 </span><span class="lineCov">          4 :             if (!includeFile || !*includeFile)</span>
+<span class="lineNum">     397 </span>            :             {
+<span class="lineNum">     398 </span><span class="lineNoCov">          0 :                 GUC_check_errmsg(&quot;@INCLUDE without file name in time zone file \&quot;%s\&quot;, line %d&quot;,</span>
+<span class="lineNum">     399 </span>            :                                  filename, lineno);
+<span class="lineNum">     400 </span><span class="lineNoCov">          0 :                 return -1;</span>
+<span class="lineNum">     401 </span>            :             }
+<span class="lineNum">     402 </span><span class="lineCov">          4 :             n = ParseTzFile(includeFile, depth + 1,</span>
+<span class="lineNum">     403 </span>            :                             base, arraysize, n);
+<span class="lineNum">     404 </span><span class="lineCov">          4 :             if (n &lt; 0)</span>
+<span class="lineNum">     405 </span><span class="lineNoCov">          0 :                 return -1;</span>
+<span class="lineNum">     406 </span><span class="lineCov">          4 :             continue;</span>
+<span class="lineNum">     407 </span>            :         }
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span><span class="lineCov">     622514 :         if (pg_strncasecmp(line, &quot;@OVERRIDE&quot;, strlen(&quot;@OVERRIDE&quot;)) == 0)</span>
+<span class="lineNum">     410 </span>            :         {
+<span class="lineNum">     411 </span><span class="lineCov">          4 :             override = true;</span>
+<span class="lineNum">     412 </span><span class="lineCov">          4 :             continue;</span>
+<span class="lineNum">     413 </span>            :         }
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span><span class="lineCov">     622510 :         if (!splitTzLine(filename, lineno, line, &amp;tzentry))</span>
+<span class="lineNum">     416 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     417 </span><span class="lineCov">     622510 :         if (!validateTzEntry(&amp;tzentry))</span>
+<span class="lineNum">     418 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     419 </span><span class="lineCov">     622510 :         n = addToArray(base, arraysize, n, &amp;tzentry, override);</span>
+<span class="lineNum">     420 </span><span class="lineCov">     622510 :         if (n &lt; 0)</span>
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     422 </span>            :     }
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineCov">       3180 :     FreeFile(tzFile);</span>
+<span class="lineNum">     425 </span>            : 
+<span class="lineNum">     426 </span><span class="lineCov">       3180 :     return n;</span>
+<span class="lineNum">     427 </span>            : }
+<span class="lineNum">     428 </span>            : 
+<span class="lineNum">     429 </span>            : /*
+<span class="lineNum">     430 </span>            :  * load_tzoffsets --- read and parse the specified timezone offset file
+<span class="lineNum">     431 </span>            :  *
+<span class="lineNum">     432 </span>            :  * On success, return a filled-in TimeZoneAbbrevTable, which must have been
+<span class="lineNum">     433 </span>            :  * malloc'd not palloc'd.  On failure, return NULL, using GUC_check_errmsg
+<span class="lineNum">     434 </span>            :  * and friends to give details of the problem.
+<a name="435"><span class="lineNum">     435 </span>            :  */</a>
+<span class="lineNum">     436 </span>            : TimeZoneAbbrevTable *
+<span class="lineNum">     437 </span><span class="lineCov">       3176 : load_tzoffsets(const char *filename)</span>
+<span class="lineNum">     438 </span>            : {
+<span class="lineNum">     439 </span><span class="lineCov">       3176 :     TimeZoneAbbrevTable *result = NULL;</span>
+<span class="lineNum">     440 </span>            :     MemoryContext tmpContext;
+<span class="lineNum">     441 </span>            :     MemoryContext oldContext;
+<span class="lineNum">     442 </span>            :     tzEntry    *array;
+<span class="lineNum">     443 </span>            :     int         arraysize;
+<span class="lineNum">     444 </span>            :     int         n;
+<span class="lineNum">     445 </span>            : 
+<span class="lineNum">     446 </span>            :     /*
+<span class="lineNum">     447 </span>            :      * Create a temp memory context to work in.  This makes it easy to clean
+<span class="lineNum">     448 </span>            :      * up afterwards.
+<span class="lineNum">     449 </span>            :      */
+<span class="lineNum">     450 </span><span class="lineCov">       3176 :     tmpContext = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     451 </span>            :                                        &quot;TZParserMemory&quot;,
+<span class="lineNum">     452 </span>            :                                        ALLOCSET_SMALL_SIZES);
+<span class="lineNum">     453 </span><span class="lineCov">       3176 :     oldContext = MemoryContextSwitchTo(tmpContext);</span>
+<span class="lineNum">     454 </span>            : 
+<span class="lineNum">     455 </span>            :     /* Initialize array at a reasonable size */
+<span class="lineNum">     456 </span><span class="lineCov">       3176 :     arraysize = 128;</span>
+<span class="lineNum">     457 </span><span class="lineCov">       3176 :     array = (tzEntry *) palloc(arraysize * sizeof(tzEntry));</span>
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span>            :     /* Parse the file(s) */
+<span class="lineNum">     460 </span><span class="lineCov">       3176 :     n = ParseTzFile(filename, 0, &amp;array, &amp;arraysize, 0);</span>
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span>            :     /* If no errors so far, let datetime.c allocate memory &amp; convert format */
+<span class="lineNum">     463 </span><span class="lineCov">       3176 :     if (n &gt;= 0)</span>
+<span class="lineNum">     464 </span>            :     {
+<span class="lineNum">     465 </span><span class="lineCov">       3176 :         result = ConvertTimeZoneAbbrevs(array, n);</span>
+<span class="lineNum">     466 </span><span class="lineCov">       3176 :         if (!result)</span>
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 :             GUC_check_errmsg(&quot;out of memory&quot;);</span>
+<span class="lineNum">     468 </span>            :     }
+<span class="lineNum">     469 </span>            : 
+<span class="lineNum">     470 </span>            :     /* Clean up */
+<span class="lineNum">     471 </span><span class="lineCov">       3176 :     MemoryContextSwitchTo(oldContext);</span>
+<span class="lineNum">     472 </span><span class="lineCov">       3176 :     MemoryContextDelete(tmpContext);</span>
+<span class="lineNum">     473 </span>            : 
+<span class="lineNum">     474 </span><span class="lineCov">       3176 :     return result;</span>
+<span class="lineNum">     475 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

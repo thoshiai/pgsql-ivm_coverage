@@ -1,0 +1,413 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/libpq/pqmq.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/libpq</a> - pqmq.c<span style="font-size: 80%;"> (source / <a href="pqmq.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">68</td>
+            <td class="headerCovTableEntry">124</td>
+            <td class="headerCovTableEntryLo">54.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">6</td>
+            <td class="headerCovTableEntry">12</td>
+            <td class="headerCovTableEntryLo">50.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * pqmq.c
+<span class="lineNum">       4 </span>            :  *    Use the frontend/backend protocol for communication over a shm_mq
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *  src/backend/libpq/pqmq.c
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      12 </span>            :  */
+<span class="lineNum">      13 </span>            : 
+<span class="lineNum">      14 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : #include &quot;libpq/libpq.h&quot;
+<span class="lineNum">      17 </span>            : #include &quot;libpq/pqformat.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;libpq/pqmq.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;tcop/tcopprot.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : static shm_mq_handle *pq_mq_handle;
+<span class="lineNum">      25 </span>            : static bool pq_mq_busy = false;
+<span class="lineNum">      26 </span>            : static pid_t pq_mq_parallel_master_pid = 0;
+<span class="lineNum">      27 </span>            : static pid_t pq_mq_parallel_master_backend_id = InvalidBackendId;
+<span class="lineNum">      28 </span>            : 
+<span class="lineNum">      29 </span>            : static void pq_cleanup_redirect_to_shm_mq(dsm_segment *seg, Datum arg);
+<span class="lineNum">      30 </span>            : static void mq_comm_reset(void);
+<span class="lineNum">      31 </span>            : static int  mq_flush(void);
+<span class="lineNum">      32 </span>            : static int  mq_flush_if_writable(void);
+<span class="lineNum">      33 </span>            : static bool mq_is_send_pending(void);
+<span class="lineNum">      34 </span>            : static int  mq_putmessage(char msgtype, const char *s, size_t len);
+<span class="lineNum">      35 </span>            : static void mq_putmessage_noblock(char msgtype, const char *s, size_t len);
+<span class="lineNum">      36 </span>            : static void mq_startcopyout(void);
+<span class="lineNum">      37 </span>            : static void mq_endcopyout(bool errorAbort);
+<span class="lineNum">      38 </span>            : 
+<span class="lineNum">      39 </span>            : static const PQcommMethods PqCommMqMethods = {
+<span class="lineNum">      40 </span>            :     mq_comm_reset,
+<span class="lineNum">      41 </span>            :     mq_flush,
+<span class="lineNum">      42 </span>            :     mq_flush_if_writable,
+<span class="lineNum">      43 </span>            :     mq_is_send_pending,
+<span class="lineNum">      44 </span>            :     mq_putmessage,
+<span class="lineNum">      45 </span>            :     mq_putmessage_noblock,
+<span class="lineNum">      46 </span>            :     mq_startcopyout,
+<span class="lineNum">      47 </span>            :     mq_endcopyout
+<span class="lineNum">      48 </span>            : };
+<span class="lineNum">      49 </span>            : 
+<span class="lineNum">      50 </span>            : /*
+<span class="lineNum">      51 </span>            :  * Arrange to redirect frontend/backend protocol messages to a shared-memory
+<span class="lineNum">      52 </span>            :  * message queue.
+<a name="53"><span class="lineNum">      53 </span>            :  */</a>
+<span class="lineNum">      54 </span>            : void
+<span class="lineNum">      55 </span><span class="lineCov">        746 : pq_redirect_to_shm_mq(dsm_segment *seg, shm_mq_handle *mqh)</span>
+<span class="lineNum">      56 </span>            : {
+<span class="lineNum">      57 </span><span class="lineCov">        746 :     PqCommMethods = &amp;PqCommMqMethods;</span>
+<span class="lineNum">      58 </span><span class="lineCov">        746 :     pq_mq_handle = mqh;</span>
+<span class="lineNum">      59 </span><span class="lineCov">        746 :     whereToSendOutput = DestRemote;</span>
+<span class="lineNum">      60 </span><span class="lineCov">        746 :     FrontendProtocol = PG_PROTOCOL_LATEST;</span>
+<span class="lineNum">      61 </span><span class="lineCov">        746 :     on_dsm_detach(seg, pq_cleanup_redirect_to_shm_mq, (Datum) 0);</span>
+<span class="lineNum">      62 </span><span class="lineCov">        746 : }</span>
+<span class="lineNum">      63 </span>            : 
+<span class="lineNum">      64 </span>            : /*
+<span class="lineNum">      65 </span>            :  * When the DSM that contains our shm_mq goes away, we need to stop sending
+<span class="lineNum">      66 </span>            :  * messages to it.
+<a name="67"><span class="lineNum">      67 </span>            :  */</a>
+<span class="lineNum">      68 </span>            : static void
+<span class="lineNum">      69 </span><span class="lineCov">        746 : pq_cleanup_redirect_to_shm_mq(dsm_segment *seg, Datum arg)</span>
+<span class="lineNum">      70 </span>            : {
+<span class="lineNum">      71 </span><span class="lineCov">        746 :     pq_mq_handle = NULL;</span>
+<span class="lineNum">      72 </span><span class="lineCov">        746 :     whereToSendOutput = DestNone;</span>
+<span class="lineNum">      73 </span><span class="lineCov">        746 : }</span>
+<span class="lineNum">      74 </span>            : 
+<span class="lineNum">      75 </span>            : /*
+<span class="lineNum">      76 </span>            :  * Arrange to SendProcSignal() to the parallel master each time we transmit
+<span class="lineNum">      77 </span>            :  * message data via the shm_mq.
+<a name="78"><span class="lineNum">      78 </span>            :  */</a>
+<span class="lineNum">      79 </span>            : void
+<span class="lineNum">      80 </span><span class="lineCov">        746 : pq_set_parallel_master(pid_t pid, BackendId backend_id)</span>
+<span class="lineNum">      81 </span>            : {
+<span class="lineNum">      82 </span><span class="lineCov">        746 :     Assert(PqCommMethods == &amp;PqCommMqMethods);</span>
+<span class="lineNum">      83 </span><span class="lineCov">        746 :     pq_mq_parallel_master_pid = pid;</span>
+<span class="lineNum">      84 </span><span class="lineCov">        746 :     pq_mq_parallel_master_backend_id = backend_id;</span>
+<span class="lineNum">      85 </span><span class="lineCov">        746 : }</span>
+<a name="86"><span class="lineNum">      86 </span>            : </a>
+<span class="lineNum">      87 </span>            : static void
+<span class="lineNum">      88 </span><span class="lineNoCov">          0 : mq_comm_reset(void)</span>
+<span class="lineNum">      89 </span>            : {
+<span class="lineNum">      90 </span>            :     /* Nothing to do. */
+<span class="lineNum">      91 </span><span class="lineNoCov">          0 : }</span>
+<a name="92"><span class="lineNum">      92 </span>            : </a>
+<span class="lineNum">      93 </span>            : static int
+<span class="lineNum">      94 </span><span class="lineCov">          2 : mq_flush(void)</span>
+<span class="lineNum">      95 </span>            : {
+<span class="lineNum">      96 </span>            :     /* Nothing to do. */
+<span class="lineNum">      97 </span><span class="lineCov">          2 :     return 0;</span>
+<span class="lineNum">      98 </span>            : }
+<a name="99"><span class="lineNum">      99 </span>            : </a>
+<span class="lineNum">     100 </span>            : static int
+<span class="lineNum">     101 </span><span class="lineNoCov">          0 : mq_flush_if_writable(void)</span>
+<span class="lineNum">     102 </span>            : {
+<span class="lineNum">     103 </span>            :     /* Nothing to do. */
+<span class="lineNum">     104 </span><span class="lineNoCov">          0 :     return 0;</span>
+<span class="lineNum">     105 </span>            : }
+<a name="106"><span class="lineNum">     106 </span>            : </a>
+<span class="lineNum">     107 </span>            : static bool
+<span class="lineNum">     108 </span><span class="lineNoCov">          0 : mq_is_send_pending(void)</span>
+<span class="lineNum">     109 </span>            : {
+<span class="lineNum">     110 </span>            :     /* There's never anything pending. */
+<span class="lineNum">     111 </span><span class="lineNoCov">          0 :     return 0;</span>
+<span class="lineNum">     112 </span>            : }
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span>            : /*
+<span class="lineNum">     115 </span>            :  * Transmit a libpq protocol message to the shared memory message queue
+<span class="lineNum">     116 </span>            :  * selected via pq_mq_handle.  We don't include a length word, because the
+<span class="lineNum">     117 </span>            :  * receiver will know the length of the message from shm_mq_receive().
+<a name="118"><span class="lineNum">     118 </span>            :  */</a>
+<span class="lineNum">     119 </span>            : static int
+<span class="lineNum">     120 </span><span class="lineCov">       1492 : mq_putmessage(char msgtype, const char *s, size_t len)</span>
+<span class="lineNum">     121 </span>            : {
+<span class="lineNum">     122 </span>            :     shm_mq_iovec iov[2];
+<span class="lineNum">     123 </span>            :     shm_mq_result result;
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            :     /*
+<span class="lineNum">     126 </span>            :      * If we're sending a message, and we have to wait because the queue is
+<span class="lineNum">     127 </span>            :      * full, and then we get interrupted, and that interrupt results in trying
+<span class="lineNum">     128 </span>            :      * to send another message, we respond by detaching the queue.  There's no
+<span class="lineNum">     129 </span>            :      * way to return to the original context, but even if there were, just
+<span class="lineNum">     130 </span>            :      * queueing the message would amount to indefinitely postponing the
+<span class="lineNum">     131 </span>            :      * response to the interrupt.  So we do this instead.
+<span class="lineNum">     132 </span>            :      */
+<span class="lineNum">     133 </span><span class="lineCov">       1492 :     if (pq_mq_busy)</span>
+<span class="lineNum">     134 </span>            :     {
+<span class="lineNum">     135 </span><span class="lineNoCov">          0 :         if (pq_mq_handle != NULL)</span>
+<span class="lineNum">     136 </span><span class="lineNoCov">          0 :             shm_mq_detach(pq_mq_handle);</span>
+<span class="lineNum">     137 </span><span class="lineNoCov">          0 :         pq_mq_handle = NULL;</span>
+<span class="lineNum">     138 </span><span class="lineNoCov">          0 :         return EOF;</span>
+<span class="lineNum">     139 </span>            :     }
+<span class="lineNum">     140 </span>            : 
+<span class="lineNum">     141 </span>            :     /*
+<span class="lineNum">     142 </span>            :      * If the message queue is already gone, just ignore the message. This
+<span class="lineNum">     143 </span>            :      * doesn't necessarily indicate a problem; for example, DEBUG messages can
+<span class="lineNum">     144 </span>            :      * be generated late in the shutdown sequence, after all DSMs have already
+<span class="lineNum">     145 </span>            :      * been detached.
+<span class="lineNum">     146 </span>            :      */
+<span class="lineNum">     147 </span><span class="lineCov">       1492 :     if (pq_mq_handle == NULL)</span>
+<span class="lineNum">     148 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     149 </span>            : 
+<span class="lineNum">     150 </span><span class="lineCov">       1492 :     pq_mq_busy = true;</span>
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineCov">       1492 :     iov[0].data = &amp;msgtype;</span>
+<span class="lineNum">     153 </span><span class="lineCov">       1492 :     iov[0].len = 1;</span>
+<span class="lineNum">     154 </span><span class="lineCov">       1492 :     iov[1].data = s;</span>
+<span class="lineNum">     155 </span><span class="lineCov">       1492 :     iov[1].len = len;</span>
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span><span class="lineCov">       1492 :     Assert(pq_mq_handle != NULL);</span>
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span>            :     for (;;)
+<span class="lineNum">     160 </span>            :     {
+<span class="lineNum">     161 </span><span class="lineCov">       1492 :         result = shm_mq_sendv(pq_mq_handle, iov, 2, true);</span>
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span><span class="lineCov">       1492 :         if (pq_mq_parallel_master_pid != 0)</span>
+<span class="lineNum">     164 </span><span class="lineCov">       1492 :             SendProcSignal(pq_mq_parallel_master_pid,</span>
+<span class="lineNum">     165 </span>            :                            PROCSIG_PARALLEL_MESSAGE,
+<span class="lineNum">     166 </span>            :                            pq_mq_parallel_master_backend_id);
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span><span class="lineCov">       1492 :         if (result != SHM_MQ_WOULD_BLOCK)</span>
+<span class="lineNum">     169 </span><span class="lineCov">       1492 :             break;</span>
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span><span class="lineNoCov">          0 :         (void) WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, 0,</span>
+<span class="lineNum">     172 </span>            :                          WAIT_EVENT_MQ_PUT_MESSAGE);
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :         ResetLatch(MyLatch);</span>
+<span class="lineNum">     174 </span><span class="lineNoCov">          0 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     175 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span><span class="lineCov">       1492 :     pq_mq_busy = false;</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span><span class="lineCov">       1492 :     Assert(result == SHM_MQ_SUCCESS || result == SHM_MQ_DETACHED);</span>
+<span class="lineNum">     180 </span><span class="lineCov">       1492 :     if (result != SHM_MQ_SUCCESS)</span>
+<span class="lineNum">     181 </span><span class="lineNoCov">          0 :         return EOF;</span>
+<span class="lineNum">     182 </span><span class="lineCov">       1492 :     return 0;</span>
+<span class="lineNum">     183 </span>            : }
+<a name="184"><span class="lineNum">     184 </span>            : </a>
+<span class="lineNum">     185 </span>            : static void
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 : mq_putmessage_noblock(char msgtype, const char *s, size_t len)</span>
+<span class="lineNum">     187 </span>            : {
+<span class="lineNum">     188 </span>            :     /*
+<span class="lineNum">     189 </span>            :      * While the shm_mq machinery does support sending a message in
+<span class="lineNum">     190 </span>            :      * non-blocking mode, there's currently no way to try sending beginning to
+<span class="lineNum">     191 </span>            :      * send the message that doesn't also commit us to completing the
+<span class="lineNum">     192 </span>            :      * transmission.  This could be improved in the future, but for now we
+<span class="lineNum">     193 </span>            :      * don't need it.
+<span class="lineNum">     194 </span>            :      */
+<span class="lineNum">     195 </span><span class="lineNoCov">          0 :     elog(ERROR, &quot;not currently supported&quot;);</span>
+<span class="lineNum">     196 </span>            : }
+<a name="197"><span class="lineNum">     197 </span>            : </a>
+<span class="lineNum">     198 </span>            : static void
+<span class="lineNum">     199 </span><span class="lineNoCov">          0 : mq_startcopyout(void)</span>
+<span class="lineNum">     200 </span>            : {
+<span class="lineNum">     201 </span>            :     /* Nothing to do. */
+<span class="lineNum">     202 </span><span class="lineNoCov">          0 : }</span>
+<a name="203"><span class="lineNum">     203 </span>            : </a>
+<span class="lineNum">     204 </span>            : static void
+<span class="lineNum">     205 </span><span class="lineNoCov">          0 : mq_endcopyout(bool errorAbort)</span>
+<span class="lineNum">     206 </span>            : {
+<span class="lineNum">     207 </span>            :     /* Nothing to do. */
+<span class="lineNum">     208 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     209 </span>            : 
+<span class="lineNum">     210 </span>            : /*
+<span class="lineNum">     211 </span>            :  * Parse an ErrorResponse or NoticeResponse payload and populate an ErrorData
+<span class="lineNum">     212 </span>            :  * structure with the results.
+<a name="213"><span class="lineNum">     213 </span>            :  */</a>
+<span class="lineNum">     214 </span>            : void
+<span class="lineNum">     215 </span><span class="lineCov">          2 : pq_parse_errornotice(StringInfo msg, ErrorData *edata)</span>
+<span class="lineNum">     216 </span>            : {
+<span class="lineNum">     217 </span>            :     /* Initialize edata with reasonable defaults. */
+<span class="lineNum">     218 </span><span class="lineCov">          2 :     MemSet(edata, 0, sizeof(ErrorData));</span>
+<span class="lineNum">     219 </span><span class="lineCov">          2 :     edata-&gt;elevel = ERROR;</span>
+<span class="lineNum">     220 </span><span class="lineCov">          2 :     edata-&gt;assoc_context = CurrentMemoryContext;</span>
+<span class="lineNum">     221 </span>            : 
+<span class="lineNum">     222 </span>            :     /* Loop over fields and extract each one. */
+<span class="lineNum">     223 </span>            :     for (;;)
+<span class="lineNum">     224 </span>            :     {
+<span class="lineNum">     225 </span><span class="lineCov">         16 :         char        code = pq_getmsgbyte(msg);</span>
+<span class="lineNum">     226 </span>            :         const char *value;
+<span class="lineNum">     227 </span>            : 
+<span class="lineNum">     228 </span><span class="lineCov">         16 :         if (code == '\0')</span>
+<span class="lineNum">     229 </span>            :         {
+<span class="lineNum">     230 </span><span class="lineCov">          2 :             pq_getmsgend(msg);</span>
+<span class="lineNum">     231 </span><span class="lineCov">          2 :             break;</span>
+<span class="lineNum">     232 </span>            :         }
+<span class="lineNum">     233 </span><span class="lineCov">         14 :         value = pq_getmsgrawstring(msg);</span>
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span><span class="lineCov">         14 :         switch (code)</span>
+<span class="lineNum">     236 </span>            :         {
+<span class="lineNum">     237 </span>            :             case PG_DIAG_SEVERITY:
+<span class="lineNum">     238 </span>            :                 /* ignore, trusting we'll get a nonlocalized version */
+<span class="lineNum">     239 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     240 </span>            :             case PG_DIAG_SEVERITY_NONLOCALIZED:
+<span class="lineNum">     241 </span><span class="lineCov">          2 :                 if (strcmp(value, &quot;DEBUG&quot;) == 0)</span>
+<span class="lineNum">     242 </span>            :                 {
+<span class="lineNum">     243 </span>            :                     /*
+<span class="lineNum">     244 </span>            :                      * We can't reconstruct the exact DEBUG level, but
+<span class="lineNum">     245 </span>            :                      * presumably it was &gt;= client_min_messages, so select
+<span class="lineNum">     246 </span>            :                      * DEBUG1 to ensure we'll pass it on to the client.
+<span class="lineNum">     247 </span>            :                      */
+<span class="lineNum">     248 </span><span class="lineNoCov">          0 :                     edata-&gt;elevel = DEBUG1;</span>
+<span class="lineNum">     249 </span>            :                 }
+<span class="lineNum">     250 </span><span class="lineCov">          2 :                 else if (strcmp(value, &quot;LOG&quot;) == 0)</span>
+<span class="lineNum">     251 </span>            :                 {
+<span class="lineNum">     252 </span>            :                     /*
+<span class="lineNum">     253 </span>            :                      * It can't be LOG_SERVER_ONLY, or the worker wouldn't
+<span class="lineNum">     254 </span>            :                      * have sent it to us; so LOG is the correct value.
+<span class="lineNum">     255 </span>            :                      */
+<span class="lineNum">     256 </span><span class="lineNoCov">          0 :                     edata-&gt;elevel = LOG;</span>
+<span class="lineNum">     257 </span>            :                 }
+<span class="lineNum">     258 </span><span class="lineCov">          2 :                 else if (strcmp(value, &quot;INFO&quot;) == 0)</span>
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :                     edata-&gt;elevel = INFO;</span>
+<span class="lineNum">     260 </span><span class="lineCov">          2 :                 else if (strcmp(value, &quot;NOTICE&quot;) == 0)</span>
+<span class="lineNum">     261 </span><span class="lineNoCov">          0 :                     edata-&gt;elevel = NOTICE;</span>
+<span class="lineNum">     262 </span><span class="lineCov">          2 :                 else if (strcmp(value, &quot;WARNING&quot;) == 0)</span>
+<span class="lineNum">     263 </span><span class="lineNoCov">          0 :                     edata-&gt;elevel = WARNING;</span>
+<span class="lineNum">     264 </span><span class="lineCov">          2 :                 else if (strcmp(value, &quot;ERROR&quot;) == 0)</span>
+<span class="lineNum">     265 </span><span class="lineCov">          2 :                     edata-&gt;elevel = ERROR;</span>
+<span class="lineNum">     266 </span><span class="lineNoCov">          0 :                 else if (strcmp(value, &quot;FATAL&quot;) == 0)</span>
+<span class="lineNum">     267 </span><span class="lineNoCov">          0 :                     edata-&gt;elevel = FATAL;</span>
+<span class="lineNum">     268 </span><span class="lineNoCov">          0 :                 else if (strcmp(value, &quot;PANIC&quot;) == 0)</span>
+<span class="lineNum">     269 </span><span class="lineNoCov">          0 :                     edata-&gt;elevel = PANIC;</span>
+<span class="lineNum">     270 </span>            :                 else
+<span class="lineNum">     271 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;unrecognized error severity: \&quot;%s\&quot;&quot;, value);</span>
+<span class="lineNum">     272 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     273 </span>            :             case PG_DIAG_SQLSTATE:
+<span class="lineNum">     274 </span><span class="lineCov">          2 :                 if (strlen(value) != 5)</span>
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;invalid SQLSTATE: \&quot;%s\&quot;&quot;, value);</span>
+<span class="lineNum">     276 </span><span class="lineCov">          2 :                 edata-&gt;sqlerrcode = MAKE_SQLSTATE(value[0], value[1], value[2],</span>
+<span class="lineNum">     277 </span>            :                                                   value[3], value[4]);
+<span class="lineNum">     278 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     279 </span>            :             case PG_DIAG_MESSAGE_PRIMARY:
+<span class="lineNum">     280 </span><span class="lineCov">          2 :                 edata-&gt;message = pstrdup(value);</span>
+<span class="lineNum">     281 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     282 </span>            :             case PG_DIAG_MESSAGE_DETAIL:
+<span class="lineNum">     283 </span><span class="lineNoCov">          0 :                 edata-&gt;detail = pstrdup(value);</span>
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     285 </span>            :             case PG_DIAG_MESSAGE_HINT:
+<span class="lineNum">     286 </span><span class="lineNoCov">          0 :                 edata-&gt;hint = pstrdup(value);</span>
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     288 </span>            :             case PG_DIAG_STATEMENT_POSITION:
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :                 edata-&gt;cursorpos = pg_strtoint32(value);</span>
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     291 </span>            :             case PG_DIAG_INTERNAL_POSITION:
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :                 edata-&gt;internalpos = pg_strtoint32(value);</span>
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     294 </span>            :             case PG_DIAG_INTERNAL_QUERY:
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :                 edata-&gt;internalquery = pstrdup(value);</span>
+<span class="lineNum">     296 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     297 </span>            :             case PG_DIAG_CONTEXT:
+<span class="lineNum">     298 </span><span class="lineNoCov">          0 :                 edata-&gt;context = pstrdup(value);</span>
+<span class="lineNum">     299 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     300 </span>            :             case PG_DIAG_SCHEMA_NAME:
+<span class="lineNum">     301 </span><span class="lineNoCov">          0 :                 edata-&gt;schema_name = pstrdup(value);</span>
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     303 </span>            :             case PG_DIAG_TABLE_NAME:
+<span class="lineNum">     304 </span><span class="lineNoCov">          0 :                 edata-&gt;table_name = pstrdup(value);</span>
+<span class="lineNum">     305 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     306 </span>            :             case PG_DIAG_COLUMN_NAME:
+<span class="lineNum">     307 </span><span class="lineNoCov">          0 :                 edata-&gt;column_name = pstrdup(value);</span>
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     309 </span>            :             case PG_DIAG_DATATYPE_NAME:
+<span class="lineNum">     310 </span><span class="lineNoCov">          0 :                 edata-&gt;datatype_name = pstrdup(value);</span>
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     312 </span>            :             case PG_DIAG_CONSTRAINT_NAME:
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :                 edata-&gt;constraint_name = pstrdup(value);</span>
+<span class="lineNum">     314 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     315 </span>            :             case PG_DIAG_SOURCE_FILE:
+<span class="lineNum">     316 </span><span class="lineCov">          2 :                 edata-&gt;filename = pstrdup(value);</span>
+<span class="lineNum">     317 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     318 </span>            :             case PG_DIAG_SOURCE_LINE:
+<span class="lineNum">     319 </span><span class="lineCov">          2 :                 edata-&gt;lineno = pg_strtoint32(value);</span>
+<span class="lineNum">     320 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     321 </span>            :             case PG_DIAG_SOURCE_FUNCTION:
+<span class="lineNum">     322 </span><span class="lineCov">          2 :                 edata-&gt;funcname = pstrdup(value);</span>
+<span class="lineNum">     323 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     324 </span>            :             default:
+<span class="lineNum">     325 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;unrecognized error field code: %d&quot;, (int) code);</span>
+<span class="lineNum">     326 </span>            :                 break;
+<span class="lineNum">     327 </span>            :         }
+<span class="lineNum">     328 </span><span class="lineCov">         14 :     }</span>
+<span class="lineNum">     329 </span><span class="lineCov">          2 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

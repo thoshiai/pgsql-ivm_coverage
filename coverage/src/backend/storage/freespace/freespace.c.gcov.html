@@ -1,0 +1,974 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/freespace/freespace.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/freespace</a> - freespace.c<span style="font-size: 80%;"> (source / <a href="freespace.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">185</td>
+            <td class="headerCovTableEntry">227</td>
+            <td class="headerCovTableEntryMed">81.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">18</td>
+            <td class="headerCovTableEntry">21</td>
+            <td class="headerCovTableEntryMed">85.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * freespace.c
+<span class="lineNum">       4 </span>            :  *    POSTGRES free space map for quickly finding free space in relations
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/storage/freespace/freespace.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  * NOTES:
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  *  Free Space Map keeps track of the amount of free space on pages, and
+<span class="lineNum">      17 </span>            :  *  allows quickly searching for a page with enough free space. The FSM is
+<span class="lineNum">      18 </span>            :  *  stored in a dedicated relation fork of all heap relations, and those
+<span class="lineNum">      19 </span>            :  *  index access methods that need it (see also indexfsm.c). See README for
+<span class="lineNum">      20 </span>            :  *  more information.
+<span class="lineNum">      21 </span>            :  *
+<span class="lineNum">      22 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      23 </span>            :  */
+<span class="lineNum">      24 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;access/xlogutils.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;storage/freespace.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;storage/fsm_internals.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;storage/lmgr.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;storage/smgr.h&quot;
+<span class="lineNum">      33 </span>            : 
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : /*
+<span class="lineNum">      36 </span>            :  * We use just one byte to store the amount of free space on a page, so we
+<span class="lineNum">      37 </span>            :  * divide the amount of free space a page can have into 256 different
+<span class="lineNum">      38 </span>            :  * categories. The highest category, 255, represents a page with at least
+<span class="lineNum">      39 </span>            :  * MaxFSMRequestSize bytes of free space, and the second highest category
+<span class="lineNum">      40 </span>            :  * represents the range from 254 * FSM_CAT_STEP, inclusive, to
+<span class="lineNum">      41 </span>            :  * MaxFSMRequestSize, exclusive.
+<span class="lineNum">      42 </span>            :  *
+<span class="lineNum">      43 </span>            :  * MaxFSMRequestSize depends on the architecture and BLCKSZ, but assuming
+<span class="lineNum">      44 </span>            :  * default 8k BLCKSZ, and that MaxFSMRequestSize is 8164 bytes, the
+<span class="lineNum">      45 </span>            :  * categories look like this:
+<span class="lineNum">      46 </span>            :  *
+<span class="lineNum">      47 </span>            :  *
+<span class="lineNum">      48 </span>            :  * Range     Category
+<span class="lineNum">      49 </span>            :  * 0    - 31   0
+<span class="lineNum">      50 </span>            :  * 32   - 63   1
+<span class="lineNum">      51 </span>            :  * ...    ...  ...
+<span class="lineNum">      52 </span>            :  * 8096 - 8127 253
+<span class="lineNum">      53 </span>            :  * 8128 - 8163 254
+<span class="lineNum">      54 </span>            :  * 8164 - 8192 255
+<span class="lineNum">      55 </span>            :  *
+<span class="lineNum">      56 </span>            :  * The reason that MaxFSMRequestSize is special is that if MaxFSMRequestSize
+<span class="lineNum">      57 </span>            :  * isn't equal to a range boundary, a page with exactly MaxFSMRequestSize
+<span class="lineNum">      58 </span>            :  * bytes of free space wouldn't satisfy a request for MaxFSMRequestSize
+<span class="lineNum">      59 </span>            :  * bytes. If there isn't more than MaxFSMRequestSize bytes of free space on a
+<span class="lineNum">      60 </span>            :  * completely empty page, that would mean that we could never satisfy a
+<span class="lineNum">      61 </span>            :  * request of exactly MaxFSMRequestSize bytes.
+<span class="lineNum">      62 </span>            :  */
+<span class="lineNum">      63 </span>            : #define FSM_CATEGORIES  256
+<span class="lineNum">      64 </span>            : #define FSM_CAT_STEP    (BLCKSZ / FSM_CATEGORIES)
+<span class="lineNum">      65 </span>            : #define MaxFSMRequestSize   MaxHeapTupleSize
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : /*
+<span class="lineNum">      68 </span>            :  * Depth of the on-disk tree. We need to be able to address 2^32-1 blocks,
+<span class="lineNum">      69 </span>            :  * and 1626 is the smallest number that satisfies X^3 &gt;= 2^32-1. Likewise,
+<span class="lineNum">      70 </span>            :  * 216 is the smallest number that satisfies X^4 &gt;= 2^32-1. In practice,
+<span class="lineNum">      71 </span>            :  * this means that 4096 bytes is the smallest BLCKSZ that we can get away
+<span class="lineNum">      72 </span>            :  * with a 3-level tree, and 512 is the smallest we support.
+<span class="lineNum">      73 </span>            :  */
+<span class="lineNum">      74 </span>            : #define FSM_TREE_DEPTH  ((SlotsPerFSMPage &gt;= 1626) ? 3 : 4)
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            : #define FSM_ROOT_LEVEL  (FSM_TREE_DEPTH - 1)
+<span class="lineNum">      77 </span>            : #define FSM_BOTTOM_LEVEL 0
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            : /*
+<span class="lineNum">      80 </span>            :  * The internal FSM routines work on a logical addressing scheme. Each
+<span class="lineNum">      81 </span>            :  * level of the tree can be thought of as a separately addressable file.
+<span class="lineNum">      82 </span>            :  */
+<span class="lineNum">      83 </span>            : typedef struct
+<span class="lineNum">      84 </span>            : {
+<span class="lineNum">      85 </span>            :     int         level;          /* level */
+<span class="lineNum">      86 </span>            :     int         logpageno;      /* page number within the level */
+<span class="lineNum">      87 </span>            : } FSMAddress;
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span>            : /* Address of the root page. */
+<span class="lineNum">      90 </span>            : static const FSMAddress FSM_ROOT_ADDRESS = {FSM_ROOT_LEVEL, 0};
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span>            : /* functions to navigate the tree */
+<span class="lineNum">      93 </span>            : static FSMAddress fsm_get_child(FSMAddress parent, uint16 slot);
+<span class="lineNum">      94 </span>            : static FSMAddress fsm_get_parent(FSMAddress child, uint16 *slot);
+<span class="lineNum">      95 </span>            : static FSMAddress fsm_get_location(BlockNumber heapblk, uint16 *slot);
+<span class="lineNum">      96 </span>            : static BlockNumber fsm_get_heap_blk(FSMAddress addr, uint16 slot);
+<span class="lineNum">      97 </span>            : static BlockNumber fsm_logical_to_physical(FSMAddress addr);
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            : static Buffer fsm_readbuf(Relation rel, FSMAddress addr, bool extend);
+<span class="lineNum">     100 </span>            : static void fsm_extend(Relation rel, BlockNumber fsm_nblocks);
+<span class="lineNum">     101 </span>            : 
+<span class="lineNum">     102 </span>            : /* functions to convert amount of free space to a FSM category */
+<span class="lineNum">     103 </span>            : static uint8 fsm_space_avail_to_cat(Size avail);
+<span class="lineNum">     104 </span>            : static uint8 fsm_space_needed_to_cat(Size needed);
+<span class="lineNum">     105 </span>            : static Size fsm_space_cat_to_avail(uint8 cat);
+<span class="lineNum">     106 </span>            : 
+<span class="lineNum">     107 </span>            : /* workhorse functions for various operations */
+<span class="lineNum">     108 </span>            : static int  fsm_set_and_search(Relation rel, FSMAddress addr, uint16 slot,
+<span class="lineNum">     109 </span>            :                                uint8 newValue, uint8 minValue);
+<span class="lineNum">     110 </span>            : static BlockNumber fsm_search(Relation rel, uint8 min_cat);
+<span class="lineNum">     111 </span>            : static uint8 fsm_vacuum_page(Relation rel, FSMAddress addr,
+<span class="lineNum">     112 </span>            :                              BlockNumber start, BlockNumber end,
+<span class="lineNum">     113 </span>            :                              bool *eof);
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span>            : 
+<span class="lineNum">     116 </span>            : /******** Public API ********/
+<span class="lineNum">     117 </span>            : 
+<span class="lineNum">     118 </span>            : /*
+<span class="lineNum">     119 </span>            :  * GetPageWithFreeSpace - try to find a page in the given relation with
+<span class="lineNum">     120 </span>            :  *      at least the specified amount of free space.
+<span class="lineNum">     121 </span>            :  *
+<span class="lineNum">     122 </span>            :  * If successful, return the block number; if not, return InvalidBlockNumber.
+<span class="lineNum">     123 </span>            :  *
+<span class="lineNum">     124 </span>            :  * The caller must be prepared for the possibility that the returned page
+<span class="lineNum">     125 </span>            :  * will turn out to have too little space available by the time the caller
+<span class="lineNum">     126 </span>            :  * gets a lock on it.  In that case, the caller should report the actual
+<span class="lineNum">     127 </span>            :  * amount of free space available on that page and then try again (see
+<span class="lineNum">     128 </span>            :  * RecordAndGetPageWithFreeSpace).  If InvalidBlockNumber is returned,
+<span class="lineNum">     129 </span>            :  * extend the relation.
+<a name="130"><span class="lineNum">     130 </span>            :  */</a>
+<span class="lineNum">     131 </span>            : BlockNumber
+<span class="lineNum">     132 </span><span class="lineCov">      16952 : GetPageWithFreeSpace(Relation rel, Size spaceNeeded)</span>
+<span class="lineNum">     133 </span>            : {
+<span class="lineNum">     134 </span><span class="lineCov">      16952 :     uint8       min_cat = fsm_space_needed_to_cat(spaceNeeded);</span>
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span><span class="lineCov">      16952 :     return fsm_search(rel, min_cat);</span>
+<span class="lineNum">     137 </span>            : }
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span>            : /*
+<span class="lineNum">     140 </span>            :  * RecordAndGetPageWithFreeSpace - update info about a page and try again.
+<span class="lineNum">     141 </span>            :  *
+<span class="lineNum">     142 </span>            :  * We provide this combo form to save some locking overhead, compared to
+<span class="lineNum">     143 </span>            :  * separate RecordPageWithFreeSpace + GetPageWithFreeSpace calls. There's
+<span class="lineNum">     144 </span>            :  * also some effort to return a page close to the old page; if there's a
+<span class="lineNum">     145 </span>            :  * page with enough free space on the same FSM page where the old one page
+<span class="lineNum">     146 </span>            :  * is located, it is preferred.
+<a name="147"><span class="lineNum">     147 </span>            :  */</a>
+<span class="lineNum">     148 </span>            : BlockNumber
+<span class="lineNum">     149 </span><span class="lineCov">      22926 : RecordAndGetPageWithFreeSpace(Relation rel, BlockNumber oldPage,</span>
+<span class="lineNum">     150 </span>            :                               Size oldSpaceAvail, Size spaceNeeded)
+<span class="lineNum">     151 </span>            : {
+<span class="lineNum">     152 </span><span class="lineCov">      22926 :     int         old_cat = fsm_space_avail_to_cat(oldSpaceAvail);</span>
+<span class="lineNum">     153 </span><span class="lineCov">      22926 :     int         search_cat = fsm_space_needed_to_cat(spaceNeeded);</span>
+<span class="lineNum">     154 </span>            :     FSMAddress  addr;
+<span class="lineNum">     155 </span>            :     uint16      slot;
+<span class="lineNum">     156 </span>            :     int         search_slot;
+<span class="lineNum">     157 </span>            : 
+<span class="lineNum">     158 </span>            :     /* Get the location of the FSM byte representing the heap block */
+<span class="lineNum">     159 </span><span class="lineCov">      22926 :     addr = fsm_get_location(oldPage, &amp;slot);</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span><span class="lineCov">      22926 :     search_slot = fsm_set_and_search(rel, addr, slot, old_cat, search_cat);</span>
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span>            :     /*
+<span class="lineNum">     164 </span>            :      * If fsm_set_and_search found a suitable new block, return that.
+<span class="lineNum">     165 </span>            :      * Otherwise, search as usual.
+<span class="lineNum">     166 </span>            :      */
+<span class="lineNum">     167 </span><span class="lineCov">      22926 :     if (search_slot != -1)</span>
+<span class="lineNum">     168 </span><span class="lineCov">       2440 :         return fsm_get_heap_blk(addr, search_slot);</span>
+<span class="lineNum">     169 </span>            :     else
+<span class="lineNum">     170 </span><span class="lineCov">      20486 :         return fsm_search(rel, search_cat);</span>
+<span class="lineNum">     171 </span>            : }
+<span class="lineNum">     172 </span>            : 
+<span class="lineNum">     173 </span>            : /*
+<span class="lineNum">     174 </span>            :  * RecordPageWithFreeSpace - update info about a page.
+<span class="lineNum">     175 </span>            :  *
+<span class="lineNum">     176 </span>            :  * Note that if the new spaceAvail value is higher than the old value stored
+<span class="lineNum">     177 </span>            :  * in the FSM, the space might not become visible to searchers until the next
+<span class="lineNum">     178 </span>            :  * FreeSpaceMapVacuum call, which updates the upper level pages.
+<a name="179"><span class="lineNum">     179 </span>            :  */</a>
+<span class="lineNum">     180 </span>            : void
+<span class="lineNum">     181 </span><span class="lineCov">      15608 : RecordPageWithFreeSpace(Relation rel, BlockNumber heapBlk, Size spaceAvail)</span>
+<span class="lineNum">     182 </span>            : {
+<span class="lineNum">     183 </span><span class="lineCov">      15608 :     int         new_cat = fsm_space_avail_to_cat(spaceAvail);</span>
+<span class="lineNum">     184 </span>            :     FSMAddress  addr;
+<span class="lineNum">     185 </span>            :     uint16      slot;
+<span class="lineNum">     186 </span>            : 
+<span class="lineNum">     187 </span>            :     /* Get the location of the FSM byte representing the heap block */
+<span class="lineNum">     188 </span><span class="lineCov">      15608 :     addr = fsm_get_location(heapBlk, &amp;slot);</span>
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span><span class="lineCov">      15608 :     fsm_set_and_search(rel, addr, slot, new_cat, 0);</span>
+<span class="lineNum">     191 </span><span class="lineCov">      15608 : }</span>
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            : /*
+<span class="lineNum">     194 </span>            :  * XLogRecordPageWithFreeSpace - like RecordPageWithFreeSpace, for use in
+<span class="lineNum">     195 </span>            :  *      WAL replay
+<a name="196"><span class="lineNum">     196 </span>            :  */</a>
+<span class="lineNum">     197 </span>            : void
+<span class="lineNum">     198 </span><span class="lineNoCov">          0 : XLogRecordPageWithFreeSpace(RelFileNode rnode, BlockNumber heapBlk,</span>
+<span class="lineNum">     199 </span>            :                             Size spaceAvail)
+<span class="lineNum">     200 </span>            : {
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :     int         new_cat = fsm_space_avail_to_cat(spaceAvail);</span>
+<span class="lineNum">     202 </span>            :     FSMAddress  addr;
+<span class="lineNum">     203 </span>            :     uint16      slot;
+<span class="lineNum">     204 </span>            :     BlockNumber blkno;
+<span class="lineNum">     205 </span>            :     Buffer      buf;
+<span class="lineNum">     206 </span>            :     Page        page;
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span>            :     /* Get the location of the FSM byte representing the heap block */
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :     addr = fsm_get_location(heapBlk, &amp;slot);</span>
+<span class="lineNum">     210 </span><span class="lineNoCov">          0 :     blkno = fsm_logical_to_physical(addr);</span>
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span>            :     /* If the page doesn't exist already, extend */
+<span class="lineNum">     213 </span><span class="lineNoCov">          0 :     buf = XLogReadBufferExtended(rnode, FSM_FORKNUM, blkno, RBM_ZERO_ON_ERROR);</span>
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 :     LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span><span class="lineNoCov">          0 :     page = BufferGetPage(buf);</span>
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 :     if (PageIsNew(page))</span>
+<span class="lineNum">     218 </span><span class="lineNoCov">          0 :         PageInit(page, BLCKSZ, 0);</span>
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span><span class="lineNoCov">          0 :     if (fsm_set_avail(page, slot, new_cat))</span>
+<span class="lineNum">     221 </span><span class="lineNoCov">          0 :         MarkBufferDirtyHint(buf, false);</span>
+<span class="lineNum">     222 </span><span class="lineNoCov">          0 :     UnlockReleaseBuffer(buf);</span>
+<span class="lineNum">     223 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span>            : /*
+<span class="lineNum">     226 </span>            :  * GetRecordedFreeSpace - return the amount of free space on a particular page,
+<span class="lineNum">     227 </span>            :  *      according to the FSM.
+<a name="228"><span class="lineNum">     228 </span>            :  */</a>
+<span class="lineNum">     229 </span>            : Size
+<span class="lineNum">     230 </span><span class="lineNoCov">          0 : GetRecordedFreeSpace(Relation rel, BlockNumber heapBlk)</span>
+<span class="lineNum">     231 </span>            : {
+<span class="lineNum">     232 </span>            :     FSMAddress  addr;
+<span class="lineNum">     233 </span>            :     uint16      slot;
+<span class="lineNum">     234 </span>            :     Buffer      buf;
+<span class="lineNum">     235 </span>            :     uint8       cat;
+<span class="lineNum">     236 </span>            : 
+<span class="lineNum">     237 </span>            :     /* Get the location of the FSM byte representing the heap block */
+<span class="lineNum">     238 </span><span class="lineNoCov">          0 :     addr = fsm_get_location(heapBlk, &amp;slot);</span>
+<span class="lineNum">     239 </span>            : 
+<span class="lineNum">     240 </span><span class="lineNoCov">          0 :     buf = fsm_readbuf(rel, addr, false);</span>
+<span class="lineNum">     241 </span><span class="lineNoCov">          0 :     if (!BufferIsValid(buf))</span>
+<span class="lineNum">     242 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     243 </span><span class="lineNoCov">          0 :     cat = fsm_get_avail(BufferGetPage(buf), slot);</span>
+<span class="lineNum">     244 </span><span class="lineNoCov">          0 :     ReleaseBuffer(buf);</span>
+<span class="lineNum">     245 </span>            : 
+<span class="lineNum">     246 </span><span class="lineNoCov">          0 :     return fsm_space_cat_to_avail(cat);</span>
+<span class="lineNum">     247 </span>            : }
+<span class="lineNum">     248 </span>            : 
+<span class="lineNum">     249 </span>            : /*
+<span class="lineNum">     250 </span>            :  * FreeSpaceMapPrepareTruncateRel - prepare for truncation of a relation.
+<span class="lineNum">     251 </span>            :  *
+<span class="lineNum">     252 </span>            :  * nblocks is the new size of the heap.
+<span class="lineNum">     253 </span>            :  *
+<span class="lineNum">     254 </span>            :  * Return the number of blocks of new FSM.
+<span class="lineNum">     255 </span>            :  * If it's InvalidBlockNumber, there is nothing to truncate;
+<span class="lineNum">     256 </span>            :  * otherwise the caller is responsible for calling smgrtruncate()
+<span class="lineNum">     257 </span>            :  * to truncate the FSM pages, and FreeSpaceMapVacuumRange()
+<span class="lineNum">     258 </span>            :  * to update upper-level pages in the FSM.
+<a name="259"><span class="lineNum">     259 </span>            :  */</a>
+<span class="lineNum">     260 </span>            : BlockNumber
+<span class="lineNum">     261 </span><span class="lineCov">         38 : FreeSpaceMapPrepareTruncateRel(Relation rel, BlockNumber nblocks)</span>
+<span class="lineNum">     262 </span>            : {
+<span class="lineNum">     263 </span>            :     BlockNumber new_nfsmblocks;
+<span class="lineNum">     264 </span>            :     FSMAddress  first_removed_address;
+<span class="lineNum">     265 </span>            :     uint16      first_removed_slot;
+<span class="lineNum">     266 </span>            :     Buffer      buf;
+<span class="lineNum">     267 </span>            : 
+<span class="lineNum">     268 </span><span class="lineCov">         38 :     RelationOpenSmgr(rel);</span>
+<span class="lineNum">     269 </span>            : 
+<span class="lineNum">     270 </span>            :     /*
+<span class="lineNum">     271 </span>            :      * If no FSM has been created yet for this relation, there's nothing to
+<span class="lineNum">     272 </span>            :      * truncate.
+<span class="lineNum">     273 </span>            :      */
+<span class="lineNum">     274 </span><span class="lineCov">         38 :     if (!smgrexists(rel-&gt;rd_smgr, FSM_FORKNUM))</span>
+<span class="lineNum">     275 </span><span class="lineNoCov">          0 :         return InvalidBlockNumber;</span>
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span>            :     /* Get the location in the FSM of the first removed heap block */
+<span class="lineNum">     278 </span><span class="lineCov">         38 :     first_removed_address = fsm_get_location(nblocks, &amp;first_removed_slot);</span>
+<span class="lineNum">     279 </span>            : 
+<span class="lineNum">     280 </span>            :     /*
+<span class="lineNum">     281 </span>            :      * Zero out the tail of the last remaining FSM page. If the slot
+<span class="lineNum">     282 </span>            :      * representing the first removed heap block is at a page boundary, as the
+<span class="lineNum">     283 </span>            :      * first slot on the FSM page that first_removed_address points to, we can
+<span class="lineNum">     284 </span>            :      * just truncate that page altogether.
+<span class="lineNum">     285 </span>            :      */
+<span class="lineNum">     286 </span><span class="lineCov">         38 :     if (first_removed_slot &gt; 0)</span>
+<span class="lineNum">     287 </span>            :     {
+<span class="lineNum">     288 </span><span class="lineCov">         26 :         buf = fsm_readbuf(rel, first_removed_address, false);</span>
+<span class="lineNum">     289 </span><span class="lineCov">         26 :         if (!BufferIsValid(buf))</span>
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :             return InvalidBlockNumber;  /* nothing to do; the FSM was already smaller */</span>
+<span class="lineNum">     291 </span><span class="lineCov">         26 :         LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     292 </span>            : 
+<span class="lineNum">     293 </span>            :         /* NO EREPORT(ERROR) from here till changes are logged */
+<span class="lineNum">     294 </span><span class="lineCov">         26 :         START_CRIT_SECTION();</span>
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span><span class="lineCov">         26 :         fsm_truncate_avail(BufferGetPage(buf), first_removed_slot);</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span>            :         /*
+<span class="lineNum">     299 </span>            :          * Truncation of a relation is WAL-logged at a higher-level, and we
+<span class="lineNum">     300 </span>            :          * will be called at WAL replay. But if checksums are enabled, we need
+<span class="lineNum">     301 </span>            :          * to still write a WAL record to protect against a torn page, if the
+<span class="lineNum">     302 </span>            :          * page is flushed to disk before the truncation WAL record. We cannot
+<span class="lineNum">     303 </span>            :          * use MarkBufferDirtyHint here, because that will not dirty the page
+<span class="lineNum">     304 </span>            :          * during recovery.
+<span class="lineNum">     305 </span>            :          */
+<span class="lineNum">     306 </span><span class="lineCov">         26 :         MarkBufferDirty(buf);</span>
+<span class="lineNum">     307 </span><span class="lineCov">         26 :         if (!InRecovery &amp;&amp; RelationNeedsWAL(rel) &amp;&amp; XLogHintBitIsNeeded())</span>
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :             log_newpage_buffer(buf, false);</span>
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span><span class="lineCov">         26 :         END_CRIT_SECTION();</span>
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span><span class="lineCov">         26 :         UnlockReleaseBuffer(buf);</span>
+<span class="lineNum">     313 </span>            : 
+<span class="lineNum">     314 </span><span class="lineCov">         26 :         new_nfsmblocks = fsm_logical_to_physical(first_removed_address) + 1;</span>
+<span class="lineNum">     315 </span>            :     }
+<span class="lineNum">     316 </span>            :     else
+<span class="lineNum">     317 </span>            :     {
+<span class="lineNum">     318 </span><span class="lineCov">         12 :         new_nfsmblocks = fsm_logical_to_physical(first_removed_address);</span>
+<span class="lineNum">     319 </span><span class="lineCov">         12 :         if (smgrnblocks(rel-&gt;rd_smgr, FSM_FORKNUM) &lt;= new_nfsmblocks)</span>
+<span class="lineNum">     320 </span><span class="lineNoCov">          0 :             return InvalidBlockNumber;  /* nothing to do; the FSM was already smaller */</span>
+<span class="lineNum">     321 </span>            :     }
+<span class="lineNum">     322 </span>            : 
+<span class="lineNum">     323 </span><span class="lineCov">         38 :     return new_nfsmblocks;</span>
+<span class="lineNum">     324 </span>            : }
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span>            : /*
+<span class="lineNum">     327 </span>            :  * FreeSpaceMapVacuum - update upper-level pages in the rel's FSM
+<span class="lineNum">     328 </span>            :  *
+<span class="lineNum">     329 </span>            :  * We assume that the bottom-level pages have already been updated with
+<span class="lineNum">     330 </span>            :  * new free-space information.
+<a name="331"><span class="lineNum">     331 </span>            :  */</a>
+<span class="lineNum">     332 </span>            : void
+<span class="lineNum">     333 </span><span class="lineCov">         44 : FreeSpaceMapVacuum(Relation rel)</span>
+<span class="lineNum">     334 </span>            : {
+<span class="lineNum">     335 </span>            :     bool        dummy;
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span>            :     /* Recursively scan the tree, starting at the root */
+<span class="lineNum">     338 </span><span class="lineCov">         44 :     (void) fsm_vacuum_page(rel, FSM_ROOT_ADDRESS,</span>
+<span class="lineNum">     339 </span>            :                            (BlockNumber) 0, InvalidBlockNumber,
+<span class="lineNum">     340 </span>            :                            &amp;dummy);
+<span class="lineNum">     341 </span><span class="lineCov">         44 : }</span>
+<span class="lineNum">     342 </span>            : 
+<span class="lineNum">     343 </span>            : /*
+<span class="lineNum">     344 </span>            :  * FreeSpaceMapVacuumRange - update upper-level pages in the rel's FSM
+<span class="lineNum">     345 </span>            :  *
+<span class="lineNum">     346 </span>            :  * As above, but assume that only heap pages between start and end-1 inclusive
+<span class="lineNum">     347 </span>            :  * have new free-space information, so update only the upper-level slots
+<span class="lineNum">     348 </span>            :  * covering that block range.  end == InvalidBlockNumber is equivalent to
+<span class="lineNum">     349 </span>            :  * &quot;all the rest of the relation&quot;.
+<a name="350"><span class="lineNum">     350 </span>            :  */</a>
+<span class="lineNum">     351 </span>            : void
+<span class="lineNum">     352 </span><span class="lineCov">        632 : FreeSpaceMapVacuumRange(Relation rel, BlockNumber start, BlockNumber end)</span>
+<span class="lineNum">     353 </span>            : {
+<span class="lineNum">     354 </span>            :     bool        dummy;
+<span class="lineNum">     355 </span>            : 
+<span class="lineNum">     356 </span>            :     /* Recursively scan the tree, starting at the root */
+<span class="lineNum">     357 </span><span class="lineCov">        632 :     if (end &gt; start)</span>
+<span class="lineNum">     358 </span><span class="lineCov">        632 :         (void) fsm_vacuum_page(rel, FSM_ROOT_ADDRESS, start, end, &amp;dummy);</span>
+<span class="lineNum">     359 </span><span class="lineCov">        632 : }</span>
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span>            : /******** Internal routines ********/
+<span class="lineNum">     362 </span>            : 
+<span class="lineNum">     363 </span>            : /*
+<span class="lineNum">     364 </span>            :  * Return category corresponding x bytes of free space
+<a name="365"><span class="lineNum">     365 </span>            :  */</a>
+<span class="lineNum">     366 </span>            : static uint8
+<span class="lineNum">     367 </span><span class="lineCov">      38534 : fsm_space_avail_to_cat(Size avail)</span>
+<span class="lineNum">     368 </span>            : {
+<span class="lineNum">     369 </span>            :     int         cat;
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineCov">      38534 :     Assert(avail &lt; BLCKSZ);</span>
+<span class="lineNum">     372 </span>            : 
+<span class="lineNum">     373 </span><span class="lineCov">      38534 :     if (avail &gt;= MaxFSMRequestSize)</span>
+<span class="lineNum">     374 </span><span class="lineCov">       1406 :         return 255;</span>
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span><span class="lineCov">      37128 :     cat = avail / FSM_CAT_STEP;</span>
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span>            :     /*
+<span class="lineNum">     379 </span>            :      * The highest category, 255, is reserved for MaxFSMRequestSize bytes or
+<span class="lineNum">     380 </span>            :      * more.
+<span class="lineNum">     381 </span>            :      */
+<span class="lineNum">     382 </span><span class="lineCov">      37128 :     if (cat &gt; 254)</span>
+<span class="lineNum">     383 </span><span class="lineNoCov">          0 :         cat = 254;</span>
+<span class="lineNum">     384 </span>            : 
+<span class="lineNum">     385 </span><span class="lineCov">      37128 :     return (uint8) cat;</span>
+<span class="lineNum">     386 </span>            : }
+<span class="lineNum">     387 </span>            : 
+<span class="lineNum">     388 </span>            : /*
+<span class="lineNum">     389 </span>            :  * Return the lower bound of the range of free space represented by given
+<span class="lineNum">     390 </span>            :  * category.
+<a name="391"><span class="lineNum">     391 </span>            :  */</a>
+<span class="lineNum">     392 </span>            : static Size
+<span class="lineNum">     393 </span><span class="lineNoCov">          0 : fsm_space_cat_to_avail(uint8 cat)</span>
+<span class="lineNum">     394 </span>            : {
+<span class="lineNum">     395 </span>            :     /* The highest category represents exactly MaxFSMRequestSize bytes. */
+<span class="lineNum">     396 </span><span class="lineNoCov">          0 :     if (cat == 255)</span>
+<span class="lineNum">     397 </span><span class="lineNoCov">          0 :         return MaxFSMRequestSize;</span>
+<span class="lineNum">     398 </span>            :     else
+<span class="lineNum">     399 </span><span class="lineNoCov">          0 :         return cat * FSM_CAT_STEP;</span>
+<span class="lineNum">     400 </span>            : }
+<span class="lineNum">     401 </span>            : 
+<span class="lineNum">     402 </span>            : /*
+<span class="lineNum">     403 </span>            :  * Which category does a page need to have, to accommodate x bytes of data?
+<span class="lineNum">     404 </span>            :  * While fsm_space_avail_to_cat() rounds down, this needs to round up.
+<a name="405"><span class="lineNum">     405 </span>            :  */</a>
+<span class="lineNum">     406 </span>            : static uint8
+<span class="lineNum">     407 </span><span class="lineCov">      39878 : fsm_space_needed_to_cat(Size needed)</span>
+<span class="lineNum">     408 </span>            : {
+<span class="lineNum">     409 </span>            :     int         cat;
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span>            :     /* Can't ask for more space than the highest category represents */
+<span class="lineNum">     412 </span><span class="lineCov">      39878 :     if (needed &gt; MaxFSMRequestSize)</span>
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;invalid FSM request size %zu&quot;, needed);</span>
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span><span class="lineCov">      39878 :     if (needed == 0)</span>
+<span class="lineNum">     416 </span><span class="lineNoCov">          0 :         return 1;</span>
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span><span class="lineCov">      39878 :     cat = (needed + FSM_CAT_STEP - 1) / FSM_CAT_STEP;</span>
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span><span class="lineCov">      39878 :     if (cat &gt; 255)</span>
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :         cat = 255;</span>
+<span class="lineNum">     422 </span>            : 
+<span class="lineNum">     423 </span><span class="lineCov">      39878 :     return (uint8) cat;</span>
+<span class="lineNum">     424 </span>            : }
+<span class="lineNum">     425 </span>            : 
+<span class="lineNum">     426 </span>            : /*
+<span class="lineNum">     427 </span>            :  * Returns the physical block number of a FSM page
+<a name="428"><span class="lineNum">     428 </span>            :  */</a>
+<span class="lineNum">     429 </span>            : static BlockNumber
+<span class="lineNum">     430 </span><span class="lineCov">      83806 : fsm_logical_to_physical(FSMAddress addr)</span>
+<span class="lineNum">     431 </span>            : {
+<span class="lineNum">     432 </span>            :     BlockNumber pages;
+<span class="lineNum">     433 </span>            :     int         leafno;
+<span class="lineNum">     434 </span>            :     int         l;
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span>            :     /*
+<span class="lineNum">     437 </span>            :      * Calculate the logical page number of the first leaf page below the
+<span class="lineNum">     438 </span>            :      * given page.
+<span class="lineNum">     439 </span>            :      */
+<span class="lineNum">     440 </span><span class="lineCov">      83806 :     leafno = addr.logpageno;</span>
+<span class="lineNum">     441 </span><span class="lineCov">     164412 :     for (l = 0; l &lt; addr.level; l++)</span>
+<span class="lineNum">     442 </span><span class="lineCov">      80606 :         leafno *= SlotsPerFSMPage;</span>
+<span class="lineNum">     443 </span>            : 
+<span class="lineNum">     444 </span>            :     /* Count upper level nodes required to address the leaf page */
+<span class="lineNum">     445 </span><span class="lineCov">      83806 :     pages = 0;</span>
+<span class="lineNum">     446 </span><span class="lineCov">     335224 :     for (l = 0; l &lt; FSM_TREE_DEPTH; l++)</span>
+<span class="lineNum">     447 </span>            :     {
+<span class="lineNum">     448 </span><span class="lineCov">     251418 :         pages += leafno + 1;</span>
+<span class="lineNum">     449 </span><span class="lineCov">     251418 :         leafno /= SlotsPerFSMPage;</span>
+<span class="lineNum">     450 </span>            :     }
+<span class="lineNum">     451 </span>            : 
+<span class="lineNum">     452 </span>            :     /*
+<span class="lineNum">     453 </span>            :      * If the page we were asked for wasn't at the bottom level, subtract the
+<span class="lineNum">     454 </span>            :      * additional lower level pages we counted above.
+<span class="lineNum">     455 </span>            :      */
+<span class="lineNum">     456 </span><span class="lineCov">      83806 :     pages -= addr.level;</span>
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span>            :     /* Turn the page count into 0-based block number */
+<span class="lineNum">     459 </span><span class="lineCov">      83806 :     return pages - 1;</span>
+<span class="lineNum">     460 </span>            : }
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span>            : /*
+<span class="lineNum">     463 </span>            :  * Return the FSM location corresponding to given heap block.
+<a name="464"><span class="lineNum">     464 </span>            :  */</a>
+<span class="lineNum">     465 </span>            : static FSMAddress
+<span class="lineNum">     466 </span><span class="lineCov">      41260 : fsm_get_location(BlockNumber heapblk, uint16 *slot)</span>
+<span class="lineNum">     467 </span>            : {
+<span class="lineNum">     468 </span>            :     FSMAddress  addr;
+<span class="lineNum">     469 </span>            : 
+<span class="lineNum">     470 </span><span class="lineCov">      41260 :     addr.level = FSM_BOTTOM_LEVEL;</span>
+<span class="lineNum">     471 </span><span class="lineCov">      41260 :     addr.logpageno = heapblk / SlotsPerFSMPage;</span>
+<span class="lineNum">     472 </span><span class="lineCov">      41260 :     *slot = heapblk % SlotsPerFSMPage;</span>
+<span class="lineNum">     473 </span>            : 
+<span class="lineNum">     474 </span><span class="lineCov">      41260 :     return addr;</span>
+<span class="lineNum">     475 </span>            : }
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span>            : /*
+<span class="lineNum">     478 </span>            :  * Return the heap block number corresponding to given location in the FSM.
+<a name="479"><span class="lineNum">     479 </span>            :  */</a>
+<span class="lineNum">     480 </span>            : static BlockNumber
+<span class="lineNum">     481 </span><span class="lineCov">       4718 : fsm_get_heap_blk(FSMAddress addr, uint16 slot)</span>
+<span class="lineNum">     482 </span>            : {
+<span class="lineNum">     483 </span><span class="lineCov">       4718 :     Assert(addr.level == FSM_BOTTOM_LEVEL);</span>
+<span class="lineNum">     484 </span><span class="lineCov">       4718 :     return ((unsigned int) addr.logpageno) * SlotsPerFSMPage + slot;</span>
+<span class="lineNum">     485 </span>            : }
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            : /*
+<span class="lineNum">     488 </span>            :  * Given a logical address of a child page, get the logical page number of
+<span class="lineNum">     489 </span>            :  * the parent, and the slot within the parent corresponding to the child.
+<a name="490"><span class="lineNum">     490 </span>            :  */</a>
+<span class="lineNum">     491 </span>            : static FSMAddress
+<span class="lineNum">     492 </span><span class="lineCov">       4332 : fsm_get_parent(FSMAddress child, uint16 *slot)</span>
+<span class="lineNum">     493 </span>            : {
+<span class="lineNum">     494 </span>            :     FSMAddress  parent;
+<span class="lineNum">     495 </span>            : 
+<span class="lineNum">     496 </span><span class="lineCov">       4332 :     Assert(child.level &lt; FSM_ROOT_LEVEL);</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span><span class="lineCov">       4332 :     parent.level = child.level + 1;</span>
+<span class="lineNum">     499 </span><span class="lineCov">       4332 :     parent.logpageno = child.logpageno / SlotsPerFSMPage;</span>
+<span class="lineNum">     500 </span><span class="lineCov">       4332 :     *slot = child.logpageno % SlotsPerFSMPage;</span>
+<span class="lineNum">     501 </span>            : 
+<span class="lineNum">     502 </span><span class="lineCov">       4332 :     return parent;</span>
+<span class="lineNum">     503 </span>            : }
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span>            : /*
+<span class="lineNum">     506 </span>            :  * Given a logical address of a parent page and a slot number, get the
+<span class="lineNum">     507 </span>            :  * logical address of the corresponding child page.
+<a name="508"><span class="lineNum">     508 </span>            :  */</a>
+<span class="lineNum">     509 </span>            : static FSMAddress
+<span class="lineNum">     510 </span><span class="lineCov">       6494 : fsm_get_child(FSMAddress parent, uint16 slot)</span>
+<span class="lineNum">     511 </span>            : {
+<span class="lineNum">     512 </span>            :     FSMAddress  child;
+<span class="lineNum">     513 </span>            : 
+<span class="lineNum">     514 </span><span class="lineCov">       6494 :     Assert(parent.level &gt; FSM_BOTTOM_LEVEL);</span>
+<span class="lineNum">     515 </span>            : 
+<span class="lineNum">     516 </span><span class="lineCov">       6494 :     child.level = parent.level - 1;</span>
+<span class="lineNum">     517 </span><span class="lineCov">       6494 :     child.logpageno = parent.logpageno * SlotsPerFSMPage + slot;</span>
+<span class="lineNum">     518 </span>            : 
+<span class="lineNum">     519 </span><span class="lineCov">       6494 :     return child;</span>
+<span class="lineNum">     520 </span>            : }
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            : /*
+<span class="lineNum">     523 </span>            :  * Read a FSM page.
+<span class="lineNum">     524 </span>            :  *
+<span class="lineNum">     525 </span>            :  * If the page doesn't exist, InvalidBuffer is returned, or if 'extend' is
+<span class="lineNum">     526 </span>            :  * true, the FSM file is extended.
+<a name="527"><span class="lineNum">     527 </span>            :  */</a>
+<span class="lineNum">     528 </span>            : static Buffer
+<span class="lineNum">     529 </span><span class="lineCov">      83768 : fsm_readbuf(Relation rel, FSMAddress addr, bool extend)</span>
+<span class="lineNum">     530 </span>            : {
+<span class="lineNum">     531 </span><span class="lineCov">      83768 :     BlockNumber blkno = fsm_logical_to_physical(addr);</span>
+<span class="lineNum">     532 </span>            :     Buffer      buf;
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span><span class="lineCov">      83768 :     RelationOpenSmgr(rel);</span>
+<span class="lineNum">     535 </span>            : 
+<span class="lineNum">     536 </span>            :     /*
+<span class="lineNum">     537 </span>            :      * If we haven't cached the size of the FSM yet, check it first.  Also
+<span class="lineNum">     538 </span>            :      * recheck if the requested block seems to be past end, since our cached
+<span class="lineNum">     539 </span>            :      * value might be stale.  (We send smgr inval messages on truncation, but
+<span class="lineNum">     540 </span>            :      * not on extension.)
+<span class="lineNum">     541 </span>            :      */
+<span class="lineNum">     542 </span><span class="lineCov">     157924 :     if (rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks == InvalidBlockNumber ||</span>
+<span class="lineNum">     543 </span><span class="lineCov">      74156 :         blkno &gt;= rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks)</span>
+<span class="lineNum">     544 </span>            :     {
+<span class="lineNum">     545 </span><span class="lineCov">      17680 :         if (smgrexists(rel-&gt;rd_smgr, FSM_FORKNUM))</span>
+<span class="lineNum">     546 </span><span class="lineCov">       4316 :             rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks = smgrnblocks(rel-&gt;rd_smgr,</span>
+<span class="lineNum">     547 </span>            :                                                          FSM_FORKNUM);
+<span class="lineNum">     548 </span>            :         else
+<span class="lineNum">     549 </span><span class="lineCov">      13364 :             rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks = 0;</span>
+<span class="lineNum">     550 </span>            :     }
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span>            :     /* Handle requests beyond EOF */
+<span class="lineNum">     553 </span><span class="lineCov">      83768 :     if (blkno &gt;= rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks)</span>
+<span class="lineNum">     554 </span>            :     {
+<span class="lineNum">     555 </span><span class="lineCov">      13520 :         if (extend)</span>
+<span class="lineNum">     556 </span><span class="lineCov">        566 :             fsm_extend(rel, blkno + 1);</span>
+<span class="lineNum">     557 </span>            :         else
+<span class="lineNum">     558 </span><span class="lineCov">      12954 :             return InvalidBuffer;</span>
+<span class="lineNum">     559 </span>            :     }
+<span class="lineNum">     560 </span>            : 
+<span class="lineNum">     561 </span>            :     /*
+<span class="lineNum">     562 </span>            :      * Use ZERO_ON_ERROR mode, and initialize the page if necessary. The FSM
+<span class="lineNum">     563 </span>            :      * information is not accurate anyway, so it's better to clear corrupt
+<span class="lineNum">     564 </span>            :      * pages than error out. Since the FSM changes are not WAL-logged, the
+<span class="lineNum">     565 </span>            :      * so-called torn page problem on crash can lead to pages with corrupt
+<span class="lineNum">     566 </span>            :      * headers, for example.
+<span class="lineNum">     567 </span>            :      *
+<span class="lineNum">     568 </span>            :      * The initialize-the-page part is trickier than it looks, because of the
+<span class="lineNum">     569 </span>            :      * possibility of multiple backends doing this concurrently, and our
+<span class="lineNum">     570 </span>            :      * desire to not uselessly take the buffer lock in the normal path where
+<span class="lineNum">     571 </span>            :      * the page is OK.  We must take the lock to initialize the page, so
+<span class="lineNum">     572 </span>            :      * recheck page newness after we have the lock, in case someone else
+<span class="lineNum">     573 </span>            :      * already did it.  Also, because we initially check PageIsNew with no
+<span class="lineNum">     574 </span>            :      * lock, it's possible to fall through and return the buffer while someone
+<span class="lineNum">     575 </span>            :      * else is still initializing the page (i.e., we might see pd_upper as set
+<span class="lineNum">     576 </span>            :      * but other page header fields are still zeroes).  This is harmless for
+<span class="lineNum">     577 </span>            :      * callers that will take a buffer lock themselves, but some callers
+<span class="lineNum">     578 </span>            :      * inspect the page without any lock at all.  The latter is OK only so
+<span class="lineNum">     579 </span>            :      * long as it doesn't depend on the page header having correct contents.
+<span class="lineNum">     580 </span>            :      * Current usage is safe because PageGetContents() does not require that.
+<span class="lineNum">     581 </span>            :      */
+<span class="lineNum">     582 </span><span class="lineCov">      70814 :     buf = ReadBufferExtended(rel, FSM_FORKNUM, blkno, RBM_ZERO_ON_ERROR, NULL);</span>
+<span class="lineNum">     583 </span><span class="lineCov">      70814 :     if (PageIsNew(BufferGetPage(buf)))</span>
+<span class="lineNum">     584 </span>            :     {
+<span class="lineNum">     585 </span><span class="lineNoCov">          0 :         LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     586 </span><span class="lineNoCov">          0 :         if (PageIsNew(BufferGetPage(buf)))</span>
+<span class="lineNum">     587 </span><span class="lineNoCov">          0 :             PageInit(BufferGetPage(buf), BLCKSZ, 0);</span>
+<span class="lineNum">     588 </span><span class="lineNoCov">          0 :         LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     589 </span>            :     }
+<span class="lineNum">     590 </span><span class="lineCov">      70814 :     return buf;</span>
+<span class="lineNum">     591 </span>            : }
+<span class="lineNum">     592 </span>            : 
+<span class="lineNum">     593 </span>            : /*
+<span class="lineNum">     594 </span>            :  * Ensure that the FSM fork is at least fsm_nblocks long, extending
+<span class="lineNum">     595 </span>            :  * it if necessary with empty pages. And by empty, I mean pages filled
+<span class="lineNum">     596 </span>            :  * with zeros, meaning there's no free space.
+<a name="597"><span class="lineNum">     597 </span>            :  */</a>
+<span class="lineNum">     598 </span>            : static void
+<span class="lineNum">     599 </span><span class="lineCov">        566 : fsm_extend(Relation rel, BlockNumber fsm_nblocks)</span>
+<span class="lineNum">     600 </span>            : {
+<span class="lineNum">     601 </span>            :     BlockNumber fsm_nblocks_now;
+<span class="lineNum">     602 </span>            :     PGAlignedBlock pg;
+<span class="lineNum">     603 </span>            : 
+<span class="lineNum">     604 </span><span class="lineCov">        566 :     PageInit((Page) pg.data, BLCKSZ, 0);</span>
+<span class="lineNum">     605 </span>            : 
+<span class="lineNum">     606 </span>            :     /*
+<span class="lineNum">     607 </span>            :      * We use the relation extension lock to lock out other backends trying to
+<span class="lineNum">     608 </span>            :      * extend the FSM at the same time. It also locks out extension of the
+<span class="lineNum">     609 </span>            :      * main fork, unnecessarily, but extending the FSM happens seldom enough
+<span class="lineNum">     610 </span>            :      * that it doesn't seem worthwhile to have a separate lock tag type for
+<span class="lineNum">     611 </span>            :      * it.
+<span class="lineNum">     612 </span>            :      *
+<span class="lineNum">     613 </span>            :      * Note that another backend might have extended or created the relation
+<span class="lineNum">     614 </span>            :      * by the time we get the lock.
+<span class="lineNum">     615 </span>            :      */
+<span class="lineNum">     616 </span><span class="lineCov">        566 :     LockRelationForExtension(rel, ExclusiveLock);</span>
+<span class="lineNum">     617 </span>            : 
+<span class="lineNum">     618 </span>            :     /* Might have to re-open if a cache flush happened */
+<span class="lineNum">     619 </span><span class="lineCov">        566 :     RelationOpenSmgr(rel);</span>
+<span class="lineNum">     620 </span>            : 
+<span class="lineNum">     621 </span>            :     /*
+<span class="lineNum">     622 </span>            :      * Create the FSM file first if it doesn't exist.  If smgr_fsm_nblocks is
+<span class="lineNum">     623 </span>            :      * positive then it must exist, no need for an smgrexists call.
+<span class="lineNum">     624 </span>            :      */
+<span class="lineNum">     625 </span><span class="lineCov">        566 :     if ((rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks == 0 ||</span>
+<span class="lineNum">     626 </span><span class="lineCov">        566 :          rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks == InvalidBlockNumber) &amp;&amp;</span>
+<span class="lineNum">     627 </span><span class="lineCov">        566 :         !smgrexists(rel-&gt;rd_smgr, FSM_FORKNUM))</span>
+<span class="lineNum">     628 </span><span class="lineCov">        566 :         smgrcreate(rel-&gt;rd_smgr, FSM_FORKNUM, false);</span>
+<span class="lineNum">     629 </span>            : 
+<span class="lineNum">     630 </span><span class="lineCov">        566 :     fsm_nblocks_now = smgrnblocks(rel-&gt;rd_smgr, FSM_FORKNUM);</span>
+<span class="lineNum">     631 </span>            : 
+<span class="lineNum">     632 </span><span class="lineCov">       2830 :     while (fsm_nblocks_now &lt; fsm_nblocks)</span>
+<span class="lineNum">     633 </span>            :     {
+<span class="lineNum">     634 </span><span class="lineCov">       1698 :         PageSetChecksumInplace((Page) pg.data, fsm_nblocks_now);</span>
+<span class="lineNum">     635 </span>            : 
+<span class="lineNum">     636 </span><span class="lineCov">       1698 :         smgrextend(rel-&gt;rd_smgr, FSM_FORKNUM, fsm_nblocks_now,</span>
+<span class="lineNum">     637 </span>            :                    pg.data, false);
+<span class="lineNum">     638 </span><span class="lineCov">       1698 :         fsm_nblocks_now++;</span>
+<span class="lineNum">     639 </span>            :     }
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span>            :     /* Update local cache with the up-to-date size */
+<span class="lineNum">     642 </span><span class="lineCov">        566 :     rel-&gt;rd_smgr-&gt;smgr_fsm_nblocks = fsm_nblocks_now;</span>
+<span class="lineNum">     643 </span>            : 
+<span class="lineNum">     644 </span><span class="lineCov">        566 :     UnlockRelationForExtension(rel, ExclusiveLock);</span>
+<span class="lineNum">     645 </span><span class="lineCov">        566 : }</span>
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span>            : /*
+<span class="lineNum">     648 </span>            :  * Set value in given FSM page and slot.
+<span class="lineNum">     649 </span>            :  *
+<span class="lineNum">     650 </span>            :  * If minValue &gt; 0, the updated page is also searched for a page with at
+<span class="lineNum">     651 </span>            :  * least minValue of free space. If one is found, its slot number is
+<span class="lineNum">     652 </span>            :  * returned, -1 otherwise.
+<a name="653"><span class="lineNum">     653 </span>            :  */</a>
+<span class="lineNum">     654 </span>            : static int
+<span class="lineNum">     655 </span><span class="lineCov">      38834 : fsm_set_and_search(Relation rel, FSMAddress addr, uint16 slot,</span>
+<span class="lineNum">     656 </span>            :                    uint8 newValue, uint8 minValue)
+<span class="lineNum">     657 </span>            : {
+<span class="lineNum">     658 </span>            :     Buffer      buf;
+<span class="lineNum">     659 </span>            :     Page        page;
+<span class="lineNum">     660 </span><span class="lineCov">      38834 :     int         newslot = -1;</span>
+<span class="lineNum">     661 </span>            : 
+<span class="lineNum">     662 </span><span class="lineCov">      38834 :     buf = fsm_readbuf(rel, addr, true);</span>
+<span class="lineNum">     663 </span><span class="lineCov">      38834 :     LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     664 </span>            : 
+<span class="lineNum">     665 </span><span class="lineCov">      38834 :     page = BufferGetPage(buf);</span>
+<span class="lineNum">     666 </span>            : 
+<span class="lineNum">     667 </span><span class="lineCov">      38834 :     if (fsm_set_avail(page, slot, newValue))</span>
+<span class="lineNum">     668 </span><span class="lineCov">      19030 :         MarkBufferDirtyHint(buf, false);</span>
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span><span class="lineCov">      38834 :     if (minValue != 0)</span>
+<span class="lineNum">     671 </span>            :     {
+<span class="lineNum">     672 </span>            :         /* Search while we still hold the lock */
+<span class="lineNum">     673 </span><span class="lineCov">      22926 :         newslot = fsm_search_avail(buf, minValue,</span>
+<span class="lineNum">     674 </span><span class="lineCov">      22926 :                                    addr.level == FSM_BOTTOM_LEVEL,</span>
+<span class="lineNum">     675 </span>            :                                    true);
+<span class="lineNum">     676 </span>            :     }
+<span class="lineNum">     677 </span>            : 
+<span class="lineNum">     678 </span><span class="lineCov">      38834 :     UnlockReleaseBuffer(buf);</span>
+<span class="lineNum">     679 </span>            : 
+<span class="lineNum">     680 </span><span class="lineCov">      38834 :     return newslot;</span>
+<span class="lineNum">     681 </span>            : }
+<span class="lineNum">     682 </span>            : 
+<span class="lineNum">     683 </span>            : /*
+<span class="lineNum">     684 </span>            :  * Search the tree for a heap page with at least min_cat of free space
+<a name="685"><span class="lineNum">     685 </span>            :  */</a>
+<span class="lineNum">     686 </span>            : static BlockNumber
+<span class="lineNum">     687 </span><span class="lineCov">      37438 : fsm_search(Relation rel, uint8 min_cat)</span>
+<span class="lineNum">     688 </span>            : {
+<span class="lineNum">     689 </span><span class="lineCov">      37438 :     int         restarts = 0;</span>
+<span class="lineNum">     690 </span><span class="lineCov">      37438 :     FSMAddress  addr = FSM_ROOT_ADDRESS;</span>
+<span class="lineNum">     691 </span>            : 
+<span class="lineNum">     692 </span>            :     for (;;)
+<span class="lineNum">     693 </span>            :     {
+<span class="lineNum">     694 </span>            :         int         slot;
+<span class="lineNum">     695 </span>            :         Buffer      buf;
+<span class="lineNum">     696 </span><span class="lineCov">      42744 :         uint8       max_avail = 0;</span>
+<span class="lineNum">     697 </span>            : 
+<span class="lineNum">     698 </span>            :         /* Read the FSM page. */
+<span class="lineNum">     699 </span><span class="lineCov">      42744 :         buf = fsm_readbuf(rel, addr, false);</span>
+<span class="lineNum">     700 </span>            : 
+<span class="lineNum">     701 </span>            :         /* Search within the page */
+<span class="lineNum">     702 </span><span class="lineCov">      42744 :         if (BufferIsValid(buf))</span>
+<span class="lineNum">     703 </span>            :         {
+<span class="lineNum">     704 </span><span class="lineCov">      29950 :             LockBuffer(buf, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">     705 </span><span class="lineCov">      29950 :             slot = fsm_search_avail(buf, min_cat,</span>
+<span class="lineNum">     706 </span><span class="lineCov">      29950 :                                     (addr.level == FSM_BOTTOM_LEVEL),</span>
+<span class="lineNum">     707 </span>            :                                     false);
+<span class="lineNum">     708 </span><span class="lineCov">      29950 :             if (slot == -1)</span>
+<span class="lineNum">     709 </span><span class="lineCov">      22666 :                 max_avail = fsm_get_max_avail(BufferGetPage(buf));</span>
+<span class="lineNum">     710 </span><span class="lineCov">      29950 :             UnlockReleaseBuffer(buf);</span>
+<span class="lineNum">     711 </span>            :         }
+<span class="lineNum">     712 </span>            :         else
+<span class="lineNum">     713 </span><span class="lineCov">      12794 :             slot = -1;</span>
+<span class="lineNum">     714 </span>            : 
+<span class="lineNum">     715 </span><span class="lineCov">      42744 :         if (slot != -1)</span>
+<span class="lineNum">     716 </span>            :         {
+<span class="lineNum">     717 </span>            :             /*
+<span class="lineNum">     718 </span>            :              * Descend the tree, or return the found block if we're at the
+<span class="lineNum">     719 </span>            :              * bottom.
+<span class="lineNum">     720 </span>            :              */
+<span class="lineNum">     721 </span><span class="lineCov">       7284 :             if (addr.level == FSM_BOTTOM_LEVEL)</span>
+<span class="lineNum">     722 </span><span class="lineCov">       2278 :                 return fsm_get_heap_blk(addr, slot);</span>
+<span class="lineNum">     723 </span>            : 
+<span class="lineNum">     724 </span><span class="lineCov">       5006 :             addr = fsm_get_child(addr, slot);</span>
+<span class="lineNum">     725 </span>            :         }
+<span class="lineNum">     726 </span><span class="lineCov">      35460 :         else if (addr.level == FSM_ROOT_LEVEL)</span>
+<span class="lineNum">     727 </span>            :         {
+<span class="lineNum">     728 </span>            :             /*
+<span class="lineNum">     729 </span>            :              * At the root, failure means there's no page with enough free
+<span class="lineNum">     730 </span>            :              * space in the FSM. Give up.
+<span class="lineNum">     731 </span>            :              */
+<span class="lineNum">     732 </span><span class="lineCov">      35160 :             return InvalidBlockNumber;</span>
+<span class="lineNum">     733 </span>            :         }
+<span class="lineNum">     734 </span>            :         else
+<span class="lineNum">     735 </span>            :         {
+<span class="lineNum">     736 </span>            :             uint16      parentslot;
+<span class="lineNum">     737 </span>            :             FSMAddress  parent;
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span>            :             /*
+<span class="lineNum">     740 </span>            :              * At lower level, failure can happen if the value in the upper-
+<span class="lineNum">     741 </span>            :              * level node didn't reflect the value on the lower page. Update
+<span class="lineNum">     742 </span>            :              * the upper node, to avoid falling into the same trap again, and
+<span class="lineNum">     743 </span>            :              * start over.
+<span class="lineNum">     744 </span>            :              *
+<span class="lineNum">     745 </span>            :              * There's a race condition here, if another backend updates this
+<span class="lineNum">     746 </span>            :              * page right after we release it, and gets the lock on the parent
+<span class="lineNum">     747 </span>            :              * page before us. We'll then update the parent page with the now
+<span class="lineNum">     748 </span>            :              * stale information we had. It's OK, because it should happen
+<span class="lineNum">     749 </span>            :              * rarely, and will be fixed by the next vacuum.
+<span class="lineNum">     750 </span>            :              */
+<span class="lineNum">     751 </span><span class="lineCov">        300 :             parent = fsm_get_parent(addr, &amp;parentslot);</span>
+<span class="lineNum">     752 </span><span class="lineCov">        300 :             fsm_set_and_search(rel, parent, parentslot, max_avail, 0);</span>
+<span class="lineNum">     753 </span>            : 
+<span class="lineNum">     754 </span>            :             /*
+<span class="lineNum">     755 </span>            :              * If the upper pages are badly out of date, we might need to loop
+<span class="lineNum">     756 </span>            :              * quite a few times, updating them as we go. Any inconsistencies
+<span class="lineNum">     757 </span>            :              * should eventually be corrected and the loop should end. Looping
+<span class="lineNum">     758 </span>            :              * indefinitely is nevertheless scary, so provide an emergency
+<span class="lineNum">     759 </span>            :              * valve.
+<span class="lineNum">     760 </span>            :              */
+<span class="lineNum">     761 </span><span class="lineCov">        300 :             if (restarts++ &gt; 10000)</span>
+<span class="lineNum">     762 </span><span class="lineNoCov">          0 :                 return InvalidBlockNumber;</span>
+<span class="lineNum">     763 </span>            : 
+<span class="lineNum">     764 </span>            :             /* Start search all over from the root */
+<span class="lineNum">     765 </span><span class="lineCov">        300 :             addr = FSM_ROOT_ADDRESS;</span>
+<span class="lineNum">     766 </span>            :         }
+<span class="lineNum">     767 </span><span class="lineCov">       5306 :     }</span>
+<span class="lineNum">     768 </span>            : }
+<span class="lineNum">     769 </span>            : 
+<span class="lineNum">     770 </span>            : 
+<span class="lineNum">     771 </span>            : /*
+<span class="lineNum">     772 </span>            :  * Recursive guts of FreeSpaceMapVacuum
+<span class="lineNum">     773 </span>            :  *
+<span class="lineNum">     774 </span>            :  * Examine the FSM page indicated by addr, as well as its children, updating
+<span class="lineNum">     775 </span>            :  * upper-level nodes that cover the heap block range from start to end-1.
+<span class="lineNum">     776 </span>            :  * (It's okay if end is beyond the actual end of the map.)
+<span class="lineNum">     777 </span>            :  * Return the maximum freespace value on this page.
+<span class="lineNum">     778 </span>            :  *
+<span class="lineNum">     779 </span>            :  * If addr is past the end of the FSM, set *eof_p to true and return 0.
+<span class="lineNum">     780 </span>            :  *
+<span class="lineNum">     781 </span>            :  * This traverses the tree in depth-first order.  The tree is stored
+<span class="lineNum">     782 </span>            :  * physically in depth-first order, so this should be pretty I/O efficient.
+<a name="783"><span class="lineNum">     783 </span>            :  */</a>
+<span class="lineNum">     784 </span>            : static uint8
+<span class="lineNum">     785 </span><span class="lineCov">       2164 : fsm_vacuum_page(Relation rel, FSMAddress addr,</span>
+<span class="lineNum">     786 </span>            :                 BlockNumber start, BlockNumber end,
+<span class="lineNum">     787 </span>            :                 bool *eof_p)
+<span class="lineNum">     788 </span>            : {
+<span class="lineNum">     789 </span>            :     Buffer      buf;
+<span class="lineNum">     790 </span>            :     Page        page;
+<span class="lineNum">     791 </span>            :     uint8       max_avail;
+<span class="lineNum">     792 </span>            : 
+<span class="lineNum">     793 </span>            :     /* Read the page if it exists, or return EOF */
+<span class="lineNum">     794 </span><span class="lineCov">       2164 :     buf = fsm_readbuf(rel, addr, false);</span>
+<span class="lineNum">     795 </span><span class="lineCov">       2164 :     if (!BufferIsValid(buf))</span>
+<span class="lineNum">     796 </span>            :     {
+<span class="lineNum">     797 </span><span class="lineCov">        160 :         *eof_p = true;</span>
+<span class="lineNum">     798 </span><span class="lineCov">        160 :         return 0;</span>
+<span class="lineNum">     799 </span>            :     }
+<span class="lineNum">     800 </span>            :     else
+<span class="lineNum">     801 </span><span class="lineCov">       2004 :         *eof_p = false;</span>
+<span class="lineNum">     802 </span>            : 
+<span class="lineNum">     803 </span><span class="lineCov">       2004 :     page = BufferGetPage(buf);</span>
+<span class="lineNum">     804 </span>            : 
+<span class="lineNum">     805 </span>            :     /*
+<span class="lineNum">     806 </span>            :      * If we're above the bottom level, recurse into children, and fix the
+<span class="lineNum">     807 </span>            :      * information stored about them at this level.
+<span class="lineNum">     808 </span>            :      */
+<span class="lineNum">     809 </span><span class="lineCov">       2004 :     if (addr.level &gt; FSM_BOTTOM_LEVEL)</span>
+<span class="lineNum">     810 </span>            :     {
+<span class="lineNum">     811 </span>            :         FSMAddress  fsm_start,
+<span class="lineNum">     812 </span>            :                     fsm_end;
+<span class="lineNum">     813 </span>            :         uint16      fsm_start_slot,
+<span class="lineNum">     814 </span>            :                     fsm_end_slot;
+<span class="lineNum">     815 </span>            :         int         slot,
+<span class="lineNum">     816 </span>            :                     start_slot,
+<span class="lineNum">     817 </span>            :                     end_slot;
+<span class="lineNum">     818 </span><span class="lineCov">       1344 :         bool        eof = false;</span>
+<span class="lineNum">     819 </span>            : 
+<span class="lineNum">     820 </span>            :         /*
+<span class="lineNum">     821 </span>            :          * Compute the range of slots we need to update on this page, given
+<span class="lineNum">     822 </span>            :          * the requested range of heap blocks to consider.  The first slot to
+<span class="lineNum">     823 </span>            :          * update is the one covering the &quot;start&quot; block, and the last slot is
+<span class="lineNum">     824 </span>            :          * the one covering &quot;end - 1&quot;.  (Some of this work will be duplicated
+<span class="lineNum">     825 </span>            :          * in each recursive call, but it's cheap enough to not worry about.)
+<span class="lineNum">     826 </span>            :          */
+<span class="lineNum">     827 </span><span class="lineCov">       1344 :         fsm_start = fsm_get_location(start, &amp;fsm_start_slot);</span>
+<span class="lineNum">     828 </span><span class="lineCov">       1344 :         fsm_end = fsm_get_location(end - 1, &amp;fsm_end_slot);</span>
+<span class="lineNum">     829 </span>            : 
+<span class="lineNum">     830 </span><span class="lineCov">       4704 :         while (fsm_start.level &lt; addr.level)</span>
+<span class="lineNum">     831 </span>            :         {
+<span class="lineNum">     832 </span><span class="lineCov">       2016 :             fsm_start = fsm_get_parent(fsm_start, &amp;fsm_start_slot);</span>
+<span class="lineNum">     833 </span><span class="lineCov">       2016 :             fsm_end = fsm_get_parent(fsm_end, &amp;fsm_end_slot);</span>
+<span class="lineNum">     834 </span>            :         }
+<span class="lineNum">     835 </span><span class="lineCov">       1344 :         Assert(fsm_start.level == addr.level);</span>
+<span class="lineNum">     836 </span>            : 
+<span class="lineNum">     837 </span><span class="lineCov">       1344 :         if (fsm_start.logpageno == addr.logpageno)</span>
+<span class="lineNum">     838 </span><span class="lineCov">       1344 :             start_slot = fsm_start_slot;</span>
+<span class="lineNum">     839 </span><span class="lineNoCov">          0 :         else if (fsm_start.logpageno &gt; addr.logpageno)</span>
+<span class="lineNum">     840 </span><span class="lineNoCov">          0 :             start_slot = SlotsPerFSMPage;   /* shouldn't get here... */</span>
+<span class="lineNum">     841 </span>            :         else
+<span class="lineNum">     842 </span><span class="lineNoCov">          0 :             start_slot = 0;</span>
+<span class="lineNum">     843 </span>            : 
+<span class="lineNum">     844 </span><span class="lineCov">       1344 :         if (fsm_end.logpageno == addr.logpageno)</span>
+<span class="lineNum">     845 </span><span class="lineCov">       1266 :             end_slot = fsm_end_slot;</span>
+<span class="lineNum">     846 </span><span class="lineCov">         78 :         else if (fsm_end.logpageno &gt; addr.logpageno)</span>
+<span class="lineNum">     847 </span><span class="lineCov">         78 :             end_slot = SlotsPerFSMPage - 1;</span>
+<span class="lineNum">     848 </span>            :         else
+<span class="lineNum">     849 </span><span class="lineNoCov">          0 :             end_slot = -1;      /* shouldn't get here... */</span>
+<span class="lineNum">     850 </span>            : 
+<span class="lineNum">     851 </span><span class="lineCov">     340194 :         for (slot = start_slot; slot &lt;= end_slot; slot++)</span>
+<span class="lineNum">     852 </span>            :         {
+<span class="lineNum">     853 </span>            :             int         child_avail;
+<span class="lineNum">     854 </span>            : 
+<span class="lineNum">     855 </span><span class="lineCov">     338850 :             CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     856 </span>            : 
+<span class="lineNum">     857 </span>            :             /* After we hit end-of-file, just clear the rest of the slots */
+<span class="lineNum">     858 </span><span class="lineCov">     338850 :             if (!eof)</span>
+<span class="lineNum">     859 </span><span class="lineCov">       1488 :                 child_avail = fsm_vacuum_page(rel, fsm_get_child(addr, slot),</span>
+<span class="lineNum">     860 </span>            :                                               start, end,
+<span class="lineNum">     861 </span>            :                                               &amp;eof);
+<span class="lineNum">     862 </span>            :             else
+<span class="lineNum">     863 </span><span class="lineCov">     337362 :                 child_avail = 0;</span>
+<span class="lineNum">     864 </span>            : 
+<span class="lineNum">     865 </span>            :             /* Update information about the child */
+<span class="lineNum">     866 </span><span class="lineCov">     338850 :             if (fsm_get_avail(page, slot) != child_avail)</span>
+<span class="lineNum">     867 </span>            :             {
+<span class="lineNum">     868 </span><span class="lineCov">       1140 :                 LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     869 </span><span class="lineCov">       1140 :                 fsm_set_avail(page, slot, child_avail);</span>
+<span class="lineNum">     870 </span><span class="lineCov">       1140 :                 MarkBufferDirtyHint(buf, false);</span>
+<span class="lineNum">     871 </span><span class="lineCov">       1140 :                 LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     872 </span>            :             }
+<span class="lineNum">     873 </span>            :         }
+<span class="lineNum">     874 </span>            :     }
+<span class="lineNum">     875 </span>            : 
+<span class="lineNum">     876 </span>            :     /* Now get the maximum value on the page, to return to caller */
+<span class="lineNum">     877 </span><span class="lineCov">       2004 :     max_avail = fsm_get_max_avail(page);</span>
+<span class="lineNum">     878 </span>            : 
+<span class="lineNum">     879 </span>            :     /*
+<span class="lineNum">     880 </span>            :      * Reset the next slot pointer. This encourages the use of low-numbered
+<span class="lineNum">     881 </span>            :      * pages, increasing the chances that a later vacuum can truncate the
+<span class="lineNum">     882 </span>            :      * relation.  We don't bother with a lock here, nor with marking the page
+<span class="lineNum">     883 </span>            :      * dirty if it wasn't already, since this is just a hint.
+<span class="lineNum">     884 </span>            :      */
+<span class="lineNum">     885 </span><span class="lineCov">       2004 :     ((FSMPage) PageGetContents(page))-&gt;fp_next_slot = 0;</span>
+<span class="lineNum">     886 </span>            : 
+<span class="lineNum">     887 </span><span class="lineCov">       2004 :     ReleaseBuffer(buf);</span>
+<span class="lineNum">     888 </span>            : 
+<span class="lineNum">     889 </span><span class="lineCov">       2004 :     return max_avail;</span>
+<span class="lineNum">     890 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

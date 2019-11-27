@@ -1,0 +1,558 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/windowfuncs.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - windowfuncs.c<span style="font-size: 80%;"> (source / <a href="windowfuncs.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">130</td>
+            <td class="headerCovTableEntry">133</td>
+            <td class="headerCovTableEntryHi">97.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">17</td>
+            <td class="headerCovTableEntry">17</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * windowfuncs.c
+<span class="lineNum">       4 </span>            :  *    Standard window functions defined in SQL spec.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 2000-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  *
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  * IDENTIFICATION
+<span class="lineNum">      10 </span>            :  *    src/backend/utils/adt/windowfuncs.c
+<span class="lineNum">      11 </span>            :  *
+<span class="lineNum">      12 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      13 </span>            :  */
+<span class="lineNum">      14 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      17 </span>            : #include &quot;windowapi.h&quot;
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : /*
+<span class="lineNum">      20 </span>            :  * ranking process information
+<span class="lineNum">      21 </span>            :  */
+<span class="lineNum">      22 </span>            : typedef struct rank_context
+<span class="lineNum">      23 </span>            : {
+<span class="lineNum">      24 </span>            :     int64       rank;           /* current rank */
+<span class="lineNum">      25 </span>            : } rank_context;
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : /*
+<span class="lineNum">      28 </span>            :  * ntile process information
+<span class="lineNum">      29 </span>            :  */
+<span class="lineNum">      30 </span>            : typedef struct
+<span class="lineNum">      31 </span>            : {
+<span class="lineNum">      32 </span>            :     int32       ntile;          /* current result */
+<span class="lineNum">      33 </span>            :     int64       rows_per_bucket;    /* row number of current bucket */
+<span class="lineNum">      34 </span>            :     int64       boundary;       /* how many rows should be in the bucket */
+<span class="lineNum">      35 </span>            :     int64       remainder;      /* (total rows) % (bucket num) */
+<span class="lineNum">      36 </span>            : } ntile_context;
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : static bool rank_up(WindowObject winobj);
+<span class="lineNum">      39 </span>            : static Datum leadlag_common(FunctionCallInfo fcinfo,
+<span class="lineNum">      40 </span>            :                             bool forward, bool withoffset, bool withdefault);
+<span class="lineNum">      41 </span>            : 
+<span class="lineNum">      42 </span>            : 
+<span class="lineNum">      43 </span>            : /*
+<span class="lineNum">      44 </span>            :  * utility routine for *_rank functions.
+<a name="45"><span class="lineNum">      45 </span>            :  */</a>
+<span class="lineNum">      46 </span>            : static bool
+<span class="lineNum">      47 </span><span class="lineCov">      55184 : rank_up(WindowObject winobj)</span>
+<span class="lineNum">      48 </span>            : {
+<span class="lineNum">      49 </span><span class="lineCov">      55184 :     bool        up = false;     /* should rank increase? */</span>
+<span class="lineNum">      50 </span><span class="lineCov">      55184 :     int64       curpos = WinGetCurrentPosition(winobj);</span>
+<span class="lineNum">      51 </span>            :     rank_context *context;
+<span class="lineNum">      52 </span>            : 
+<span class="lineNum">      53 </span><span class="lineCov">      55184 :     context = (rank_context *)</span>
+<span class="lineNum">      54 </span>            :         WinGetPartitionLocalMemory(winobj, sizeof(rank_context));
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span><span class="lineCov">      55184 :     if (context-&gt;rank == 0)</span>
+<span class="lineNum">      57 </span>            :     {
+<span class="lineNum">      58 </span>            :         /* first call: rank of first row is always 1 */
+<span class="lineNum">      59 </span><span class="lineCov">        130 :         Assert(curpos == 0);</span>
+<span class="lineNum">      60 </span><span class="lineCov">        130 :         context-&gt;rank = 1;</span>
+<span class="lineNum">      61 </span>            :     }
+<span class="lineNum">      62 </span>            :     else
+<span class="lineNum">      63 </span>            :     {
+<span class="lineNum">      64 </span><span class="lineCov">      55054 :         Assert(curpos &gt; 0);</span>
+<span class="lineNum">      65 </span>            :         /* do current and prior tuples match by ORDER BY clause? */
+<span class="lineNum">      66 </span><span class="lineCov">      55054 :         if (!WinRowsArePeers(winobj, curpos - 1, curpos))</span>
+<span class="lineNum">      67 </span><span class="lineCov">      44722 :             up = true;</span>
+<span class="lineNum">      68 </span>            :     }
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span>            :     /* We can advance the mark, but only *after* access to prior row */
+<span class="lineNum">      71 </span><span class="lineCov">      55184 :     WinSetMarkPosition(winobj, curpos);</span>
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span><span class="lineCov">      55184 :     return up;</span>
+<span class="lineNum">      74 </span>            : }
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span>            : /*
+<span class="lineNum">      78 </span>            :  * row_number
+<span class="lineNum">      79 </span>            :  * just increment up from 1 until current partition finishes.
+<a name="80"><span class="lineNum">      80 </span>            :  */</a>
+<span class="lineNum">      81 </span>            : Datum
+<span class="lineNum">      82 </span><span class="lineCov">     139218 : window_row_number(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      83 </span>            : {
+<span class="lineNum">      84 </span><span class="lineCov">     139218 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">      85 </span><span class="lineCov">     139218 :     int64       curpos = WinGetCurrentPosition(winobj);</span>
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span><span class="lineCov">     139218 :     WinSetMarkPosition(winobj, curpos);</span>
+<span class="lineNum">      88 </span><span class="lineCov">     139218 :     PG_RETURN_INT64(curpos + 1);</span>
+<span class="lineNum">      89 </span>            : }
+<span class="lineNum">      90 </span>            : 
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span>            : /*
+<span class="lineNum">      93 </span>            :  * rank
+<span class="lineNum">      94 </span>            :  * Rank changes when key columns change.
+<span class="lineNum">      95 </span>            :  * The new rank number is the current row number.
+<a name="96"><span class="lineNum">      96 </span>            :  */</a>
+<span class="lineNum">      97 </span>            : Datum
+<span class="lineNum">      98 </span><span class="lineCov">      55124 : window_rank(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      99 </span>            : {
+<span class="lineNum">     100 </span><span class="lineCov">      55124 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     101 </span>            :     rank_context *context;
+<span class="lineNum">     102 </span>            :     bool        up;
+<span class="lineNum">     103 </span>            : 
+<span class="lineNum">     104 </span><span class="lineCov">      55124 :     up = rank_up(winobj);</span>
+<span class="lineNum">     105 </span><span class="lineCov">      55124 :     context = (rank_context *)</span>
+<span class="lineNum">     106 </span>            :         WinGetPartitionLocalMemory(winobj, sizeof(rank_context));
+<span class="lineNum">     107 </span><span class="lineCov">      55124 :     if (up)</span>
+<span class="lineNum">     108 </span><span class="lineCov">      44698 :         context-&gt;rank = WinGetCurrentPosition(winobj) + 1;</span>
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span><span class="lineCov">      55124 :     PG_RETURN_INT64(context-&gt;rank);</span>
+<span class="lineNum">     111 </span>            : }
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span>            : /*
+<span class="lineNum">     114 </span>            :  * dense_rank
+<span class="lineNum">     115 </span>            :  * Rank increases by 1 when key columns change.
+<a name="116"><span class="lineNum">     116 </span>            :  */</a>
+<span class="lineNum">     117 </span>            : Datum
+<span class="lineNum">     118 </span><span class="lineCov">         20 : window_dense_rank(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     119 </span>            : {
+<span class="lineNum">     120 </span><span class="lineCov">         20 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     121 </span>            :     rank_context *context;
+<span class="lineNum">     122 </span>            :     bool        up;
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span><span class="lineCov">         20 :     up = rank_up(winobj);</span>
+<span class="lineNum">     125 </span><span class="lineCov">         20 :     context = (rank_context *)</span>
+<span class="lineNum">     126 </span>            :         WinGetPartitionLocalMemory(winobj, sizeof(rank_context));
+<span class="lineNum">     127 </span><span class="lineCov">         20 :     if (up)</span>
+<span class="lineNum">     128 </span><span class="lineCov">          8 :         context-&gt;rank++;</span>
+<span class="lineNum">     129 </span>            : 
+<span class="lineNum">     130 </span><span class="lineCov">         20 :     PG_RETURN_INT64(context-&gt;rank);</span>
+<span class="lineNum">     131 </span>            : }
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span>            : /*
+<span class="lineNum">     134 </span>            :  * percent_rank
+<span class="lineNum">     135 </span>            :  * return fraction between 0 and 1 inclusive,
+<span class="lineNum">     136 </span>            :  * which is described as (RK - 1) / (NR - 1), where RK is the current row's
+<span class="lineNum">     137 </span>            :  * rank and NR is the total number of rows, per spec.
+<a name="138"><span class="lineNum">     138 </span>            :  */</a>
+<span class="lineNum">     139 </span>            : Datum
+<span class="lineNum">     140 </span><span class="lineCov">         20 : window_percent_rank(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     141 </span>            : {
+<span class="lineNum">     142 </span><span class="lineCov">         20 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     143 </span>            :     rank_context *context;
+<span class="lineNum">     144 </span>            :     bool        up;
+<span class="lineNum">     145 </span><span class="lineCov">         20 :     int64       totalrows = WinGetPartitionRowCount(winobj);</span>
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span><span class="lineCov">         20 :     Assert(totalrows &gt; 0);</span>
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span><span class="lineCov">         20 :     up = rank_up(winobj);</span>
+<span class="lineNum">     150 </span><span class="lineCov">         20 :     context = (rank_context *)</span>
+<span class="lineNum">     151 </span>            :         WinGetPartitionLocalMemory(winobj, sizeof(rank_context));
+<span class="lineNum">     152 </span><span class="lineCov">         20 :     if (up)</span>
+<span class="lineNum">     153 </span><span class="lineCov">          8 :         context-&gt;rank = WinGetCurrentPosition(winobj) + 1;</span>
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            :     /* return zero if there's only one row, per spec */
+<span class="lineNum">     156 </span><span class="lineCov">         20 :     if (totalrows &lt;= 1)</span>
+<span class="lineNum">     157 </span><span class="lineCov">          2 :         PG_RETURN_FLOAT8(0.0);</span>
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span><span class="lineCov">         18 :     PG_RETURN_FLOAT8((float8) (context-&gt;rank - 1) / (float8) (totalrows - 1));</span>
+<span class="lineNum">     160 </span>            : }
+<span class="lineNum">     161 </span>            : 
+<span class="lineNum">     162 </span>            : /*
+<span class="lineNum">     163 </span>            :  * cume_dist
+<span class="lineNum">     164 </span>            :  * return fraction between 0 and 1 inclusive,
+<span class="lineNum">     165 </span>            :  * which is described as NP / NR, where NP is the number of rows preceding or
+<span class="lineNum">     166 </span>            :  * peers to the current row, and NR is the total number of rows, per spec.
+<a name="167"><span class="lineNum">     167 </span>            :  */</a>
+<span class="lineNum">     168 </span>            : Datum
+<span class="lineNum">     169 </span><span class="lineCov">         20 : window_cume_dist(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     170 </span>            : {
+<span class="lineNum">     171 </span><span class="lineCov">         20 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     172 </span>            :     rank_context *context;
+<span class="lineNum">     173 </span>            :     bool        up;
+<span class="lineNum">     174 </span><span class="lineCov">         20 :     int64       totalrows = WinGetPartitionRowCount(winobj);</span>
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span><span class="lineCov">         20 :     Assert(totalrows &gt; 0);</span>
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span><span class="lineCov">         20 :     up = rank_up(winobj);</span>
+<span class="lineNum">     179 </span><span class="lineCov">         20 :     context = (rank_context *)</span>
+<span class="lineNum">     180 </span>            :         WinGetPartitionLocalMemory(winobj, sizeof(rank_context));
+<span class="lineNum">     181 </span><span class="lineCov">         20 :     if (up || context-&gt;rank == 1)</span>
+<span class="lineNum">     182 </span>            :     {
+<span class="lineNum">     183 </span>            :         /*
+<span class="lineNum">     184 </span>            :          * The current row is not peer to prior row or is just the first, so
+<span class="lineNum">     185 </span>            :          * count up the number of rows that are peer to the current.
+<span class="lineNum">     186 </span>            :          */
+<span class="lineNum">     187 </span>            :         int64       row;
+<span class="lineNum">     188 </span>            : 
+<span class="lineNum">     189 </span><span class="lineCov">         16 :         context-&gt;rank = WinGetCurrentPosition(winobj) + 1;</span>
+<span class="lineNum">     190 </span>            : 
+<span class="lineNum">     191 </span>            :         /*
+<span class="lineNum">     192 </span>            :          * start from current + 1
+<span class="lineNum">     193 </span>            :          */
+<span class="lineNum">     194 </span><span class="lineCov">         20 :         for (row = context-&gt;rank; row &lt; totalrows; row++)</span>
+<span class="lineNum">     195 </span>            :         {
+<span class="lineNum">     196 </span><span class="lineCov">         12 :             if (!WinRowsArePeers(winobj, row - 1, row))</span>
+<span class="lineNum">     197 </span><span class="lineCov">          8 :                 break;</span>
+<span class="lineNum">     198 </span><span class="lineCov">          4 :             context-&gt;rank++;</span>
+<span class="lineNum">     199 </span>            :         }
+<span class="lineNum">     200 </span>            :     }
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span><span class="lineCov">         20 :     PG_RETURN_FLOAT8((float8) context-&gt;rank / (float8) totalrows);</span>
+<span class="lineNum">     203 </span>            : }
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span>            : /*
+<span class="lineNum">     206 </span>            :  * ntile
+<span class="lineNum">     207 </span>            :  * compute an exact numeric value with scale 0 (zero),
+<span class="lineNum">     208 </span>            :  * ranging from 1 (one) to n, per spec.
+<a name="209"><span class="lineNum">     209 </span>            :  */</a>
+<span class="lineNum">     210 </span>            : Datum
+<span class="lineNum">     211 </span><span class="lineCov">         26 : window_ntile(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     212 </span>            : {
+<span class="lineNum">     213 </span><span class="lineCov">         26 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     214 </span>            :     ntile_context *context;
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span><span class="lineCov">         26 :     context = (ntile_context *)</span>
+<span class="lineNum">     217 </span>            :         WinGetPartitionLocalMemory(winobj, sizeof(ntile_context));
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span><span class="lineCov">         26 :     if (context-&gt;ntile == 0)</span>
+<span class="lineNum">     220 </span>            :     {
+<span class="lineNum">     221 </span>            :         /* first call */
+<span class="lineNum">     222 </span>            :         int64       total;
+<span class="lineNum">     223 </span>            :         int32       nbuckets;
+<span class="lineNum">     224 </span>            :         bool        isnull;
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineCov">          8 :         total = WinGetPartitionRowCount(winobj);</span>
+<span class="lineNum">     227 </span><span class="lineCov">          8 :         nbuckets = DatumGetInt32(WinGetFuncArgCurrent(winobj, 0, &amp;isnull));</span>
+<span class="lineNum">     228 </span>            : 
+<span class="lineNum">     229 </span>            :         /*
+<span class="lineNum">     230 </span>            :          * per spec: If NT is the null value, then the result is the null
+<span class="lineNum">     231 </span>            :          * value.
+<span class="lineNum">     232 </span>            :          */
+<span class="lineNum">     233 </span><span class="lineCov">          8 :         if (isnull)</span>
+<span class="lineNum">     234 </span><span class="lineCov">          4 :             PG_RETURN_NULL();</span>
+<span class="lineNum">     235 </span>            : 
+<span class="lineNum">     236 </span>            :         /*
+<span class="lineNum">     237 </span>            :          * per spec: If NT is less than or equal to 0 (zero), then an
+<span class="lineNum">     238 </span>            :          * exception condition is raised.
+<span class="lineNum">     239 </span>            :          */
+<span class="lineNum">     240 </span><span class="lineCov">          4 :         if (nbuckets &lt;= 0)</span>
+<span class="lineNum">     241 </span><span class="lineCov">          2 :             ereport(ERROR,</span>
+<span class="lineNum">     242 </span>            :                     (errcode(ERRCODE_INVALID_ARGUMENT_FOR_NTILE),
+<span class="lineNum">     243 </span>            :                      errmsg(&quot;argument of ntile must be greater than zero&quot;)));
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span><span class="lineCov">          2 :         context-&gt;ntile = 1;</span>
+<span class="lineNum">     246 </span><span class="lineCov">          2 :         context-&gt;rows_per_bucket = 0;</span>
+<span class="lineNum">     247 </span><span class="lineCov">          2 :         context-&gt;boundary = total / nbuckets;</span>
+<span class="lineNum">     248 </span><span class="lineCov">          2 :         if (context-&gt;boundary &lt;= 0)</span>
+<span class="lineNum">     249 </span><span class="lineNoCov">          0 :             context-&gt;boundary = 1;</span>
+<span class="lineNum">     250 </span>            :         else
+<span class="lineNum">     251 </span>            :         {
+<span class="lineNum">     252 </span>            :             /*
+<span class="lineNum">     253 </span>            :              * If the total number is not divisible, add 1 row to leading
+<span class="lineNum">     254 </span>            :              * buckets.
+<span class="lineNum">     255 </span>            :              */
+<span class="lineNum">     256 </span><span class="lineCov">          2 :             context-&gt;remainder = total % nbuckets;</span>
+<span class="lineNum">     257 </span><span class="lineCov">          2 :             if (context-&gt;remainder != 0)</span>
+<span class="lineNum">     258 </span><span class="lineCov">          2 :                 context-&gt;boundary++;</span>
+<span class="lineNum">     259 </span>            :         }
+<span class="lineNum">     260 </span>            :     }
+<span class="lineNum">     261 </span>            : 
+<span class="lineNum">     262 </span><span class="lineCov">         20 :     context-&gt;rows_per_bucket++;</span>
+<span class="lineNum">     263 </span><span class="lineCov">         20 :     if (context-&gt;boundary &lt; context-&gt;rows_per_bucket)</span>
+<span class="lineNum">     264 </span>            :     {
+<span class="lineNum">     265 </span>            :         /* ntile up */
+<span class="lineNum">     266 </span><span class="lineCov">          4 :         if (context-&gt;remainder != 0 &amp;&amp; context-&gt;ntile == context-&gt;remainder)</span>
+<span class="lineNum">     267 </span>            :         {
+<span class="lineNum">     268 </span><span class="lineCov">          2 :             context-&gt;remainder = 0;</span>
+<span class="lineNum">     269 </span><span class="lineCov">          2 :             context-&gt;boundary -= 1;</span>
+<span class="lineNum">     270 </span>            :         }
+<span class="lineNum">     271 </span><span class="lineCov">          4 :         context-&gt;ntile += 1;</span>
+<span class="lineNum">     272 </span><span class="lineCov">          4 :         context-&gt;rows_per_bucket = 1;</span>
+<span class="lineNum">     273 </span>            :     }
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span><span class="lineCov">         20 :     PG_RETURN_INT32(context-&gt;ntile);</span>
+<span class="lineNum">     276 </span>            : }
+<span class="lineNum">     277 </span>            : 
+<span class="lineNum">     278 </span>            : /*
+<span class="lineNum">     279 </span>            :  * leadlag_common
+<span class="lineNum">     280 </span>            :  * common operation of lead() and lag()
+<span class="lineNum">     281 </span>            :  * For lead() forward is true, whereas for lag() it is false.
+<span class="lineNum">     282 </span>            :  * withoffset indicates we have an offset second argument.
+<span class="lineNum">     283 </span>            :  * withdefault indicates we have a default third argument.
+<a name="284"><span class="lineNum">     284 </span>            :  */</a>
+<span class="lineNum">     285 </span>            : static Datum
+<span class="lineNum">     286 </span><span class="lineCov">      60314 : leadlag_common(FunctionCallInfo fcinfo,</span>
+<span class="lineNum">     287 </span>            :                bool forward, bool withoffset, bool withdefault)
+<span class="lineNum">     288 </span>            : {
+<span class="lineNum">     289 </span><span class="lineCov">      60314 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     290 </span>            :     int32       offset;
+<span class="lineNum">     291 </span>            :     bool        const_offset;
+<span class="lineNum">     292 </span>            :     Datum       result;
+<span class="lineNum">     293 </span>            :     bool        isnull;
+<span class="lineNum">     294 </span>            :     bool        isout;
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span><span class="lineCov">      60314 :     if (withoffset)</span>
+<span class="lineNum">     297 </span>            :     {
+<span class="lineNum">     298 </span><span class="lineCov">        100 :         offset = DatumGetInt32(WinGetFuncArgCurrent(winobj, 1, &amp;isnull));</span>
+<span class="lineNum">     299 </span><span class="lineCov">        100 :         if (isnull)</span>
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :             PG_RETURN_NULL();</span>
+<span class="lineNum">     301 </span><span class="lineCov">        100 :         const_offset = get_fn_expr_arg_stable(fcinfo-&gt;flinfo, 1);</span>
+<span class="lineNum">     302 </span>            :     }
+<span class="lineNum">     303 </span>            :     else
+<span class="lineNum">     304 </span>            :     {
+<span class="lineNum">     305 </span><span class="lineCov">      60214 :         offset = 1;</span>
+<span class="lineNum">     306 </span><span class="lineCov">      60214 :         const_offset = true;</span>
+<span class="lineNum">     307 </span>            :     }
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span><span class="lineCov">      60314 :     result = WinGetFuncArgInPartition(winobj, 0,</span>
+<span class="lineNum">     310 </span>            :                                       (forward ? offset : -offset),
+<span class="lineNum">     311 </span>            :                                       WINDOW_SEEK_CURRENT,
+<span class="lineNum">     312 </span>            :                                       const_offset,
+<span class="lineNum">     313 </span>            :                                       &amp;isnull, &amp;isout);
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span><span class="lineCov">      60314 :     if (isout)</span>
+<span class="lineNum">     316 </span>            :     {
+<span class="lineNum">     317 </span>            :         /*
+<span class="lineNum">     318 </span>            :          * target row is out of the partition; supply default value if
+<span class="lineNum">     319 </span>            :          * provided.  otherwise it'll stay NULL
+<span class="lineNum">     320 </span>            :          */
+<span class="lineNum">     321 </span><span class="lineCov">         78 :         if (withdefault)</span>
+<span class="lineNum">     322 </span><span class="lineCov">         16 :             result = WinGetFuncArgCurrent(winobj, 2, &amp;isnull);</span>
+<span class="lineNum">     323 </span>            :     }
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span><span class="lineCov">      60314 :     if (isnull)</span>
+<span class="lineNum">     326 </span><span class="lineCov">         62 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     327 </span>            : 
+<span class="lineNum">     328 </span><span class="lineCov">      60252 :     PG_RETURN_DATUM(result);</span>
+<span class="lineNum">     329 </span>            : }
+<span class="lineNum">     330 </span>            : 
+<span class="lineNum">     331 </span>            : /*
+<span class="lineNum">     332 </span>            :  * lag
+<span class="lineNum">     333 </span>            :  * returns the value of VE evaluated on a row that is 1
+<span class="lineNum">     334 </span>            :  * row before the current row within a partition,
+<span class="lineNum">     335 </span>            :  * per spec.
+<a name="336"><span class="lineNum">     336 </span>            :  */</a>
+<span class="lineNum">     337 </span>            : Datum
+<span class="lineNum">     338 </span><span class="lineCov">      60114 : window_lag(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     339 </span>            : {
+<span class="lineNum">     340 </span><span class="lineCov">      60114 :     return leadlag_common(fcinfo, false, false, false);</span>
+<span class="lineNum">     341 </span>            : }
+<span class="lineNum">     342 </span>            : 
+<span class="lineNum">     343 </span>            : /*
+<span class="lineNum">     344 </span>            :  * lag_with_offset
+<span class="lineNum">     345 </span>            :  * returns the value of VE evaluated on a row that is OFFSET
+<span class="lineNum">     346 </span>            :  * rows before the current row within a partition,
+<span class="lineNum">     347 </span>            :  * per spec.
+<a name="348"><span class="lineNum">     348 </span>            :  */</a>
+<span class="lineNum">     349 </span>            : Datum
+<span class="lineNum">     350 </span><span class="lineCov">         20 : window_lag_with_offset(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     351 </span>            : {
+<span class="lineNum">     352 </span><span class="lineCov">         20 :     return leadlag_common(fcinfo, false, true, false);</span>
+<span class="lineNum">     353 </span>            : }
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span>            : /*
+<span class="lineNum">     356 </span>            :  * lag_with_offset_and_default
+<span class="lineNum">     357 </span>            :  * same as lag_with_offset but accepts default value
+<span class="lineNum">     358 </span>            :  * as its third argument.
+<a name="359"><span class="lineNum">     359 </span>            :  */</a>
+<span class="lineNum">     360 </span>            : Datum
+<span class="lineNum">     361 </span><span class="lineCov">         20 : window_lag_with_offset_and_default(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     362 </span>            : {
+<span class="lineNum">     363 </span><span class="lineCov">         20 :     return leadlag_common(fcinfo, false, true, true);</span>
+<span class="lineNum">     364 </span>            : }
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span>            : /*
+<span class="lineNum">     367 </span>            :  * lead
+<span class="lineNum">     368 </span>            :  * returns the value of VE evaluated on a row that is 1
+<span class="lineNum">     369 </span>            :  * row after the current row within a partition,
+<span class="lineNum">     370 </span>            :  * per spec.
+<a name="371"><span class="lineNum">     371 </span>            :  */</a>
+<span class="lineNum">     372 </span>            : Datum
+<span class="lineNum">     373 </span><span class="lineCov">        100 : window_lead(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     374 </span>            : {
+<span class="lineNum">     375 </span><span class="lineCov">        100 :     return leadlag_common(fcinfo, true, false, false);</span>
+<span class="lineNum">     376 </span>            : }
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span>            : /*
+<span class="lineNum">     379 </span>            :  * lead_with_offset
+<span class="lineNum">     380 </span>            :  * returns the value of VE evaluated on a row that is OFFSET
+<span class="lineNum">     381 </span>            :  * number of rows after the current row within a partition,
+<span class="lineNum">     382 </span>            :  * per spec.
+<a name="383"><span class="lineNum">     383 </span>            :  */</a>
+<span class="lineNum">     384 </span>            : Datum
+<span class="lineNum">     385 </span><span class="lineCov">         40 : window_lead_with_offset(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     386 </span>            : {
+<span class="lineNum">     387 </span><span class="lineCov">         40 :     return leadlag_common(fcinfo, true, true, false);</span>
+<span class="lineNum">     388 </span>            : }
+<span class="lineNum">     389 </span>            : 
+<span class="lineNum">     390 </span>            : /*
+<span class="lineNum">     391 </span>            :  * lead_with_offset_and_default
+<span class="lineNum">     392 </span>            :  * same as lead_with_offset but accepts default value
+<span class="lineNum">     393 </span>            :  * as its third argument.
+<a name="394"><span class="lineNum">     394 </span>            :  */</a>
+<span class="lineNum">     395 </span>            : Datum
+<span class="lineNum">     396 </span><span class="lineCov">         20 : window_lead_with_offset_and_default(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     397 </span>            : {
+<span class="lineNum">     398 </span><span class="lineCov">         20 :     return leadlag_common(fcinfo, true, true, true);</span>
+<span class="lineNum">     399 </span>            : }
+<span class="lineNum">     400 </span>            : 
+<span class="lineNum">     401 </span>            : /*
+<span class="lineNum">     402 </span>            :  * first_value
+<span class="lineNum">     403 </span>            :  * return the value of VE evaluated on the first row of the
+<span class="lineNum">     404 </span>            :  * window frame, per spec.
+<a name="405"><span class="lineNum">     405 </span>            :  */</a>
+<span class="lineNum">     406 </span>            : Datum
+<span class="lineNum">     407 </span><span class="lineCov">        682 : window_first_value(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     408 </span>            : {
+<span class="lineNum">     409 </span><span class="lineCov">        682 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     410 </span>            :     Datum       result;
+<span class="lineNum">     411 </span>            :     bool        isnull;
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span><span class="lineCov">        682 :     result = WinGetFuncArgInFrame(winobj, 0,</span>
+<span class="lineNum">     414 </span>            :                                   0, WINDOW_SEEK_HEAD, true,
+<span class="lineNum">     415 </span>            :                                   &amp;isnull, NULL);
+<span class="lineNum">     416 </span><span class="lineCov">        676 :     if (isnull)</span>
+<span class="lineNum">     417 </span><span class="lineCov">         20 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span><span class="lineCov">        656 :     PG_RETURN_DATUM(result);</span>
+<span class="lineNum">     420 </span>            : }
+<span class="lineNum">     421 </span>            : 
+<span class="lineNum">     422 </span>            : /*
+<span class="lineNum">     423 </span>            :  * last_value
+<span class="lineNum">     424 </span>            :  * return the value of VE evaluated on the last row of the
+<span class="lineNum">     425 </span>            :  * window frame, per spec.
+<a name="426"><span class="lineNum">     426 </span>            :  */</a>
+<span class="lineNum">     427 </span>            : Datum
+<span class="lineNum">     428 </span><span class="lineCov">        932 : window_last_value(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     429 </span>            : {
+<span class="lineNum">     430 </span><span class="lineCov">        932 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     431 </span>            :     Datum       result;
+<span class="lineNum">     432 </span>            :     bool        isnull;
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span><span class="lineCov">        932 :     result = WinGetFuncArgInFrame(winobj, 0,</span>
+<span class="lineNum">     435 </span>            :                                   0, WINDOW_SEEK_TAIL, true,
+<span class="lineNum">     436 </span>            :                                   &amp;isnull, NULL);
+<span class="lineNum">     437 </span><span class="lineCov">        932 :     if (isnull)</span>
+<span class="lineNum">     438 </span><span class="lineCov">         20 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     439 </span>            : 
+<span class="lineNum">     440 </span><span class="lineCov">        912 :     PG_RETURN_DATUM(result);</span>
+<span class="lineNum">     441 </span>            : }
+<span class="lineNum">     442 </span>            : 
+<span class="lineNum">     443 </span>            : /*
+<span class="lineNum">     444 </span>            :  * nth_value
+<span class="lineNum">     445 </span>            :  * return the value of VE evaluated on the n-th row from the first
+<span class="lineNum">     446 </span>            :  * row of the window frame, per spec.
+<a name="447"><span class="lineNum">     447 </span>            :  */</a>
+<span class="lineNum">     448 </span>            : Datum
+<span class="lineNum">     449 </span><span class="lineCov">        162 : window_nth_value(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     450 </span>            : {
+<span class="lineNum">     451 </span><span class="lineCov">        162 :     WindowObject winobj = PG_WINDOW_OBJECT();</span>
+<span class="lineNum">     452 </span>            :     bool        const_offset;
+<span class="lineNum">     453 </span>            :     Datum       result;
+<span class="lineNum">     454 </span>            :     bool        isnull;
+<span class="lineNum">     455 </span>            :     int32       nth;
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span><span class="lineCov">        162 :     nth = DatumGetInt32(WinGetFuncArgCurrent(winobj, 1, &amp;isnull));</span>
+<span class="lineNum">     458 </span><span class="lineCov">        162 :     if (isnull)</span>
+<span class="lineNum">     459 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     460 </span><span class="lineCov">        162 :     const_offset = get_fn_expr_arg_stable(fcinfo-&gt;flinfo, 1);</span>
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span><span class="lineCov">        162 :     if (nth &lt;= 0)</span>
+<span class="lineNum">     463 </span><span class="lineCov">          2 :         ereport(ERROR,</span>
+<span class="lineNum">     464 </span>            :                 (errcode(ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE),
+<span class="lineNum">     465 </span>            :                  errmsg(&quot;argument of nth_value must be greater than zero&quot;)));
+<span class="lineNum">     466 </span>            : 
+<span class="lineNum">     467 </span><span class="lineCov">        160 :     result = WinGetFuncArgInFrame(winobj, 0,</span>
+<span class="lineNum">     468 </span>            :                                   nth - 1, WINDOW_SEEK_HEAD, const_offset,
+<span class="lineNum">     469 </span>            :                                   &amp;isnull, NULL);
+<span class="lineNum">     470 </span><span class="lineCov">        160 :     if (isnull)</span>
+<span class="lineNum">     471 </span><span class="lineCov">         18 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span><span class="lineCov">        142 :     PG_RETURN_DATUM(result);</span>
+<span class="lineNum">     474 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

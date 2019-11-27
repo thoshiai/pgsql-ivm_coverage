@@ -1,0 +1,499 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/ipc/ipc.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/ipc</a> - ipc.c<span style="font-size: 80%;"> (source / <a href="ipc.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">71</td>
+            <td class="headerCovTableEntry">78</td>
+            <td class="headerCovTableEntryHi">91.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * ipc.c
+<span class="lineNum">       4 </span>            :  *    POSTGRES inter-process communication definitions.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * This file is misnamed, as it no longer has much of anything directly
+<span class="lineNum">       7 </span>            :  * to do with IPC.  The functionality here is concerned with managing
+<span class="lineNum">       8 </span>            :  * exit-time cleanup for either a postmaster or a backend.
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      12 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  * IDENTIFICATION
+<span class="lineNum">      16 </span>            :  *    src/backend/storage/ipc/ipc.c
+<span class="lineNum">      17 </span>            :  *
+<span class="lineNum">      18 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      19 </span>            :  */
+<span class="lineNum">      20 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      21 </span>            : 
+<span class="lineNum">      22 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      23 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      24 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      27 </span>            : #ifdef PROFILE_PID_DIR
+<span class="lineNum">      28 </span>            : #include &quot;postmaster/autovacuum.h&quot;
+<span class="lineNum">      29 </span>            : #endif
+<span class="lineNum">      30 </span>            : #include &quot;storage/dsm.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;storage/ipc.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;tcop/tcopprot.h&quot;
+<span class="lineNum">      33 </span>            : 
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : /*
+<span class="lineNum">      36 </span>            :  * This flag is set during proc_exit() to change ereport()'s behavior,
+<span class="lineNum">      37 </span>            :  * so that an ereport() from an on_proc_exit routine cannot get us out
+<span class="lineNum">      38 </span>            :  * of the exit procedure.  We do NOT want to go back to the idle loop...
+<span class="lineNum">      39 </span>            :  */
+<span class="lineNum">      40 </span>            : bool        proc_exit_inprogress = false;
+<span class="lineNum">      41 </span>            : 
+<span class="lineNum">      42 </span>            : /*
+<span class="lineNum">      43 </span>            :  * Set when shmem_exit() is in progress.
+<span class="lineNum">      44 </span>            :  */
+<span class="lineNum">      45 </span>            : bool        shmem_exit_inprogress = false;
+<span class="lineNum">      46 </span>            : 
+<span class="lineNum">      47 </span>            : /*
+<span class="lineNum">      48 </span>            :  * This flag tracks whether we've called atexit() in the current process
+<span class="lineNum">      49 </span>            :  * (or in the parent postmaster).
+<span class="lineNum">      50 </span>            :  */
+<span class="lineNum">      51 </span>            : static bool atexit_callback_setup = false;
+<span class="lineNum">      52 </span>            : 
+<span class="lineNum">      53 </span>            : /* local functions */
+<span class="lineNum">      54 </span>            : static void proc_exit_prepare(int code);
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : 
+<span class="lineNum">      57 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">      58 </span>            :  *                      exit() handling stuff
+<span class="lineNum">      59 </span>            :  *
+<span class="lineNum">      60 </span>            :  * These functions are in generally the same spirit as atexit(),
+<span class="lineNum">      61 </span>            :  * but provide some additional features we need --- in particular,
+<span class="lineNum">      62 </span>            :  * we want to register callbacks to invoke when we are disconnecting
+<span class="lineNum">      63 </span>            :  * from a broken shared-memory context but not exiting the postmaster.
+<span class="lineNum">      64 </span>            :  *
+<span class="lineNum">      65 </span>            :  * Callback functions can take zero, one, or two args: the first passed
+<span class="lineNum">      66 </span>            :  * arg is the integer exitcode, the second is the Datum supplied when
+<span class="lineNum">      67 </span>            :  * the callback was registered.
+<span class="lineNum">      68 </span>            :  * ----------------------------------------------------------------
+<span class="lineNum">      69 </span>            :  */
+<span class="lineNum">      70 </span>            : 
+<span class="lineNum">      71 </span>            : #define MAX_ON_EXITS 20
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            : struct ONEXIT
+<span class="lineNum">      74 </span>            : {
+<span class="lineNum">      75 </span>            :     pg_on_exit_callback function;
+<span class="lineNum">      76 </span>            :     Datum       arg;
+<span class="lineNum">      77 </span>            : };
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            : static struct ONEXIT on_proc_exit_list[MAX_ON_EXITS];
+<span class="lineNum">      80 </span>            : static struct ONEXIT on_shmem_exit_list[MAX_ON_EXITS];
+<span class="lineNum">      81 </span>            : static struct ONEXIT before_shmem_exit_list[MAX_ON_EXITS];
+<span class="lineNum">      82 </span>            : 
+<span class="lineNum">      83 </span>            : static int  on_proc_exit_index,
+<span class="lineNum">      84 </span>            :             on_shmem_exit_index,
+<span class="lineNum">      85 </span>            :             before_shmem_exit_index;
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">      89 </span>            :  *      proc_exit
+<span class="lineNum">      90 </span>            :  *
+<span class="lineNum">      91 </span>            :  *      this function calls all the callbacks registered
+<span class="lineNum">      92 </span>            :  *      for it (to free resources) and then calls exit.
+<span class="lineNum">      93 </span>            :  *
+<span class="lineNum">      94 </span>            :  *      This should be the only function to call exit().
+<span class="lineNum">      95 </span>            :  *      -cim 2/6/90
+<span class="lineNum">      96 </span>            :  *
+<span class="lineNum">      97 </span>            :  *      Unfortunately, we can't really guarantee that add-on code
+<span class="lineNum">      98 </span>            :  *      obeys the rule of not calling exit() directly.  So, while
+<span class="lineNum">      99 </span>            :  *      this is the preferred way out of the system, we also register
+<span class="lineNum">     100 </span>            :  *      an atexit callback that will make sure cleanup happens.
+<span class="lineNum">     101 </span>            :  * ----------------------------------------------------------------
+<a name="102"><span class="lineNum">     102 </span>            :  */</a>
+<span class="lineNum">     103 </span>            : void
+<span class="lineNum">     104 </span><span class="lineCov">       1226 : proc_exit(int code)</span>
+<span class="lineNum">     105 </span>            : {
+<span class="lineNum">     106 </span>            :     /* Clean up everything that must be cleaned up */
+<span class="lineNum">     107 </span><span class="lineCov">       1226 :     proc_exit_prepare(code);</span>
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            : #ifdef PROFILE_PID_DIR
+<span class="lineNum">     110 </span>            :     {
+<span class="lineNum">     111 </span>            :         /*
+<span class="lineNum">     112 </span>            :          * If we are profiling ourself then gprof's mcleanup() is about to
+<span class="lineNum">     113 </span>            :          * write out a profile to ./gmon.out.  Since mcleanup() always uses a
+<span class="lineNum">     114 </span>            :          * fixed file name, each backend will overwrite earlier profiles. To
+<span class="lineNum">     115 </span>            :          * fix that, we create a separate subdirectory for each backend
+<span class="lineNum">     116 </span>            :          * (./gprof/pid) and 'cd' to that subdirectory before we exit() - that
+<span class="lineNum">     117 </span>            :          * forces mcleanup() to write each profile into its own directory.  We
+<span class="lineNum">     118 </span>            :          * end up with something like: $PGDATA/gprof/8829/gmon.out
+<span class="lineNum">     119 </span>            :          * $PGDATA/gprof/8845/gmon.out ...
+<span class="lineNum">     120 </span>            :          *
+<span class="lineNum">     121 </span>            :          * To avoid undesirable disk space bloat, autovacuum workers are
+<span class="lineNum">     122 </span>            :          * discriminated against: all their gmon.out files go into the same
+<span class="lineNum">     123 </span>            :          * subdirectory.  Without this, an installation that is &quot;just sitting
+<span class="lineNum">     124 </span>            :          * there&quot; nonetheless eats megabytes of disk space every few seconds.
+<span class="lineNum">     125 </span>            :          *
+<span class="lineNum">     126 </span>            :          * Note that we do this here instead of in an on_proc_exit() callback
+<span class="lineNum">     127 </span>            :          * because we want to ensure that this code executes last - we don't
+<span class="lineNum">     128 </span>            :          * want to interfere with any other on_proc_exit() callback.  For the
+<span class="lineNum">     129 </span>            :          * same reason, we do not include it in proc_exit_prepare ... so if
+<span class="lineNum">     130 </span>            :          * you are exiting in the &quot;wrong way&quot; you won't drop your profile in a
+<span class="lineNum">     131 </span>            :          * nice place.
+<span class="lineNum">     132 </span>            :          */
+<span class="lineNum">     133 </span>            :         char        gprofDirName[32];
+<span class="lineNum">     134 </span>            : 
+<span class="lineNum">     135 </span>            :         if (IsAutoVacuumWorkerProcess())
+<span class="lineNum">     136 </span>            :             snprintf(gprofDirName, 32, &quot;gprof/avworker&quot;);
+<span class="lineNum">     137 </span>            :         else
+<span class="lineNum">     138 </span>            :             snprintf(gprofDirName, 32, &quot;gprof/%d&quot;, (int) getpid());
+<span class="lineNum">     139 </span>            : 
+<span class="lineNum">     140 </span>            :         /*
+<span class="lineNum">     141 </span>            :          * Use mkdir() instead of MakePGDirectory() since we aren't making a
+<span class="lineNum">     142 </span>            :          * PG directory here.
+<span class="lineNum">     143 </span>            :          */
+<span class="lineNum">     144 </span>            :         mkdir(&quot;gprof&quot;, S_IRWXU | S_IRWXG | S_IRWXO);
+<span class="lineNum">     145 </span>            :         mkdir(gprofDirName, S_IRWXU | S_IRWXG | S_IRWXO);
+<span class="lineNum">     146 </span>            :         chdir(gprofDirName);
+<span class="lineNum">     147 </span>            :     }
+<span class="lineNum">     148 </span>            : #endif
+<span class="lineNum">     149 </span>            : 
+<span class="lineNum">     150 </span><span class="lineCov">       1226 :     elog(DEBUG3, &quot;exit(%d)&quot;, code);</span>
+<span class="lineNum">     151 </span>            : 
+<span class="lineNum">     152 </span><span class="lineCov">       1226 :     exit(code);</span>
+<span class="lineNum">     153 </span>            : }
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            : /*
+<span class="lineNum">     156 </span>            :  * Code shared between proc_exit and the atexit handler.  Note that in
+<span class="lineNum">     157 </span>            :  * normal exit through proc_exit, this will actually be called twice ...
+<span class="lineNum">     158 </span>            :  * but the second call will have nothing to do.
+<a name="159"><span class="lineNum">     159 </span>            :  */</a>
+<span class="lineNum">     160 </span>            : static void
+<span class="lineNum">     161 </span><span class="lineCov">       2454 : proc_exit_prepare(int code)</span>
+<span class="lineNum">     162 </span>            : {
+<span class="lineNum">     163 </span>            :     /*
+<span class="lineNum">     164 </span>            :      * Once we set this flag, we are committed to exit.  Any ereport() will
+<span class="lineNum">     165 </span>            :      * NOT send control back to the main loop, but right back here.
+<span class="lineNum">     166 </span>            :      */
+<span class="lineNum">     167 </span><span class="lineCov">       2454 :     proc_exit_inprogress = true;</span>
+<span class="lineNum">     168 </span>            : 
+<span class="lineNum">     169 </span>            :     /*
+<span class="lineNum">     170 </span>            :      * Forget any pending cancel or die requests; we're doing our best to
+<span class="lineNum">     171 </span>            :      * close up shop already.  Note that the signal handlers will not set
+<span class="lineNum">     172 </span>            :      * these flags again, now that proc_exit_inprogress is set.
+<span class="lineNum">     173 </span>            :      */
+<span class="lineNum">     174 </span><span class="lineCov">       2454 :     InterruptPending = false;</span>
+<span class="lineNum">     175 </span><span class="lineCov">       2454 :     ProcDiePending = false;</span>
+<span class="lineNum">     176 </span><span class="lineCov">       2454 :     QueryCancelPending = false;</span>
+<span class="lineNum">     177 </span><span class="lineCov">       2454 :     InterruptHoldoffCount = 1;</span>
+<span class="lineNum">     178 </span><span class="lineCov">       2454 :     CritSectionCount = 0;</span>
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span>            :     /*
+<span class="lineNum">     181 </span>            :      * Also clear the error context stack, to prevent error callbacks from
+<span class="lineNum">     182 </span>            :      * being invoked by any elog/ereport calls made during proc_exit. Whatever
+<span class="lineNum">     183 </span>            :      * context they might want to offer is probably not relevant, and in any
+<span class="lineNum">     184 </span>            :      * case they are likely to fail outright after we've done things like
+<span class="lineNum">     185 </span>            :      * aborting any open transaction.  (In normal exit scenarios the context
+<span class="lineNum">     186 </span>            :      * stack should be empty anyway, but it might not be in the case of
+<span class="lineNum">     187 </span>            :      * elog(FATAL) for example.)
+<span class="lineNum">     188 </span>            :      */
+<span class="lineNum">     189 </span><span class="lineCov">       2454 :     error_context_stack = NULL;</span>
+<span class="lineNum">     190 </span>            :     /* For the same reason, reset debug_query_string before it's clobbered */
+<span class="lineNum">     191 </span><span class="lineCov">       2454 :     debug_query_string = NULL;</span>
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span>            :     /* do our shared memory exits first */
+<span class="lineNum">     194 </span><span class="lineCov">       2454 :     shmem_exit(code);</span>
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span><span class="lineCov">       2454 :     elog(DEBUG3, &quot;proc_exit(%d): %d callbacks to make&quot;,</span>
+<span class="lineNum">     197 </span>            :          code, on_proc_exit_index);
+<span class="lineNum">     198 </span>            : 
+<span class="lineNum">     199 </span>            :     /*
+<span class="lineNum">     200 </span>            :      * call all the registered callbacks.
+<span class="lineNum">     201 </span>            :      *
+<span class="lineNum">     202 </span>            :      * Note that since we decrement on_proc_exit_index each time, if a
+<span class="lineNum">     203 </span>            :      * callback calls ereport(ERROR) or ereport(FATAL) then it won't be
+<span class="lineNum">     204 </span>            :      * invoked again when control comes back here (nor will the
+<span class="lineNum">     205 </span>            :      * previously-completed callbacks).  So, an infinite loop should not be
+<span class="lineNum">     206 </span>            :      * possible.
+<span class="lineNum">     207 </span>            :      */
+<span class="lineNum">     208 </span><span class="lineCov">       7822 :     while (--on_proc_exit_index &gt;= 0)</span>
+<span class="lineNum">     209 </span><span class="lineCov">       2914 :         on_proc_exit_list[on_proc_exit_index].function(code,</span>
+<span class="lineNum">     210 </span>            :                                                        on_proc_exit_list[on_proc_exit_index].arg);
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span><span class="lineCov">       2454 :     on_proc_exit_index = 0;</span>
+<span class="lineNum">     213 </span><span class="lineCov">       2454 : }</span>
+<span class="lineNum">     214 </span>            : 
+<span class="lineNum">     215 </span>            : /* ------------------
+<span class="lineNum">     216 </span>            :  * Run all of the on_shmem_exit routines --- but don't actually exit.
+<span class="lineNum">     217 </span>            :  * This is used by the postmaster to re-initialize shared memory and
+<span class="lineNum">     218 </span>            :  * semaphores after a backend dies horribly.  As with proc_exit(), we
+<span class="lineNum">     219 </span>            :  * remove each callback from the list before calling it, to avoid
+<span class="lineNum">     220 </span>            :  * infinite loop in case of error.
+<span class="lineNum">     221 </span>            :  * ------------------
+<a name="222"><span class="lineNum">     222 </span>            :  */</a>
+<span class="lineNum">     223 </span>            : void
+<span class="lineNum">     224 </span><span class="lineCov">       2454 : shmem_exit(int code)</span>
+<span class="lineNum">     225 </span>            : {
+<span class="lineNum">     226 </span><span class="lineCov">       2454 :     shmem_exit_inprogress = true;</span>
+<span class="lineNum">     227 </span>            : 
+<span class="lineNum">     228 </span>            :     /*
+<span class="lineNum">     229 </span>            :      * Call before_shmem_exit callbacks.
+<span class="lineNum">     230 </span>            :      *
+<span class="lineNum">     231 </span>            :      * These should be things that need most of the system to still be up and
+<span class="lineNum">     232 </span>            :      * working, such as cleanup of temp relations, which requires catalog
+<span class="lineNum">     233 </span>            :      * access; or things that need to be completed because later cleanup steps
+<span class="lineNum">     234 </span>            :      * depend on them, such as releasing lwlocks.
+<span class="lineNum">     235 </span>            :      */
+<span class="lineNum">     236 </span><span class="lineCov">       2454 :     elog(DEBUG3, &quot;shmem_exit(%d): %d before_shmem_exit callbacks to make&quot;,</span>
+<span class="lineNum">     237 </span>            :          code, before_shmem_exit_index);
+<span class="lineNum">     238 </span><span class="lineCov">       6262 :     while (--before_shmem_exit_index &gt;= 0)</span>
+<span class="lineNum">     239 </span><span class="lineCov">       1354 :         before_shmem_exit_list[before_shmem_exit_index].function(code,</span>
+<span class="lineNum">     240 </span>            :                                                                  before_shmem_exit_list[before_shmem_exit_index].arg);
+<span class="lineNum">     241 </span><span class="lineCov">       2454 :     before_shmem_exit_index = 0;</span>
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span>            :     /*
+<span class="lineNum">     244 </span>            :      * Call dynamic shared memory callbacks.
+<span class="lineNum">     245 </span>            :      *
+<span class="lineNum">     246 </span>            :      * These serve the same purpose as late callbacks, but for dynamic shared
+<span class="lineNum">     247 </span>            :      * memory segments rather than the main shared memory segment.
+<span class="lineNum">     248 </span>            :      * dsm_backend_shutdown() has the same kind of progressive logic we use
+<span class="lineNum">     249 </span>            :      * for the main shared memory segment; namely, it unregisters each
+<span class="lineNum">     250 </span>            :      * callback before invoking it, so that we don't get stuck in an infinite
+<span class="lineNum">     251 </span>            :      * loop if one of those callbacks itself throws an ERROR or FATAL.
+<span class="lineNum">     252 </span>            :      *
+<span class="lineNum">     253 </span>            :      * Note that explicitly calling this function here is quite different from
+<span class="lineNum">     254 </span>            :      * registering it as an on_shmem_exit callback for precisely this reason:
+<span class="lineNum">     255 </span>            :      * if one dynamic shared memory callback errors out, the remaining
+<span class="lineNum">     256 </span>            :      * callbacks will still be invoked.  Thus, hard-coding this call puts it
+<span class="lineNum">     257 </span>            :      * equal footing with callbacks for the main shared memory segment.
+<span class="lineNum">     258 </span>            :      */
+<span class="lineNum">     259 </span><span class="lineCov">       2454 :     dsm_backend_shutdown();</span>
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span>            :     /*
+<span class="lineNum">     262 </span>            :      * Call on_shmem_exit callbacks.
+<span class="lineNum">     263 </span>            :      *
+<span class="lineNum">     264 </span>            :      * These are generally releasing low-level shared memory resources.  In
+<span class="lineNum">     265 </span>            :      * some cases, this is a backstop against the possibility that the early
+<span class="lineNum">     266 </span>            :      * callbacks might themselves fail, leading to re-entry to this routine;
+<span class="lineNum">     267 </span>            :      * in other cases, it's cleanup that only happens at process exit.
+<span class="lineNum">     268 </span>            :      */
+<span class="lineNum">     269 </span><span class="lineCov">       2454 :     elog(DEBUG3, &quot;shmem_exit(%d): %d on_shmem_exit callbacks to make&quot;,</span>
+<span class="lineNum">     270 </span>            :          code, on_shmem_exit_index);
+<span class="lineNum">     271 </span><span class="lineCov">      13026 :     while (--on_shmem_exit_index &gt;= 0)</span>
+<span class="lineNum">     272 </span><span class="lineCov">       8118 :         on_shmem_exit_list[on_shmem_exit_index].function(code,</span>
+<span class="lineNum">     273 </span>            :                                                          on_shmem_exit_list[on_shmem_exit_index].arg);
+<span class="lineNum">     274 </span><span class="lineCov">       2454 :     on_shmem_exit_index = 0;</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span><span class="lineCov">       2454 :     shmem_exit_inprogress = false;</span>
+<span class="lineNum">     277 </span><span class="lineCov">       2454 : }</span>
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     280 </span>            :  *      atexit_callback
+<span class="lineNum">     281 </span>            :  *
+<span class="lineNum">     282 </span>            :  *      Backstop to ensure that direct calls of exit() don't mess us up.
+<span class="lineNum">     283 </span>            :  *
+<span class="lineNum">     284 </span>            :  * Somebody who was being really uncooperative could call _exit(),
+<span class="lineNum">     285 </span>            :  * but for that case we have a &quot;dead man switch&quot; that will make the
+<span class="lineNum">     286 </span>            :  * postmaster treat it as a crash --- see pmsignal.c.
+<span class="lineNum">     287 </span>            :  * ----------------------------------------------------------------
+<a name="288"><span class="lineNum">     288 </span>            :  */</a>
+<span class="lineNum">     289 </span>            : static void
+<span class="lineNum">     290 </span><span class="lineCov">       1228 : atexit_callback(void)</span>
+<span class="lineNum">     291 </span>            : {
+<span class="lineNum">     292 </span>            :     /* Clean up everything that must be cleaned up */
+<span class="lineNum">     293 </span>            :     /* ... too bad we don't know the real exit code ... */
+<span class="lineNum">     294 </span><span class="lineCov">       1228 :     proc_exit_prepare(-1);</span>
+<span class="lineNum">     295 </span><span class="lineCov">       1228 : }</span>
+<span class="lineNum">     296 </span>            : 
+<span class="lineNum">     297 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     298 </span>            :  *      on_proc_exit
+<span class="lineNum">     299 </span>            :  *
+<span class="lineNum">     300 </span>            :  *      this function adds a callback function to the list of
+<span class="lineNum">     301 </span>            :  *      functions invoked by proc_exit().   -cim 2/6/90
+<span class="lineNum">     302 </span>            :  * ----------------------------------------------------------------
+<a name="303"><span class="lineNum">     303 </span>            :  */</a>
+<span class="lineNum">     304 </span>            : void
+<span class="lineNum">     305 </span><span class="lineCov">       5350 : on_proc_exit(pg_on_exit_callback function, Datum arg)</span>
+<span class="lineNum">     306 </span>            : {
+<span class="lineNum">     307 </span><span class="lineCov">       5350 :     if (on_proc_exit_index &gt;= MAX_ON_EXITS)</span>
+<span class="lineNum">     308 </span><span class="lineNoCov">          0 :         ereport(FATAL,</span>
+<span class="lineNum">     309 </span>            :                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+<span class="lineNum">     310 </span>            :                  errmsg_internal(&quot;out of on_proc_exit slots&quot;)));
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span><span class="lineCov">       5350 :     on_proc_exit_list[on_proc_exit_index].function = function;</span>
+<span class="lineNum">     313 </span><span class="lineCov">       5350 :     on_proc_exit_list[on_proc_exit_index].arg = arg;</span>
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span><span class="lineCov">       5350 :     ++on_proc_exit_index;</span>
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span><span class="lineCov">       5350 :     if (!atexit_callback_setup)</span>
+<span class="lineNum">     318 </span>            :     {
+<span class="lineNum">     319 </span><span class="lineCov">       1228 :         atexit(atexit_callback);</span>
+<span class="lineNum">     320 </span><span class="lineCov">       1228 :         atexit_callback_setup = true;</span>
+<span class="lineNum">     321 </span>            :     }
+<span class="lineNum">     322 </span><span class="lineCov">       5350 : }</span>
+<span class="lineNum">     323 </span>            : 
+<span class="lineNum">     324 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     325 </span>            :  *      before_shmem_exit
+<span class="lineNum">     326 </span>            :  *
+<span class="lineNum">     327 </span>            :  *      Register early callback to perform user-level cleanup,
+<span class="lineNum">     328 </span>            :  *      e.g. transaction abort, before we begin shutting down
+<span class="lineNum">     329 </span>            :  *      low-level subsystems.
+<span class="lineNum">     330 </span>            :  * ----------------------------------------------------------------
+<a name="331"><span class="lineNum">     331 </span>            :  */</a>
+<span class="lineNum">     332 </span>            : void
+<span class="lineNum">     333 </span><span class="lineCov">       1686 : before_shmem_exit(pg_on_exit_callback function, Datum arg)</span>
+<span class="lineNum">     334 </span>            : {
+<span class="lineNum">     335 </span><span class="lineCov">       1686 :     if (before_shmem_exit_index &gt;= MAX_ON_EXITS)</span>
+<span class="lineNum">     336 </span><span class="lineNoCov">          0 :         ereport(FATAL,</span>
+<span class="lineNum">     337 </span>            :                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+<span class="lineNum">     338 </span>            :                  errmsg_internal(&quot;out of before_shmem_exit slots&quot;)));
+<span class="lineNum">     339 </span>            : 
+<span class="lineNum">     340 </span><span class="lineCov">       1686 :     before_shmem_exit_list[before_shmem_exit_index].function = function;</span>
+<span class="lineNum">     341 </span><span class="lineCov">       1686 :     before_shmem_exit_list[before_shmem_exit_index].arg = arg;</span>
+<span class="lineNum">     342 </span>            : 
+<span class="lineNum">     343 </span><span class="lineCov">       1686 :     ++before_shmem_exit_index;</span>
+<span class="lineNum">     344 </span>            : 
+<span class="lineNum">     345 </span><span class="lineCov">       1686 :     if (!atexit_callback_setup)</span>
+<span class="lineNum">     346 </span>            :     {
+<span class="lineNum">     347 </span><span class="lineNoCov">          0 :         atexit(atexit_callback);</span>
+<span class="lineNum">     348 </span><span class="lineNoCov">          0 :         atexit_callback_setup = true;</span>
+<span class="lineNum">     349 </span>            :     }
+<span class="lineNum">     350 </span><span class="lineCov">       1686 : }</span>
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     353 </span>            :  *      on_shmem_exit
+<span class="lineNum">     354 </span>            :  *
+<span class="lineNum">     355 </span>            :  *      Register ordinary callback to perform low-level shutdown
+<span class="lineNum">     356 </span>            :  *      (e.g. releasing our PGPROC); run after before_shmem_exit
+<span class="lineNum">     357 </span>            :  *      callbacks and before on_proc_exit callbacks.
+<span class="lineNum">     358 </span>            :  * ----------------------------------------------------------------
+<a name="359"><span class="lineNum">     359 </span>            :  */</a>
+<span class="lineNum">     360 </span>            : void
+<span class="lineNum">     361 </span><span class="lineCov">      14208 : on_shmem_exit(pg_on_exit_callback function, Datum arg)</span>
+<span class="lineNum">     362 </span>            : {
+<span class="lineNum">     363 </span><span class="lineCov">      14208 :     if (on_shmem_exit_index &gt;= MAX_ON_EXITS)</span>
+<span class="lineNum">     364 </span><span class="lineNoCov">          0 :         ereport(FATAL,</span>
+<span class="lineNum">     365 </span>            :                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+<span class="lineNum">     366 </span>            :                  errmsg_internal(&quot;out of on_shmem_exit slots&quot;)));
+<span class="lineNum">     367 </span>            : 
+<span class="lineNum">     368 </span><span class="lineCov">      14208 :     on_shmem_exit_list[on_shmem_exit_index].function = function;</span>
+<span class="lineNum">     369 </span><span class="lineCov">      14208 :     on_shmem_exit_list[on_shmem_exit_index].arg = arg;</span>
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineCov">      14208 :     ++on_shmem_exit_index;</span>
+<span class="lineNum">     372 </span>            : 
+<span class="lineNum">     373 </span><span class="lineCov">      14208 :     if (!atexit_callback_setup)</span>
+<span class="lineNum">     374 </span>            :     {
+<span class="lineNum">     375 </span><span class="lineNoCov">          0 :         atexit(atexit_callback);</span>
+<span class="lineNum">     376 </span><span class="lineNoCov">          0 :         atexit_callback_setup = true;</span>
+<span class="lineNum">     377 </span>            :     }
+<span class="lineNum">     378 </span><span class="lineCov">      14208 : }</span>
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     381 </span>            :  *      cancel_before_shmem_exit
+<span class="lineNum">     382 </span>            :  *
+<span class="lineNum">     383 </span>            :  *      this function removes a previously-registered before_shmem_exit
+<span class="lineNum">     384 </span>            :  *      callback.  For simplicity, only the latest entry can be
+<span class="lineNum">     385 </span>            :  *      removed.  (We could work harder but there is no need for
+<span class="lineNum">     386 </span>            :  *      current uses.)
+<span class="lineNum">     387 </span>            :  * ----------------------------------------------------------------
+<a name="388"><span class="lineNum">     388 </span>            :  */</a>
+<span class="lineNum">     389 </span>            : void
+<span class="lineNum">     390 </span><span class="lineCov">        332 : cancel_before_shmem_exit(pg_on_exit_callback function, Datum arg)</span>
+<span class="lineNum">     391 </span>            : {
+<span class="lineNum">     392 </span><span class="lineCov">        664 :     if (before_shmem_exit_index &gt; 0 &amp;&amp;</span>
+<span class="lineNum">     393 </span><span class="lineCov">        332 :         before_shmem_exit_list[before_shmem_exit_index - 1].function</span>
+<span class="lineNum">     394 </span><span class="lineCov">        332 :         == function &amp;&amp;</span>
+<span class="lineNum">     395 </span><span class="lineCov">        332 :         before_shmem_exit_list[before_shmem_exit_index - 1].arg == arg)</span>
+<span class="lineNum">     396 </span><span class="lineCov">        332 :         --before_shmem_exit_index;</span>
+<span class="lineNum">     397 </span><span class="lineCov">        332 : }</span>
+<span class="lineNum">     398 </span>            : 
+<span class="lineNum">     399 </span>            : /* ----------------------------------------------------------------
+<span class="lineNum">     400 </span>            :  *      on_exit_reset
+<span class="lineNum">     401 </span>            :  *
+<span class="lineNum">     402 </span>            :  *      this function clears all on_proc_exit() and on_shmem_exit()
+<span class="lineNum">     403 </span>            :  *      registered functions.  This is used just after forking a backend,
+<span class="lineNum">     404 </span>            :  *      so that the backend doesn't believe it should call the postmaster's
+<span class="lineNum">     405 </span>            :  *      on-exit routines when it exits...
+<span class="lineNum">     406 </span>            :  * ----------------------------------------------------------------
+<a name="407"><span class="lineNum">     407 </span>            :  */</a>
+<span class="lineNum">     408 </span>            : void
+<span class="lineNum">     409 </span><span class="lineCov">       1218 : on_exit_reset(void)</span>
+<span class="lineNum">     410 </span>            : {
+<span class="lineNum">     411 </span><span class="lineCov">       1218 :     before_shmem_exit_index = 0;</span>
+<span class="lineNum">     412 </span><span class="lineCov">       1218 :     on_shmem_exit_index = 0;</span>
+<span class="lineNum">     413 </span><span class="lineCov">       1218 :     on_proc_exit_index = 0;</span>
+<span class="lineNum">     414 </span><span class="lineCov">       1218 :     reset_on_dsm_detach();</span>
+<span class="lineNum">     415 </span><span class="lineCov">       1218 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

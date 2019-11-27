@@ -1,0 +1,1507 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/orderedsetaggs.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - orderedsetaggs.c<span style="font-size: 80%;"> (source / <a href="orderedsetaggs.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">449</td>
+            <td class="headerCovTableEntry">505</td>
+            <td class="headerCovTableEntryMed">88.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">20</td>
+            <td class="headerCovTableEntry">23</td>
+            <td class="headerCovTableEntryMed">87.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * orderedsetaggs.c
+<span class="lineNum">       4 </span>            :  *      Ordered-set aggregate functions.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/utils/adt/orderedsetaggs.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &lt;math.h&gt;
+<span class="lineNum">      18 </span>            : 
+<span class="lineNum">      19 </span>            : #include &quot;catalog/pg_aggregate.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;catalog/pg_operator.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;executor/executor.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;optimizer/optimizer.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;utils/array.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;utils/timestamp.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;utils/tuplesort.h&quot;
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : 
+<span class="lineNum">      34 </span>            : /*
+<span class="lineNum">      35 </span>            :  * Generic support for ordered-set aggregates
+<span class="lineNum">      36 </span>            :  *
+<span class="lineNum">      37 </span>            :  * The state for an ordered-set aggregate is divided into a per-group struct
+<span class="lineNum">      38 </span>            :  * (which is the internal-type transition state datum returned to nodeAgg.c)
+<span class="lineNum">      39 </span>            :  * and a per-query struct, which contains data and sub-objects that we can
+<span class="lineNum">      40 </span>            :  * create just once per query because they will not change across groups.
+<span class="lineNum">      41 </span>            :  * The per-query struct and subsidiary data live in the executor's per-query
+<span class="lineNum">      42 </span>            :  * memory context, and go away implicitly at ExecutorEnd().
+<span class="lineNum">      43 </span>            :  *
+<span class="lineNum">      44 </span>            :  * These structs are set up during the first call of the transition function.
+<span class="lineNum">      45 </span>            :  * Because we allow nodeAgg.c to merge ordered-set aggregates (but not
+<span class="lineNum">      46 </span>            :  * hypothetical aggregates) with identical inputs and transition functions,
+<span class="lineNum">      47 </span>            :  * this info must not depend on the particular aggregate (ie, particular
+<span class="lineNum">      48 </span>            :  * final-function), nor on the direct argument(s) of the aggregate.
+<span class="lineNum">      49 </span>            :  */
+<span class="lineNum">      50 </span>            : 
+<span class="lineNum">      51 </span>            : typedef struct OSAPerQueryState
+<span class="lineNum">      52 </span>            : {
+<span class="lineNum">      53 </span>            :     /* Representative Aggref for this aggregate: */
+<span class="lineNum">      54 </span>            :     Aggref     *aggref;
+<span class="lineNum">      55 </span>            :     /* Memory context containing this struct and other per-query data: */
+<span class="lineNum">      56 </span>            :     MemoryContext qcontext;
+<span class="lineNum">      57 </span>            :     /* Context for expression evaluation */
+<span class="lineNum">      58 </span>            :     ExprContext *econtext;
+<span class="lineNum">      59 </span>            :     /* Do we expect multiple final-function calls within one group? */
+<span class="lineNum">      60 </span>            :     bool        rescan_needed;
+<span class="lineNum">      61 </span>            : 
+<span class="lineNum">      62 </span>            :     /* These fields are used only when accumulating tuples: */
+<span class="lineNum">      63 </span>            : 
+<span class="lineNum">      64 </span>            :     /* Tuple descriptor for tuples inserted into sortstate: */
+<span class="lineNum">      65 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">      66 </span>            :     /* Tuple slot we can use for inserting/extracting tuples: */
+<span class="lineNum">      67 </span>            :     TupleTableSlot *tupslot;
+<span class="lineNum">      68 </span>            :     /* Per-sort-column sorting information */
+<span class="lineNum">      69 </span>            :     int         numSortCols;
+<span class="lineNum">      70 </span>            :     AttrNumber *sortColIdx;
+<span class="lineNum">      71 </span>            :     Oid        *sortOperators;
+<span class="lineNum">      72 </span>            :     Oid        *eqOperators;
+<span class="lineNum">      73 </span>            :     Oid        *sortCollations;
+<span class="lineNum">      74 </span>            :     bool       *sortNullsFirsts;
+<span class="lineNum">      75 </span>            :     /* Equality operator call info, created only if needed: */
+<span class="lineNum">      76 </span>            :     ExprState  *compareTuple;
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            :     /* These fields are used only when accumulating datums: */
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            :     /* Info about datatype of datums being sorted: */
+<span class="lineNum">      81 </span>            :     Oid         sortColType;
+<span class="lineNum">      82 </span>            :     int16       typLen;
+<span class="lineNum">      83 </span>            :     bool        typByVal;
+<span class="lineNum">      84 </span>            :     char        typAlign;
+<span class="lineNum">      85 </span>            :     /* Info about sort ordering: */
+<span class="lineNum">      86 </span>            :     Oid         sortOperator;
+<span class="lineNum">      87 </span>            :     Oid         eqOperator;
+<span class="lineNum">      88 </span>            :     Oid         sortCollation;
+<span class="lineNum">      89 </span>            :     bool        sortNullsFirst;
+<span class="lineNum">      90 </span>            :     /* Equality operator call info, created only if needed: */
+<span class="lineNum">      91 </span>            :     FmgrInfo    equalfn;
+<span class="lineNum">      92 </span>            : } OSAPerQueryState;
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span>            : typedef struct OSAPerGroupState
+<span class="lineNum">      95 </span>            : {
+<span class="lineNum">      96 </span>            :     /* Link to the per-query state for this aggregate: */
+<span class="lineNum">      97 </span>            :     OSAPerQueryState *qstate;
+<span class="lineNum">      98 </span>            :     /* Memory context containing per-group data: */
+<span class="lineNum">      99 </span>            :     MemoryContext gcontext;
+<span class="lineNum">     100 </span>            :     /* Sort object we're accumulating data in: */
+<span class="lineNum">     101 </span>            :     Tuplesortstate *sortstate;
+<span class="lineNum">     102 </span>            :     /* Number of normal rows inserted into sortstate: */
+<span class="lineNum">     103 </span>            :     int64       number_of_rows;
+<span class="lineNum">     104 </span>            :     /* Have we already done tuplesort_performsort? */
+<span class="lineNum">     105 </span>            :     bool        sort_done;
+<span class="lineNum">     106 </span>            : } OSAPerGroupState;
+<span class="lineNum">     107 </span>            : 
+<span class="lineNum">     108 </span>            : static void ordered_set_shutdown(Datum arg);
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span>            : 
+<span class="lineNum">     111 </span>            : /*
+<span class="lineNum">     112 </span>            :  * Set up working state for an ordered-set aggregate
+<a name="113"><span class="lineNum">     113 </span>            :  */</a>
+<span class="lineNum">     114 </span>            : static OSAPerGroupState *
+<span class="lineNum">     115 </span><span class="lineCov">        206 : ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)</span>
+<span class="lineNum">     116 </span>            : {
+<span class="lineNum">     117 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">     118 </span>            :     OSAPerQueryState *qstate;
+<span class="lineNum">     119 </span>            :     MemoryContext gcontext;
+<span class="lineNum">     120 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span>            :     /*
+<span class="lineNum">     123 </span>            :      * Check we're called as aggregate (and not a window function), and get
+<span class="lineNum">     124 </span>            :      * the Agg node's group-lifespan context (which might change from group to
+<span class="lineNum">     125 </span>            :      * group, so we shouldn't cache it in the per-query state).
+<span class="lineNum">     126 </span>            :      */
+<span class="lineNum">     127 </span><span class="lineCov">        206 :     if (AggCheckCallContext(fcinfo, &amp;gcontext) != AGG_CONTEXT_AGGREGATE)</span>
+<span class="lineNum">     128 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;ordered-set aggregate called in non-aggregate context&quot;);</span>
+<span class="lineNum">     129 </span>            : 
+<span class="lineNum">     130 </span>            :     /*
+<span class="lineNum">     131 </span>            :      * We keep a link to the per-query state in fn_extra; if it's not there,
+<span class="lineNum">     132 </span>            :      * create it, and do the per-query setup we need.
+<span class="lineNum">     133 </span>            :      */
+<span class="lineNum">     134 </span><span class="lineCov">        206 :     qstate = (OSAPerQueryState *) fcinfo-&gt;flinfo-&gt;fn_extra;</span>
+<span class="lineNum">     135 </span><span class="lineCov">        206 :     if (qstate == NULL)</span>
+<span class="lineNum">     136 </span>            :     {
+<span class="lineNum">     137 </span>            :         Aggref     *aggref;
+<span class="lineNum">     138 </span>            :         MemoryContext qcontext;
+<span class="lineNum">     139 </span>            :         List       *sortlist;
+<span class="lineNum">     140 </span>            :         int         numSortCols;
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span>            :         /* Get the Aggref so we can examine aggregate's arguments */
+<span class="lineNum">     143 </span><span class="lineCov">         80 :         aggref = AggGetAggref(fcinfo);</span>
+<span class="lineNum">     144 </span><span class="lineCov">         80 :         if (!aggref)</span>
+<span class="lineNum">     145 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;ordered-set aggregate called in non-aggregate context&quot;);</span>
+<span class="lineNum">     146 </span><span class="lineCov">         80 :         if (!AGGKIND_IS_ORDERED_SET(aggref-&gt;aggkind))</span>
+<span class="lineNum">     147 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;ordered-set aggregate support function called for non-ordered-set aggregate&quot;);</span>
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :         /*
+<span class="lineNum">     150 </span>            :          * Prepare per-query structures in the fn_mcxt, which we assume is the
+<span class="lineNum">     151 </span>            :          * executor's per-query context; in any case it's the right place to
+<span class="lineNum">     152 </span>            :          * keep anything found via fn_extra.
+<span class="lineNum">     153 </span>            :          */
+<span class="lineNum">     154 </span><span class="lineCov">         80 :         qcontext = fcinfo-&gt;flinfo-&gt;fn_mcxt;</span>
+<span class="lineNum">     155 </span><span class="lineCov">         80 :         oldcontext = MemoryContextSwitchTo(qcontext);</span>
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span><span class="lineCov">         80 :         qstate = (OSAPerQueryState *) palloc0(sizeof(OSAPerQueryState));</span>
+<span class="lineNum">     158 </span><span class="lineCov">         80 :         qstate-&gt;aggref = aggref;</span>
+<span class="lineNum">     159 </span><span class="lineCov">         80 :         qstate-&gt;qcontext = qcontext;</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span>            :         /* We need to support rescans if the trans state is shared */
+<span class="lineNum">     162 </span><span class="lineCov">         80 :         qstate-&gt;rescan_needed = AggStateIsShared(fcinfo);</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span>            :         /* Extract the sort information */
+<span class="lineNum">     165 </span><span class="lineCov">         80 :         sortlist = aggref-&gt;aggorder;</span>
+<span class="lineNum">     166 </span><span class="lineCov">         80 :         numSortCols = list_length(sortlist);</span>
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span><span class="lineCov">         80 :         if (use_tuples)</span>
+<span class="lineNum">     169 </span>            :         {
+<span class="lineNum">     170 </span><span class="lineCov">         32 :             bool        ishypothetical = (aggref-&gt;aggkind == AGGKIND_HYPOTHETICAL);</span>
+<span class="lineNum">     171 </span>            :             ListCell   *lc;
+<span class="lineNum">     172 </span>            :             int         i;
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span><span class="lineCov">         32 :             if (ishypothetical)</span>
+<span class="lineNum">     175 </span><span class="lineCov">         32 :                 numSortCols++;  /* make space for flag column */</span>
+<span class="lineNum">     176 </span><span class="lineCov">         32 :             qstate-&gt;numSortCols = numSortCols;</span>
+<span class="lineNum">     177 </span><span class="lineCov">         32 :             qstate-&gt;sortColIdx = (AttrNumber *) palloc(numSortCols * sizeof(AttrNumber));</span>
+<span class="lineNum">     178 </span><span class="lineCov">         32 :             qstate-&gt;sortOperators = (Oid *) palloc(numSortCols * sizeof(Oid));</span>
+<span class="lineNum">     179 </span><span class="lineCov">         32 :             qstate-&gt;eqOperators = (Oid *) palloc(numSortCols * sizeof(Oid));</span>
+<span class="lineNum">     180 </span><span class="lineCov">         32 :             qstate-&gt;sortCollations = (Oid *) palloc(numSortCols * sizeof(Oid));</span>
+<span class="lineNum">     181 </span><span class="lineCov">         32 :             qstate-&gt;sortNullsFirsts = (bool *) palloc(numSortCols * sizeof(bool));</span>
+<span class="lineNum">     182 </span>            : 
+<span class="lineNum">     183 </span><span class="lineCov">         32 :             i = 0;</span>
+<span class="lineNum">     184 </span><span class="lineCov">         80 :             foreach(lc, sortlist)</span>
+<span class="lineNum">     185 </span>            :             {
+<span class="lineNum">     186 </span><span class="lineCov">         48 :                 SortGroupClause *sortcl = (SortGroupClause *) lfirst(lc);</span>
+<span class="lineNum">     187 </span><span class="lineCov">         48 :                 TargetEntry *tle = get_sortgroupclause_tle(sortcl,</span>
+<span class="lineNum">     188 </span>            :                                                            aggref-&gt;args);
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span>            :                 /* the parser should have made sure of this */
+<span class="lineNum">     191 </span><span class="lineCov">         48 :                 Assert(OidIsValid(sortcl-&gt;sortop));</span>
+<span class="lineNum">     192 </span>            : 
+<span class="lineNum">     193 </span><span class="lineCov">         48 :                 qstate-&gt;sortColIdx[i] = tle-&gt;resno;</span>
+<span class="lineNum">     194 </span><span class="lineCov">         48 :                 qstate-&gt;sortOperators[i] = sortcl-&gt;sortop;</span>
+<span class="lineNum">     195 </span><span class="lineCov">         48 :                 qstate-&gt;eqOperators[i] = sortcl-&gt;eqop;</span>
+<span class="lineNum">     196 </span><span class="lineCov">         48 :                 qstate-&gt;sortCollations[i] = exprCollation((Node *) tle-&gt;expr);</span>
+<span class="lineNum">     197 </span><span class="lineCov">         48 :                 qstate-&gt;sortNullsFirsts[i] = sortcl-&gt;nulls_first;</span>
+<span class="lineNum">     198 </span><span class="lineCov">         48 :                 i++;</span>
+<span class="lineNum">     199 </span>            :             }
+<span class="lineNum">     200 </span>            : 
+<span class="lineNum">     201 </span><span class="lineCov">         32 :             if (ishypothetical)</span>
+<span class="lineNum">     202 </span>            :             {
+<span class="lineNum">     203 </span>            :                 /* Add an integer flag column as the last sort column */
+<span class="lineNum">     204 </span><span class="lineCov">         32 :                 qstate-&gt;sortColIdx[i] = list_length(aggref-&gt;args) + 1;</span>
+<span class="lineNum">     205 </span><span class="lineCov">         32 :                 qstate-&gt;sortOperators[i] = Int4LessOperator;</span>
+<span class="lineNum">     206 </span><span class="lineCov">         32 :                 qstate-&gt;eqOperators[i] = Int4EqualOperator;</span>
+<span class="lineNum">     207 </span><span class="lineCov">         32 :                 qstate-&gt;sortCollations[i] = InvalidOid;</span>
+<span class="lineNum">     208 </span><span class="lineCov">         32 :                 qstate-&gt;sortNullsFirsts[i] = false;</span>
+<span class="lineNum">     209 </span><span class="lineCov">         32 :                 i++;</span>
+<span class="lineNum">     210 </span>            :             }
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span><span class="lineCov">         32 :             Assert(i == numSortCols);</span>
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span>            :             /*
+<span class="lineNum">     215 </span>            :              * Get a tupledesc corresponding to the aggregated inputs
+<span class="lineNum">     216 </span>            :              * (including sort expressions) of the agg.
+<span class="lineNum">     217 </span>            :              */
+<span class="lineNum">     218 </span><span class="lineCov">         32 :             qstate-&gt;tupdesc = ExecTypeFromTL(aggref-&gt;args);</span>
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span>            :             /* If we need a flag column, hack the tupledesc to include that */
+<span class="lineNum">     221 </span><span class="lineCov">         32 :             if (ishypothetical)</span>
+<span class="lineNum">     222 </span>            :             {
+<span class="lineNum">     223 </span>            :                 TupleDesc   newdesc;
+<span class="lineNum">     224 </span><span class="lineCov">         32 :                 int         natts = qstate-&gt;tupdesc-&gt;natts;</span>
+<span class="lineNum">     225 </span>            : 
+<span class="lineNum">     226 </span><span class="lineCov">         32 :                 newdesc = CreateTemplateTupleDesc(natts + 1);</span>
+<span class="lineNum">     227 </span><span class="lineCov">         80 :                 for (i = 1; i &lt;= natts; i++)</span>
+<span class="lineNum">     228 </span><span class="lineCov">         48 :                     TupleDescCopyEntry(newdesc, i, qstate-&gt;tupdesc, i);</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span><span class="lineCov">         64 :                 TupleDescInitEntry(newdesc,</span>
+<span class="lineNum">     231 </span><span class="lineCov">         32 :                                    (AttrNumber) ++natts,</span>
+<span class="lineNum">     232 </span>            :                                    &quot;flag&quot;,
+<span class="lineNum">     233 </span>            :                                    INT4OID,
+<span class="lineNum">     234 </span>            :                                    -1,
+<span class="lineNum">     235 </span>            :                                    0);
+<span class="lineNum">     236 </span>            : 
+<span class="lineNum">     237 </span><span class="lineCov">         32 :                 FreeTupleDesc(qstate-&gt;tupdesc);</span>
+<span class="lineNum">     238 </span><span class="lineCov">         32 :                 qstate-&gt;tupdesc = newdesc;</span>
+<span class="lineNum">     239 </span>            :             }
+<span class="lineNum">     240 </span>            : 
+<span class="lineNum">     241 </span>            :             /* Create slot we'll use to store/retrieve rows */
+<span class="lineNum">     242 </span><span class="lineCov">         32 :             qstate-&gt;tupslot = MakeSingleTupleTableSlot(qstate-&gt;tupdesc,</span>
+<span class="lineNum">     243 </span>            :                                                        &amp;TTSOpsMinimalTuple);
+<span class="lineNum">     244 </span>            :         }
+<span class="lineNum">     245 </span>            :         else
+<span class="lineNum">     246 </span>            :         {
+<span class="lineNum">     247 </span>            :             /* Sort single datums */
+<span class="lineNum">     248 </span>            :             SortGroupClause *sortcl;
+<span class="lineNum">     249 </span>            :             TargetEntry *tle;
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span><span class="lineCov">         48 :             if (numSortCols != 1 || aggref-&gt;aggkind == AGGKIND_HYPOTHETICAL)</span>
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;ordered-set aggregate support function does not support multiple aggregated columns&quot;);</span>
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span><span class="lineCov">         48 :             sortcl = (SortGroupClause *) linitial(sortlist);</span>
+<span class="lineNum">     255 </span><span class="lineCov">         48 :             tle = get_sortgroupclause_tle(sortcl, aggref-&gt;args);</span>
+<span class="lineNum">     256 </span>            : 
+<span class="lineNum">     257 </span>            :             /* the parser should have made sure of this */
+<span class="lineNum">     258 </span><span class="lineCov">         48 :             Assert(OidIsValid(sortcl-&gt;sortop));</span>
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span>            :             /* Save sort ordering info */
+<span class="lineNum">     261 </span><span class="lineCov">         48 :             qstate-&gt;sortColType = exprType((Node *) tle-&gt;expr);</span>
+<span class="lineNum">     262 </span><span class="lineCov">         48 :             qstate-&gt;sortOperator = sortcl-&gt;sortop;</span>
+<span class="lineNum">     263 </span><span class="lineCov">         48 :             qstate-&gt;eqOperator = sortcl-&gt;eqop;</span>
+<span class="lineNum">     264 </span><span class="lineCov">         48 :             qstate-&gt;sortCollation = exprCollation((Node *) tle-&gt;expr);</span>
+<span class="lineNum">     265 </span><span class="lineCov">         48 :             qstate-&gt;sortNullsFirst = sortcl-&gt;nulls_first;</span>
+<span class="lineNum">     266 </span>            : 
+<span class="lineNum">     267 </span>            :             /* Save datatype info */
+<span class="lineNum">     268 </span><span class="lineCov">         48 :             get_typlenbyvalalign(qstate-&gt;sortColType,</span>
+<span class="lineNum">     269 </span>            :                                  &amp;qstate-&gt;typLen,
+<span class="lineNum">     270 </span>            :                                  &amp;qstate-&gt;typByVal,
+<span class="lineNum">     271 </span>            :                                  &amp;qstate-&gt;typAlign);
+<span class="lineNum">     272 </span>            :         }
+<span class="lineNum">     273 </span>            : 
+<span class="lineNum">     274 </span><span class="lineCov">         80 :         fcinfo-&gt;flinfo-&gt;fn_extra = (void *) qstate;</span>
+<span class="lineNum">     275 </span>            : 
+<span class="lineNum">     276 </span><span class="lineCov">         80 :         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     277 </span>            :     }
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span>            :     /* Now build the stuff we need in group-lifespan context */
+<span class="lineNum">     280 </span><span class="lineCov">        206 :     oldcontext = MemoryContextSwitchTo(gcontext);</span>
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span><span class="lineCov">        206 :     osastate = (OSAPerGroupState *) palloc(sizeof(OSAPerGroupState));</span>
+<span class="lineNum">     283 </span><span class="lineCov">        206 :     osastate-&gt;qstate = qstate;</span>
+<span class="lineNum">     284 </span><span class="lineCov">        206 :     osastate-&gt;gcontext = gcontext;</span>
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span>            :     /*
+<span class="lineNum">     287 </span>            :      * Initialize tuplesort object.
+<span class="lineNum">     288 </span>            :      */
+<span class="lineNum">     289 </span><span class="lineCov">        206 :     if (use_tuples)</span>
+<span class="lineNum">     290 </span><span class="lineCov">         84 :         osastate-&gt;sortstate = tuplesort_begin_heap(qstate-&gt;tupdesc,</span>
+<span class="lineNum">     291 </span>            :                                                    qstate-&gt;numSortCols,
+<span class="lineNum">     292 </span>            :                                                    qstate-&gt;sortColIdx,
+<span class="lineNum">     293 </span>            :                                                    qstate-&gt;sortOperators,
+<span class="lineNum">     294 </span>            :                                                    qstate-&gt;sortCollations,
+<span class="lineNum">     295 </span>            :                                                    qstate-&gt;sortNullsFirsts,
+<span class="lineNum">     296 </span>            :                                                    work_mem,
+<span class="lineNum">     297 </span>            :                                                    NULL,
+<span class="lineNum">     298 </span><span class="lineCov">         84 :                                                    qstate-&gt;rescan_needed);</span>
+<span class="lineNum">     299 </span>            :     else
+<span class="lineNum">     300 </span><span class="lineCov">        244 :         osastate-&gt;sortstate = tuplesort_begin_datum(qstate-&gt;sortColType,</span>
+<span class="lineNum">     301 </span>            :                                                     qstate-&gt;sortOperator,
+<span class="lineNum">     302 </span>            :                                                     qstate-&gt;sortCollation,
+<span class="lineNum">     303 </span><span class="lineCov">        122 :                                                     qstate-&gt;sortNullsFirst,</span>
+<span class="lineNum">     304 </span>            :                                                     work_mem,
+<span class="lineNum">     305 </span>            :                                                     NULL,
+<span class="lineNum">     306 </span><span class="lineCov">        122 :                                                     qstate-&gt;rescan_needed);</span>
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span><span class="lineCov">        206 :     osastate-&gt;number_of_rows = 0;</span>
+<span class="lineNum">     309 </span><span class="lineCov">        206 :     osastate-&gt;sort_done = false;</span>
+<span class="lineNum">     310 </span>            : 
+<span class="lineNum">     311 </span>            :     /* Now register a shutdown callback to clean things up at end of group */
+<span class="lineNum">     312 </span><span class="lineCov">        206 :     AggRegisterCallback(fcinfo,</span>
+<span class="lineNum">     313 </span>            :                         ordered_set_shutdown,
+<span class="lineNum">     314 </span>            :                         PointerGetDatum(osastate));
+<span class="lineNum">     315 </span>            : 
+<span class="lineNum">     316 </span><span class="lineCov">        206 :     MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span><span class="lineCov">        206 :     return osastate;</span>
+<span class="lineNum">     319 </span>            : }
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span>            : /*
+<span class="lineNum">     322 </span>            :  * Clean up when evaluation of an ordered-set aggregate is complete.
+<span class="lineNum">     323 </span>            :  *
+<span class="lineNum">     324 </span>            :  * We don't need to bother freeing objects in the per-group memory context,
+<span class="lineNum">     325 </span>            :  * since that will get reset anyway by nodeAgg.c; nor should we free anything
+<span class="lineNum">     326 </span>            :  * in the per-query context, which will get cleared (if this was the last
+<span class="lineNum">     327 </span>            :  * group) by ExecutorEnd.  But we must take care to release any potential
+<span class="lineNum">     328 </span>            :  * non-memory resources.
+<span class="lineNum">     329 </span>            :  *
+<span class="lineNum">     330 </span>            :  * In the case where we're not expecting multiple finalfn calls, we could
+<span class="lineNum">     331 </span>            :  * arguably rely on the finalfn to clean up; but it's easier and more testable
+<span class="lineNum">     332 </span>            :  * if we just do it the same way in either case.
+<a name="333"><span class="lineNum">     333 </span>            :  */</a>
+<span class="lineNum">     334 </span>            : static void
+<span class="lineNum">     335 </span><span class="lineCov">        206 : ordered_set_shutdown(Datum arg)</span>
+<span class="lineNum">     336 </span>            : {
+<span class="lineNum">     337 </span><span class="lineCov">        206 :     OSAPerGroupState *osastate = (OSAPerGroupState *) DatumGetPointer(arg);</span>
+<span class="lineNum">     338 </span>            : 
+<span class="lineNum">     339 </span>            :     /* Tuplesort object might have temp files. */
+<span class="lineNum">     340 </span><span class="lineCov">        206 :     if (osastate-&gt;sortstate)</span>
+<span class="lineNum">     341 </span><span class="lineCov">        206 :         tuplesort_end(osastate-&gt;sortstate);</span>
+<span class="lineNum">     342 </span><span class="lineCov">        206 :     osastate-&gt;sortstate = NULL;</span>
+<span class="lineNum">     343 </span>            :     /* The tupleslot probably can't be holding a pin, but let's be safe. */
+<span class="lineNum">     344 </span><span class="lineCov">        206 :     if (osastate-&gt;qstate-&gt;tupslot)</span>
+<span class="lineNum">     345 </span><span class="lineCov">         84 :         ExecClearTuple(osastate-&gt;qstate-&gt;tupslot);</span>
+<span class="lineNum">     346 </span><span class="lineCov">        206 : }</span>
+<span class="lineNum">     347 </span>            : 
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span>            : /*
+<span class="lineNum">     350 </span>            :  * Generic transition function for ordered-set aggregates
+<span class="lineNum">     351 </span>            :  * with a single input column in which we want to suppress nulls
+<a name="352"><span class="lineNum">     352 </span>            :  */</a>
+<span class="lineNum">     353 </span>            : Datum
+<span class="lineNum">     354 </span><span class="lineCov">     400566 : ordered_set_transition(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     355 </span>            : {
+<span class="lineNum">     356 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">     357 </span>            : 
+<span class="lineNum">     358 </span>            :     /* If first call, create the transition state workspace */
+<span class="lineNum">     359 </span><span class="lineCov">     400566 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">     360 </span><span class="lineCov">        122 :         osastate = ordered_set_startup(fcinfo, false);</span>
+<span class="lineNum">     361 </span>            :     else
+<span class="lineNum">     362 </span><span class="lineCov">     400444 :         osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span>            :     /* Load the datum into the tuplesort object, but only if it's not null */
+<span class="lineNum">     365 </span><span class="lineCov">     400566 :     if (!PG_ARGISNULL(1))</span>
+<span class="lineNum">     366 </span>            :     {
+<span class="lineNum">     367 </span><span class="lineCov">     400542 :         tuplesort_putdatum(osastate-&gt;sortstate, PG_GETARG_DATUM(1), false);</span>
+<span class="lineNum">     368 </span><span class="lineCov">     400542 :         osastate-&gt;number_of_rows++;</span>
+<span class="lineNum">     369 </span>            :     }
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineCov">     400566 :     PG_RETURN_POINTER(osastate);</span>
+<span class="lineNum">     372 </span>            : }
+<span class="lineNum">     373 </span>            : 
+<span class="lineNum">     374 </span>            : /*
+<span class="lineNum">     375 </span>            :  * Generic transition function for ordered-set aggregates
+<span class="lineNum">     376 </span>            :  * with (potentially) multiple aggregated input columns
+<a name="377"><span class="lineNum">     377 </span>            :  */</a>
+<span class="lineNum">     378 </span>            : Datum
+<span class="lineNum">     379 </span><span class="lineCov">     100262 : ordered_set_transition_multi(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     380 </span>            : {
+<span class="lineNum">     381 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">     382 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">     383 </span>            :     int         nargs;
+<span class="lineNum">     384 </span>            :     int         i;
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span>            :     /* If first call, create the transition state workspace */
+<span class="lineNum">     387 </span><span class="lineCov">     100262 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">     388 </span><span class="lineCov">         84 :         osastate = ordered_set_startup(fcinfo, true);</span>
+<span class="lineNum">     389 </span>            :     else
+<span class="lineNum">     390 </span><span class="lineCov">     100178 :         osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span>            :     /* Form a tuple from all the other inputs besides the transition value */
+<span class="lineNum">     393 </span><span class="lineCov">     100262 :     slot = osastate-&gt;qstate-&gt;tupslot;</span>
+<span class="lineNum">     394 </span><span class="lineCov">     100262 :     ExecClearTuple(slot);</span>
+<span class="lineNum">     395 </span><span class="lineCov">     100262 :     nargs = PG_NARGS() - 1;</span>
+<span class="lineNum">     396 </span><span class="lineCov">     400740 :     for (i = 0; i &lt; nargs; i++)</span>
+<span class="lineNum">     397 </span>            :     {
+<span class="lineNum">     398 </span><span class="lineCov">     300478 :         slot-&gt;tts_values[i] = PG_GETARG_DATUM(i + 1);</span>
+<span class="lineNum">     399 </span><span class="lineCov">     300478 :         slot-&gt;tts_isnull[i] = PG_ARGISNULL(i + 1);</span>
+<span class="lineNum">     400 </span>            :     }
+<span class="lineNum">     401 </span><span class="lineCov">     100262 :     if (osastate-&gt;qstate-&gt;aggref-&gt;aggkind == AGGKIND_HYPOTHETICAL)</span>
+<span class="lineNum">     402 </span>            :     {
+<span class="lineNum">     403 </span>            :         /* Add a zero flag value to mark this row as a normal input row */
+<span class="lineNum">     404 </span><span class="lineCov">     100262 :         slot-&gt;tts_values[i] = Int32GetDatum(0);</span>
+<span class="lineNum">     405 </span><span class="lineCov">     100262 :         slot-&gt;tts_isnull[i] = false;</span>
+<span class="lineNum">     406 </span><span class="lineCov">     100262 :         i++;</span>
+<span class="lineNum">     407 </span>            :     }
+<span class="lineNum">     408 </span><span class="lineCov">     100262 :     Assert(i == slot-&gt;tts_tupleDescriptor-&gt;natts);</span>
+<span class="lineNum">     409 </span><span class="lineCov">     100262 :     ExecStoreVirtualTuple(slot);</span>
+<span class="lineNum">     410 </span>            : 
+<span class="lineNum">     411 </span>            :     /* Load the row into the tuplesort object */
+<span class="lineNum">     412 </span><span class="lineCov">     100262 :     tuplesort_puttupleslot(osastate-&gt;sortstate, slot);</span>
+<span class="lineNum">     413 </span><span class="lineCov">     100262 :     osastate-&gt;number_of_rows++;</span>
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span><span class="lineCov">     100262 :     PG_RETURN_POINTER(osastate);</span>
+<span class="lineNum">     416 </span>            : }
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span>            : /*
+<span class="lineNum">     420 </span>            :  * percentile_disc(float8) within group(anyelement) - discrete percentile
+<a name="421"><span class="lineNum">     421 </span>            :  */</a>
+<span class="lineNum">     422 </span>            : Datum
+<span class="lineNum">     423 </span><span class="lineCov">         90 : percentile_disc_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     424 </span>            : {
+<span class="lineNum">     425 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">     426 </span>            :     double      percentile;
+<span class="lineNum">     427 </span>            :     Datum       val;
+<span class="lineNum">     428 </span>            :     bool        isnull;
+<span class="lineNum">     429 </span>            :     int64       rownum;
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span><span class="lineCov">         90 :     Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);</span>
+<span class="lineNum">     432 </span>            : 
+<span class="lineNum">     433 </span>            :     /* Get and check the percentile argument */
+<span class="lineNum">     434 </span><span class="lineCov">         90 :     if (PG_ARGISNULL(1))</span>
+<span class="lineNum">     435 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span><span class="lineCov">         90 :     percentile = PG_GETARG_FLOAT8(1);</span>
+<span class="lineNum">     438 </span>            : 
+<span class="lineNum">     439 </span><span class="lineCov">         90 :     if (percentile &lt; 0 || percentile &gt; 1 || isnan(percentile))</span>
+<span class="lineNum">     440 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     441 </span>            :                 (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+<span class="lineNum">     442 </span>            :                  errmsg(&quot;percentile value %g is not between 0 and 1&quot;,
+<span class="lineNum">     443 </span>            :                         percentile)));
+<span class="lineNum">     444 </span>            : 
+<span class="lineNum">     445 </span>            :     /* If there were no regular rows, the result is NULL */
+<span class="lineNum">     446 </span><span class="lineCov">         90 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">     447 </span><span class="lineCov">         18 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     448 </span>            : 
+<span class="lineNum">     449 </span><span class="lineCov">         72 :     osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     450 </span>            : 
+<span class="lineNum">     451 </span>            :     /* number_of_rows could be zero if we only saw NULL input values */
+<span class="lineNum">     452 </span><span class="lineCov">         72 :     if (osastate-&gt;number_of_rows == 0)</span>
+<span class="lineNum">     453 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     454 </span>            : 
+<span class="lineNum">     455 </span>            :     /* Finish the sort, or rescan if we already did */
+<span class="lineNum">     456 </span><span class="lineCov">         72 :     if (!osastate-&gt;sort_done)</span>
+<span class="lineNum">     457 </span>            :     {
+<span class="lineNum">     458 </span><span class="lineCov">         64 :         tuplesort_performsort(osastate-&gt;sortstate);</span>
+<span class="lineNum">     459 </span><span class="lineCov">         64 :         osastate-&gt;sort_done = true;</span>
+<span class="lineNum">     460 </span>            :     }
+<span class="lineNum">     461 </span>            :     else
+<span class="lineNum">     462 </span><span class="lineCov">          8 :         tuplesort_rescan(osastate-&gt;sortstate);</span>
+<span class="lineNum">     463 </span>            : 
+<span class="lineNum">     464 </span>            :     /*----------
+<span class="lineNum">     465 </span>            :      * We need the smallest K such that (K/N) &gt;= percentile.
+<span class="lineNum">     466 </span>            :      * N&gt;0, therefore K &gt;= N*percentile, therefore K = ceil(N*percentile).
+<span class="lineNum">     467 </span>            :      * So we skip K-1 rows (if K&gt;0) and return the next row fetched.
+<span class="lineNum">     468 </span>            :      *----------
+<span class="lineNum">     469 </span>            :      */
+<span class="lineNum">     470 </span><span class="lineCov">         72 :     rownum = (int64) ceil(percentile * osastate-&gt;number_of_rows);</span>
+<span class="lineNum">     471 </span><span class="lineCov">         72 :     Assert(rownum &lt;= osastate-&gt;number_of_rows);</span>
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span><span class="lineCov">         72 :     if (rownum &gt; 1)</span>
+<span class="lineNum">     474 </span>            :     {
+<span class="lineNum">     475 </span><span class="lineCov">         52 :         if (!tuplesort_skiptuples(osastate-&gt;sortstate, rownum - 1, true))</span>
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;missing row in percentile_disc&quot;);</span>
+<span class="lineNum">     477 </span>            :     }
+<span class="lineNum">     478 </span>            : 
+<span class="lineNum">     479 </span><span class="lineCov">         72 :     if (!tuplesort_getdatum(osastate-&gt;sortstate, true, &amp;val, &amp;isnull, NULL))</span>
+<span class="lineNum">     480 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;missing row in percentile_disc&quot;);</span>
+<span class="lineNum">     481 </span>            : 
+<span class="lineNum">     482 </span>            :     /* We shouldn't have stored any nulls, but do the right thing anyway */
+<span class="lineNum">     483 </span><span class="lineCov">         72 :     if (isnull)</span>
+<span class="lineNum">     484 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     485 </span>            :     else
+<span class="lineNum">     486 </span><span class="lineCov">         72 :         PG_RETURN_DATUM(val);</span>
+<span class="lineNum">     487 </span>            : }
+<span class="lineNum">     488 </span>            : 
+<span class="lineNum">     489 </span>            : 
+<span class="lineNum">     490 </span>            : /*
+<span class="lineNum">     491 </span>            :  * For percentile_cont, we need a way to interpolate between consecutive
+<span class="lineNum">     492 </span>            :  * values. Use a helper function for that, so that we can share the rest
+<span class="lineNum">     493 </span>            :  * of the code between types.
+<span class="lineNum">     494 </span>            :  */
+<span class="lineNum">     495 </span>            : typedef Datum (*LerpFunc) (Datum lo, Datum hi, double pct);
+<a name="496"><span class="lineNum">     496 </span>            : </a>
+<span class="lineNum">     497 </span>            : static Datum
+<span class="lineNum">     498 </span><span class="lineCov">         38 : float8_lerp(Datum lo, Datum hi, double pct)</span>
+<span class="lineNum">     499 </span>            : {
+<span class="lineNum">     500 </span><span class="lineCov">         38 :     double      loval = DatumGetFloat8(lo);</span>
+<span class="lineNum">     501 </span><span class="lineCov">         38 :     double      hival = DatumGetFloat8(hi);</span>
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span><span class="lineCov">         38 :     return Float8GetDatum(loval + (pct * (hival - loval)));</span>
+<span class="lineNum">     504 </span>            : }
+<a name="505"><span class="lineNum">     505 </span>            : </a>
+<span class="lineNum">     506 </span>            : static Datum
+<span class="lineNum">     507 </span><span class="lineNoCov">          0 : interval_lerp(Datum lo, Datum hi, double pct)</span>
+<span class="lineNum">     508 </span>            : {
+<span class="lineNum">     509 </span><span class="lineNoCov">          0 :     Datum       diff_result = DirectFunctionCall2(interval_mi, hi, lo);</span>
+<span class="lineNum">     510 </span><span class="lineNoCov">          0 :     Datum       mul_result = DirectFunctionCall2(interval_mul,</span>
+<span class="lineNum">     511 </span>            :                                                  diff_result,
+<span class="lineNum">     512 </span>            :                                                  Float8GetDatumFast(pct));
+<span class="lineNum">     513 </span>            : 
+<span class="lineNum">     514 </span><span class="lineNoCov">          0 :     return DirectFunctionCall2(interval_pl, mul_result, lo);</span>
+<span class="lineNum">     515 </span>            : }
+<span class="lineNum">     516 </span>            : 
+<span class="lineNum">     517 </span>            : /*
+<span class="lineNum">     518 </span>            :  * Continuous percentile
+<a name="519"><span class="lineNum">     519 </span>            :  */</a>
+<span class="lineNum">     520 </span>            : static Datum
+<span class="lineNum">     521 </span><span class="lineCov">         28 : percentile_cont_final_common(FunctionCallInfo fcinfo,</span>
+<span class="lineNum">     522 </span>            :                              Oid expect_type,
+<span class="lineNum">     523 </span>            :                              LerpFunc lerpfunc)
+<span class="lineNum">     524 </span>            : {
+<span class="lineNum">     525 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">     526 </span>            :     double      percentile;
+<span class="lineNum">     527 </span><span class="lineCov">         28 :     int64       first_row = 0;</span>
+<span class="lineNum">     528 </span><span class="lineCov">         28 :     int64       second_row = 0;</span>
+<span class="lineNum">     529 </span>            :     Datum       val;
+<span class="lineNum">     530 </span>            :     Datum       first_val;
+<span class="lineNum">     531 </span>            :     Datum       second_val;
+<span class="lineNum">     532 </span>            :     double      proportion;
+<span class="lineNum">     533 </span>            :     bool        isnull;
+<span class="lineNum">     534 </span>            : 
+<span class="lineNum">     535 </span><span class="lineCov">         28 :     Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);</span>
+<span class="lineNum">     536 </span>            : 
+<span class="lineNum">     537 </span>            :     /* Get and check the percentile argument */
+<span class="lineNum">     538 </span><span class="lineCov">         28 :     if (PG_ARGISNULL(1))</span>
+<span class="lineNum">     539 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     540 </span>            : 
+<span class="lineNum">     541 </span><span class="lineCov">         28 :     percentile = PG_GETARG_FLOAT8(1);</span>
+<span class="lineNum">     542 </span>            : 
+<span class="lineNum">     543 </span><span class="lineCov">         28 :     if (percentile &lt; 0 || percentile &gt; 1 || isnan(percentile))</span>
+<span class="lineNum">     544 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     545 </span>            :                 (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+<span class="lineNum">     546 </span>            :                  errmsg(&quot;percentile value %g is not between 0 and 1&quot;,
+<span class="lineNum">     547 </span>            :                         percentile)));
+<span class="lineNum">     548 </span>            : 
+<span class="lineNum">     549 </span>            :     /* If there were no regular rows, the result is NULL */
+<span class="lineNum">     550 </span><span class="lineCov">         28 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">     551 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     552 </span>            : 
+<span class="lineNum">     553 </span><span class="lineCov">         28 :     osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     554 </span>            : 
+<span class="lineNum">     555 </span>            :     /* number_of_rows could be zero if we only saw NULL input values */
+<span class="lineNum">     556 </span><span class="lineCov">         28 :     if (osastate-&gt;number_of_rows == 0)</span>
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     558 </span>            : 
+<span class="lineNum">     559 </span><span class="lineCov">         28 :     Assert(expect_type == osastate-&gt;qstate-&gt;sortColType);</span>
+<span class="lineNum">     560 </span>            : 
+<span class="lineNum">     561 </span>            :     /* Finish the sort, or rescan if we already did */
+<span class="lineNum">     562 </span><span class="lineCov">         28 :     if (!osastate-&gt;sort_done)</span>
+<span class="lineNum">     563 </span>            :     {
+<span class="lineNum">     564 </span><span class="lineCov">         28 :         tuplesort_performsort(osastate-&gt;sortstate);</span>
+<span class="lineNum">     565 </span><span class="lineCov">         28 :         osastate-&gt;sort_done = true;</span>
+<span class="lineNum">     566 </span>            :     }
+<span class="lineNum">     567 </span>            :     else
+<span class="lineNum">     568 </span><span class="lineNoCov">          0 :         tuplesort_rescan(osastate-&gt;sortstate);</span>
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span><span class="lineCov">         28 :     first_row = floor(percentile * (osastate-&gt;number_of_rows - 1));</span>
+<span class="lineNum">     571 </span><span class="lineCov">         28 :     second_row = ceil(percentile * (osastate-&gt;number_of_rows - 1));</span>
+<span class="lineNum">     572 </span>            : 
+<span class="lineNum">     573 </span><span class="lineCov">         28 :     Assert(first_row &lt; osastate-&gt;number_of_rows);</span>
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span><span class="lineCov">         28 :     if (!tuplesort_skiptuples(osastate-&gt;sortstate, first_row, true))</span>
+<span class="lineNum">     576 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;missing row in percentile_cont&quot;);</span>
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span><span class="lineCov">         28 :     if (!tuplesort_getdatum(osastate-&gt;sortstate, true, &amp;first_val, &amp;isnull, NULL))</span>
+<span class="lineNum">     579 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;missing row in percentile_cont&quot;);</span>
+<span class="lineNum">     580 </span><span class="lineCov">         28 :     if (isnull)</span>
+<span class="lineNum">     581 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     582 </span>            : 
+<span class="lineNum">     583 </span><span class="lineCov">         28 :     if (first_row == second_row)</span>
+<span class="lineNum">     584 </span>            :     {
+<span class="lineNum">     585 </span><span class="lineCov">         10 :         val = first_val;</span>
+<span class="lineNum">     586 </span>            :     }
+<span class="lineNum">     587 </span>            :     else
+<span class="lineNum">     588 </span>            :     {
+<span class="lineNum">     589 </span><span class="lineCov">         18 :         if (!tuplesort_getdatum(osastate-&gt;sortstate, true, &amp;second_val, &amp;isnull, NULL))</span>
+<span class="lineNum">     590 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;missing row in percentile_cont&quot;);</span>
+<span class="lineNum">     591 </span>            : 
+<span class="lineNum">     592 </span><span class="lineCov">         18 :         if (isnull)</span>
+<span class="lineNum">     593 </span><span class="lineNoCov">          0 :             PG_RETURN_NULL();</span>
+<span class="lineNum">     594 </span>            : 
+<span class="lineNum">     595 </span><span class="lineCov">         18 :         proportion = (percentile * (osastate-&gt;number_of_rows - 1)) - first_row;</span>
+<span class="lineNum">     596 </span><span class="lineCov">         18 :         val = lerpfunc(first_val, second_val, proportion);</span>
+<span class="lineNum">     597 </span>            :     }
+<span class="lineNum">     598 </span>            : 
+<span class="lineNum">     599 </span><span class="lineCov">         28 :     PG_RETURN_DATUM(val);</span>
+<span class="lineNum">     600 </span>            : }
+<span class="lineNum">     601 </span>            : 
+<span class="lineNum">     602 </span>            : /*
+<span class="lineNum">     603 </span>            :  * percentile_cont(float8) within group (float8)    - continuous percentile
+<a name="604"><span class="lineNum">     604 </span>            :  */</a>
+<span class="lineNum">     605 </span>            : Datum
+<span class="lineNum">     606 </span><span class="lineCov">         28 : percentile_cont_float8_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     607 </span>            : {
+<span class="lineNum">     608 </span><span class="lineCov">         28 :     return percentile_cont_final_common(fcinfo, FLOAT8OID, float8_lerp);</span>
+<span class="lineNum">     609 </span>            : }
+<span class="lineNum">     610 </span>            : 
+<span class="lineNum">     611 </span>            : /*
+<span class="lineNum">     612 </span>            :  * percentile_cont(float8) within group (interval)  - continuous percentile
+<a name="613"><span class="lineNum">     613 </span>            :  */</a>
+<span class="lineNum">     614 </span>            : Datum
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 : percentile_cont_interval_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     616 </span>            : {
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :     return percentile_cont_final_common(fcinfo, INTERVALOID, interval_lerp);</span>
+<span class="lineNum">     618 </span>            : }
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span>            : 
+<span class="lineNum">     621 </span>            : /*
+<span class="lineNum">     622 </span>            :  * Support code for handling arrays of percentiles
+<span class="lineNum">     623 </span>            :  *
+<span class="lineNum">     624 </span>            :  * Note: in each pct_info entry, second_row should be equal to or
+<span class="lineNum">     625 </span>            :  * exactly one more than first_row.
+<span class="lineNum">     626 </span>            :  */
+<span class="lineNum">     627 </span>            : struct pct_info
+<span class="lineNum">     628 </span>            : {
+<span class="lineNum">     629 </span>            :     int64       first_row;      /* first row to sample */
+<span class="lineNum">     630 </span>            :     int64       second_row;     /* possible second row to sample */
+<span class="lineNum">     631 </span>            :     double      proportion;     /* interpolation fraction */
+<span class="lineNum">     632 </span>            :     int         idx;            /* index of this item in original array */
+<span class="lineNum">     633 </span>            : };
+<span class="lineNum">     634 </span>            : 
+<span class="lineNum">     635 </span>            : /*
+<span class="lineNum">     636 </span>            :  * Sort comparator to sort pct_infos by first_row then second_row
+<a name="637"><span class="lineNum">     637 </span>            :  */</a>
+<span class="lineNum">     638 </span>            : static int
+<span class="lineNum">     639 </span><span class="lineCov">        100 : pct_info_cmp(const void *pa, const void *pb)</span>
+<span class="lineNum">     640 </span>            : {
+<span class="lineNum">     641 </span><span class="lineCov">        100 :     const struct pct_info *a = (const struct pct_info *) pa;</span>
+<span class="lineNum">     642 </span><span class="lineCov">        100 :     const struct pct_info *b = (const struct pct_info *) pb;</span>
+<span class="lineNum">     643 </span>            : 
+<span class="lineNum">     644 </span><span class="lineCov">        100 :     if (a-&gt;first_row != b-&gt;first_row)</span>
+<span class="lineNum">     645 </span><span class="lineCov">         86 :         return (a-&gt;first_row &lt; b-&gt;first_row) ? -1 : 1;</span>
+<span class="lineNum">     646 </span><span class="lineCov">         14 :     if (a-&gt;second_row != b-&gt;second_row)</span>
+<span class="lineNum">     647 </span><span class="lineCov">          2 :         return (a-&gt;second_row &lt; b-&gt;second_row) ? -1 : 1;</span>
+<span class="lineNum">     648 </span><span class="lineCov">         12 :     return 0;</span>
+<span class="lineNum">     649 </span>            : }
+<span class="lineNum">     650 </span>            : 
+<span class="lineNum">     651 </span>            : /*
+<span class="lineNum">     652 </span>            :  * Construct array showing which rows to sample for percentiles.
+<a name="653"><span class="lineNum">     653 </span>            :  */</a>
+<span class="lineNum">     654 </span>            : static struct pct_info *
+<span class="lineNum">     655 </span><span class="lineCov">         10 : setup_pct_info(int num_percentiles,</span>
+<span class="lineNum">     656 </span>            :                Datum *percentiles_datum,
+<span class="lineNum">     657 </span>            :                bool *percentiles_null,
+<span class="lineNum">     658 </span>            :                int64 rowcount,
+<span class="lineNum">     659 </span>            :                bool continuous)
+<span class="lineNum">     660 </span>            : {
+<span class="lineNum">     661 </span>            :     struct pct_info *pct_info;
+<span class="lineNum">     662 </span>            :     int         i;
+<span class="lineNum">     663 </span>            : 
+<span class="lineNum">     664 </span><span class="lineCov">         10 :     pct_info = (struct pct_info *) palloc(num_percentiles * sizeof(struct pct_info));</span>
+<span class="lineNum">     665 </span>            : 
+<span class="lineNum">     666 </span><span class="lineCov">         74 :     for (i = 0; i &lt; num_percentiles; i++)</span>
+<span class="lineNum">     667 </span>            :     {
+<span class="lineNum">     668 </span><span class="lineCov">         64 :         pct_info[i].idx = i;</span>
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span><span class="lineCov">         64 :         if (percentiles_null[i])</span>
+<span class="lineNum">     671 </span>            :         {
+<span class="lineNum">     672 </span>            :             /* dummy entry for any NULL in array */
+<span class="lineNum">     673 </span><span class="lineCov">          4 :             pct_info[i].first_row = 0;</span>
+<span class="lineNum">     674 </span><span class="lineCov">          4 :             pct_info[i].second_row = 0;</span>
+<span class="lineNum">     675 </span><span class="lineCov">          4 :             pct_info[i].proportion = 0;</span>
+<span class="lineNum">     676 </span>            :         }
+<span class="lineNum">     677 </span>            :         else
+<span class="lineNum">     678 </span>            :         {
+<span class="lineNum">     679 </span><span class="lineCov">         60 :             double      p = DatumGetFloat8(percentiles_datum[i]);</span>
+<span class="lineNum">     680 </span>            : 
+<span class="lineNum">     681 </span><span class="lineCov">         60 :             if (p &lt; 0 || p &gt; 1 || isnan(p))</span>
+<span class="lineNum">     682 </span><span class="lineNoCov">          0 :                 ereport(ERROR,</span>
+<span class="lineNum">     683 </span>            :                         (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+<span class="lineNum">     684 </span>            :                          errmsg(&quot;percentile value %g is not between 0 and 1&quot;,
+<span class="lineNum">     685 </span>            :                                 p)));
+<span class="lineNum">     686 </span>            : 
+<span class="lineNum">     687 </span><span class="lineCov">         60 :             if (continuous)</span>
+<span class="lineNum">     688 </span>            :             {
+<span class="lineNum">     689 </span><span class="lineCov">         32 :                 pct_info[i].first_row = 1 + floor(p * (rowcount - 1));</span>
+<span class="lineNum">     690 </span><span class="lineCov">         32 :                 pct_info[i].second_row = 1 + ceil(p * (rowcount - 1));</span>
+<span class="lineNum">     691 </span><span class="lineCov">         32 :                 pct_info[i].proportion = (p * (rowcount - 1)) - floor(p * (rowcount - 1));</span>
+<span class="lineNum">     692 </span>            :             }
+<span class="lineNum">     693 </span>            :             else
+<span class="lineNum">     694 </span>            :             {
+<span class="lineNum">     695 </span>            :                 /*----------
+<span class="lineNum">     696 </span>            :                  * We need the smallest K such that (K/N) &gt;= percentile.
+<span class="lineNum">     697 </span>            :                  * N&gt;0, therefore K &gt;= N*percentile, therefore
+<span class="lineNum">     698 </span>            :                  * K = ceil(N*percentile); but not less than 1.
+<span class="lineNum">     699 </span>            :                  *----------
+<span class="lineNum">     700 </span>            :                  */
+<span class="lineNum">     701 </span><span class="lineCov">         28 :                 int64       row = (int64) ceil(p * rowcount);</span>
+<span class="lineNum">     702 </span>            : 
+<span class="lineNum">     703 </span><span class="lineCov">         28 :                 row = Max(1, row);</span>
+<span class="lineNum">     704 </span><span class="lineCov">         28 :                 pct_info[i].first_row = row;</span>
+<span class="lineNum">     705 </span><span class="lineCov">         28 :                 pct_info[i].second_row = row;</span>
+<span class="lineNum">     706 </span><span class="lineCov">         28 :                 pct_info[i].proportion = 0;</span>
+<span class="lineNum">     707 </span>            :             }
+<span class="lineNum">     708 </span>            :         }
+<span class="lineNum">     709 </span>            :     }
+<span class="lineNum">     710 </span>            : 
+<span class="lineNum">     711 </span>            :     /*
+<span class="lineNum">     712 </span>            :      * The parameter array wasn't necessarily in sorted order, but we need to
+<span class="lineNum">     713 </span>            :      * visit the rows in order, so sort by first_row/second_row.
+<span class="lineNum">     714 </span>            :      */
+<span class="lineNum">     715 </span><span class="lineCov">         10 :     qsort(pct_info, num_percentiles, sizeof(struct pct_info), pct_info_cmp);</span>
+<span class="lineNum">     716 </span>            : 
+<span class="lineNum">     717 </span><span class="lineCov">         10 :     return pct_info;</span>
+<span class="lineNum">     718 </span>            : }
+<span class="lineNum">     719 </span>            : 
+<span class="lineNum">     720 </span>            : /*
+<span class="lineNum">     721 </span>            :  * percentile_disc(float8[]) within group (anyelement)  - discrete percentiles
+<a name="722"><span class="lineNum">     722 </span>            :  */</a>
+<span class="lineNum">     723 </span>            : Datum
+<span class="lineNum">     724 </span><span class="lineCov">          6 : percentile_disc_multi_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     725 </span>            : {
+<span class="lineNum">     726 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">     727 </span>            :     ArrayType  *param;
+<span class="lineNum">     728 </span>            :     Datum      *percentiles_datum;
+<span class="lineNum">     729 </span>            :     bool       *percentiles_null;
+<span class="lineNum">     730 </span>            :     int         num_percentiles;
+<span class="lineNum">     731 </span>            :     struct pct_info *pct_info;
+<span class="lineNum">     732 </span>            :     Datum      *result_datum;
+<span class="lineNum">     733 </span>            :     bool       *result_isnull;
+<span class="lineNum">     734 </span><span class="lineCov">          6 :     int64       rownum = 0;</span>
+<span class="lineNum">     735 </span><span class="lineCov">          6 :     Datum       val = (Datum) 0;</span>
+<span class="lineNum">     736 </span><span class="lineCov">          6 :     bool        isnull = true;</span>
+<span class="lineNum">     737 </span>            :     int         i;
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span><span class="lineCov">          6 :     Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);</span>
+<span class="lineNum">     740 </span>            : 
+<span class="lineNum">     741 </span>            :     /* If there were no regular rows, the result is NULL */
+<span class="lineNum">     742 </span><span class="lineCov">          6 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">     743 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span><span class="lineCov">          6 :     osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     746 </span>            : 
+<span class="lineNum">     747 </span>            :     /* number_of_rows could be zero if we only saw NULL input values */
+<span class="lineNum">     748 </span><span class="lineCov">          6 :     if (osastate-&gt;number_of_rows == 0)</span>
+<span class="lineNum">     749 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     750 </span>            : 
+<span class="lineNum">     751 </span>            :     /* Deconstruct the percentile-array input */
+<span class="lineNum">     752 </span><span class="lineCov">          6 :     if (PG_ARGISNULL(1))</span>
+<span class="lineNum">     753 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     754 </span><span class="lineCov">          6 :     param = PG_GETARG_ARRAYTYPE_P(1);</span>
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span><span class="lineCov">          6 :     deconstruct_array(param, FLOAT8OID,</span>
+<span class="lineNum">     757 </span>            :     /* hard-wired info on type float8 */
+<span class="lineNum">     758 </span>            :                       8, FLOAT8PASSBYVAL, 'd',
+<span class="lineNum">     759 </span>            :                       &amp;percentiles_datum,
+<span class="lineNum">     760 </span>            :                       &amp;percentiles_null,
+<span class="lineNum">     761 </span>            :                       &amp;num_percentiles);
+<span class="lineNum">     762 </span>            : 
+<span class="lineNum">     763 </span><span class="lineCov">          6 :     if (num_percentiles == 0)</span>
+<span class="lineNum">     764 </span><span class="lineNoCov">          0 :         PG_RETURN_POINTER(construct_empty_array(osastate-&gt;qstate-&gt;sortColType));</span>
+<span class="lineNum">     765 </span>            : 
+<span class="lineNum">     766 </span><span class="lineCov">          6 :     pct_info = setup_pct_info(num_percentiles,</span>
+<span class="lineNum">     767 </span>            :                               percentiles_datum,
+<span class="lineNum">     768 </span>            :                               percentiles_null,
+<span class="lineNum">     769 </span>            :                               osastate-&gt;number_of_rows,
+<span class="lineNum">     770 </span>            :                               false);
+<span class="lineNum">     771 </span>            : 
+<span class="lineNum">     772 </span><span class="lineCov">          6 :     result_datum = (Datum *) palloc(num_percentiles * sizeof(Datum));</span>
+<span class="lineNum">     773 </span><span class="lineCov">          6 :     result_isnull = (bool *) palloc(num_percentiles * sizeof(bool));</span>
+<span class="lineNum">     774 </span>            : 
+<span class="lineNum">     775 </span>            :     /*
+<span class="lineNum">     776 </span>            :      * Start by dealing with any nulls in the param array - those are sorted
+<span class="lineNum">     777 </span>            :      * to the front on row=0, so set the corresponding result indexes to null
+<span class="lineNum">     778 </span>            :      */
+<span class="lineNum">     779 </span><span class="lineCov">         10 :     for (i = 0; i &lt; num_percentiles; i++)</span>
+<span class="lineNum">     780 </span>            :     {
+<span class="lineNum">     781 </span><span class="lineCov">         10 :         int         idx = pct_info[i].idx;</span>
+<span class="lineNum">     782 </span>            : 
+<span class="lineNum">     783 </span><span class="lineCov">         10 :         if (pct_info[i].first_row &gt; 0)</span>
+<span class="lineNum">     784 </span><span class="lineCov">          6 :             break;</span>
+<span class="lineNum">     785 </span>            : 
+<span class="lineNum">     786 </span><span class="lineCov">          4 :         result_datum[idx] = (Datum) 0;</span>
+<span class="lineNum">     787 </span><span class="lineCov">          4 :         result_isnull[idx] = true;</span>
+<span class="lineNum">     788 </span>            :     }
+<span class="lineNum">     789 </span>            : 
+<span class="lineNum">     790 </span>            :     /*
+<span class="lineNum">     791 </span>            :      * If there's anything left after doing the nulls, then grind the input
+<span class="lineNum">     792 </span>            :      * and extract the needed values
+<span class="lineNum">     793 </span>            :      */
+<span class="lineNum">     794 </span><span class="lineCov">          6 :     if (i &lt; num_percentiles)</span>
+<span class="lineNum">     795 </span>            :     {
+<span class="lineNum">     796 </span>            :         /* Finish the sort, or rescan if we already did */
+<span class="lineNum">     797 </span><span class="lineCov">          6 :         if (!osastate-&gt;sort_done)</span>
+<span class="lineNum">     798 </span>            :         {
+<span class="lineNum">     799 </span><span class="lineCov">          6 :             tuplesort_performsort(osastate-&gt;sortstate);</span>
+<span class="lineNum">     800 </span><span class="lineCov">          6 :             osastate-&gt;sort_done = true;</span>
+<span class="lineNum">     801 </span>            :         }
+<span class="lineNum">     802 </span>            :         else
+<span class="lineNum">     803 </span><span class="lineNoCov">          0 :             tuplesort_rescan(osastate-&gt;sortstate);</span>
+<span class="lineNum">     804 </span>            : 
+<span class="lineNum">     805 </span><span class="lineCov">         34 :         for (; i &lt; num_percentiles; i++)</span>
+<span class="lineNum">     806 </span>            :         {
+<span class="lineNum">     807 </span><span class="lineCov">         28 :             int64       target_row = pct_info[i].first_row;</span>
+<span class="lineNum">     808 </span><span class="lineCov">         28 :             int         idx = pct_info[i].idx;</span>
+<span class="lineNum">     809 </span>            : 
+<span class="lineNum">     810 </span>            :             /* Advance to target row, if not already there */
+<span class="lineNum">     811 </span><span class="lineCov">         28 :             if (target_row &gt; rownum)</span>
+<span class="lineNum">     812 </span>            :             {
+<span class="lineNum">     813 </span><span class="lineCov">         28 :                 if (!tuplesort_skiptuples(osastate-&gt;sortstate, target_row - rownum - 1, true))</span>
+<span class="lineNum">     814 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;missing row in percentile_disc&quot;);</span>
+<span class="lineNum">     815 </span>            : 
+<span class="lineNum">     816 </span><span class="lineCov">         28 :                 if (!tuplesort_getdatum(osastate-&gt;sortstate, true, &amp;val, &amp;isnull, NULL))</span>
+<span class="lineNum">     817 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;missing row in percentile_disc&quot;);</span>
+<span class="lineNum">     818 </span>            : 
+<span class="lineNum">     819 </span><span class="lineCov">         28 :                 rownum = target_row;</span>
+<span class="lineNum">     820 </span>            :             }
+<span class="lineNum">     821 </span>            : 
+<span class="lineNum">     822 </span><span class="lineCov">         28 :             result_datum[idx] = val;</span>
+<span class="lineNum">     823 </span><span class="lineCov">         28 :             result_isnull[idx] = isnull;</span>
+<span class="lineNum">     824 </span>            :         }
+<span class="lineNum">     825 </span>            :     }
+<span class="lineNum">     826 </span>            : 
+<span class="lineNum">     827 </span>            :     /* We make the output array the same shape as the input */
+<span class="lineNum">     828 </span><span class="lineCov">          6 :     PG_RETURN_POINTER(construct_md_array(result_datum, result_isnull,</span>
+<span class="lineNum">     829 </span>            :                                          ARR_NDIM(param),
+<span class="lineNum">     830 </span>            :                                          ARR_DIMS(param),
+<span class="lineNum">     831 </span>            :                                          ARR_LBOUND(param),
+<span class="lineNum">     832 </span>            :                                          osastate-&gt;qstate-&gt;sortColType,
+<span class="lineNum">     833 </span>            :                                          osastate-&gt;qstate-&gt;typLen,
+<span class="lineNum">     834 </span>            :                                          osastate-&gt;qstate-&gt;typByVal,
+<span class="lineNum">     835 </span>            :                                          osastate-&gt;qstate-&gt;typAlign));
+<span class="lineNum">     836 </span>            : }
+<span class="lineNum">     837 </span>            : 
+<span class="lineNum">     838 </span>            : /*
+<span class="lineNum">     839 </span>            :  * percentile_cont(float8[]) within group ()    - continuous percentiles
+<a name="840"><span class="lineNum">     840 </span>            :  */</a>
+<span class="lineNum">     841 </span>            : static Datum
+<span class="lineNum">     842 </span><span class="lineCov">          4 : percentile_cont_multi_final_common(FunctionCallInfo fcinfo,</span>
+<span class="lineNum">     843 </span>            :                                    Oid expect_type,
+<span class="lineNum">     844 </span>            :                                    int16 typLen, bool typByVal, char typAlign,
+<span class="lineNum">     845 </span>            :                                    LerpFunc lerpfunc)
+<span class="lineNum">     846 </span>            : {
+<span class="lineNum">     847 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">     848 </span>            :     ArrayType  *param;
+<span class="lineNum">     849 </span>            :     Datum      *percentiles_datum;
+<span class="lineNum">     850 </span>            :     bool       *percentiles_null;
+<span class="lineNum">     851 </span>            :     int         num_percentiles;
+<span class="lineNum">     852 </span>            :     struct pct_info *pct_info;
+<span class="lineNum">     853 </span>            :     Datum      *result_datum;
+<span class="lineNum">     854 </span>            :     bool       *result_isnull;
+<span class="lineNum">     855 </span><span class="lineCov">          4 :     int64       rownum = 0;</span>
+<span class="lineNum">     856 </span><span class="lineCov">          4 :     Datum       first_val = (Datum) 0;</span>
+<span class="lineNum">     857 </span><span class="lineCov">          4 :     Datum       second_val = (Datum) 0;</span>
+<span class="lineNum">     858 </span>            :     bool        isnull;
+<span class="lineNum">     859 </span>            :     int         i;
+<span class="lineNum">     860 </span>            : 
+<span class="lineNum">     861 </span><span class="lineCov">          4 :     Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);</span>
+<span class="lineNum">     862 </span>            : 
+<span class="lineNum">     863 </span>            :     /* If there were no regular rows, the result is NULL */
+<span class="lineNum">     864 </span><span class="lineCov">          4 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">     865 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     866 </span>            : 
+<span class="lineNum">     867 </span><span class="lineCov">          4 :     osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     868 </span>            : 
+<span class="lineNum">     869 </span>            :     /* number_of_rows could be zero if we only saw NULL input values */
+<span class="lineNum">     870 </span><span class="lineCov">          4 :     if (osastate-&gt;number_of_rows == 0)</span>
+<span class="lineNum">     871 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     872 </span>            : 
+<span class="lineNum">     873 </span><span class="lineCov">          4 :     Assert(expect_type == osastate-&gt;qstate-&gt;sortColType);</span>
+<span class="lineNum">     874 </span>            : 
+<span class="lineNum">     875 </span>            :     /* Deconstruct the percentile-array input */
+<span class="lineNum">     876 </span><span class="lineCov">          4 :     if (PG_ARGISNULL(1))</span>
+<span class="lineNum">     877 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">     878 </span><span class="lineCov">          4 :     param = PG_GETARG_ARRAYTYPE_P(1);</span>
+<span class="lineNum">     879 </span>            : 
+<span class="lineNum">     880 </span><span class="lineCov">          4 :     deconstruct_array(param, FLOAT8OID,</span>
+<span class="lineNum">     881 </span>            :     /* hard-wired info on type float8 */
+<span class="lineNum">     882 </span>            :                       8, FLOAT8PASSBYVAL, 'd',
+<span class="lineNum">     883 </span>            :                       &amp;percentiles_datum,
+<span class="lineNum">     884 </span>            :                       &amp;percentiles_null,
+<span class="lineNum">     885 </span>            :                       &amp;num_percentiles);
+<span class="lineNum">     886 </span>            : 
+<span class="lineNum">     887 </span><span class="lineCov">          4 :     if (num_percentiles == 0)</span>
+<span class="lineNum">     888 </span><span class="lineNoCov">          0 :         PG_RETURN_POINTER(construct_empty_array(osastate-&gt;qstate-&gt;sortColType));</span>
+<span class="lineNum">     889 </span>            : 
+<span class="lineNum">     890 </span><span class="lineCov">          4 :     pct_info = setup_pct_info(num_percentiles,</span>
+<span class="lineNum">     891 </span>            :                               percentiles_datum,
+<span class="lineNum">     892 </span>            :                               percentiles_null,
+<span class="lineNum">     893 </span>            :                               osastate-&gt;number_of_rows,
+<span class="lineNum">     894 </span>            :                               true);
+<span class="lineNum">     895 </span>            : 
+<span class="lineNum">     896 </span><span class="lineCov">          4 :     result_datum = (Datum *) palloc(num_percentiles * sizeof(Datum));</span>
+<span class="lineNum">     897 </span><span class="lineCov">          4 :     result_isnull = (bool *) palloc(num_percentiles * sizeof(bool));</span>
+<span class="lineNum">     898 </span>            : 
+<span class="lineNum">     899 </span>            :     /*
+<span class="lineNum">     900 </span>            :      * Start by dealing with any nulls in the param array - those are sorted
+<span class="lineNum">     901 </span>            :      * to the front on row=0, so set the corresponding result indexes to null
+<span class="lineNum">     902 </span>            :      */
+<span class="lineNum">     903 </span><span class="lineCov">          4 :     for (i = 0; i &lt; num_percentiles; i++)</span>
+<span class="lineNum">     904 </span>            :     {
+<span class="lineNum">     905 </span><span class="lineCov">          4 :         int         idx = pct_info[i].idx;</span>
+<span class="lineNum">     906 </span>            : 
+<span class="lineNum">     907 </span><span class="lineCov">          4 :         if (pct_info[i].first_row &gt; 0)</span>
+<span class="lineNum">     908 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">     909 </span>            : 
+<span class="lineNum">     910 </span><span class="lineNoCov">          0 :         result_datum[idx] = (Datum) 0;</span>
+<span class="lineNum">     911 </span><span class="lineNoCov">          0 :         result_isnull[idx] = true;</span>
+<span class="lineNum">     912 </span>            :     }
+<span class="lineNum">     913 </span>            : 
+<span class="lineNum">     914 </span>            :     /*
+<span class="lineNum">     915 </span>            :      * If there's anything left after doing the nulls, then grind the input
+<span class="lineNum">     916 </span>            :      * and extract the needed values
+<span class="lineNum">     917 </span>            :      */
+<span class="lineNum">     918 </span><span class="lineCov">          4 :     if (i &lt; num_percentiles)</span>
+<span class="lineNum">     919 </span>            :     {
+<span class="lineNum">     920 </span>            :         /* Finish the sort, or rescan if we already did */
+<span class="lineNum">     921 </span><span class="lineCov">          4 :         if (!osastate-&gt;sort_done)</span>
+<span class="lineNum">     922 </span>            :         {
+<span class="lineNum">     923 </span><span class="lineCov">          4 :             tuplesort_performsort(osastate-&gt;sortstate);</span>
+<span class="lineNum">     924 </span><span class="lineCov">          4 :             osastate-&gt;sort_done = true;</span>
+<span class="lineNum">     925 </span>            :         }
+<span class="lineNum">     926 </span>            :         else
+<span class="lineNum">     927 </span><span class="lineNoCov">          0 :             tuplesort_rescan(osastate-&gt;sortstate);</span>
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineCov">         36 :         for (; i &lt; num_percentiles; i++)</span>
+<span class="lineNum">     930 </span>            :         {
+<span class="lineNum">     931 </span><span class="lineCov">         32 :             int64       first_row = pct_info[i].first_row;</span>
+<span class="lineNum">     932 </span><span class="lineCov">         32 :             int64       second_row = pct_info[i].second_row;</span>
+<span class="lineNum">     933 </span><span class="lineCov">         32 :             int         idx = pct_info[i].idx;</span>
+<span class="lineNum">     934 </span>            : 
+<span class="lineNum">     935 </span>            :             /*
+<span class="lineNum">     936 </span>            :              * Advance to first_row, if not already there.  Note that we might
+<span class="lineNum">     937 </span>            :              * already have rownum beyond first_row, in which case first_val
+<span class="lineNum">     938 </span>            :              * is already correct.  (This occurs when interpolating between
+<span class="lineNum">     939 </span>            :              * the same two input rows as for the previous percentile.)
+<span class="lineNum">     940 </span>            :              */
+<span class="lineNum">     941 </span><span class="lineCov">         32 :             if (first_row &gt; rownum)</span>
+<span class="lineNum">     942 </span>            :             {
+<span class="lineNum">     943 </span><span class="lineCov">         16 :                 if (!tuplesort_skiptuples(osastate-&gt;sortstate, first_row - rownum - 1, true))</span>
+<span class="lineNum">     944 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;missing row in percentile_cont&quot;);</span>
+<span class="lineNum">     945 </span>            : 
+<span class="lineNum">     946 </span><span class="lineCov">         16 :                 if (!tuplesort_getdatum(osastate-&gt;sortstate, true, &amp;first_val,</span>
+<span class="lineNum">     947 </span><span class="lineCov">         16 :                                         &amp;isnull, NULL) || isnull)</span>
+<span class="lineNum">     948 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;missing row in percentile_cont&quot;);</span>
+<span class="lineNum">     949 </span>            : 
+<span class="lineNum">     950 </span><span class="lineCov">         16 :                 rownum = first_row;</span>
+<span class="lineNum">     951 </span>            :                 /* Always advance second_val to be latest input value */
+<span class="lineNum">     952 </span><span class="lineCov">         16 :                 second_val = first_val;</span>
+<span class="lineNum">     953 </span>            :             }
+<span class="lineNum">     954 </span><span class="lineCov">         16 :             else if (first_row == rownum)</span>
+<span class="lineNum">     955 </span>            :             {
+<span class="lineNum">     956 </span>            :                 /*
+<span class="lineNum">     957 </span>            :                  * We are already at the desired row, so we must previously
+<span class="lineNum">     958 </span>            :                  * have read its value into second_val (and perhaps first_val
+<span class="lineNum">     959 </span>            :                  * as well, but this assignment is harmless in that case).
+<span class="lineNum">     960 </span>            :                  */
+<span class="lineNum">     961 </span><span class="lineCov">          8 :                 first_val = second_val;</span>
+<span class="lineNum">     962 </span>            :             }
+<span class="lineNum">     963 </span>            : 
+<span class="lineNum">     964 </span>            :             /* Fetch second_row if needed */
+<span class="lineNum">     965 </span><span class="lineCov">         32 :             if (second_row &gt; rownum)</span>
+<span class="lineNum">     966 </span>            :             {
+<span class="lineNum">     967 </span><span class="lineCov">         12 :                 if (!tuplesort_getdatum(osastate-&gt;sortstate, true, &amp;second_val,</span>
+<span class="lineNum">     968 </span><span class="lineCov">         12 :                                         &amp;isnull, NULL) || isnull)</span>
+<span class="lineNum">     969 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;missing row in percentile_cont&quot;);</span>
+<span class="lineNum">     970 </span><span class="lineCov">         12 :                 rownum++;</span>
+<span class="lineNum">     971 </span>            :             }
+<span class="lineNum">     972 </span>            :             /* We should now certainly be on second_row exactly */
+<span class="lineNum">     973 </span><span class="lineCov">         32 :             Assert(second_row == rownum);</span>
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span>            :             /* Compute appropriate result */
+<span class="lineNum">     976 </span><span class="lineCov">         32 :             if (second_row &gt; first_row)</span>
+<span class="lineNum">     977 </span><span class="lineCov">         40 :                 result_datum[idx] = lerpfunc(first_val, second_val,</span>
+<span class="lineNum">     978 </span><span class="lineCov">         20 :                                              pct_info[i].proportion);</span>
+<span class="lineNum">     979 </span>            :             else
+<span class="lineNum">     980 </span><span class="lineCov">         12 :                 result_datum[idx] = first_val;</span>
+<span class="lineNum">     981 </span>            : 
+<span class="lineNum">     982 </span><span class="lineCov">         32 :             result_isnull[idx] = false;</span>
+<span class="lineNum">     983 </span>            :         }
+<span class="lineNum">     984 </span>            :     }
+<span class="lineNum">     985 </span>            : 
+<span class="lineNum">     986 </span>            :     /* We make the output array the same shape as the input */
+<span class="lineNum">     987 </span><span class="lineCov">          4 :     PG_RETURN_POINTER(construct_md_array(result_datum, result_isnull,</span>
+<span class="lineNum">     988 </span>            :                                          ARR_NDIM(param),
+<span class="lineNum">     989 </span>            :                                          ARR_DIMS(param), ARR_LBOUND(param),
+<span class="lineNum">     990 </span>            :                                          expect_type,
+<span class="lineNum">     991 </span>            :                                          typLen,
+<span class="lineNum">     992 </span>            :                                          typByVal,
+<span class="lineNum">     993 </span>            :                                          typAlign));
+<span class="lineNum">     994 </span>            : }
+<span class="lineNum">     995 </span>            : 
+<span class="lineNum">     996 </span>            : /*
+<span class="lineNum">     997 </span>            :  * percentile_cont(float8[]) within group (float8)  - continuous percentiles
+<a name="998"><span class="lineNum">     998 </span>            :  */</a>
+<span class="lineNum">     999 </span>            : Datum
+<span class="lineNum">    1000 </span><span class="lineCov">          4 : percentile_cont_float8_multi_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1001 </span>            : {
+<span class="lineNum">    1002 </span><span class="lineCov">          4 :     return percentile_cont_multi_final_common(fcinfo,</span>
+<span class="lineNum">    1003 </span>            :                                               FLOAT8OID,
+<span class="lineNum">    1004 </span>            :     /* hard-wired info on type float8 */
+<span class="lineNum">    1005 </span>            :                                               8, FLOAT8PASSBYVAL, 'd',
+<span class="lineNum">    1006 </span>            :                                               float8_lerp);
+<span class="lineNum">    1007 </span>            : }
+<span class="lineNum">    1008 </span>            : 
+<span class="lineNum">    1009 </span>            : /*
+<span class="lineNum">    1010 </span>            :  * percentile_cont(float8[]) within group (interval)  - continuous percentiles
+<a name="1011"><span class="lineNum">    1011 </span>            :  */</a>
+<span class="lineNum">    1012 </span>            : Datum
+<span class="lineNum">    1013 </span><span class="lineNoCov">          0 : percentile_cont_interval_multi_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1014 </span>            : {
+<span class="lineNum">    1015 </span><span class="lineNoCov">          0 :     return percentile_cont_multi_final_common(fcinfo,</span>
+<span class="lineNum">    1016 </span>            :                                               INTERVALOID,
+<span class="lineNum">    1017 </span>            :     /* hard-wired info on type interval */
+<span class="lineNum">    1018 </span>            :                                               16, false, 'd',
+<span class="lineNum">    1019 </span>            :                                               interval_lerp);
+<span class="lineNum">    1020 </span>            : }
+<span class="lineNum">    1021 </span>            : 
+<span class="lineNum">    1022 </span>            : 
+<span class="lineNum">    1023 </span>            : /*
+<span class="lineNum">    1024 </span>            :  * mode() within group (anyelement) - most common value
+<a name="1025"><span class="lineNum">    1025 </span>            :  */</a>
+<span class="lineNum">    1026 </span>            : Datum
+<span class="lineNum">    1027 </span><span class="lineCov">         20 : mode_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1028 </span>            : {
+<span class="lineNum">    1029 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">    1030 </span>            :     Datum       val;
+<span class="lineNum">    1031 </span>            :     bool        isnull;
+<span class="lineNum">    1032 </span><span class="lineCov">         20 :     Datum       mode_val = (Datum) 0;</span>
+<span class="lineNum">    1033 </span><span class="lineCov">         20 :     int64       mode_freq = 0;</span>
+<span class="lineNum">    1034 </span><span class="lineCov">         20 :     Datum       last_val = (Datum) 0;</span>
+<span class="lineNum">    1035 </span><span class="lineCov">         20 :     int64       last_val_freq = 0;</span>
+<span class="lineNum">    1036 </span><span class="lineCov">         20 :     bool        last_val_is_mode = false;</span>
+<span class="lineNum">    1037 </span>            :     FmgrInfo   *equalfn;
+<span class="lineNum">    1038 </span><span class="lineCov">         20 :     Datum       abbrev_val = (Datum) 0;</span>
+<span class="lineNum">    1039 </span><span class="lineCov">         20 :     Datum       last_abbrev_val = (Datum) 0;</span>
+<span class="lineNum">    1040 </span>            :     bool        shouldfree;
+<span class="lineNum">    1041 </span>            : 
+<span class="lineNum">    1042 </span><span class="lineCov">         20 :     Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);</span>
+<span class="lineNum">    1043 </span>            : 
+<span class="lineNum">    1044 </span>            :     /* If there were no regular rows, the result is NULL */
+<span class="lineNum">    1045 </span><span class="lineCov">         20 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">    1046 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">    1047 </span>            : 
+<span class="lineNum">    1048 </span><span class="lineCov">         20 :     osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">    1049 </span>            : 
+<span class="lineNum">    1050 </span>            :     /* number_of_rows could be zero if we only saw NULL input values */
+<span class="lineNum">    1051 </span><span class="lineCov">         20 :     if (osastate-&gt;number_of_rows == 0)</span>
+<span class="lineNum">    1052 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">    1053 </span>            : 
+<span class="lineNum">    1054 </span>            :     /* Look up the equality function for the datatype, if we didn't already */
+<span class="lineNum">    1055 </span><span class="lineCov">         20 :     equalfn = &amp;(osastate-&gt;qstate-&gt;equalfn);</span>
+<span class="lineNum">    1056 </span><span class="lineCov">         20 :     if (!OidIsValid(equalfn-&gt;fn_oid))</span>
+<span class="lineNum">    1057 </span><span class="lineCov">          2 :         fmgr_info_cxt(get_opcode(osastate-&gt;qstate-&gt;eqOperator), equalfn,</span>
+<span class="lineNum">    1058 </span><span class="lineCov">          2 :                       osastate-&gt;qstate-&gt;qcontext);</span>
+<span class="lineNum">    1059 </span>            : 
+<span class="lineNum">    1060 </span><span class="lineCov">         20 :     shouldfree = !(osastate-&gt;qstate-&gt;typByVal);</span>
+<span class="lineNum">    1061 </span>            : 
+<span class="lineNum">    1062 </span>            :     /* Finish the sort, or rescan if we already did */
+<span class="lineNum">    1063 </span><span class="lineCov">         20 :     if (!osastate-&gt;sort_done)</span>
+<span class="lineNum">    1064 </span>            :     {
+<span class="lineNum">    1065 </span><span class="lineCov">         20 :         tuplesort_performsort(osastate-&gt;sortstate);</span>
+<span class="lineNum">    1066 </span><span class="lineCov">         20 :         osastate-&gt;sort_done = true;</span>
+<span class="lineNum">    1067 </span>            :     }
+<span class="lineNum">    1068 </span>            :     else
+<span class="lineNum">    1069 </span><span class="lineNoCov">          0 :         tuplesort_rescan(osastate-&gt;sortstate);</span>
+<span class="lineNum">    1070 </span>            : 
+<span class="lineNum">    1071 </span>            :     /* Scan tuples and count frequencies */
+<span class="lineNum">    1072 </span><span class="lineCov">      20040 :     while (tuplesort_getdatum(osastate-&gt;sortstate, true, &amp;val, &amp;isnull, &amp;abbrev_val))</span>
+<span class="lineNum">    1073 </span>            :     {
+<span class="lineNum">    1074 </span>            :         /* we don't expect any nulls, but ignore them if found */
+<span class="lineNum">    1075 </span><span class="lineCov">      20000 :         if (isnull)</span>
+<span class="lineNum">    1076 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">    1077 </span>            : 
+<span class="lineNum">    1078 </span><span class="lineCov">      20000 :         if (last_val_freq == 0)</span>
+<span class="lineNum">    1079 </span>            :         {
+<span class="lineNum">    1080 </span>            :             /* first nonnull value - it's the mode for now */
+<span class="lineNum">    1081 </span><span class="lineCov">         20 :             mode_val = last_val = val;</span>
+<span class="lineNum">    1082 </span><span class="lineCov">         20 :             mode_freq = last_val_freq = 1;</span>
+<span class="lineNum">    1083 </span><span class="lineCov">         20 :             last_val_is_mode = true;</span>
+<span class="lineNum">    1084 </span><span class="lineCov">         20 :             last_abbrev_val = abbrev_val;</span>
+<span class="lineNum">    1085 </span>            :         }
+<span class="lineNum">    1086 </span><span class="lineCov">      39960 :         else if (abbrev_val == last_abbrev_val &amp;&amp;</span>
+<span class="lineNum">    1087 </span><span class="lineCov">      19980 :                  DatumGetBool(FunctionCall2Coll(equalfn, PG_GET_COLLATION(), val, last_val)))</span>
+<span class="lineNum">    1088 </span>            :         {
+<span class="lineNum">    1089 </span>            :             /* value equal to previous value, count it */
+<span class="lineNum">    1090 </span><span class="lineCov">      19920 :             if (last_val_is_mode)</span>
+<span class="lineNum">    1091 </span><span class="lineCov">       5308 :                 mode_freq++;    /* needn't maintain last_val_freq */</span>
+<span class="lineNum">    1092 </span><span class="lineCov">      14612 :             else if (++last_val_freq &gt; mode_freq)</span>
+<span class="lineNum">    1093 </span>            :             {
+<span class="lineNum">    1094 </span>            :                 /* last_val becomes new mode */
+<span class="lineNum">    1095 </span><span class="lineCov">         22 :                 if (shouldfree)</span>
+<span class="lineNum">    1096 </span><span class="lineCov">         22 :                     pfree(DatumGetPointer(mode_val));</span>
+<span class="lineNum">    1097 </span><span class="lineCov">         22 :                 mode_val = last_val;</span>
+<span class="lineNum">    1098 </span><span class="lineCov">         22 :                 mode_freq = last_val_freq;</span>
+<span class="lineNum">    1099 </span><span class="lineCov">         22 :                 last_val_is_mode = true;</span>
+<span class="lineNum">    1100 </span>            :             }
+<span class="lineNum">    1101 </span><span class="lineCov">      39840 :             if (shouldfree)</span>
+<span class="lineNum">    1102 </span><span class="lineCov">      19920 :                 pfree(DatumGetPointer(val));</span>
+<span class="lineNum">    1103 </span>            :         }
+<span class="lineNum">    1104 </span>            :         else
+<span class="lineNum">    1105 </span>            :         {
+<span class="lineNum">    1106 </span>            :             /* val should replace last_val */
+<span class="lineNum">    1107 </span><span class="lineCov">         60 :             if (shouldfree &amp;&amp; !last_val_is_mode)</span>
+<span class="lineNum">    1108 </span><span class="lineCov">         24 :                 pfree(DatumGetPointer(last_val));</span>
+<span class="lineNum">    1109 </span><span class="lineCov">         60 :             last_val = val;</span>
+<span class="lineNum">    1110 </span>            :             /* avoid equality function calls by reusing abbreviated keys */
+<span class="lineNum">    1111 </span><span class="lineCov">         60 :             last_abbrev_val = abbrev_val;</span>
+<span class="lineNum">    1112 </span><span class="lineCov">         60 :             last_val_freq = 1;</span>
+<span class="lineNum">    1113 </span><span class="lineCov">         60 :             last_val_is_mode = false;</span>
+<span class="lineNum">    1114 </span>            :         }
+<span class="lineNum">    1115 </span>            : 
+<span class="lineNum">    1116 </span><span class="lineCov">      20000 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1117 </span>            :     }
+<span class="lineNum">    1118 </span>            : 
+<span class="lineNum">    1119 </span><span class="lineCov">         20 :     if (shouldfree &amp;&amp; !last_val_is_mode)</span>
+<span class="lineNum">    1120 </span><span class="lineCov">         14 :         pfree(DatumGetPointer(last_val));</span>
+<span class="lineNum">    1121 </span>            : 
+<span class="lineNum">    1122 </span><span class="lineCov">         20 :     if (mode_freq)</span>
+<span class="lineNum">    1123 </span><span class="lineCov">         20 :         PG_RETURN_DATUM(mode_val);</span>
+<span class="lineNum">    1124 </span>            :     else
+<span class="lineNum">    1125 </span><span class="lineNoCov">          0 :         PG_RETURN_NULL();</span>
+<span class="lineNum">    1126 </span>            : }
+<span class="lineNum">    1127 </span>            : 
+<span class="lineNum">    1128 </span>            : 
+<span class="lineNum">    1129 </span>            : /*
+<span class="lineNum">    1130 </span>            :  * Common code to sanity-check args for hypothetical-set functions. No need
+<span class="lineNum">    1131 </span>            :  * for friendly errors, these can only happen if someone's messing up the
+<span class="lineNum">    1132 </span>            :  * aggregate definitions. The checks are needed for security, however.
+<a name="1133"><span class="lineNum">    1133 </span>            :  */</a>
+<span class="lineNum">    1134 </span>            : static void
+<span class="lineNum">    1135 </span><span class="lineCov">         84 : hypothetical_check_argtypes(FunctionCallInfo fcinfo, int nargs,</span>
+<span class="lineNum">    1136 </span>            :                             TupleDesc tupdesc)
+<span class="lineNum">    1137 </span>            : {
+<span class="lineNum">    1138 </span>            :     int         i;
+<span class="lineNum">    1139 </span>            : 
+<span class="lineNum">    1140 </span>            :     /* check that we have an int4 flag column */
+<span class="lineNum">    1141 </span><span class="lineCov">        168 :     if (!tupdesc ||</span>
+<span class="lineNum">    1142 </span><span class="lineCov">        168 :         (nargs + 1) != tupdesc-&gt;natts ||</span>
+<span class="lineNum">    1143 </span><span class="lineCov">         84 :         TupleDescAttr(tupdesc, nargs)-&gt;atttypid != INT4OID)</span>
+<span class="lineNum">    1144 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;type mismatch in hypothetical-set function&quot;);</span>
+<span class="lineNum">    1145 </span>            : 
+<span class="lineNum">    1146 </span>            :     /* check that direct args match in type with aggregated args */
+<span class="lineNum">    1147 </span><span class="lineCov">        264 :     for (i = 0; i &lt; nargs; i++)</span>
+<span class="lineNum">    1148 </span>            :     {
+<span class="lineNum">    1149 </span><span class="lineCov">        180 :         Form_pg_attribute attr = TupleDescAttr(tupdesc, i);</span>
+<span class="lineNum">    1150 </span>            : 
+<span class="lineNum">    1151 </span><span class="lineCov">        180 :         if (get_fn_expr_argtype(fcinfo-&gt;flinfo, i + 1) != attr-&gt;atttypid)</span>
+<span class="lineNum">    1152 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;type mismatch in hypothetical-set function&quot;);</span>
+<span class="lineNum">    1153 </span>            :     }
+<span class="lineNum">    1154 </span><span class="lineCov">         84 : }</span>
+<span class="lineNum">    1155 </span>            : 
+<span class="lineNum">    1156 </span>            : /*
+<span class="lineNum">    1157 </span>            :  * compute rank of hypothetical row
+<span class="lineNum">    1158 </span>            :  *
+<span class="lineNum">    1159 </span>            :  * flag should be -1 to sort hypothetical row ahead of its peers, or +1
+<span class="lineNum">    1160 </span>            :  * to sort behind.
+<span class="lineNum">    1161 </span>            :  * total number of regular rows is returned into *number_of_rows.
+<a name="1162"><span class="lineNum">    1162 </span>            :  */</a>
+<span class="lineNum">    1163 </span>            : static int64
+<span class="lineNum">    1164 </span><span class="lineCov">         76 : hypothetical_rank_common(FunctionCallInfo fcinfo, int flag,</span>
+<span class="lineNum">    1165 </span>            :                          int64 *number_of_rows)
+<span class="lineNum">    1166 </span>            : {
+<span class="lineNum">    1167 </span><span class="lineCov">         76 :     int         nargs = PG_NARGS() - 1;</span>
+<span class="lineNum">    1168 </span><span class="lineCov">         76 :     int64       rank = 1;</span>
+<span class="lineNum">    1169 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">    1170 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">    1171 </span>            :     int         i;
+<span class="lineNum">    1172 </span>            : 
+<span class="lineNum">    1173 </span><span class="lineCov">         76 :     Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);</span>
+<span class="lineNum">    1174 </span>            : 
+<span class="lineNum">    1175 </span>            :     /* If there were no regular rows, the rank is always 1 */
+<span class="lineNum">    1176 </span><span class="lineCov">         76 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">    1177 </span>            :     {
+<span class="lineNum">    1178 </span><span class="lineCov">          2 :         *number_of_rows = 0;</span>
+<span class="lineNum">    1179 </span><span class="lineCov">          2 :         return 1;</span>
+<span class="lineNum">    1180 </span>            :     }
+<span class="lineNum">    1181 </span>            : 
+<span class="lineNum">    1182 </span><span class="lineCov">         74 :     osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">    1183 </span><span class="lineCov">         74 :     *number_of_rows = osastate-&gt;number_of_rows;</span>
+<span class="lineNum">    1184 </span>            : 
+<span class="lineNum">    1185 </span>            :     /* Adjust nargs to be the number of direct (or aggregated) args */
+<span class="lineNum">    1186 </span><span class="lineCov">         74 :     if (nargs % 2 != 0)</span>
+<span class="lineNum">    1187 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;wrong number of arguments in hypothetical-set function&quot;);</span>
+<span class="lineNum">    1188 </span><span class="lineCov">         74 :     nargs /= 2;</span>
+<span class="lineNum">    1189 </span>            : 
+<span class="lineNum">    1190 </span><span class="lineCov">         74 :     hypothetical_check_argtypes(fcinfo, nargs, osastate-&gt;qstate-&gt;tupdesc);</span>
+<span class="lineNum">    1191 </span>            : 
+<span class="lineNum">    1192 </span>            :     /* because we need a hypothetical row, we can't share transition state */
+<span class="lineNum">    1193 </span><span class="lineCov">         74 :     Assert(!osastate-&gt;sort_done);</span>
+<span class="lineNum">    1194 </span>            : 
+<span class="lineNum">    1195 </span>            :     /* insert the hypothetical row into the sort */
+<span class="lineNum">    1196 </span><span class="lineCov">         74 :     slot = osastate-&gt;qstate-&gt;tupslot;</span>
+<span class="lineNum">    1197 </span><span class="lineCov">         74 :     ExecClearTuple(slot);</span>
+<span class="lineNum">    1198 </span><span class="lineCov">        244 :     for (i = 0; i &lt; nargs; i++)</span>
+<span class="lineNum">    1199 </span>            :     {
+<span class="lineNum">    1200 </span><span class="lineCov">        170 :         slot-&gt;tts_values[i] = PG_GETARG_DATUM(i + 1);</span>
+<span class="lineNum">    1201 </span><span class="lineCov">        170 :         slot-&gt;tts_isnull[i] = PG_ARGISNULL(i + 1);</span>
+<span class="lineNum">    1202 </span>            :     }
+<span class="lineNum">    1203 </span><span class="lineCov">         74 :     slot-&gt;tts_values[i] = Int32GetDatum(flag);</span>
+<span class="lineNum">    1204 </span><span class="lineCov">         74 :     slot-&gt;tts_isnull[i] = false;</span>
+<span class="lineNum">    1205 </span><span class="lineCov">         74 :     ExecStoreVirtualTuple(slot);</span>
+<span class="lineNum">    1206 </span>            : 
+<span class="lineNum">    1207 </span><span class="lineCov">         74 :     tuplesort_puttupleslot(osastate-&gt;sortstate, slot);</span>
+<span class="lineNum">    1208 </span>            : 
+<span class="lineNum">    1209 </span>            :     /* finish the sort */
+<span class="lineNum">    1210 </span><span class="lineCov">         74 :     tuplesort_performsort(osastate-&gt;sortstate);</span>
+<span class="lineNum">    1211 </span><span class="lineCov">         74 :     osastate-&gt;sort_done = true;</span>
+<span class="lineNum">    1212 </span>            : 
+<span class="lineNum">    1213 </span>            :     /* iterate till we find the hypothetical row */
+<span class="lineNum">    1214 </span><span class="lineCov">       1358 :     while (tuplesort_gettupleslot(osastate-&gt;sortstate, true, true, slot, NULL))</span>
+<span class="lineNum">    1215 </span>            :     {
+<span class="lineNum">    1216 </span>            :         bool        isnull;
+<span class="lineNum">    1217 </span><span class="lineCov">       1284 :         Datum       d = slot_getattr(slot, nargs + 1, &amp;isnull);</span>
+<span class="lineNum">    1218 </span>            : 
+<span class="lineNum">    1219 </span><span class="lineCov">       1284 :         if (!isnull &amp;&amp; DatumGetInt32(d) != 0)</span>
+<span class="lineNum">    1220 </span><span class="lineCov">         74 :             break;</span>
+<span class="lineNum">    1221 </span>            : 
+<span class="lineNum">    1222 </span><span class="lineCov">       1210 :         rank++;</span>
+<span class="lineNum">    1223 </span>            : 
+<span class="lineNum">    1224 </span><span class="lineCov">       1210 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1225 </span>            :     }
+<span class="lineNum">    1226 </span>            : 
+<span class="lineNum">    1227 </span><span class="lineCov">         74 :     ExecClearTuple(slot);</span>
+<span class="lineNum">    1228 </span>            : 
+<span class="lineNum">    1229 </span><span class="lineCov">         74 :     return rank;</span>
+<span class="lineNum">    1230 </span>            : }
+<span class="lineNum">    1231 </span>            : 
+<span class="lineNum">    1232 </span>            : 
+<span class="lineNum">    1233 </span>            : /*
+<span class="lineNum">    1234 </span>            :  * rank()  - rank of hypothetical row
+<a name="1235"><span class="lineNum">    1235 </span>            :  */</a>
+<span class="lineNum">    1236 </span>            : Datum
+<span class="lineNum">    1237 </span><span class="lineCov">         70 : hypothetical_rank_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1238 </span>            : {
+<span class="lineNum">    1239 </span>            :     int64       rank;
+<span class="lineNum">    1240 </span>            :     int64       rowcount;
+<span class="lineNum">    1241 </span>            : 
+<span class="lineNum">    1242 </span><span class="lineCov">         70 :     rank = hypothetical_rank_common(fcinfo, -1, &amp;rowcount);</span>
+<span class="lineNum">    1243 </span>            : 
+<span class="lineNum">    1244 </span><span class="lineCov">         70 :     PG_RETURN_INT64(rank);</span>
+<span class="lineNum">    1245 </span>            : }
+<span class="lineNum">    1246 </span>            : 
+<span class="lineNum">    1247 </span>            : /*
+<span class="lineNum">    1248 </span>            :  * percent_rank()   - percentile rank of hypothetical row
+<a name="1249"><span class="lineNum">    1249 </span>            :  */</a>
+<span class="lineNum">    1250 </span>            : Datum
+<span class="lineNum">    1251 </span><span class="lineCov">          4 : hypothetical_percent_rank_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1252 </span>            : {
+<span class="lineNum">    1253 </span>            :     int64       rank;
+<span class="lineNum">    1254 </span>            :     int64       rowcount;
+<span class="lineNum">    1255 </span>            :     double      result_val;
+<span class="lineNum">    1256 </span>            : 
+<span class="lineNum">    1257 </span><span class="lineCov">          4 :     rank = hypothetical_rank_common(fcinfo, -1, &amp;rowcount);</span>
+<span class="lineNum">    1258 </span>            : 
+<span class="lineNum">    1259 </span><span class="lineCov">          4 :     if (rowcount == 0)</span>
+<span class="lineNum">    1260 </span><span class="lineCov">          2 :         PG_RETURN_FLOAT8(0);</span>
+<span class="lineNum">    1261 </span>            : 
+<span class="lineNum">    1262 </span><span class="lineCov">          2 :     result_val = (double) (rank - 1) / (double) (rowcount);</span>
+<span class="lineNum">    1263 </span>            : 
+<span class="lineNum">    1264 </span><span class="lineCov">          2 :     PG_RETURN_FLOAT8(result_val);</span>
+<span class="lineNum">    1265 </span>            : }
+<span class="lineNum">    1266 </span>            : 
+<span class="lineNum">    1267 </span>            : /*
+<span class="lineNum">    1268 </span>            :  * cume_dist()  - cumulative distribution of hypothetical row
+<a name="1269"><span class="lineNum">    1269 </span>            :  */</a>
+<span class="lineNum">    1270 </span>            : Datum
+<span class="lineNum">    1271 </span><span class="lineCov">          2 : hypothetical_cume_dist_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1272 </span>            : {
+<span class="lineNum">    1273 </span>            :     int64       rank;
+<span class="lineNum">    1274 </span>            :     int64       rowcount;
+<span class="lineNum">    1275 </span>            :     double      result_val;
+<span class="lineNum">    1276 </span>            : 
+<span class="lineNum">    1277 </span><span class="lineCov">          2 :     rank = hypothetical_rank_common(fcinfo, 1, &amp;rowcount);</span>
+<span class="lineNum">    1278 </span>            : 
+<span class="lineNum">    1279 </span><span class="lineCov">          2 :     result_val = (double) (rank) / (double) (rowcount + 1);</span>
+<span class="lineNum">    1280 </span>            : 
+<span class="lineNum">    1281 </span><span class="lineCov">          2 :     PG_RETURN_FLOAT8(result_val);</span>
+<span class="lineNum">    1282 </span>            : }
+<span class="lineNum">    1283 </span>            : 
+<span class="lineNum">    1284 </span>            : /*
+<span class="lineNum">    1285 </span>            :  * dense_rank() - rank of hypothetical row without gaps in ranking
+<a name="1286"><span class="lineNum">    1286 </span>            :  */</a>
+<span class="lineNum">    1287 </span>            : Datum
+<span class="lineNum">    1288 </span><span class="lineCov">         10 : hypothetical_dense_rank_final(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">    1289 </span>            : {
+<span class="lineNum">    1290 </span>            :     ExprContext *econtext;
+<span class="lineNum">    1291 </span>            :     ExprState  *compareTuple;
+<span class="lineNum">    1292 </span><span class="lineCov">         10 :     int         nargs = PG_NARGS() - 1;</span>
+<span class="lineNum">    1293 </span><span class="lineCov">         10 :     int64       rank = 1;</span>
+<span class="lineNum">    1294 </span><span class="lineCov">         10 :     int64       duplicate_count = 0;</span>
+<span class="lineNum">    1295 </span>            :     OSAPerGroupState *osastate;
+<span class="lineNum">    1296 </span>            :     int         numDistinctCols;
+<span class="lineNum">    1297 </span><span class="lineCov">         10 :     Datum       abbrevVal = (Datum) 0;</span>
+<span class="lineNum">    1298 </span><span class="lineCov">         10 :     Datum       abbrevOld = (Datum) 0;</span>
+<span class="lineNum">    1299 </span>            :     TupleTableSlot *slot;
+<span class="lineNum">    1300 </span>            :     TupleTableSlot *extraslot;
+<span class="lineNum">    1301 </span>            :     TupleTableSlot *slot2;
+<span class="lineNum">    1302 </span>            :     int         i;
+<span class="lineNum">    1303 </span>            : 
+<span class="lineNum">    1304 </span><span class="lineCov">         10 :     Assert(AggCheckCallContext(fcinfo, NULL) == AGG_CONTEXT_AGGREGATE);</span>
+<span class="lineNum">    1305 </span>            : 
+<span class="lineNum">    1306 </span>            :     /* If there were no regular rows, the rank is always 1 */
+<span class="lineNum">    1307 </span><span class="lineCov">         10 :     if (PG_ARGISNULL(0))</span>
+<span class="lineNum">    1308 </span><span class="lineNoCov">          0 :         PG_RETURN_INT64(rank);</span>
+<span class="lineNum">    1309 </span>            : 
+<span class="lineNum">    1310 </span><span class="lineCov">         10 :     osastate = (OSAPerGroupState *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">    1311 </span><span class="lineCov">         10 :     econtext = osastate-&gt;qstate-&gt;econtext;</span>
+<span class="lineNum">    1312 </span><span class="lineCov">         10 :     if (!econtext)</span>
+<span class="lineNum">    1313 </span>            :     {
+<span class="lineNum">    1314 </span>            :         MemoryContext oldcontext;
+<span class="lineNum">    1315 </span>            : 
+<span class="lineNum">    1316 </span>            :         /* Make sure to we create econtext under correct parent context. */
+<span class="lineNum">    1317 </span><span class="lineCov">          6 :         oldcontext = MemoryContextSwitchTo(osastate-&gt;qstate-&gt;qcontext);</span>
+<span class="lineNum">    1318 </span><span class="lineCov">          6 :         osastate-&gt;qstate-&gt;econtext = CreateStandaloneExprContext();</span>
+<span class="lineNum">    1319 </span><span class="lineCov">          6 :         econtext = osastate-&gt;qstate-&gt;econtext;</span>
+<span class="lineNum">    1320 </span><span class="lineCov">          6 :         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">    1321 </span>            :     }
+<span class="lineNum">    1322 </span>            : 
+<span class="lineNum">    1323 </span>            :     /* Adjust nargs to be the number of direct (or aggregated) args */
+<span class="lineNum">    1324 </span><span class="lineCov">         10 :     if (nargs % 2 != 0)</span>
+<span class="lineNum">    1325 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;wrong number of arguments in hypothetical-set function&quot;);</span>
+<span class="lineNum">    1326 </span><span class="lineCov">         10 :     nargs /= 2;</span>
+<span class="lineNum">    1327 </span>            : 
+<span class="lineNum">    1328 </span><span class="lineCov">         10 :     hypothetical_check_argtypes(fcinfo, nargs, osastate-&gt;qstate-&gt;tupdesc);</span>
+<span class="lineNum">    1329 </span>            : 
+<span class="lineNum">    1330 </span>            :     /*
+<span class="lineNum">    1331 </span>            :      * When comparing tuples, we can omit the flag column since we will only
+<span class="lineNum">    1332 </span>            :      * compare rows with flag == 0.
+<span class="lineNum">    1333 </span>            :      */
+<span class="lineNum">    1334 </span><span class="lineCov">         10 :     numDistinctCols = osastate-&gt;qstate-&gt;numSortCols - 1;</span>
+<span class="lineNum">    1335 </span>            : 
+<span class="lineNum">    1336 </span>            :     /* Build tuple comparator, if we didn't already */
+<span class="lineNum">    1337 </span><span class="lineCov">         10 :     compareTuple = osastate-&gt;qstate-&gt;compareTuple;</span>
+<span class="lineNum">    1338 </span><span class="lineCov">         10 :     if (compareTuple == NULL)</span>
+<span class="lineNum">    1339 </span>            :     {
+<span class="lineNum">    1340 </span><span class="lineCov">          6 :         AttrNumber *sortColIdx = osastate-&gt;qstate-&gt;sortColIdx;</span>
+<span class="lineNum">    1341 </span>            :         MemoryContext oldContext;
+<span class="lineNum">    1342 </span>            : 
+<span class="lineNum">    1343 </span><span class="lineCov">          6 :         oldContext = MemoryContextSwitchTo(osastate-&gt;qstate-&gt;qcontext);</span>
+<span class="lineNum">    1344 </span><span class="lineCov">          6 :         compareTuple = execTuplesMatchPrepare(osastate-&gt;qstate-&gt;tupdesc,</span>
+<span class="lineNum">    1345 </span>            :                                               numDistinctCols,
+<span class="lineNum">    1346 </span>            :                                               sortColIdx,
+<span class="lineNum">    1347 </span><span class="lineCov">          6 :                                               osastate-&gt;qstate-&gt;eqOperators,</span>
+<span class="lineNum">    1348 </span><span class="lineCov">          6 :                                               osastate-&gt;qstate-&gt;sortCollations,</span>
+<span class="lineNum">    1349 </span>            :                                               NULL);
+<span class="lineNum">    1350 </span><span class="lineCov">          6 :         MemoryContextSwitchTo(oldContext);</span>
+<span class="lineNum">    1351 </span><span class="lineCov">          6 :         osastate-&gt;qstate-&gt;compareTuple = compareTuple;</span>
+<span class="lineNum">    1352 </span>            :     }
+<span class="lineNum">    1353 </span>            : 
+<span class="lineNum">    1354 </span>            :     /* because we need a hypothetical row, we can't share transition state */
+<span class="lineNum">    1355 </span><span class="lineCov">         10 :     Assert(!osastate-&gt;sort_done);</span>
+<span class="lineNum">    1356 </span>            : 
+<span class="lineNum">    1357 </span>            :     /* insert the hypothetical row into the sort */
+<span class="lineNum">    1358 </span><span class="lineCov">         10 :     slot = osastate-&gt;qstate-&gt;tupslot;</span>
+<span class="lineNum">    1359 </span><span class="lineCov">         10 :     ExecClearTuple(slot);</span>
+<span class="lineNum">    1360 </span><span class="lineCov">         20 :     for (i = 0; i &lt; nargs; i++)</span>
+<span class="lineNum">    1361 </span>            :     {
+<span class="lineNum">    1362 </span><span class="lineCov">         10 :         slot-&gt;tts_values[i] = PG_GETARG_DATUM(i + 1);</span>
+<span class="lineNum">    1363 </span><span class="lineCov">         10 :         slot-&gt;tts_isnull[i] = PG_ARGISNULL(i + 1);</span>
+<span class="lineNum">    1364 </span>            :     }
+<span class="lineNum">    1365 </span><span class="lineCov">         10 :     slot-&gt;tts_values[i] = Int32GetDatum(-1);</span>
+<span class="lineNum">    1366 </span><span class="lineCov">         10 :     slot-&gt;tts_isnull[i] = false;</span>
+<span class="lineNum">    1367 </span><span class="lineCov">         10 :     ExecStoreVirtualTuple(slot);</span>
+<span class="lineNum">    1368 </span>            : 
+<span class="lineNum">    1369 </span><span class="lineCov">         10 :     tuplesort_puttupleslot(osastate-&gt;sortstate, slot);</span>
+<span class="lineNum">    1370 </span>            : 
+<span class="lineNum">    1371 </span>            :     /* finish the sort */
+<span class="lineNum">    1372 </span><span class="lineCov">         10 :     tuplesort_performsort(osastate-&gt;sortstate);</span>
+<span class="lineNum">    1373 </span><span class="lineCov">         10 :     osastate-&gt;sort_done = true;</span>
+<span class="lineNum">    1374 </span>            : 
+<span class="lineNum">    1375 </span>            :     /*
+<span class="lineNum">    1376 </span>            :      * We alternate fetching into tupslot and extraslot so that we have the
+<span class="lineNum">    1377 </span>            :      * previous row available for comparisons.  This is accomplished by
+<span class="lineNum">    1378 </span>            :      * swapping the slot pointer variables after each row.
+<span class="lineNum">    1379 </span>            :      */
+<span class="lineNum">    1380 </span><span class="lineCov">         10 :     extraslot = MakeSingleTupleTableSlot(osastate-&gt;qstate-&gt;tupdesc,</span>
+<span class="lineNum">    1381 </span>            :                                          &amp;TTSOpsMinimalTuple);
+<span class="lineNum">    1382 </span><span class="lineCov">         10 :     slot2 = extraslot;</span>
+<span class="lineNum">    1383 </span>            : 
+<span class="lineNum">    1384 </span>            :     /* iterate till we find the hypothetical row */
+<span class="lineNum">    1385 </span><span class="lineCov">         32 :     while (tuplesort_gettupleslot(osastate-&gt;sortstate, true, true, slot,</span>
+<span class="lineNum">    1386 </span>            :                                   &amp;abbrevVal))
+<span class="lineNum">    1387 </span>            :     {
+<span class="lineNum">    1388 </span>            :         bool        isnull;
+<span class="lineNum">    1389 </span><span class="lineCov">         22 :         Datum       d = slot_getattr(slot, nargs + 1, &amp;isnull);</span>
+<span class="lineNum">    1390 </span>            :         TupleTableSlot *tmpslot;
+<span class="lineNum">    1391 </span>            : 
+<span class="lineNum">    1392 </span><span class="lineCov">         22 :         if (!isnull &amp;&amp; DatumGetInt32(d) != 0)</span>
+<span class="lineNum">    1393 </span><span class="lineCov">         10 :             break;</span>
+<span class="lineNum">    1394 </span>            : 
+<span class="lineNum">    1395 </span>            :         /* count non-distinct tuples */
+<span class="lineNum">    1396 </span><span class="lineCov">         12 :         econtext-&gt;ecxt_outertuple = slot;</span>
+<span class="lineNum">    1397 </span><span class="lineCov">         12 :         econtext-&gt;ecxt_innertuple = slot2;</span>
+<span class="lineNum">    1398 </span>            : 
+<span class="lineNum">    1399 </span><span class="lineCov">         20 :         if (!TupIsNull(slot2) &amp;&amp;</span>
+<span class="lineNum">    1400 </span><span class="lineCov">         16 :             abbrevVal == abbrevOld &amp;&amp;</span>
+<span class="lineNum">    1401 </span><span class="lineCov">          8 :             ExecQualAndReset(compareTuple, econtext))</span>
+<span class="lineNum">    1402 </span><span class="lineCov">          4 :             duplicate_count++;</span>
+<span class="lineNum">    1403 </span>            : 
+<span class="lineNum">    1404 </span><span class="lineCov">         12 :         tmpslot = slot2;</span>
+<span class="lineNum">    1405 </span><span class="lineCov">         12 :         slot2 = slot;</span>
+<span class="lineNum">    1406 </span><span class="lineCov">         12 :         slot = tmpslot;</span>
+<span class="lineNum">    1407 </span>            :         /* avoid ExecQual() calls by reusing abbreviated keys */
+<span class="lineNum">    1408 </span><span class="lineCov">         12 :         abbrevOld = abbrevVal;</span>
+<span class="lineNum">    1409 </span>            : 
+<span class="lineNum">    1410 </span><span class="lineCov">         12 :         rank++;</span>
+<span class="lineNum">    1411 </span>            : 
+<span class="lineNum">    1412 </span><span class="lineCov">         12 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1413 </span>            :     }
+<span class="lineNum">    1414 </span>            : 
+<span class="lineNum">    1415 </span><span class="lineCov">         10 :     ExecClearTuple(slot);</span>
+<span class="lineNum">    1416 </span><span class="lineCov">         10 :     ExecClearTuple(slot2);</span>
+<span class="lineNum">    1417 </span>            : 
+<span class="lineNum">    1418 </span><span class="lineCov">         10 :     ExecDropSingleTupleTableSlot(extraslot);</span>
+<span class="lineNum">    1419 </span>            : 
+<span class="lineNum">    1420 </span><span class="lineCov">         10 :     rank = rank - duplicate_count;</span>
+<span class="lineNum">    1421 </span>            : 
+<span class="lineNum">    1422 </span><span class="lineCov">         10 :     PG_RETURN_INT64(rank);</span>
+<span class="lineNum">    1423 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

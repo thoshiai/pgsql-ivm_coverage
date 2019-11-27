@@ -1,0 +1,1570 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/brin/brin.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/brin</a> - brin.c<span style="font-size: 80%;"> (source / <a href="brin.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">404</td>
+            <td class="headerCovTableEntry">461</td>
+            <td class="headerCovTableEntryMed">87.6 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">23</td>
+            <td class="headerCovTableEntry">25</td>
+            <td class="headerCovTableEntryHi">92.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*</a>
+<span class="lineNum">       2 </span>            :  * brin.c
+<span class="lineNum">       3 </span>            :  *      Implementation of BRIN indexes for Postgres
+<span class="lineNum">       4 </span>            :  *
+<span class="lineNum">       5 </span>            :  * See src/backend/access/brin/README for details.
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/access/brin/brin.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  * TODO
+<span class="lineNum">      14 </span>            :  *      * ScalarArrayOpExpr (amsearcharray -&gt; SK_SEARCHARRAY)
+<span class="lineNum">      15 </span>            :  */
+<span class="lineNum">      16 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      17 </span>            : 
+<span class="lineNum">      18 </span>            : #include &quot;access/brin.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;access/brin_page.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;access/brin_pageops.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;access/brin_xlog.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;access/relation.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;access/reloptions.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;access/relscan.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;access/table.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;access/tableam.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;access/xloginsert.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;catalog/index.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;catalog/pg_am.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;postmaster/autovacuum.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;storage/bufmgr.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;storage/freespace.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;utils/index_selfuncs.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      38 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      39 </span>            : 
+<span class="lineNum">      40 </span>            : 
+<span class="lineNum">      41 </span>            : /*
+<span class="lineNum">      42 </span>            :  * We use a BrinBuildState during initial construction of a BRIN index.
+<span class="lineNum">      43 </span>            :  * The running state is kept in a BrinMemTuple.
+<span class="lineNum">      44 </span>            :  */
+<span class="lineNum">      45 </span>            : typedef struct BrinBuildState
+<span class="lineNum">      46 </span>            : {
+<span class="lineNum">      47 </span>            :     Relation    bs_irel;
+<span class="lineNum">      48 </span>            :     int         bs_numtuples;
+<span class="lineNum">      49 </span>            :     Buffer      bs_currentInsertBuf;
+<span class="lineNum">      50 </span>            :     BlockNumber bs_pagesPerRange;
+<span class="lineNum">      51 </span>            :     BlockNumber bs_currRangeStart;
+<span class="lineNum">      52 </span>            :     BrinRevmap *bs_rmAccess;
+<span class="lineNum">      53 </span>            :     BrinDesc   *bs_bdesc;
+<span class="lineNum">      54 </span>            :     BrinMemTuple *bs_dtuple;
+<span class="lineNum">      55 </span>            : } BrinBuildState;
+<span class="lineNum">      56 </span>            : 
+<span class="lineNum">      57 </span>            : /*
+<span class="lineNum">      58 </span>            :  * Struct used as &quot;opaque&quot; during index scans
+<span class="lineNum">      59 </span>            :  */
+<span class="lineNum">      60 </span>            : typedef struct BrinOpaque
+<span class="lineNum">      61 </span>            : {
+<span class="lineNum">      62 </span>            :     BlockNumber bo_pagesPerRange;
+<span class="lineNum">      63 </span>            :     BrinRevmap *bo_rmAccess;
+<span class="lineNum">      64 </span>            :     BrinDesc   *bo_bdesc;
+<span class="lineNum">      65 </span>            : } BrinOpaque;
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : #define BRIN_ALL_BLOCKRANGES    InvalidBlockNumber
+<span class="lineNum">      68 </span>            : 
+<span class="lineNum">      69 </span>            : static BrinBuildState *initialize_brin_buildstate(Relation idxRel,
+<span class="lineNum">      70 </span>            :                                                   BrinRevmap *revmap, BlockNumber pagesPerRange);
+<span class="lineNum">      71 </span>            : static void terminate_brin_buildstate(BrinBuildState *state);
+<span class="lineNum">      72 </span>            : static void brinsummarize(Relation index, Relation heapRel, BlockNumber pageRange,
+<span class="lineNum">      73 </span>            :                           bool include_partial, double *numSummarized, double *numExisting);
+<span class="lineNum">      74 </span>            : static void form_and_insert_tuple(BrinBuildState *state);
+<span class="lineNum">      75 </span>            : static void union_tuples(BrinDesc *bdesc, BrinMemTuple *a,
+<span class="lineNum">      76 </span>            :                          BrinTuple *b);
+<span class="lineNum">      77 </span>            : static void brin_vacuum_scan(Relation idxrel, BufferAccessStrategy strategy);
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            : /*
+<span class="lineNum">      81 </span>            :  * BRIN handler function: return IndexAmRoutine with access method parameters
+<span class="lineNum">      82 </span>            :  * and callbacks.
+<a name="83"><span class="lineNum">      83 </span>            :  */</a>
+<span class="lineNum">      84 </span>            : Datum
+<span class="lineNum">      85 </span><span class="lineCov">        148 : brinhandler(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      86 </span>            : {
+<span class="lineNum">      87 </span><span class="lineCov">        148 :     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);</span>
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span><span class="lineCov">        148 :     amroutine-&gt;amstrategies = 0;</span>
+<span class="lineNum">      90 </span><span class="lineCov">        148 :     amroutine-&gt;amsupport = BRIN_LAST_OPTIONAL_PROCNUM;</span>
+<span class="lineNum">      91 </span><span class="lineCov">        148 :     amroutine-&gt;amcanorder = false;</span>
+<span class="lineNum">      92 </span><span class="lineCov">        148 :     amroutine-&gt;amcanorderbyop = false;</span>
+<span class="lineNum">      93 </span><span class="lineCov">        148 :     amroutine-&gt;amcanbackward = false;</span>
+<span class="lineNum">      94 </span><span class="lineCov">        148 :     amroutine-&gt;amcanunique = false;</span>
+<span class="lineNum">      95 </span><span class="lineCov">        148 :     amroutine-&gt;amcanmulticol = true;</span>
+<span class="lineNum">      96 </span><span class="lineCov">        148 :     amroutine-&gt;amoptionalkey = true;</span>
+<span class="lineNum">      97 </span><span class="lineCov">        148 :     amroutine-&gt;amsearcharray = false;</span>
+<span class="lineNum">      98 </span><span class="lineCov">        148 :     amroutine-&gt;amsearchnulls = true;</span>
+<span class="lineNum">      99 </span><span class="lineCov">        148 :     amroutine-&gt;amstorage = true;</span>
+<span class="lineNum">     100 </span><span class="lineCov">        148 :     amroutine-&gt;amclusterable = false;</span>
+<span class="lineNum">     101 </span><span class="lineCov">        148 :     amroutine-&gt;ampredlocks = false;</span>
+<span class="lineNum">     102 </span><span class="lineCov">        148 :     amroutine-&gt;amcanparallel = false;</span>
+<span class="lineNum">     103 </span><span class="lineCov">        148 :     amroutine-&gt;amcaninclude = false;</span>
+<span class="lineNum">     104 </span><span class="lineCov">        148 :     amroutine-&gt;amkeytype = InvalidOid;</span>
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span><span class="lineCov">        148 :     amroutine-&gt;ambuild = brinbuild;</span>
+<span class="lineNum">     107 </span><span class="lineCov">        148 :     amroutine-&gt;ambuildempty = brinbuildempty;</span>
+<span class="lineNum">     108 </span><span class="lineCov">        148 :     amroutine-&gt;aminsert = brininsert;</span>
+<span class="lineNum">     109 </span><span class="lineCov">        148 :     amroutine-&gt;ambulkdelete = brinbulkdelete;</span>
+<span class="lineNum">     110 </span><span class="lineCov">        148 :     amroutine-&gt;amvacuumcleanup = brinvacuumcleanup;</span>
+<span class="lineNum">     111 </span><span class="lineCov">        148 :     amroutine-&gt;amcanreturn = NULL;</span>
+<span class="lineNum">     112 </span><span class="lineCov">        148 :     amroutine-&gt;amcostestimate = brincostestimate;</span>
+<span class="lineNum">     113 </span><span class="lineCov">        148 :     amroutine-&gt;amoptions = brinoptions;</span>
+<span class="lineNum">     114 </span><span class="lineCov">        148 :     amroutine-&gt;amproperty = NULL;</span>
+<span class="lineNum">     115 </span><span class="lineCov">        148 :     amroutine-&gt;ambuildphasename = NULL;</span>
+<span class="lineNum">     116 </span><span class="lineCov">        148 :     amroutine-&gt;amvalidate = brinvalidate;</span>
+<span class="lineNum">     117 </span><span class="lineCov">        148 :     amroutine-&gt;ambeginscan = brinbeginscan;</span>
+<span class="lineNum">     118 </span><span class="lineCov">        148 :     amroutine-&gt;amrescan = brinrescan;</span>
+<span class="lineNum">     119 </span><span class="lineCov">        148 :     amroutine-&gt;amgettuple = NULL;</span>
+<span class="lineNum">     120 </span><span class="lineCov">        148 :     amroutine-&gt;amgetbitmap = bringetbitmap;</span>
+<span class="lineNum">     121 </span><span class="lineCov">        148 :     amroutine-&gt;amendscan = brinendscan;</span>
+<span class="lineNum">     122 </span><span class="lineCov">        148 :     amroutine-&gt;ammarkpos = NULL;</span>
+<span class="lineNum">     123 </span><span class="lineCov">        148 :     amroutine-&gt;amrestrpos = NULL;</span>
+<span class="lineNum">     124 </span><span class="lineCov">        148 :     amroutine-&gt;amestimateparallelscan = NULL;</span>
+<span class="lineNum">     125 </span><span class="lineCov">        148 :     amroutine-&gt;aminitparallelscan = NULL;</span>
+<span class="lineNum">     126 </span><span class="lineCov">        148 :     amroutine-&gt;amparallelrescan = NULL;</span>
+<span class="lineNum">     127 </span>            : 
+<span class="lineNum">     128 </span><span class="lineCov">        148 :     PG_RETURN_POINTER(amroutine);</span>
+<span class="lineNum">     129 </span>            : }
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span>            : /*
+<span class="lineNum">     132 </span>            :  * A tuple in the heap is being inserted.  To keep a brin index up to date,
+<span class="lineNum">     133 </span>            :  * we need to obtain the relevant index tuple and compare its stored values
+<span class="lineNum">     134 </span>            :  * with those of the new tuple.  If the tuple values are not consistent with
+<span class="lineNum">     135 </span>            :  * the summary tuple, we need to update the index tuple.
+<span class="lineNum">     136 </span>            :  *
+<span class="lineNum">     137 </span>            :  * If autosummarization is enabled, check if we need to summarize the previous
+<span class="lineNum">     138 </span>            :  * page range.
+<span class="lineNum">     139 </span>            :  *
+<span class="lineNum">     140 </span>            :  * If the range is not currently summarized (i.e. the revmap returns NULL for
+<span class="lineNum">     141 </span>            :  * it), there's nothing to do for this tuple.
+<a name="142"><span class="lineNum">     142 </span>            :  */</a>
+<span class="lineNum">     143 </span>            : bool
+<span class="lineNum">     144 </span><span class="lineCov">        520 : brininsert(Relation idxRel, Datum *values, bool *nulls,</span>
+<span class="lineNum">     145 </span>            :            ItemPointer heaptid, Relation heapRel,
+<span class="lineNum">     146 </span>            :            IndexUniqueCheck checkUnique,
+<span class="lineNum">     147 </span>            :            IndexInfo *indexInfo)
+<span class="lineNum">     148 </span>            : {
+<span class="lineNum">     149 </span>            :     BlockNumber pagesPerRange;
+<span class="lineNum">     150 </span>            :     BlockNumber origHeapBlk;
+<span class="lineNum">     151 </span>            :     BlockNumber heapBlk;
+<span class="lineNum">     152 </span><span class="lineCov">        520 :     BrinDesc   *bdesc = (BrinDesc *) indexInfo-&gt;ii_AmCache;</span>
+<span class="lineNum">     153 </span>            :     BrinRevmap *revmap;
+<span class="lineNum">     154 </span><span class="lineCov">        520 :     Buffer      buf = InvalidBuffer;</span>
+<span class="lineNum">     155 </span><span class="lineCov">        520 :     MemoryContext tupcxt = NULL;</span>
+<span class="lineNum">     156 </span><span class="lineCov">        520 :     MemoryContext oldcxt = CurrentMemoryContext;</span>
+<span class="lineNum">     157 </span><span class="lineCov">        520 :     bool        autosummarize = BrinGetAutoSummarize(idxRel);</span>
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span><span class="lineCov">        520 :     revmap = brinRevmapInitialize(idxRel, &amp;pagesPerRange, NULL);</span>
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span>            :     /*
+<span class="lineNum">     162 </span>            :      * origHeapBlk is the block number where the insertion occurred.  heapBlk
+<span class="lineNum">     163 </span>            :      * is the first block in the corresponding page range.
+<span class="lineNum">     164 </span>            :      */
+<span class="lineNum">     165 </span><span class="lineCov">        520 :     origHeapBlk = ItemPointerGetBlockNumber(heaptid);</span>
+<span class="lineNum">     166 </span><span class="lineCov">        520 :     heapBlk = (origHeapBlk / pagesPerRange) * pagesPerRange;</span>
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            :     for (;;)
+<span class="lineNum">     169 </span>            :     {
+<span class="lineNum">     170 </span><span class="lineCov">        520 :         bool        need_insert = false;</span>
+<span class="lineNum">     171 </span>            :         OffsetNumber off;
+<span class="lineNum">     172 </span>            :         BrinTuple  *brtup;
+<span class="lineNum">     173 </span>            :         BrinMemTuple *dtup;
+<span class="lineNum">     174 </span>            :         int         keyno;
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span><span class="lineCov">        520 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span>            :         /*
+<span class="lineNum">     179 </span>            :          * If auto-summarization is enabled and we just inserted the first
+<span class="lineNum">     180 </span>            :          * tuple into the first block of a new non-first page range, request a
+<span class="lineNum">     181 </span>            :          * summarization run of the previous range.
+<span class="lineNum">     182 </span>            :          */
+<span class="lineNum">     183 </span><span class="lineCov">        520 :         if (autosummarize &amp;&amp;</span>
+<span class="lineNum">     184 </span><span class="lineNoCov">          0 :             heapBlk &gt; 0 &amp;&amp;</span>
+<span class="lineNum">     185 </span><span class="lineNoCov">          0 :             heapBlk == origHeapBlk &amp;&amp;</span>
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 :             ItemPointerGetOffsetNumber(heaptid) == FirstOffsetNumber)</span>
+<span class="lineNum">     187 </span>            :         {
+<span class="lineNum">     188 </span><span class="lineNoCov">          0 :             BlockNumber lastPageRange = heapBlk - 1;</span>
+<span class="lineNum">     189 </span>            :             BrinTuple  *lastPageTuple;
+<span class="lineNum">     190 </span>            : 
+<span class="lineNum">     191 </span><span class="lineNoCov">          0 :             lastPageTuple =</span>
+<span class="lineNum">     192 </span>            :                 brinGetTupleForHeapBlock(revmap, lastPageRange, &amp;buf, &amp;off,
+<span class="lineNum">     193 </span>            :                                          NULL, BUFFER_LOCK_SHARE, NULL);
+<span class="lineNum">     194 </span><span class="lineNoCov">          0 :             if (!lastPageTuple)</span>
+<span class="lineNum">     195 </span>            :             {
+<span class="lineNum">     196 </span>            :                 bool        recorded;
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span><span class="lineNoCov">          0 :                 recorded = AutoVacuumRequestWork(AVW_BRINSummarizeRange,</span>
+<span class="lineNum">     199 </span>            :                                                  RelationGetRelid(idxRel),
+<span class="lineNum">     200 </span>            :                                                  lastPageRange);
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :                 if (!recorded)</span>
+<span class="lineNum">     202 </span><span class="lineNoCov">          0 :                     ereport(LOG,</span>
+<span class="lineNum">     203 </span>            :                             (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+<span class="lineNum">     204 </span>            :                              errmsg(&quot;request for BRIN range summarization for index \&quot;%s\&quot; page %u was not recorded&quot;,
+<span class="lineNum">     205 </span>            :                                     RelationGetRelationName(idxRel),
+<span class="lineNum">     206 </span>            :                                     lastPageRange)));
+<span class="lineNum">     207 </span>            :             }
+<span class="lineNum">     208 </span>            :             else
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :                 LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     210 </span>            :         }
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span><span class="lineCov">        520 :         brtup = brinGetTupleForHeapBlock(revmap, heapBlk, &amp;buf, &amp;off,</span>
+<span class="lineNum">     213 </span>            :                                          NULL, BUFFER_LOCK_SHARE, NULL);
+<span class="lineNum">     214 </span>            : 
+<span class="lineNum">     215 </span>            :         /* if range is unsummarized, there's nothing to do */
+<span class="lineNum">     216 </span><span class="lineCov">        520 :         if (!brtup)</span>
+<span class="lineNum">     217 </span><span class="lineCov">        532 :             break;</span>
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span>            :         /* First time through in this statement? */
+<span class="lineNum">     220 </span><span class="lineCov">        508 :         if (bdesc == NULL)</span>
+<span class="lineNum">     221 </span>            :         {
+<span class="lineNum">     222 </span><span class="lineCov">         92 :             MemoryContextSwitchTo(indexInfo-&gt;ii_Context);</span>
+<span class="lineNum">     223 </span><span class="lineCov">         92 :             bdesc = brin_build_desc(idxRel);</span>
+<span class="lineNum">     224 </span><span class="lineCov">         92 :             indexInfo-&gt;ii_AmCache = (void *) bdesc;</span>
+<span class="lineNum">     225 </span><span class="lineCov">         92 :             MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     226 </span>            :         }
+<span class="lineNum">     227 </span>            :         /* First time through in this brininsert call? */
+<span class="lineNum">     228 </span><span class="lineCov">        508 :         if (tupcxt == NULL)</span>
+<span class="lineNum">     229 </span>            :         {
+<span class="lineNum">     230 </span><span class="lineCov">        508 :             tupcxt = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     231 </span>            :                                            &quot;brininsert cxt&quot;,
+<span class="lineNum">     232 </span>            :                                            ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     233 </span><span class="lineCov">        508 :             MemoryContextSwitchTo(tupcxt);</span>
+<span class="lineNum">     234 </span>            :         }
+<span class="lineNum">     235 </span>            : 
+<span class="lineNum">     236 </span><span class="lineCov">        508 :         dtup = brin_deform_tuple(bdesc, brtup, NULL);</span>
+<span class="lineNum">     237 </span>            : 
+<span class="lineNum">     238 </span>            :         /*
+<span class="lineNum">     239 </span>            :          * Compare the key values of the new tuple to the stored index values;
+<span class="lineNum">     240 </span>            :          * our deformed tuple will get updated if the new tuple doesn't fit
+<span class="lineNum">     241 </span>            :          * the original range (note this means we can't break out of the loop
+<span class="lineNum">     242 </span>            :          * early). Make a note of whether this happens, so that we know to
+<span class="lineNum">     243 </span>            :          * insert the modified tuple later.
+<span class="lineNum">     244 </span>            :          */
+<span class="lineNum">     245 </span><span class="lineCov">      13196 :         for (keyno = 0; keyno &lt; bdesc-&gt;bd_tupdesc-&gt;natts; keyno++)</span>
+<span class="lineNum">     246 </span>            :         {
+<span class="lineNum">     247 </span>            :             Datum       result;
+<span class="lineNum">     248 </span>            :             BrinValues *bval;
+<span class="lineNum">     249 </span>            :             FmgrInfo   *addValue;
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span><span class="lineCov">      12688 :             bval = &amp;dtup-&gt;bt_columns[keyno];</span>
+<span class="lineNum">     252 </span><span class="lineCov">      12688 :             addValue = index_getprocinfo(idxRel, keyno + 1,</span>
+<span class="lineNum">     253 </span>            :                                          BRIN_PROCNUM_ADDVALUE);
+<span class="lineNum">     254 </span><span class="lineCov">      38064 :             result = FunctionCall4Coll(addValue,</span>
+<span class="lineNum">     255 </span><span class="lineCov">      12688 :                                        idxRel-&gt;rd_indcollation[keyno],</span>
+<span class="lineNum">     256 </span>            :                                        PointerGetDatum(bdesc),
+<span class="lineNum">     257 </span>            :                                        PointerGetDatum(bval),
+<span class="lineNum">     258 </span><span class="lineCov">      12688 :                                        values[keyno],</span>
+<span class="lineNum">     259 </span><span class="lineCov">      12688 :                                        nulls[keyno]);</span>
+<span class="lineNum">     260 </span>            :             /* if that returned true, we need to insert the updated tuple */
+<span class="lineNum">     261 </span><span class="lineCov">      12688 :             need_insert |= DatumGetBool(result);</span>
+<span class="lineNum">     262 </span>            :         }
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span><span class="lineCov">        508 :         if (!need_insert)</span>
+<span class="lineNum">     265 </span>            :         {
+<span class="lineNum">     266 </span>            :             /*
+<span class="lineNum">     267 </span>            :              * The tuple is consistent with the new values, so there's nothing
+<span class="lineNum">     268 </span>            :              * to do.
+<span class="lineNum">     269 </span>            :              */
+<span class="lineNum">     270 </span><span class="lineCov">         86 :             LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     271 </span>            :         }
+<span class="lineNum">     272 </span>            :         else
+<span class="lineNum">     273 </span>            :         {
+<span class="lineNum">     274 </span><span class="lineCov">        422 :             Page        page = BufferGetPage(buf);</span>
+<span class="lineNum">     275 </span><span class="lineCov">        422 :             ItemId      lp = PageGetItemId(page, off);</span>
+<span class="lineNum">     276 </span>            :             Size        origsz;
+<span class="lineNum">     277 </span>            :             BrinTuple  *origtup;
+<span class="lineNum">     278 </span>            :             Size        newsz;
+<span class="lineNum">     279 </span>            :             BrinTuple  *newtup;
+<span class="lineNum">     280 </span>            :             bool        samepage;
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span>            :             /*
+<span class="lineNum">     283 </span>            :              * Make a copy of the old tuple, so that we can compare it after
+<span class="lineNum">     284 </span>            :              * re-acquiring the lock.
+<span class="lineNum">     285 </span>            :              */
+<span class="lineNum">     286 </span><span class="lineCov">        422 :             origsz = ItemIdGetLength(lp);</span>
+<span class="lineNum">     287 </span><span class="lineCov">        422 :             origtup = brin_copy_tuple(brtup, origsz, NULL, NULL);</span>
+<span class="lineNum">     288 </span>            : 
+<span class="lineNum">     289 </span>            :             /*
+<span class="lineNum">     290 </span>            :              * Before releasing the lock, check if we can attempt a same-page
+<span class="lineNum">     291 </span>            :              * update.  Another process could insert a tuple concurrently in
+<span class="lineNum">     292 </span>            :              * the same page though, so downstream we must be prepared to cope
+<span class="lineNum">     293 </span>            :              * if this turns out to not be possible after all.
+<span class="lineNum">     294 </span>            :              */
+<span class="lineNum">     295 </span><span class="lineCov">        422 :             newtup = brin_form_tuple(bdesc, heapBlk, dtup, &amp;newsz);</span>
+<span class="lineNum">     296 </span><span class="lineCov">        422 :             samepage = brin_can_do_samepage_update(buf, origsz, newsz);</span>
+<span class="lineNum">     297 </span><span class="lineCov">        422 :             LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     298 </span>            : 
+<span class="lineNum">     299 </span>            :             /*
+<span class="lineNum">     300 </span>            :              * Try to update the tuple.  If this doesn't work for whatever
+<span class="lineNum">     301 </span>            :              * reason, we need to restart from the top; the revmap might be
+<span class="lineNum">     302 </span>            :              * pointing at a different tuple for this block now, so we need to
+<span class="lineNum">     303 </span>            :              * recompute to ensure both our new heap tuple and the other
+<span class="lineNum">     304 </span>            :              * inserter's are covered by the combined tuple.  It might be that
+<span class="lineNum">     305 </span>            :              * we don't need to update at all.
+<span class="lineNum">     306 </span>            :              */
+<span class="lineNum">     307 </span><span class="lineCov">        422 :             if (!brin_doupdate(idxRel, pagesPerRange, revmap, heapBlk,</span>
+<span class="lineNum">     308 </span>            :                                buf, off, origtup, origsz, newtup, newsz,
+<span class="lineNum">     309 </span>            :                                samepage))
+<span class="lineNum">     310 </span>            :             {
+<span class="lineNum">     311 </span>            :                 /* no luck; start over */
+<span class="lineNum">     312 </span><span class="lineNoCov">          0 :                 MemoryContextResetAndDeleteChildren(tupcxt);</span>
+<span class="lineNum">     313 </span><span class="lineNoCov">          0 :                 continue;</span>
+<span class="lineNum">     314 </span>            :             }
+<span class="lineNum">     315 </span>            :         }
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            :         /* success! */
+<span class="lineNum">     318 </span><span class="lineCov">        508 :         break;</span>
+<span class="lineNum">     319 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span><span class="lineCov">        520 :     brinRevmapTerminate(revmap);</span>
+<span class="lineNum">     322 </span><span class="lineCov">        520 :     if (BufferIsValid(buf))</span>
+<span class="lineNum">     323 </span><span class="lineCov">        508 :         ReleaseBuffer(buf);</span>
+<span class="lineNum">     324 </span><span class="lineCov">        520 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     325 </span><span class="lineCov">        520 :     if (tupcxt != NULL)</span>
+<span class="lineNum">     326 </span><span class="lineCov">        508 :         MemoryContextDelete(tupcxt);</span>
+<span class="lineNum">     327 </span>            : 
+<span class="lineNum">     328 </span><span class="lineCov">        520 :     return false;</span>
+<span class="lineNum">     329 </span>            : }
+<span class="lineNum">     330 </span>            : 
+<span class="lineNum">     331 </span>            : /*
+<span class="lineNum">     332 </span>            :  * Initialize state for a BRIN index scan.
+<span class="lineNum">     333 </span>            :  *
+<span class="lineNum">     334 </span>            :  * We read the metapage here to determine the pages-per-range number that this
+<span class="lineNum">     335 </span>            :  * index was built with.  Note that since this cannot be changed while we're
+<span class="lineNum">     336 </span>            :  * holding lock on index, it's not necessary to recompute it during brinrescan.
+<a name="337"><span class="lineNum">     337 </span>            :  */</a>
+<span class="lineNum">     338 </span>            : IndexScanDesc
+<span class="lineNum">     339 </span><span class="lineCov">        496 : brinbeginscan(Relation r, int nkeys, int norderbys)</span>
+<span class="lineNum">     340 </span>            : {
+<span class="lineNum">     341 </span>            :     IndexScanDesc scan;
+<span class="lineNum">     342 </span>            :     BrinOpaque *opaque;
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span><span class="lineCov">        496 :     scan = RelationGetIndexScan(r, nkeys, norderbys);</span>
+<span class="lineNum">     345 </span>            : 
+<span class="lineNum">     346 </span><span class="lineCov">        496 :     opaque = (BrinOpaque *) palloc(sizeof(BrinOpaque));</span>
+<span class="lineNum">     347 </span><span class="lineCov">        496 :     opaque-&gt;bo_rmAccess = brinRevmapInitialize(r, &amp;opaque-&gt;bo_pagesPerRange,</span>
+<span class="lineNum">     348 </span>            :                                                scan-&gt;xs_snapshot);
+<span class="lineNum">     349 </span><span class="lineCov">        496 :     opaque-&gt;bo_bdesc = brin_build_desc(r);</span>
+<span class="lineNum">     350 </span><span class="lineCov">        496 :     scan-&gt;opaque = opaque;</span>
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span><span class="lineCov">        496 :     return scan;</span>
+<span class="lineNum">     353 </span>            : }
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span>            : /*
+<span class="lineNum">     356 </span>            :  * Execute the index scan.
+<span class="lineNum">     357 </span>            :  *
+<span class="lineNum">     358 </span>            :  * This works by reading index TIDs from the revmap, and obtaining the index
+<span class="lineNum">     359 </span>            :  * tuples pointed to by them; the summary values in the index tuples are
+<span class="lineNum">     360 </span>            :  * compared to the scan keys.  We return into the TID bitmap all the pages in
+<span class="lineNum">     361 </span>            :  * ranges corresponding to index tuples that match the scan keys.
+<span class="lineNum">     362 </span>            :  *
+<span class="lineNum">     363 </span>            :  * If a TID from the revmap is read as InvalidTID, we know that range is
+<span class="lineNum">     364 </span>            :  * unsummarized.  Pages in those ranges need to be returned regardless of scan
+<span class="lineNum">     365 </span>            :  * keys.
+<a name="366"><span class="lineNum">     366 </span>            :  */</a>
+<span class="lineNum">     367 </span>            : int64
+<span class="lineNum">     368 </span><span class="lineCov">        496 : bringetbitmap(IndexScanDesc scan, TIDBitmap *tbm)</span>
+<span class="lineNum">     369 </span>            : {
+<span class="lineNum">     370 </span><span class="lineCov">        496 :     Relation    idxRel = scan-&gt;indexRelation;</span>
+<span class="lineNum">     371 </span><span class="lineCov">        496 :     Buffer      buf = InvalidBuffer;</span>
+<span class="lineNum">     372 </span>            :     BrinDesc   *bdesc;
+<span class="lineNum">     373 </span>            :     Oid         heapOid;
+<span class="lineNum">     374 </span>            :     Relation    heapRel;
+<span class="lineNum">     375 </span>            :     BrinOpaque *opaque;
+<span class="lineNum">     376 </span>            :     BlockNumber nblocks;
+<span class="lineNum">     377 </span>            :     BlockNumber heapBlk;
+<span class="lineNum">     378 </span><span class="lineCov">        496 :     int         totalpages = 0;</span>
+<span class="lineNum">     379 </span>            :     FmgrInfo   *consistentFn;
+<span class="lineNum">     380 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">     381 </span>            :     MemoryContext perRangeCxt;
+<span class="lineNum">     382 </span>            :     BrinMemTuple *dtup;
+<span class="lineNum">     383 </span><span class="lineCov">        496 :     BrinTuple  *btup = NULL;</span>
+<span class="lineNum">     384 </span><span class="lineCov">        496 :     Size        btupsz = 0;</span>
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span><span class="lineCov">        496 :     opaque = (BrinOpaque *) scan-&gt;opaque;</span>
+<span class="lineNum">     387 </span><span class="lineCov">        496 :     bdesc = opaque-&gt;bo_bdesc;</span>
+<span class="lineNum">     388 </span><span class="lineCov">        496 :     pgstat_count_index_scan(idxRel);</span>
+<span class="lineNum">     389 </span>            : 
+<span class="lineNum">     390 </span>            :     /*
+<span class="lineNum">     391 </span>            :      * We need to know the size of the table so that we know how long to
+<span class="lineNum">     392 </span>            :      * iterate on the revmap.
+<span class="lineNum">     393 </span>            :      */
+<span class="lineNum">     394 </span><span class="lineCov">        496 :     heapOid = IndexGetRelation(RelationGetRelid(idxRel), false);</span>
+<span class="lineNum">     395 </span><span class="lineCov">        496 :     heapRel = table_open(heapOid, AccessShareLock);</span>
+<span class="lineNum">     396 </span><span class="lineCov">        496 :     nblocks = RelationGetNumberOfBlocks(heapRel);</span>
+<span class="lineNum">     397 </span><span class="lineCov">        496 :     table_close(heapRel, AccessShareLock);</span>
+<span class="lineNum">     398 </span>            : 
+<span class="lineNum">     399 </span>            :     /*
+<span class="lineNum">     400 </span>            :      * Make room for the consistent support procedures of indexed columns.  We
+<span class="lineNum">     401 </span>            :      * don't look them up here; we do that lazily the first time we see a scan
+<span class="lineNum">     402 </span>            :      * key reference each of them.  We rely on zeroing fn_oid to InvalidOid.
+<span class="lineNum">     403 </span>            :      */
+<span class="lineNum">     404 </span><span class="lineCov">        496 :     consistentFn = palloc0(sizeof(FmgrInfo) * bdesc-&gt;bd_tupdesc-&gt;natts);</span>
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span>            :     /* allocate an initial in-memory tuple, out of the per-range memcxt */
+<span class="lineNum">     407 </span><span class="lineCov">        496 :     dtup = brin_new_memtuple(bdesc);</span>
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span>            :     /*
+<span class="lineNum">     410 </span>            :      * Setup and use a per-range memory context, which is reset every time we
+<span class="lineNum">     411 </span>            :      * loop below.  This avoids having to free the tuples within the loop.
+<span class="lineNum">     412 </span>            :      */
+<span class="lineNum">     413 </span><span class="lineCov">        496 :     perRangeCxt = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     414 </span>            :                                         &quot;bringetbitmap cxt&quot;,
+<span class="lineNum">     415 </span>            :                                         ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     416 </span><span class="lineCov">        496 :     oldcxt = MemoryContextSwitchTo(perRangeCxt);</span>
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span>            :     /*
+<span class="lineNum">     419 </span>            :      * Now scan the revmap.  We start by querying for heap page 0,
+<span class="lineNum">     420 </span>            :      * incrementing by the number of pages per range; this gives us a full
+<span class="lineNum">     421 </span>            :      * view of the table.
+<span class="lineNum">     422 </span>            :      */
+<span class="lineNum">     423 </span><span class="lineCov">      50096 :     for (heapBlk = 0; heapBlk &lt; nblocks; heapBlk += opaque-&gt;bo_pagesPerRange)</span>
+<span class="lineNum">     424 </span>            :     {
+<span class="lineNum">     425 </span>            :         bool        addrange;
+<span class="lineNum">     426 </span><span class="lineCov">      49600 :         bool        gottuple = false;</span>
+<span class="lineNum">     427 </span>            :         BrinTuple  *tup;
+<span class="lineNum">     428 </span>            :         OffsetNumber off;
+<span class="lineNum">     429 </span>            :         Size        size;
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span><span class="lineCov">      49600 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     432 </span>            : 
+<span class="lineNum">     433 </span><span class="lineCov">      49600 :         MemoryContextResetAndDeleteChildren(perRangeCxt);</span>
+<span class="lineNum">     434 </span>            : 
+<span class="lineNum">     435 </span><span class="lineCov">      49600 :         tup = brinGetTupleForHeapBlock(opaque-&gt;bo_rmAccess, heapBlk, &amp;buf,</span>
+<span class="lineNum">     436 </span>            :                                        &amp;off, &amp;size, BUFFER_LOCK_SHARE,
+<span class="lineNum">     437 </span>            :                                        scan-&gt;xs_snapshot);
+<span class="lineNum">     438 </span><span class="lineCov">      49600 :         if (tup)</span>
+<span class="lineNum">     439 </span>            :         {
+<span class="lineNum">     440 </span><span class="lineCov">      49600 :             gottuple = true;</span>
+<span class="lineNum">     441 </span><span class="lineCov">      49600 :             btup = brin_copy_tuple(tup, size, btup, &amp;btupsz);</span>
+<span class="lineNum">     442 </span><span class="lineCov">      49600 :             LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">     443 </span>            :         }
+<span class="lineNum">     444 </span>            : 
+<span class="lineNum">     445 </span>            :         /*
+<span class="lineNum">     446 </span>            :          * For page ranges with no indexed tuple, we must return the whole
+<span class="lineNum">     447 </span>            :          * range; otherwise, compare it to the scan keys.
+<span class="lineNum">     448 </span>            :          */
+<span class="lineNum">     449 </span><span class="lineCov">      49600 :         if (!gottuple)</span>
+<span class="lineNum">     450 </span>            :         {
+<span class="lineNum">     451 </span><span class="lineNoCov">          0 :             addrange = true;</span>
+<span class="lineNum">     452 </span>            :         }
+<span class="lineNum">     453 </span>            :         else
+<span class="lineNum">     454 </span>            :         {
+<span class="lineNum">     455 </span><span class="lineCov">      49600 :             dtup = brin_deform_tuple(bdesc, btup, dtup);</span>
+<span class="lineNum">     456 </span><span class="lineCov">      49600 :             if (dtup-&gt;bt_placeholder)</span>
+<span class="lineNum">     457 </span>            :             {
+<span class="lineNum">     458 </span>            :                 /*
+<span class="lineNum">     459 </span>            :                  * Placeholder tuples are always returned, regardless of the
+<span class="lineNum">     460 </span>            :                  * values stored in them.
+<span class="lineNum">     461 </span>            :                  */
+<span class="lineNum">     462 </span><span class="lineNoCov">          0 :                 addrange = true;</span>
+<span class="lineNum">     463 </span>            :             }
+<span class="lineNum">     464 </span>            :             else
+<span class="lineNum">     465 </span>            :             {
+<span class="lineNum">     466 </span>            :                 int         keyno;
+<span class="lineNum">     467 </span>            : 
+<span class="lineNum">     468 </span>            :                 /*
+<span class="lineNum">     469 </span>            :                  * Compare scan keys with summary values stored for the range.
+<span class="lineNum">     470 </span>            :                  * If scan keys are matched, the page range must be added to
+<span class="lineNum">     471 </span>            :                  * the bitmap.  We initially assume the range needs to be
+<span class="lineNum">     472 </span>            :                  * added; in particular this serves the case where there are
+<span class="lineNum">     473 </span>            :                  * no keys.
+<span class="lineNum">     474 </span>            :                  */
+<span class="lineNum">     475 </span><span class="lineCov">      49600 :                 addrange = true;</span>
+<span class="lineNum">     476 </span><span class="lineCov">      86554 :                 for (keyno = 0; keyno &lt; scan-&gt;numberOfKeys; keyno++)</span>
+<span class="lineNum">     477 </span>            :                 {
+<span class="lineNum">     478 </span><span class="lineCov">      49600 :                     ScanKey     key = &amp;scan-&gt;keyData[keyno];</span>
+<span class="lineNum">     479 </span><span class="lineCov">      49600 :                     AttrNumber  keyattno = key-&gt;sk_attno;</span>
+<span class="lineNum">     480 </span><span class="lineCov">      49600 :                     BrinValues *bval = &amp;dtup-&gt;bt_columns[keyattno - 1];</span>
+<span class="lineNum">     481 </span>            :                     Datum       add;
+<span class="lineNum">     482 </span>            : 
+<span class="lineNum">     483 </span>            :                     /*
+<span class="lineNum">     484 </span>            :                      * The collation of the scan key must match the collation
+<span class="lineNum">     485 </span>            :                      * used in the index column (but only if the search is not
+<span class="lineNum">     486 </span>            :                      * IS NULL/ IS NOT NULL).  Otherwise we shouldn't be using
+<span class="lineNum">     487 </span>            :                      * this index ...
+<span class="lineNum">     488 </span>            :                      */
+<span class="lineNum">     489 </span><span class="lineCov">      49600 :                     Assert((key-&gt;sk_flags &amp; SK_ISNULL) ||</span>
+<span class="lineNum">     490 </span>            :                            (key-&gt;sk_collation ==
+<span class="lineNum">     491 </span>            :                             TupleDescAttr(bdesc-&gt;bd_tupdesc,
+<span class="lineNum">     492 </span>            :                                           keyattno - 1)-&gt;attcollation));
+<span class="lineNum">     493 </span>            : 
+<span class="lineNum">     494 </span>            :                     /* First time this column? look up consistent function */
+<span class="lineNum">     495 </span><span class="lineCov">      49600 :                     if (consistentFn[keyattno - 1].fn_oid == InvalidOid)</span>
+<span class="lineNum">     496 </span>            :                     {
+<span class="lineNum">     497 </span>            :                         FmgrInfo   *tmp;
+<span class="lineNum">     498 </span>            : 
+<span class="lineNum">     499 </span><span class="lineCov">        496 :                         tmp = index_getprocinfo(idxRel, keyattno,</span>
+<span class="lineNum">     500 </span>            :                                                 BRIN_PROCNUM_CONSISTENT);
+<span class="lineNum">     501 </span><span class="lineCov">        496 :                         fmgr_info_copy(&amp;consistentFn[keyattno - 1], tmp,</span>
+<span class="lineNum">     502 </span>            :                                        CurrentMemoryContext);
+<span class="lineNum">     503 </span>            :                     }
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span>            :                     /*
+<span class="lineNum">     506 </span>            :                      * Check whether the scan key is consistent with the page
+<span class="lineNum">     507 </span>            :                      * range values; if so, have the pages in the range added
+<span class="lineNum">     508 </span>            :                      * to the output bitmap.
+<span class="lineNum">     509 </span>            :                      *
+<span class="lineNum">     510 </span>            :                      * When there are multiple scan keys, failure to meet the
+<span class="lineNum">     511 </span>            :                      * criteria for a single one of them is enough to discard
+<span class="lineNum">     512 </span>            :                      * the range as a whole, so break out of the loop as soon
+<span class="lineNum">     513 </span>            :                      * as a false return value is obtained.
+<span class="lineNum">     514 </span>            :                      */
+<span class="lineNum">     515 </span><span class="lineCov">      49600 :                     add = FunctionCall3Coll(&amp;consistentFn[keyattno - 1],</span>
+<span class="lineNum">     516 </span>            :                                             key-&gt;sk_collation,
+<span class="lineNum">     517 </span>            :                                             PointerGetDatum(bdesc),
+<span class="lineNum">     518 </span>            :                                             PointerGetDatum(bval),
+<span class="lineNum">     519 </span>            :                                             PointerGetDatum(key));
+<span class="lineNum">     520 </span><span class="lineCov">      49600 :                     addrange = DatumGetBool(add);</span>
+<span class="lineNum">     521 </span><span class="lineCov">      49600 :                     if (!addrange)</span>
+<span class="lineNum">     522 </span><span class="lineCov">      12646 :                         break;</span>
+<span class="lineNum">     523 </span>            :                 }
+<span class="lineNum">     524 </span>            :             }
+<span class="lineNum">     525 </span>            :         }
+<span class="lineNum">     526 </span>            : 
+<span class="lineNum">     527 </span>            :         /* add the pages in the range to the output bitmap, if needed */
+<span class="lineNum">     528 </span><span class="lineCov">      49600 :         if (addrange)</span>
+<span class="lineNum">     529 </span>            :         {
+<span class="lineNum">     530 </span>            :             BlockNumber pageno;
+<span class="lineNum">     531 </span>            : 
+<span class="lineNum">     532 </span><span class="lineCov">     110862 :             for (pageno = heapBlk;</span>
+<span class="lineNum">     533 </span><span class="lineCov">      73908 :                  pageno &lt;= heapBlk + opaque-&gt;bo_pagesPerRange - 1;</span>
+<span class="lineNum">     534 </span><span class="lineCov">      36954 :                  pageno++)</span>
+<span class="lineNum">     535 </span>            :             {
+<span class="lineNum">     536 </span><span class="lineCov">      36954 :                 MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     537 </span><span class="lineCov">      36954 :                 tbm_add_page(tbm, pageno);</span>
+<span class="lineNum">     538 </span><span class="lineCov">      36954 :                 totalpages++;</span>
+<span class="lineNum">     539 </span><span class="lineCov">      36954 :                 MemoryContextSwitchTo(perRangeCxt);</span>
+<span class="lineNum">     540 </span>            :             }
+<span class="lineNum">     541 </span>            :         }
+<span class="lineNum">     542 </span>            :     }
+<span class="lineNum">     543 </span>            : 
+<span class="lineNum">     544 </span><span class="lineCov">        496 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">     545 </span><span class="lineCov">        496 :     MemoryContextDelete(perRangeCxt);</span>
+<span class="lineNum">     546 </span>            : 
+<span class="lineNum">     547 </span><span class="lineCov">        496 :     if (buf != InvalidBuffer)</span>
+<span class="lineNum">     548 </span><span class="lineCov">        496 :         ReleaseBuffer(buf);</span>
+<span class="lineNum">     549 </span>            : 
+<span class="lineNum">     550 </span>            :     /*
+<span class="lineNum">     551 </span>            :      * XXX We have an approximation of the number of *pages* that our scan
+<span class="lineNum">     552 </span>            :      * returns, but we don't have a precise idea of the number of heap tuples
+<span class="lineNum">     553 </span>            :      * involved.
+<span class="lineNum">     554 </span>            :      */
+<span class="lineNum">     555 </span><span class="lineCov">        496 :     return totalpages * 10;</span>
+<span class="lineNum">     556 </span>            : }
+<span class="lineNum">     557 </span>            : 
+<span class="lineNum">     558 </span>            : /*
+<span class="lineNum">     559 </span>            :  * Re-initialize state for a BRIN index scan
+<a name="560"><span class="lineNum">     560 </span>            :  */</a>
+<span class="lineNum">     561 </span>            : void
+<span class="lineNum">     562 </span><span class="lineCov">        496 : brinrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,</span>
+<span class="lineNum">     563 </span>            :            ScanKey orderbys, int norderbys)
+<span class="lineNum">     564 </span>            : {
+<span class="lineNum">     565 </span>            :     /*
+<span class="lineNum">     566 </span>            :      * Other index AMs preprocess the scan keys at this point, or sometime
+<span class="lineNum">     567 </span>            :      * early during the scan; this lets them optimize by removing redundant
+<span class="lineNum">     568 </span>            :      * keys, or doing early returns when they are impossible to satisfy; see
+<span class="lineNum">     569 </span>            :      * _bt_preprocess_keys for an example.  Something like that could be added
+<span class="lineNum">     570 </span>            :      * here someday, too.
+<span class="lineNum">     571 </span>            :      */
+<span class="lineNum">     572 </span>            : 
+<span class="lineNum">     573 </span><span class="lineCov">        496 :     if (scankey &amp;&amp; scan-&gt;numberOfKeys &gt; 0)</span>
+<span class="lineNum">     574 </span><span class="lineCov">        496 :         memmove(scan-&gt;keyData, scankey,</span>
+<span class="lineNum">     575 </span><span class="lineCov">        496 :                 scan-&gt;numberOfKeys * sizeof(ScanKeyData));</span>
+<span class="lineNum">     576 </span><span class="lineCov">        496 : }</span>
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span>            : /*
+<span class="lineNum">     579 </span>            :  * Close down a BRIN index scan
+<a name="580"><span class="lineNum">     580 </span>            :  */</a>
+<span class="lineNum">     581 </span>            : void
+<span class="lineNum">     582 </span><span class="lineCov">        496 : brinendscan(IndexScanDesc scan)</span>
+<span class="lineNum">     583 </span>            : {
+<span class="lineNum">     584 </span><span class="lineCov">        496 :     BrinOpaque *opaque = (BrinOpaque *) scan-&gt;opaque;</span>
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span><span class="lineCov">        496 :     brinRevmapTerminate(opaque-&gt;bo_rmAccess);</span>
+<span class="lineNum">     587 </span><span class="lineCov">        496 :     brin_free_desc(opaque-&gt;bo_bdesc);</span>
+<span class="lineNum">     588 </span><span class="lineCov">        496 :     pfree(opaque);</span>
+<span class="lineNum">     589 </span><span class="lineCov">        496 : }</span>
+<span class="lineNum">     590 </span>            : 
+<span class="lineNum">     591 </span>            : /*
+<span class="lineNum">     592 </span>            :  * Per-heap-tuple callback for table_index_build_scan.
+<span class="lineNum">     593 </span>            :  *
+<span class="lineNum">     594 </span>            :  * Note we don't worry about the page range at the end of the table here; it is
+<span class="lineNum">     595 </span>            :  * present in the build state struct after we're called the last time, but not
+<span class="lineNum">     596 </span>            :  * inserted into the index.  Caller must ensure to do so, if appropriate.
+<a name="597"><span class="lineNum">     597 </span>            :  */</a>
+<span class="lineNum">     598 </span>            : static void
+<span class="lineNum">     599 </span><span class="lineCov">      40282 : brinbuildCallback(Relation index,</span>
+<span class="lineNum">     600 </span>            :                   ItemPointer tid,
+<span class="lineNum">     601 </span>            :                   Datum *values,
+<span class="lineNum">     602 </span>            :                   bool *isnull,
+<span class="lineNum">     603 </span>            :                   bool tupleIsAlive,
+<span class="lineNum">     604 </span>            :                   void *brstate)
+<span class="lineNum">     605 </span>            : {
+<span class="lineNum">     606 </span><span class="lineCov">      40282 :     BrinBuildState *state = (BrinBuildState *) brstate;</span>
+<span class="lineNum">     607 </span>            :     BlockNumber thisblock;
+<span class="lineNum">     608 </span>            :     int         i;
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span><span class="lineCov">      40282 :     thisblock = ItemPointerGetBlockNumber(tid);</span>
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span>            :     /*
+<span class="lineNum">     613 </span>            :      * If we're in a block that belongs to a future range, summarize what
+<span class="lineNum">     614 </span>            :      * we've got and start afresh.  Note the scan might have skipped many
+<span class="lineNum">     615 </span>            :      * pages, if they were devoid of live tuples; make sure to insert index
+<span class="lineNum">     616 </span>            :      * tuples for those too.
+<span class="lineNum">     617 </span>            :      */
+<span class="lineNum">     618 </span><span class="lineCov">      80850 :     while (thisblock &gt; state-&gt;bs_currRangeStart + state-&gt;bs_pagesPerRange - 1)</span>
+<span class="lineNum">     619 </span>            :     {
+<span class="lineNum">     620 </span>            : 
+<span class="lineNum">     621 </span>            :         BRIN_elog((DEBUG2,
+<span class="lineNum">     622 </span>            :                    &quot;brinbuildCallback: completed a range: %u--%u&quot;,
+<span class="lineNum">     623 </span>            :                    state-&gt;bs_currRangeStart,
+<span class="lineNum">     624 </span>            :                    state-&gt;bs_currRangeStart + state-&gt;bs_pagesPerRange));
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span>            :         /* create the index tuple and insert it */
+<span class="lineNum">     627 </span><span class="lineCov">        286 :         form_and_insert_tuple(state);</span>
+<span class="lineNum">     628 </span>            : 
+<span class="lineNum">     629 </span>            :         /* set state to correspond to the next range */
+<span class="lineNum">     630 </span><span class="lineCov">        286 :         state-&gt;bs_currRangeStart += state-&gt;bs_pagesPerRange;</span>
+<span class="lineNum">     631 </span>            : 
+<span class="lineNum">     632 </span>            :         /* re-initialize state for it */
+<span class="lineNum">     633 </span><span class="lineCov">        286 :         brin_memtuple_initialize(state-&gt;bs_dtuple, state-&gt;bs_bdesc);</span>
+<span class="lineNum">     634 </span>            :     }
+<span class="lineNum">     635 </span>            : 
+<span class="lineNum">     636 </span>            :     /* Accumulate the current tuple into the running state */
+<span class="lineNum">     637 </span><span class="lineCov">      88684 :     for (i = 0; i &lt; state-&gt;bs_bdesc-&gt;bd_tupdesc-&gt;natts; i++)</span>
+<span class="lineNum">     638 </span>            :     {
+<span class="lineNum">     639 </span>            :         FmgrInfo   *addValue;
+<span class="lineNum">     640 </span>            :         BrinValues *col;
+<span class="lineNum">     641 </span><span class="lineCov">      48402 :         Form_pg_attribute attr = TupleDescAttr(state-&gt;bs_bdesc-&gt;bd_tupdesc, i);</span>
+<span class="lineNum">     642 </span>            : 
+<span class="lineNum">     643 </span><span class="lineCov">      48402 :         col = &amp;state-&gt;bs_dtuple-&gt;bt_columns[i];</span>
+<span class="lineNum">     644 </span><span class="lineCov">      48402 :         addValue = index_getprocinfo(index, i + 1,</span>
+<span class="lineNum">     645 </span>            :                                      BRIN_PROCNUM_ADDVALUE);
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span>            :         /*
+<span class="lineNum">     648 </span>            :          * Update dtuple state, if and as necessary.
+<span class="lineNum">     649 </span>            :          */
+<span class="lineNum">     650 </span><span class="lineCov">     145206 :         FunctionCall4Coll(addValue,</span>
+<span class="lineNum">     651 </span>            :                           attr-&gt;attcollation,
+<span class="lineNum">     652 </span><span class="lineCov">      48402 :                           PointerGetDatum(state-&gt;bs_bdesc),</span>
+<span class="lineNum">     653 </span>            :                           PointerGetDatum(col),
+<span class="lineNum">     654 </span><span class="lineCov">      96804 :                           values[i], isnull[i]);</span>
+<span class="lineNum">     655 </span>            :     }
+<span class="lineNum">     656 </span><span class="lineCov">      40282 : }</span>
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span>            : /*
+<span class="lineNum">     659 </span>            :  * brinbuild() -- build a new BRIN index.
+<a name="660"><span class="lineNum">     660 </span>            :  */</a>
+<span class="lineNum">     661 </span>            : IndexBuildResult *
+<span class="lineNum">     662 </span><span class="lineCov">          8 : brinbuild(Relation heap, Relation index, IndexInfo *indexInfo)</span>
+<span class="lineNum">     663 </span>            : {
+<span class="lineNum">     664 </span>            :     IndexBuildResult *result;
+<span class="lineNum">     665 </span>            :     double      reltuples;
+<span class="lineNum">     666 </span>            :     double      idxtuples;
+<span class="lineNum">     667 </span>            :     BrinRevmap *revmap;
+<span class="lineNum">     668 </span>            :     BrinBuildState *state;
+<span class="lineNum">     669 </span>            :     Buffer      meta;
+<span class="lineNum">     670 </span>            :     BlockNumber pagesPerRange;
+<span class="lineNum">     671 </span>            : 
+<span class="lineNum">     672 </span>            :     /*
+<span class="lineNum">     673 </span>            :      * We expect to be called exactly once for any index relation.
+<span class="lineNum">     674 </span>            :      */
+<span class="lineNum">     675 </span><span class="lineCov">          8 :     if (RelationGetNumberOfBlocks(index) != 0)</span>
+<span class="lineNum">     676 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;index \&quot;%s\&quot; already contains data&quot;,</span>
+<span class="lineNum">     677 </span>            :              RelationGetRelationName(index));
+<span class="lineNum">     678 </span>            : 
+<span class="lineNum">     679 </span>            :     /*
+<span class="lineNum">     680 </span>            :      * Critical section not required, because on error the creation of the
+<span class="lineNum">     681 </span>            :      * whole relation will be rolled back.
+<span class="lineNum">     682 </span>            :      */
+<span class="lineNum">     683 </span>            : 
+<span class="lineNum">     684 </span><span class="lineCov">          8 :     meta = ReadBuffer(index, P_NEW);</span>
+<span class="lineNum">     685 </span><span class="lineCov">          8 :     Assert(BufferGetBlockNumber(meta) == BRIN_METAPAGE_BLKNO);</span>
+<span class="lineNum">     686 </span><span class="lineCov">          8 :     LockBuffer(meta, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     687 </span>            : 
+<span class="lineNum">     688 </span><span class="lineCov">          8 :     brin_metapage_init(BufferGetPage(meta), BrinGetPagesPerRange(index),</span>
+<span class="lineNum">     689 </span>            :                        BRIN_CURRENT_VERSION);
+<span class="lineNum">     690 </span><span class="lineCov">          8 :     MarkBufferDirty(meta);</span>
+<span class="lineNum">     691 </span>            : 
+<span class="lineNum">     692 </span><span class="lineCov">          8 :     if (RelationNeedsWAL(index))</span>
+<span class="lineNum">     693 </span>            :     {
+<span class="lineNum">     694 </span>            :         xl_brin_createidx xlrec;
+<span class="lineNum">     695 </span>            :         XLogRecPtr  recptr;
+<span class="lineNum">     696 </span>            :         Page        page;
+<span class="lineNum">     697 </span>            : 
+<span class="lineNum">     698 </span><span class="lineCov">          8 :         xlrec.version = BRIN_CURRENT_VERSION;</span>
+<span class="lineNum">     699 </span><span class="lineCov">          8 :         xlrec.pagesPerRange = BrinGetPagesPerRange(index);</span>
+<span class="lineNum">     700 </span>            : 
+<span class="lineNum">     701 </span><span class="lineCov">          8 :         XLogBeginInsert();</span>
+<span class="lineNum">     702 </span><span class="lineCov">          8 :         XLogRegisterData((char *) &amp;xlrec, SizeOfBrinCreateIdx);</span>
+<span class="lineNum">     703 </span><span class="lineCov">          8 :         XLogRegisterBuffer(0, meta, REGBUF_WILL_INIT | REGBUF_STANDARD);</span>
+<span class="lineNum">     704 </span>            : 
+<span class="lineNum">     705 </span><span class="lineCov">          8 :         recptr = XLogInsert(RM_BRIN_ID, XLOG_BRIN_CREATE_INDEX);</span>
+<span class="lineNum">     706 </span>            : 
+<span class="lineNum">     707 </span><span class="lineCov">          8 :         page = BufferGetPage(meta);</span>
+<span class="lineNum">     708 </span><span class="lineCov">          8 :         PageSetLSN(page, recptr);</span>
+<span class="lineNum">     709 </span>            :     }
+<span class="lineNum">     710 </span>            : 
+<span class="lineNum">     711 </span><span class="lineCov">          8 :     UnlockReleaseBuffer(meta);</span>
+<span class="lineNum">     712 </span>            : 
+<span class="lineNum">     713 </span>            :     /*
+<span class="lineNum">     714 </span>            :      * Initialize our state, including the deformed tuple state.
+<span class="lineNum">     715 </span>            :      */
+<span class="lineNum">     716 </span><span class="lineCov">          8 :     revmap = brinRevmapInitialize(index, &amp;pagesPerRange, NULL);</span>
+<span class="lineNum">     717 </span><span class="lineCov">          8 :     state = initialize_brin_buildstate(index, revmap, pagesPerRange);</span>
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span>            :     /*
+<span class="lineNum">     720 </span>            :      * Now scan the relation.  No syncscan allowed here because we want the
+<span class="lineNum">     721 </span>            :      * heap blocks in physical order.
+<span class="lineNum">     722 </span>            :      */
+<span class="lineNum">     723 </span><span class="lineCov">          8 :     reltuples = table_index_build_scan(heap, index, indexInfo, false, true,</span>
+<span class="lineNum">     724 </span>            :                                        brinbuildCallback, (void *) state, NULL);
+<span class="lineNum">     725 </span>            : 
+<span class="lineNum">     726 </span>            :     /* process the final batch */
+<span class="lineNum">     727 </span><span class="lineCov">          8 :     form_and_insert_tuple(state);</span>
+<span class="lineNum">     728 </span>            : 
+<span class="lineNum">     729 </span>            :     /* release resources */
+<span class="lineNum">     730 </span><span class="lineCov">          8 :     idxtuples = state-&gt;bs_numtuples;</span>
+<span class="lineNum">     731 </span><span class="lineCov">          8 :     brinRevmapTerminate(state-&gt;bs_rmAccess);</span>
+<span class="lineNum">     732 </span><span class="lineCov">          8 :     terminate_brin_buildstate(state);</span>
+<span class="lineNum">     733 </span>            : 
+<span class="lineNum">     734 </span>            :     /*
+<span class="lineNum">     735 </span>            :      * Return statistics
+<span class="lineNum">     736 </span>            :      */
+<span class="lineNum">     737 </span><span class="lineCov">          8 :     result = (IndexBuildResult *) palloc(sizeof(IndexBuildResult));</span>
+<span class="lineNum">     738 </span>            : 
+<span class="lineNum">     739 </span><span class="lineCov">          8 :     result-&gt;heap_tuples = reltuples;</span>
+<span class="lineNum">     740 </span><span class="lineCov">          8 :     result-&gt;index_tuples = idxtuples;</span>
+<span class="lineNum">     741 </span>            : 
+<span class="lineNum">     742 </span><span class="lineCov">          8 :     return result;</span>
+<span class="lineNum">     743 </span>            : }
+<a name="744"><span class="lineNum">     744 </span>            : </a>
+<span class="lineNum">     745 </span>            : void
+<span class="lineNum">     746 </span><span class="lineNoCov">          0 : brinbuildempty(Relation index)</span>
+<span class="lineNum">     747 </span>            : {
+<span class="lineNum">     748 </span>            :     Buffer      metabuf;
+<span class="lineNum">     749 </span>            : 
+<span class="lineNum">     750 </span>            :     /* An empty BRIN index has a metapage only. */
+<span class="lineNum">     751 </span><span class="lineNoCov">          0 :     metabuf =</span>
+<span class="lineNum">     752 </span>            :         ReadBufferExtended(index, INIT_FORKNUM, P_NEW, RBM_NORMAL, NULL);
+<span class="lineNum">     753 </span><span class="lineNoCov">          0 :     LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);</span>
+<span class="lineNum">     754 </span>            : 
+<span class="lineNum">     755 </span>            :     /* Initialize and xlog metabuffer. */
+<span class="lineNum">     756 </span><span class="lineNoCov">          0 :     START_CRIT_SECTION();</span>
+<span class="lineNum">     757 </span><span class="lineNoCov">          0 :     brin_metapage_init(BufferGetPage(metabuf), BrinGetPagesPerRange(index),</span>
+<span class="lineNum">     758 </span>            :                        BRIN_CURRENT_VERSION);
+<span class="lineNum">     759 </span><span class="lineNoCov">          0 :     MarkBufferDirty(metabuf);</span>
+<span class="lineNum">     760 </span><span class="lineNoCov">          0 :     log_newpage_buffer(metabuf, true);</span>
+<span class="lineNum">     761 </span><span class="lineNoCov">          0 :     END_CRIT_SECTION();</span>
+<span class="lineNum">     762 </span>            : 
+<span class="lineNum">     763 </span><span class="lineNoCov">          0 :     UnlockReleaseBuffer(metabuf);</span>
+<span class="lineNum">     764 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     765 </span>            : 
+<span class="lineNum">     766 </span>            : /*
+<span class="lineNum">     767 </span>            :  * brinbulkdelete
+<span class="lineNum">     768 </span>            :  *      Since there are no per-heap-tuple index tuples in BRIN indexes,
+<span class="lineNum">     769 </span>            :  *      there's not a lot we can do here.
+<span class="lineNum">     770 </span>            :  *
+<span class="lineNum">     771 </span>            :  * XXX we could mark item tuples as &quot;dirty&quot; (when a minimum or maximum heap
+<span class="lineNum">     772 </span>            :  * tuple is deleted), meaning the need to re-run summarization on the affected
+<span class="lineNum">     773 </span>            :  * range.  Would need to add an extra flag in brintuples for that.
+<a name="774"><span class="lineNum">     774 </span>            :  */</a>
+<span class="lineNum">     775 </span>            : IndexBulkDeleteResult *
+<span class="lineNum">     776 </span><span class="lineCov">          2 : brinbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,</span>
+<span class="lineNum">     777 </span>            :                IndexBulkDeleteCallback callback, void *callback_state)
+<span class="lineNum">     778 </span>            : {
+<span class="lineNum">     779 </span>            :     /* allocate stats if first time through, else re-use existing struct */
+<span class="lineNum">     780 </span><span class="lineCov">          2 :     if (stats == NULL)</span>
+<span class="lineNum">     781 </span><span class="lineCov">          2 :         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));</span>
+<span class="lineNum">     782 </span>            : 
+<span class="lineNum">     783 </span><span class="lineCov">          2 :     return stats;</span>
+<span class="lineNum">     784 </span>            : }
+<span class="lineNum">     785 </span>            : 
+<span class="lineNum">     786 </span>            : /*
+<span class="lineNum">     787 </span>            :  * This routine is in charge of &quot;vacuuming&quot; a BRIN index: we just summarize
+<span class="lineNum">     788 </span>            :  * ranges that are currently unsummarized.
+<a name="789"><span class="lineNum">     789 </span>            :  */</a>
+<span class="lineNum">     790 </span>            : IndexBulkDeleteResult *
+<span class="lineNum">     791 </span><span class="lineCov">         12 : brinvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)</span>
+<span class="lineNum">     792 </span>            : {
+<span class="lineNum">     793 </span>            :     Relation    heapRel;
+<span class="lineNum">     794 </span>            : 
+<span class="lineNum">     795 </span>            :     /* No-op in ANALYZE ONLY mode */
+<span class="lineNum">     796 </span><span class="lineCov">         12 :     if (info-&gt;analyze_only)</span>
+<span class="lineNum">     797 </span><span class="lineCov">          4 :         return stats;</span>
+<span class="lineNum">     798 </span>            : 
+<span class="lineNum">     799 </span><span class="lineCov">          8 :     if (!stats)</span>
+<span class="lineNum">     800 </span><span class="lineCov">          6 :         stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));</span>
+<span class="lineNum">     801 </span><span class="lineCov">          8 :     stats-&gt;num_pages = RelationGetNumberOfBlocks(info-&gt;index);</span>
+<span class="lineNum">     802 </span>            :     /* rest of stats is initialized by zeroing */
+<span class="lineNum">     803 </span>            : 
+<span class="lineNum">     804 </span><span class="lineCov">          8 :     heapRel = table_open(IndexGetRelation(RelationGetRelid(info-&gt;index), false),</span>
+<span class="lineNum">     805 </span>            :                          AccessShareLock);
+<span class="lineNum">     806 </span>            : 
+<span class="lineNum">     807 </span><span class="lineCov">          8 :     brin_vacuum_scan(info-&gt;index, info-&gt;strategy);</span>
+<span class="lineNum">     808 </span>            : 
+<span class="lineNum">     809 </span><span class="lineCov">          8 :     brinsummarize(info-&gt;index, heapRel, BRIN_ALL_BLOCKRANGES, false,</span>
+<span class="lineNum">     810 </span>            :                   &amp;stats-&gt;num_index_tuples, &amp;stats-&gt;num_index_tuples);
+<span class="lineNum">     811 </span>            : 
+<span class="lineNum">     812 </span><span class="lineCov">          8 :     table_close(heapRel, AccessShareLock);</span>
+<span class="lineNum">     813 </span>            : 
+<span class="lineNum">     814 </span><span class="lineCov">          8 :     return stats;</span>
+<span class="lineNum">     815 </span>            : }
+<span class="lineNum">     816 </span>            : 
+<span class="lineNum">     817 </span>            : /*
+<span class="lineNum">     818 </span>            :  * reloptions processor for BRIN indexes
+<a name="819"><span class="lineNum">     819 </span>            :  */</a>
+<span class="lineNum">     820 </span>            : bytea *
+<span class="lineNum">     821 </span><span class="lineCov">         46 : brinoptions(Datum reloptions, bool validate)</span>
+<span class="lineNum">     822 </span>            : {
+<span class="lineNum">     823 </span>            :     static const relopt_parse_elt tab[] = {
+<span class="lineNum">     824 </span>            :         {&quot;pages_per_range&quot;, RELOPT_TYPE_INT, offsetof(BrinOptions, pagesPerRange)},
+<span class="lineNum">     825 </span>            :         {&quot;autosummarize&quot;, RELOPT_TYPE_BOOL, offsetof(BrinOptions, autosummarize)}
+<span class="lineNum">     826 </span>            :     };
+<span class="lineNum">     827 </span>            : 
+<span class="lineNum">     828 </span><span class="lineCov">         46 :     return (bytea *) build_reloptions(reloptions, validate,</span>
+<span class="lineNum">     829 </span>            :                                       RELOPT_KIND_BRIN,
+<span class="lineNum">     830 </span>            :                                       sizeof(BrinOptions),
+<span class="lineNum">     831 </span>            :                                       tab, lengthof(tab));
+<span class="lineNum">     832 </span>            : }
+<span class="lineNum">     833 </span>            : 
+<span class="lineNum">     834 </span>            : /*
+<span class="lineNum">     835 </span>            :  * SQL-callable function to scan through an index and summarize all ranges
+<span class="lineNum">     836 </span>            :  * that are not currently summarized.
+<a name="837"><span class="lineNum">     837 </span>            :  */</a>
+<span class="lineNum">     838 </span>            : Datum
+<span class="lineNum">     839 </span><span class="lineCov">          6 : brin_summarize_new_values(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     840 </span>            : {
+<span class="lineNum">     841 </span><span class="lineCov">          6 :     Datum       relation = PG_GETARG_DATUM(0);</span>
+<span class="lineNum">     842 </span>            : 
+<span class="lineNum">     843 </span><span class="lineCov">          6 :     return DirectFunctionCall2(brin_summarize_range,</span>
+<span class="lineNum">     844 </span>            :                                relation,
+<span class="lineNum">     845 </span>            :                                Int64GetDatum((int64) BRIN_ALL_BLOCKRANGES));
+<span class="lineNum">     846 </span>            : }
+<span class="lineNum">     847 </span>            : 
+<span class="lineNum">     848 </span>            : /*
+<span class="lineNum">     849 </span>            :  * SQL-callable function to summarize the indicated page range, if not already
+<span class="lineNum">     850 </span>            :  * summarized.  If the second argument is BRIN_ALL_BLOCKRANGES, all
+<span class="lineNum">     851 </span>            :  * unsummarized ranges are summarized.
+<a name="852"><span class="lineNum">     852 </span>            :  */</a>
+<span class="lineNum">     853 </span>            : Datum
+<span class="lineNum">     854 </span><span class="lineCov">         18 : brin_summarize_range(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     855 </span>            : {
+<span class="lineNum">     856 </span><span class="lineCov">         18 :     Oid         indexoid = PG_GETARG_OID(0);</span>
+<span class="lineNum">     857 </span><span class="lineCov">         18 :     int64       heapBlk64 = PG_GETARG_INT64(1);</span>
+<span class="lineNum">     858 </span>            :     BlockNumber heapBlk;
+<span class="lineNum">     859 </span>            :     Oid         heapoid;
+<span class="lineNum">     860 </span>            :     Relation    indexRel;
+<span class="lineNum">     861 </span>            :     Relation    heapRel;
+<span class="lineNum">     862 </span><span class="lineCov">         18 :     double      numSummarized = 0;</span>
+<span class="lineNum">     863 </span>            : 
+<span class="lineNum">     864 </span><span class="lineCov">         18 :     if (RecoveryInProgress())</span>
+<span class="lineNum">     865 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     866 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">     867 </span>            :                  errmsg(&quot;recovery is in progress&quot;),
+<span class="lineNum">     868 </span>            :                  errhint(&quot;BRIN control functions cannot be executed during recovery.&quot;)));
+<span class="lineNum">     869 </span>            : 
+<span class="lineNum">     870 </span><span class="lineCov">         18 :     if (heapBlk64 &gt; BRIN_ALL_BLOCKRANGES || heapBlk64 &lt; 0)</span>
+<span class="lineNum">     871 </span>            :     {
+<span class="lineNum">     872 </span><span class="lineCov">          4 :         char       *blk = psprintf(INT64_FORMAT, heapBlk64);</span>
+<span class="lineNum">     873 </span>            : 
+<span class="lineNum">     874 </span><span class="lineCov">          4 :         ereport(ERROR,</span>
+<span class="lineNum">     875 </span>            :                 (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+<span class="lineNum">     876 </span>            :                  errmsg(&quot;block number out of range: %s&quot;, blk)));
+<span class="lineNum">     877 </span>            :     }
+<span class="lineNum">     878 </span><span class="lineCov">         14 :     heapBlk = (BlockNumber) heapBlk64;</span>
+<span class="lineNum">     879 </span>            : 
+<span class="lineNum">     880 </span>            :     /*
+<span class="lineNum">     881 </span>            :      * We must lock table before index to avoid deadlocks.  However, if the
+<span class="lineNum">     882 </span>            :      * passed indexoid isn't an index then IndexGetRelation() will fail.
+<span class="lineNum">     883 </span>            :      * Rather than emitting a not-very-helpful error message, postpone
+<span class="lineNum">     884 </span>            :      * complaining, expecting that the is-it-an-index test below will fail.
+<span class="lineNum">     885 </span>            :      */
+<span class="lineNum">     886 </span><span class="lineCov">         14 :     heapoid = IndexGetRelation(indexoid, true);</span>
+<span class="lineNum">     887 </span><span class="lineCov">         14 :     if (OidIsValid(heapoid))</span>
+<span class="lineNum">     888 </span><span class="lineCov">         12 :         heapRel = table_open(heapoid, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">     889 </span>            :     else
+<span class="lineNum">     890 </span><span class="lineCov">          2 :         heapRel = NULL;</span>
+<span class="lineNum">     891 </span>            : 
+<span class="lineNum">     892 </span><span class="lineCov">         14 :     indexRel = index_open(indexoid, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">     893 </span>            : 
+<span class="lineNum">     894 </span>            :     /* Must be a BRIN index */
+<span class="lineNum">     895 </span><span class="lineCov">         24 :     if (indexRel-&gt;rd_rel-&gt;relkind != RELKIND_INDEX ||</span>
+<span class="lineNum">     896 </span><span class="lineCov">         12 :         indexRel-&gt;rd_rel-&gt;relam != BRIN_AM_OID)</span>
+<span class="lineNum">     897 </span><span class="lineCov">          2 :         ereport(ERROR,</span>
+<span class="lineNum">     898 </span>            :                 (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+<span class="lineNum">     899 </span>            :                  errmsg(&quot;\&quot;%s\&quot; is not a BRIN index&quot;,
+<span class="lineNum">     900 </span>            :                         RelationGetRelationName(indexRel))));
+<span class="lineNum">     901 </span>            : 
+<span class="lineNum">     902 </span>            :     /* User must own the index (comparable to privileges needed for VACUUM) */
+<span class="lineNum">     903 </span><span class="lineCov">         10 :     if (!pg_class_ownercheck(indexoid, GetUserId()))</span>
+<span class="lineNum">     904 </span><span class="lineNoCov">          0 :         aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_INDEX,</span>
+<span class="lineNum">     905 </span><span class="lineNoCov">          0 :                        RelationGetRelationName(indexRel));</span>
+<span class="lineNum">     906 </span>            : 
+<span class="lineNum">     907 </span>            :     /*
+<span class="lineNum">     908 </span>            :      * Since we did the IndexGetRelation call above without any lock, it's
+<span class="lineNum">     909 </span>            :      * barely possible that a race against an index drop/recreation could have
+<span class="lineNum">     910 </span>            :      * netted us the wrong table.  Recheck.
+<span class="lineNum">     911 </span>            :      */
+<span class="lineNum">     912 </span><span class="lineCov">         10 :     if (heapRel == NULL || heapoid != IndexGetRelation(indexoid, false))</span>
+<span class="lineNum">     913 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     914 </span>            :                 (errcode(ERRCODE_UNDEFINED_TABLE),
+<span class="lineNum">     915 </span>            :                  errmsg(&quot;could not open parent table of index %s&quot;,
+<span class="lineNum">     916 </span>            :                         RelationGetRelationName(indexRel))));
+<span class="lineNum">     917 </span>            : 
+<span class="lineNum">     918 </span>            :     /* OK, do it */
+<span class="lineNum">     919 </span><span class="lineCov">         10 :     brinsummarize(indexRel, heapRel, heapBlk, true, &amp;numSummarized, NULL);</span>
+<span class="lineNum">     920 </span>            : 
+<span class="lineNum">     921 </span><span class="lineCov">         10 :     relation_close(indexRel, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">     922 </span><span class="lineCov">         10 :     relation_close(heapRel, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">     923 </span>            : 
+<span class="lineNum">     924 </span><span class="lineCov">         10 :     PG_RETURN_INT32((int32) numSummarized);</span>
+<span class="lineNum">     925 </span>            : }
+<span class="lineNum">     926 </span>            : 
+<span class="lineNum">     927 </span>            : /*
+<span class="lineNum">     928 </span>            :  * SQL-callable interface to mark a range as no longer summarized
+<a name="929"><span class="lineNum">     929 </span>            :  */</a>
+<span class="lineNum">     930 </span>            : Datum
+<span class="lineNum">     931 </span><span class="lineCov">         10 : brin_desummarize_range(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     932 </span>            : {
+<span class="lineNum">     933 </span><span class="lineCov">         10 :     Oid         indexoid = PG_GETARG_OID(0);</span>
+<span class="lineNum">     934 </span><span class="lineCov">         10 :     int64       heapBlk64 = PG_GETARG_INT64(1);</span>
+<span class="lineNum">     935 </span>            :     BlockNumber heapBlk;
+<span class="lineNum">     936 </span>            :     Oid         heapoid;
+<span class="lineNum">     937 </span>            :     Relation    heapRel;
+<span class="lineNum">     938 </span>            :     Relation    indexRel;
+<span class="lineNum">     939 </span>            :     bool        done;
+<span class="lineNum">     940 </span>            : 
+<span class="lineNum">     941 </span><span class="lineCov">         10 :     if (RecoveryInProgress())</span>
+<span class="lineNum">     942 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     943 </span>            :                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+<span class="lineNum">     944 </span>            :                  errmsg(&quot;recovery is in progress&quot;),
+<span class="lineNum">     945 </span>            :                  errhint(&quot;BRIN control functions cannot be executed during recovery.&quot;)));
+<span class="lineNum">     946 </span>            : 
+<span class="lineNum">     947 </span><span class="lineCov">         10 :     if (heapBlk64 &gt; MaxBlockNumber || heapBlk64 &lt; 0)</span>
+<span class="lineNum">     948 </span>            :     {
+<span class="lineNum">     949 </span><span class="lineCov">          2 :         char       *blk = psprintf(INT64_FORMAT, heapBlk64);</span>
+<span class="lineNum">     950 </span>            : 
+<span class="lineNum">     951 </span><span class="lineCov">          2 :         ereport(ERROR,</span>
+<span class="lineNum">     952 </span>            :                 (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+<span class="lineNum">     953 </span>            :                  errmsg(&quot;block number out of range: %s&quot;, blk)));
+<span class="lineNum">     954 </span>            :     }
+<span class="lineNum">     955 </span><span class="lineCov">          8 :     heapBlk = (BlockNumber) heapBlk64;</span>
+<span class="lineNum">     956 </span>            : 
+<span class="lineNum">     957 </span>            :     /*
+<span class="lineNum">     958 </span>            :      * We must lock table before index to avoid deadlocks.  However, if the
+<span class="lineNum">     959 </span>            :      * passed indexoid isn't an index then IndexGetRelation() will fail.
+<span class="lineNum">     960 </span>            :      * Rather than emitting a not-very-helpful error message, postpone
+<span class="lineNum">     961 </span>            :      * complaining, expecting that the is-it-an-index test below will fail.
+<span class="lineNum">     962 </span>            :      */
+<span class="lineNum">     963 </span><span class="lineCov">          8 :     heapoid = IndexGetRelation(indexoid, true);</span>
+<span class="lineNum">     964 </span><span class="lineCov">          8 :     if (OidIsValid(heapoid))</span>
+<span class="lineNum">     965 </span><span class="lineCov">          8 :         heapRel = table_open(heapoid, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">     966 </span>            :     else
+<span class="lineNum">     967 </span><span class="lineNoCov">          0 :         heapRel = NULL;</span>
+<span class="lineNum">     968 </span>            : 
+<span class="lineNum">     969 </span><span class="lineCov">          8 :     indexRel = index_open(indexoid, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">     970 </span>            : 
+<span class="lineNum">     971 </span>            :     /* Must be a BRIN index */
+<span class="lineNum">     972 </span><span class="lineCov">         16 :     if (indexRel-&gt;rd_rel-&gt;relkind != RELKIND_INDEX ||</span>
+<span class="lineNum">     973 </span><span class="lineCov">          8 :         indexRel-&gt;rd_rel-&gt;relam != BRIN_AM_OID)</span>
+<span class="lineNum">     974 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     975 </span>            :                 (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+<span class="lineNum">     976 </span>            :                  errmsg(&quot;\&quot;%s\&quot; is not a BRIN index&quot;,
+<span class="lineNum">     977 </span>            :                         RelationGetRelationName(indexRel))));
+<span class="lineNum">     978 </span>            : 
+<span class="lineNum">     979 </span>            :     /* User must own the index (comparable to privileges needed for VACUUM) */
+<span class="lineNum">     980 </span><span class="lineCov">          8 :     if (!pg_class_ownercheck(indexoid, GetUserId()))</span>
+<span class="lineNum">     981 </span><span class="lineNoCov">          0 :         aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_INDEX,</span>
+<span class="lineNum">     982 </span><span class="lineNoCov">          0 :                        RelationGetRelationName(indexRel));</span>
+<span class="lineNum">     983 </span>            : 
+<span class="lineNum">     984 </span>            :     /*
+<span class="lineNum">     985 </span>            :      * Since we did the IndexGetRelation call above without any lock, it's
+<span class="lineNum">     986 </span>            :      * barely possible that a race against an index drop/recreation could have
+<span class="lineNum">     987 </span>            :      * netted us the wrong table.  Recheck.
+<span class="lineNum">     988 </span>            :      */
+<span class="lineNum">     989 </span><span class="lineCov">          8 :     if (heapRel == NULL || heapoid != IndexGetRelation(indexoid, false))</span>
+<span class="lineNum">     990 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     991 </span>            :                 (errcode(ERRCODE_UNDEFINED_TABLE),
+<span class="lineNum">     992 </span>            :                  errmsg(&quot;could not open parent table of index %s&quot;,
+<span class="lineNum">     993 </span>            :                         RelationGetRelationName(indexRel))));
+<span class="lineNum">     994 </span>            : 
+<span class="lineNum">     995 </span>            :     /* the revmap does the hard work */
+<span class="lineNum">     996 </span>            :     do
+<span class="lineNum">     997 </span>            :     {
+<span class="lineNum">     998 </span><span class="lineCov">          8 :         done = brinRevmapDesummarizeRange(indexRel, heapBlk);</span>
+<span class="lineNum">     999 </span>            :     }
+<span class="lineNum">    1000 </span><span class="lineCov">          8 :     while (!done);</span>
+<span class="lineNum">    1001 </span>            : 
+<span class="lineNum">    1002 </span><span class="lineCov">          8 :     relation_close(indexRel, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">    1003 </span><span class="lineCov">          8 :     relation_close(heapRel, ShareUpdateExclusiveLock);</span>
+<span class="lineNum">    1004 </span>            : 
+<span class="lineNum">    1005 </span><span class="lineCov">          8 :     PG_RETURN_VOID();</span>
+<span class="lineNum">    1006 </span>            : }
+<span class="lineNum">    1007 </span>            : 
+<span class="lineNum">    1008 </span>            : /*
+<span class="lineNum">    1009 </span>            :  * Build a BrinDesc used to create or scan a BRIN index
+<a name="1010"><span class="lineNum">    1010 </span>            :  */</a>
+<span class="lineNum">    1011 </span>            : BrinDesc *
+<span class="lineNum">    1012 </span><span class="lineCov">        602 : brin_build_desc(Relation rel)</span>
+<span class="lineNum">    1013 </span>            : {
+<span class="lineNum">    1014 </span>            :     BrinOpcInfo **opcinfo;
+<span class="lineNum">    1015 </span>            :     BrinDesc   *bdesc;
+<span class="lineNum">    1016 </span>            :     TupleDesc   tupdesc;
+<span class="lineNum">    1017 </span><span class="lineCov">        602 :     int         totalstored = 0;</span>
+<span class="lineNum">    1018 </span>            :     int         keyno;
+<span class="lineNum">    1019 </span>            :     long        totalsize;
+<span class="lineNum">    1020 </span>            :     MemoryContext cxt;
+<span class="lineNum">    1021 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">    1022 </span>            : 
+<span class="lineNum">    1023 </span><span class="lineCov">        602 :     cxt = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">    1024 </span>            :                                 &quot;brin desc cxt&quot;,
+<span class="lineNum">    1025 </span>            :                                 ALLOCSET_SMALL_SIZES);
+<span class="lineNum">    1026 </span><span class="lineCov">        602 :     oldcxt = MemoryContextSwitchTo(cxt);</span>
+<span class="lineNum">    1027 </span><span class="lineCov">        602 :     tupdesc = RelationGetDescr(rel);</span>
+<span class="lineNum">    1028 </span>            : 
+<span class="lineNum">    1029 </span>            :     /*
+<span class="lineNum">    1030 </span>            :      * Obtain BrinOpcInfo for each indexed column.  While at it, accumulate
+<span class="lineNum">    1031 </span>            :      * the number of columns stored, since the number is opclass-defined.
+<span class="lineNum">    1032 </span>            :      */
+<span class="lineNum">    1033 </span><span class="lineCov">        602 :     opcinfo = (BrinOpcInfo **) palloc(sizeof(BrinOpcInfo *) * tupdesc-&gt;natts);</span>
+<span class="lineNum">    1034 </span><span class="lineCov">      15878 :     for (keyno = 0; keyno &lt; tupdesc-&gt;natts; keyno++)</span>
+<span class="lineNum">    1035 </span>            :     {
+<span class="lineNum">    1036 </span>            :         FmgrInfo   *opcInfoFn;
+<span class="lineNum">    1037 </span><span class="lineCov">      15276 :         Form_pg_attribute attr = TupleDescAttr(tupdesc, keyno);</span>
+<span class="lineNum">    1038 </span>            : 
+<span class="lineNum">    1039 </span><span class="lineCov">      15276 :         opcInfoFn = index_getprocinfo(rel, keyno + 1, BRIN_PROCNUM_OPCINFO);</span>
+<span class="lineNum">    1040 </span>            : 
+<span class="lineNum">    1041 </span><span class="lineCov">      30552 :         opcinfo[keyno] = (BrinOpcInfo *)</span>
+<span class="lineNum">    1042 </span><span class="lineCov">      15276 :             DatumGetPointer(FunctionCall1(opcInfoFn, attr-&gt;atttypid));</span>
+<span class="lineNum">    1043 </span><span class="lineCov">      15276 :         totalstored += opcinfo[keyno]-&gt;oi_nstored;</span>
+<span class="lineNum">    1044 </span>            :     }
+<span class="lineNum">    1045 </span>            : 
+<span class="lineNum">    1046 </span>            :     /* Allocate our result struct and fill it in */
+<span class="lineNum">    1047 </span><span class="lineCov">        602 :     totalsize = offsetof(BrinDesc, bd_info) +</span>
+<span class="lineNum">    1048 </span><span class="lineCov">        602 :         sizeof(BrinOpcInfo *) * tupdesc-&gt;natts;</span>
+<span class="lineNum">    1049 </span>            : 
+<span class="lineNum">    1050 </span><span class="lineCov">        602 :     bdesc = palloc(totalsize);</span>
+<span class="lineNum">    1051 </span><span class="lineCov">        602 :     bdesc-&gt;bd_context = cxt;</span>
+<span class="lineNum">    1052 </span><span class="lineCov">        602 :     bdesc-&gt;bd_index = rel;</span>
+<span class="lineNum">    1053 </span><span class="lineCov">        602 :     bdesc-&gt;bd_tupdesc = tupdesc;</span>
+<span class="lineNum">    1054 </span><span class="lineCov">        602 :     bdesc-&gt;bd_disktdesc = NULL; /* generated lazily */</span>
+<span class="lineNum">    1055 </span><span class="lineCov">        602 :     bdesc-&gt;bd_totalstored = totalstored;</span>
+<span class="lineNum">    1056 </span>            : 
+<span class="lineNum">    1057 </span><span class="lineCov">      15878 :     for (keyno = 0; keyno &lt; tupdesc-&gt;natts; keyno++)</span>
+<span class="lineNum">    1058 </span><span class="lineCov">      15276 :         bdesc-&gt;bd_info[keyno] = opcinfo[keyno];</span>
+<span class="lineNum">    1059 </span><span class="lineCov">        602 :     pfree(opcinfo);</span>
+<span class="lineNum">    1060 </span>            : 
+<span class="lineNum">    1061 </span><span class="lineCov">        602 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1062 </span>            : 
+<span class="lineNum">    1063 </span><span class="lineCov">        602 :     return bdesc;</span>
+<span class="lineNum">    1064 </span>            : }
+<a name="1065"><span class="lineNum">    1065 </span>            : </a>
+<span class="lineNum">    1066 </span>            : void
+<span class="lineNum">    1067 </span><span class="lineCov">        510 : brin_free_desc(BrinDesc *bdesc)</span>
+<span class="lineNum">    1068 </span>            : {
+<span class="lineNum">    1069 </span>            :     /* make sure the tupdesc is still valid */
+<span class="lineNum">    1070 </span><span class="lineCov">        510 :     Assert(bdesc-&gt;bd_tupdesc-&gt;tdrefcount &gt;= 1);</span>
+<span class="lineNum">    1071 </span>            :     /* no need for retail pfree */
+<span class="lineNum">    1072 </span><span class="lineCov">        510 :     MemoryContextDelete(bdesc-&gt;bd_context);</span>
+<span class="lineNum">    1073 </span><span class="lineCov">        510 : }</span>
+<span class="lineNum">    1074 </span>            : 
+<span class="lineNum">    1075 </span>            : /*
+<span class="lineNum">    1076 </span>            :  * Fetch index's statistical data into *stats
+<a name="1077"><span class="lineNum">    1077 </span>            :  */</a>
+<span class="lineNum">    1078 </span>            : void
+<span class="lineNum">    1079 </span><span class="lineCov">       1990 : brinGetStats(Relation index, BrinStatsData *stats)</span>
+<span class="lineNum">    1080 </span>            : {
+<span class="lineNum">    1081 </span>            :     Buffer      metabuffer;
+<span class="lineNum">    1082 </span>            :     Page        metapage;
+<span class="lineNum">    1083 </span>            :     BrinMetaPageData *metadata;
+<span class="lineNum">    1084 </span>            : 
+<span class="lineNum">    1085 </span><span class="lineCov">       1990 :     metabuffer = ReadBuffer(index, BRIN_METAPAGE_BLKNO);</span>
+<span class="lineNum">    1086 </span><span class="lineCov">       1990 :     LockBuffer(metabuffer, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">    1087 </span><span class="lineCov">       1990 :     metapage = BufferGetPage(metabuffer);</span>
+<span class="lineNum">    1088 </span><span class="lineCov">       1990 :     metadata = (BrinMetaPageData *) PageGetContents(metapage);</span>
+<span class="lineNum">    1089 </span>            : 
+<span class="lineNum">    1090 </span><span class="lineCov">       1990 :     stats-&gt;pagesPerRange = metadata-&gt;pagesPerRange;</span>
+<span class="lineNum">    1091 </span><span class="lineCov">       1990 :     stats-&gt;revmapNumPages = metadata-&gt;lastRevmapPage - 1;</span>
+<span class="lineNum">    1092 </span>            : 
+<span class="lineNum">    1093 </span><span class="lineCov">       1990 :     UnlockReleaseBuffer(metabuffer);</span>
+<span class="lineNum">    1094 </span><span class="lineCov">       1990 : }</span>
+<span class="lineNum">    1095 </span>            : 
+<span class="lineNum">    1096 </span>            : /*
+<span class="lineNum">    1097 </span>            :  * Initialize a BrinBuildState appropriate to create tuples on the given index.
+<a name="1098"><span class="lineNum">    1098 </span>            :  */</a>
+<span class="lineNum">    1099 </span>            : static BrinBuildState *
+<span class="lineNum">    1100 </span><span class="lineCov">         14 : initialize_brin_buildstate(Relation idxRel, BrinRevmap *revmap,</span>
+<span class="lineNum">    1101 </span>            :                            BlockNumber pagesPerRange)
+<span class="lineNum">    1102 </span>            : {
+<span class="lineNum">    1103 </span>            :     BrinBuildState *state;
+<span class="lineNum">    1104 </span>            : 
+<span class="lineNum">    1105 </span><span class="lineCov">         14 :     state = palloc(sizeof(BrinBuildState));</span>
+<span class="lineNum">    1106 </span>            : 
+<span class="lineNum">    1107 </span><span class="lineCov">         14 :     state-&gt;bs_irel = idxRel;</span>
+<span class="lineNum">    1108 </span><span class="lineCov">         14 :     state-&gt;bs_numtuples = 0;</span>
+<span class="lineNum">    1109 </span><span class="lineCov">         14 :     state-&gt;bs_currentInsertBuf = InvalidBuffer;</span>
+<span class="lineNum">    1110 </span><span class="lineCov">         14 :     state-&gt;bs_pagesPerRange = pagesPerRange;</span>
+<span class="lineNum">    1111 </span><span class="lineCov">         14 :     state-&gt;bs_currRangeStart = 0;</span>
+<span class="lineNum">    1112 </span><span class="lineCov">         14 :     state-&gt;bs_rmAccess = revmap;</span>
+<span class="lineNum">    1113 </span><span class="lineCov">         14 :     state-&gt;bs_bdesc = brin_build_desc(idxRel);</span>
+<span class="lineNum">    1114 </span><span class="lineCov">         14 :     state-&gt;bs_dtuple = brin_new_memtuple(state-&gt;bs_bdesc);</span>
+<span class="lineNum">    1115 </span>            : 
+<span class="lineNum">    1116 </span><span class="lineCov">         14 :     brin_memtuple_initialize(state-&gt;bs_dtuple, state-&gt;bs_bdesc);</span>
+<span class="lineNum">    1117 </span>            : 
+<span class="lineNum">    1118 </span><span class="lineCov">         14 :     return state;</span>
+<span class="lineNum">    1119 </span>            : }
+<span class="lineNum">    1120 </span>            : 
+<span class="lineNum">    1121 </span>            : /*
+<span class="lineNum">    1122 </span>            :  * Release resources associated with a BrinBuildState.
+<a name="1123"><span class="lineNum">    1123 </span>            :  */</a>
+<span class="lineNum">    1124 </span>            : static void
+<span class="lineNum">    1125 </span><span class="lineCov">         14 : terminate_brin_buildstate(BrinBuildState *state)</span>
+<span class="lineNum">    1126 </span>            : {
+<span class="lineNum">    1127 </span>            :     /*
+<span class="lineNum">    1128 </span>            :      * Release the last index buffer used.  We might as well ensure that
+<span class="lineNum">    1129 </span>            :      * whatever free space remains in that page is available in FSM, too.
+<span class="lineNum">    1130 </span>            :      */
+<span class="lineNum">    1131 </span><span class="lineCov">         14 :     if (!BufferIsInvalid(state-&gt;bs_currentInsertBuf))</span>
+<span class="lineNum">    1132 </span>            :     {
+<span class="lineNum">    1133 </span>            :         Page        page;
+<span class="lineNum">    1134 </span>            :         Size        freespace;
+<span class="lineNum">    1135 </span>            :         BlockNumber blk;
+<span class="lineNum">    1136 </span>            : 
+<span class="lineNum">    1137 </span><span class="lineCov">          8 :         page = BufferGetPage(state-&gt;bs_currentInsertBuf);</span>
+<span class="lineNum">    1138 </span><span class="lineCov">          8 :         freespace = PageGetFreeSpace(page);</span>
+<span class="lineNum">    1139 </span><span class="lineCov">          8 :         blk = BufferGetBlockNumber(state-&gt;bs_currentInsertBuf);</span>
+<span class="lineNum">    1140 </span><span class="lineCov">          8 :         ReleaseBuffer(state-&gt;bs_currentInsertBuf);</span>
+<span class="lineNum">    1141 </span><span class="lineCov">          8 :         RecordPageWithFreeSpace(state-&gt;bs_irel, blk, freespace);</span>
+<span class="lineNum">    1142 </span><span class="lineCov">          8 :         FreeSpaceMapVacuumRange(state-&gt;bs_irel, blk, blk + 1);</span>
+<span class="lineNum">    1143 </span>            :     }
+<span class="lineNum">    1144 </span>            : 
+<span class="lineNum">    1145 </span><span class="lineCov">         14 :     brin_free_desc(state-&gt;bs_bdesc);</span>
+<span class="lineNum">    1146 </span><span class="lineCov">         14 :     pfree(state-&gt;bs_dtuple);</span>
+<span class="lineNum">    1147 </span><span class="lineCov">         14 :     pfree(state);</span>
+<span class="lineNum">    1148 </span><span class="lineCov">         14 : }</span>
+<span class="lineNum">    1149 </span>            : 
+<span class="lineNum">    1150 </span>            : /*
+<span class="lineNum">    1151 </span>            :  * On the given BRIN index, summarize the heap page range that corresponds
+<span class="lineNum">    1152 </span>            :  * to the heap block number given.
+<span class="lineNum">    1153 </span>            :  *
+<span class="lineNum">    1154 </span>            :  * This routine can run in parallel with insertions into the heap.  To avoid
+<span class="lineNum">    1155 </span>            :  * missing those values from the summary tuple, we first insert a placeholder
+<span class="lineNum">    1156 </span>            :  * index tuple into the index, then execute the heap scan; transactions
+<span class="lineNum">    1157 </span>            :  * concurrent with the scan update the placeholder tuple.  After the scan, we
+<span class="lineNum">    1158 </span>            :  * union the placeholder tuple with the one computed by this routine.  The
+<span class="lineNum">    1159 </span>            :  * update of the index value happens in a loop, so that if somebody updates
+<span class="lineNum">    1160 </span>            :  * the placeholder tuple after we read it, we detect the case and try again.
+<span class="lineNum">    1161 </span>            :  * This ensures that the concurrently inserted tuples are not lost.
+<span class="lineNum">    1162 </span>            :  *
+<span class="lineNum">    1163 </span>            :  * A further corner case is this routine being asked to summarize the partial
+<span class="lineNum">    1164 </span>            :  * range at the end of the table.  heapNumBlocks is the (possibly outdated)
+<span class="lineNum">    1165 </span>            :  * table size; if we notice that the requested range lies beyond that size,
+<span class="lineNum">    1166 </span>            :  * we re-compute the table size after inserting the placeholder tuple, to
+<span class="lineNum">    1167 </span>            :  * avoid missing pages that were appended recently.
+<a name="1168"><span class="lineNum">    1168 </span>            :  */</a>
+<span class="lineNum">    1169 </span>            : static void
+<span class="lineNum">    1170 </span><span class="lineCov">         16 : summarize_range(IndexInfo *indexInfo, BrinBuildState *state, Relation heapRel,</span>
+<span class="lineNum">    1171 </span>            :                 BlockNumber heapBlk, BlockNumber heapNumBlks)
+<span class="lineNum">    1172 </span>            : {
+<span class="lineNum">    1173 </span>            :     Buffer      phbuf;
+<span class="lineNum">    1174 </span>            :     BrinTuple  *phtup;
+<span class="lineNum">    1175 </span>            :     Size        phsz;
+<span class="lineNum">    1176 </span>            :     OffsetNumber offset;
+<span class="lineNum">    1177 </span>            :     BlockNumber scanNumBlks;
+<span class="lineNum">    1178 </span>            : 
+<span class="lineNum">    1179 </span>            :     /*
+<span class="lineNum">    1180 </span>            :      * Insert the placeholder tuple
+<span class="lineNum">    1181 </span>            :      */
+<span class="lineNum">    1182 </span><span class="lineCov">         16 :     phbuf = InvalidBuffer;</span>
+<span class="lineNum">    1183 </span><span class="lineCov">         16 :     phtup = brin_form_placeholder_tuple(state-&gt;bs_bdesc, heapBlk, &amp;phsz);</span>
+<span class="lineNum">    1184 </span><span class="lineCov">         16 :     offset = brin_doinsert(state-&gt;bs_irel, state-&gt;bs_pagesPerRange,</span>
+<span class="lineNum">    1185 </span>            :                            state-&gt;bs_rmAccess, &amp;phbuf,
+<span class="lineNum">    1186 </span>            :                            heapBlk, phtup, phsz);
+<span class="lineNum">    1187 </span>            : 
+<span class="lineNum">    1188 </span>            :     /*
+<span class="lineNum">    1189 </span>            :      * Compute range end.  We hold ShareUpdateExclusive lock on table, so it
+<span class="lineNum">    1190 </span>            :      * cannot shrink concurrently (but it can grow).
+<span class="lineNum">    1191 </span>            :      */
+<span class="lineNum">    1192 </span><span class="lineCov">         16 :     Assert(heapBlk % state-&gt;bs_pagesPerRange == 0);</span>
+<span class="lineNum">    1193 </span><span class="lineCov">         16 :     if (heapBlk + state-&gt;bs_pagesPerRange &gt; heapNumBlks)</span>
+<span class="lineNum">    1194 </span>            :     {
+<span class="lineNum">    1195 </span>            :         /*
+<span class="lineNum">    1196 </span>            :          * If we're asked to scan what we believe to be the final range on the
+<span class="lineNum">    1197 </span>            :          * table (i.e. a range that might be partial) we need to recompute our
+<span class="lineNum">    1198 </span>            :          * idea of what the latest page is after inserting the placeholder
+<span class="lineNum">    1199 </span>            :          * tuple.  Anyone that grows the table later will update the
+<span class="lineNum">    1200 </span>            :          * placeholder tuple, so it doesn't matter that we won't scan these
+<span class="lineNum">    1201 </span>            :          * pages ourselves.  Careful: the table might have been extended
+<span class="lineNum">    1202 </span>            :          * beyond the current range, so clamp our result.
+<span class="lineNum">    1203 </span>            :          *
+<span class="lineNum">    1204 </span>            :          * Fortunately, this should occur infrequently.
+<span class="lineNum">    1205 </span>            :          */
+<span class="lineNum">    1206 </span><span class="lineCov">          2 :         scanNumBlks = Min(RelationGetNumberOfBlocks(heapRel) - heapBlk,</span>
+<span class="lineNum">    1207 </span>            :                           state-&gt;bs_pagesPerRange);
+<span class="lineNum">    1208 </span>            :     }
+<span class="lineNum">    1209 </span>            :     else
+<span class="lineNum">    1210 </span>            :     {
+<span class="lineNum">    1211 </span>            :         /* Easy case: range is known to be complete */
+<span class="lineNum">    1212 </span><span class="lineCov">         14 :         scanNumBlks = state-&gt;bs_pagesPerRange;</span>
+<span class="lineNum">    1213 </span>            :     }
+<span class="lineNum">    1214 </span>            : 
+<span class="lineNum">    1215 </span>            :     /*
+<span class="lineNum">    1216 </span>            :      * Execute the partial heap scan covering the heap blocks in the specified
+<span class="lineNum">    1217 </span>            :      * page range, summarizing the heap tuples in it.  This scan stops just
+<span class="lineNum">    1218 </span>            :      * short of brinbuildCallback creating the new index entry.
+<span class="lineNum">    1219 </span>            :      *
+<span class="lineNum">    1220 </span>            :      * Note that it is critical we use the &quot;any visible&quot; mode of
+<span class="lineNum">    1221 </span>            :      * table_index_build_range_scan here: otherwise, we would miss tuples
+<span class="lineNum">    1222 </span>            :      * inserted by transactions that are still in progress, among other corner
+<span class="lineNum">    1223 </span>            :      * cases.
+<span class="lineNum">    1224 </span>            :      */
+<span class="lineNum">    1225 </span><span class="lineCov">         16 :     state-&gt;bs_currRangeStart = heapBlk;</span>
+<span class="lineNum">    1226 </span><span class="lineCov">         16 :     table_index_build_range_scan(heapRel, state-&gt;bs_irel, indexInfo, false, true, false,</span>
+<span class="lineNum">    1227 </span>            :                                  heapBlk, scanNumBlks,
+<span class="lineNum">    1228 </span>            :                                  brinbuildCallback, (void *) state, NULL);
+<span class="lineNum">    1229 </span>            : 
+<span class="lineNum">    1230 </span>            :     /*
+<span class="lineNum">    1231 </span>            :      * Now we update the values obtained by the scan with the placeholder
+<span class="lineNum">    1232 </span>            :      * tuple.  We do this in a loop which only terminates if we're able to
+<span class="lineNum">    1233 </span>            :      * update the placeholder tuple successfully; if we are not, this means
+<span class="lineNum">    1234 </span>            :      * somebody else modified the placeholder tuple after we read it.
+<span class="lineNum">    1235 </span>            :      */
+<span class="lineNum">    1236 </span>            :     for (;;)
+<span class="lineNum">    1237 </span>            :     {
+<span class="lineNum">    1238 </span>            :         BrinTuple  *newtup;
+<span class="lineNum">    1239 </span>            :         Size        newsize;
+<span class="lineNum">    1240 </span>            :         bool        didupdate;
+<span class="lineNum">    1241 </span>            :         bool        samepage;
+<span class="lineNum">    1242 </span>            : 
+<span class="lineNum">    1243 </span><span class="lineCov">         16 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1244 </span>            : 
+<span class="lineNum">    1245 </span>            :         /*
+<span class="lineNum">    1246 </span>            :          * Update the summary tuple and try to update.
+<span class="lineNum">    1247 </span>            :          */
+<span class="lineNum">    1248 </span><span class="lineCov">         16 :         newtup = brin_form_tuple(state-&gt;bs_bdesc,</span>
+<span class="lineNum">    1249 </span>            :                                  heapBlk, state-&gt;bs_dtuple, &amp;newsize);
+<span class="lineNum">    1250 </span><span class="lineCov">         16 :         samepage = brin_can_do_samepage_update(phbuf, phsz, newsize);</span>
+<span class="lineNum">    1251 </span><span class="lineCov">         16 :         didupdate =</span>
+<span class="lineNum">    1252 </span><span class="lineCov">         16 :             brin_doupdate(state-&gt;bs_irel, state-&gt;bs_pagesPerRange,</span>
+<span class="lineNum">    1253 </span>            :                           state-&gt;bs_rmAccess, heapBlk, phbuf, offset,
+<span class="lineNum">    1254 </span>            :                           phtup, phsz, newtup, newsize, samepage);
+<span class="lineNum">    1255 </span><span class="lineCov">         16 :         brin_free_tuple(phtup);</span>
+<span class="lineNum">    1256 </span><span class="lineCov">         16 :         brin_free_tuple(newtup);</span>
+<span class="lineNum">    1257 </span>            : 
+<span class="lineNum">    1258 </span>            :         /* If the update succeeded, we're done. */
+<span class="lineNum">    1259 </span><span class="lineCov">         16 :         if (didupdate)</span>
+<span class="lineNum">    1260 </span><span class="lineCov">         16 :             break;</span>
+<span class="lineNum">    1261 </span>            : 
+<span class="lineNum">    1262 </span>            :         /*
+<span class="lineNum">    1263 </span>            :          * If the update didn't work, it might be because somebody updated the
+<span class="lineNum">    1264 </span>            :          * placeholder tuple concurrently.  Extract the new version, union it
+<span class="lineNum">    1265 </span>            :          * with the values we have from the scan, and start over.  (There are
+<span class="lineNum">    1266 </span>            :          * other reasons for the update to fail, but it's simple to treat them
+<span class="lineNum">    1267 </span>            :          * the same.)
+<span class="lineNum">    1268 </span>            :          */
+<span class="lineNum">    1269 </span><span class="lineNoCov">          0 :         phtup = brinGetTupleForHeapBlock(state-&gt;bs_rmAccess, heapBlk, &amp;phbuf,</span>
+<span class="lineNum">    1270 </span>            :                                          &amp;offset, &amp;phsz, BUFFER_LOCK_SHARE,
+<span class="lineNum">    1271 </span>            :                                          NULL);
+<span class="lineNum">    1272 </span>            :         /* the placeholder tuple must exist */
+<span class="lineNum">    1273 </span><span class="lineNoCov">          0 :         if (phtup == NULL)</span>
+<span class="lineNum">    1274 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;missing placeholder tuple&quot;);</span>
+<span class="lineNum">    1275 </span><span class="lineNoCov">          0 :         phtup = brin_copy_tuple(phtup, phsz, NULL, NULL);</span>
+<span class="lineNum">    1276 </span><span class="lineNoCov">          0 :         LockBuffer(phbuf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">    1277 </span>            : 
+<span class="lineNum">    1278 </span>            :         /* merge it into the tuple from the heap scan */
+<span class="lineNum">    1279 </span><span class="lineNoCov">          0 :         union_tuples(state-&gt;bs_bdesc, state-&gt;bs_dtuple, phtup);</span>
+<span class="lineNum">    1280 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1281 </span>            : 
+<span class="lineNum">    1282 </span><span class="lineCov">         16 :     ReleaseBuffer(phbuf);</span>
+<span class="lineNum">    1283 </span><span class="lineCov">         16 : }</span>
+<span class="lineNum">    1284 </span>            : 
+<span class="lineNum">    1285 </span>            : /*
+<span class="lineNum">    1286 </span>            :  * Summarize page ranges that are not already summarized.  If pageRange is
+<span class="lineNum">    1287 </span>            :  * BRIN_ALL_BLOCKRANGES then the whole table is scanned; otherwise, only the
+<span class="lineNum">    1288 </span>            :  * page range containing the given heap page number is scanned.
+<span class="lineNum">    1289 </span>            :  * If include_partial is true, then the partial range at the end of the table
+<span class="lineNum">    1290 </span>            :  * is summarized, otherwise not.
+<span class="lineNum">    1291 </span>            :  *
+<span class="lineNum">    1292 </span>            :  * For each new index tuple inserted, *numSummarized (if not NULL) is
+<span class="lineNum">    1293 </span>            :  * incremented; for each existing tuple, *numExisting (if not NULL) is
+<span class="lineNum">    1294 </span>            :  * incremented.
+<a name="1295"><span class="lineNum">    1295 </span>            :  */</a>
+<span class="lineNum">    1296 </span>            : static void
+<span class="lineNum">    1297 </span><span class="lineCov">         18 : brinsummarize(Relation index, Relation heapRel, BlockNumber pageRange,</span>
+<span class="lineNum">    1298 </span>            :               bool include_partial, double *numSummarized, double *numExisting)
+<span class="lineNum">    1299 </span>            : {
+<span class="lineNum">    1300 </span>            :     BrinRevmap *revmap;
+<span class="lineNum">    1301 </span><span class="lineCov">         18 :     BrinBuildState *state = NULL;</span>
+<span class="lineNum">    1302 </span><span class="lineCov">         18 :     IndexInfo  *indexInfo = NULL;</span>
+<span class="lineNum">    1303 </span>            :     BlockNumber heapNumBlocks;
+<span class="lineNum">    1304 </span>            :     BlockNumber pagesPerRange;
+<span class="lineNum">    1305 </span>            :     Buffer      buf;
+<span class="lineNum">    1306 </span>            :     BlockNumber startBlk;
+<span class="lineNum">    1307 </span>            : 
+<span class="lineNum">    1308 </span><span class="lineCov">         18 :     revmap = brinRevmapInitialize(index, &amp;pagesPerRange, NULL);</span>
+<span class="lineNum">    1309 </span>            : 
+<span class="lineNum">    1310 </span>            :     /* determine range of pages to process */
+<span class="lineNum">    1311 </span><span class="lineCov">         18 :     heapNumBlocks = RelationGetNumberOfBlocks(heapRel);</span>
+<span class="lineNum">    1312 </span><span class="lineCov">         18 :     if (pageRange == BRIN_ALL_BLOCKRANGES)</span>
+<span class="lineNum">    1313 </span><span class="lineCov">         12 :         startBlk = 0;</span>
+<span class="lineNum">    1314 </span>            :     else
+<span class="lineNum">    1315 </span>            :     {
+<span class="lineNum">    1316 </span><span class="lineCov">          6 :         startBlk = (pageRange / pagesPerRange) * pagesPerRange;</span>
+<span class="lineNum">    1317 </span><span class="lineCov">          6 :         heapNumBlocks = Min(heapNumBlocks, startBlk + pagesPerRange);</span>
+<span class="lineNum">    1318 </span>            :     }
+<span class="lineNum">    1319 </span><span class="lineCov">         18 :     if (startBlk &gt; heapNumBlocks)</span>
+<span class="lineNum">    1320 </span>            :     {
+<span class="lineNum">    1321 </span>            :         /* Nothing to do if start point is beyond end of table */
+<span class="lineNum">    1322 </span><span class="lineNoCov">          0 :         brinRevmapTerminate(revmap);</span>
+<span class="lineNum">    1323 </span><span class="lineCov">         18 :         return;</span>
+<span class="lineNum">    1324 </span>            :     }
+<span class="lineNum">    1325 </span>            : 
+<span class="lineNum">    1326 </span>            :     /*
+<span class="lineNum">    1327 </span>            :      * Scan the revmap to find unsummarized items.
+<span class="lineNum">    1328 </span>            :      */
+<span class="lineNum">    1329 </span><span class="lineCov">         18 :     buf = InvalidBuffer;</span>
+<span class="lineNum">    1330 </span><span class="lineCov">        746 :     for (; startBlk &lt; heapNumBlocks; startBlk += pagesPerRange)</span>
+<span class="lineNum">    1331 </span>            :     {
+<span class="lineNum">    1332 </span>            :         BrinTuple  *tup;
+<span class="lineNum">    1333 </span>            :         OffsetNumber off;
+<span class="lineNum">    1334 </span>            : 
+<span class="lineNum">    1335 </span>            :         /*
+<span class="lineNum">    1336 </span>            :          * Unless requested to summarize even a partial range, go away now if
+<span class="lineNum">    1337 </span>            :          * we think the next range is partial.  Caller would pass true when it
+<span class="lineNum">    1338 </span>            :          * is typically run once bulk data loading is done
+<span class="lineNum">    1339 </span>            :          * (brin_summarize_new_values), and false when it is typically the
+<span class="lineNum">    1340 </span>            :          * result of arbitrarily-scheduled maintenance command (vacuuming).
+<span class="lineNum">    1341 </span>            :          */
+<span class="lineNum">    1342 </span><span class="lineCov">       1244 :         if (!include_partial &amp;&amp;</span>
+<span class="lineNum">    1343 </span><span class="lineCov">        512 :             (startBlk + pagesPerRange &gt; heapNumBlocks))</span>
+<span class="lineNum">    1344 </span><span class="lineCov">          4 :             break;</span>
+<span class="lineNum">    1345 </span>            : 
+<span class="lineNum">    1346 </span><span class="lineCov">        728 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1347 </span>            : 
+<span class="lineNum">    1348 </span><span class="lineCov">        728 :         tup = brinGetTupleForHeapBlock(revmap, startBlk, &amp;buf, &amp;off, NULL,</span>
+<span class="lineNum">    1349 </span>            :                                        BUFFER_LOCK_SHARE, NULL);
+<span class="lineNum">    1350 </span><span class="lineCov">        728 :         if (tup == NULL)</span>
+<span class="lineNum">    1351 </span>            :         {
+<span class="lineNum">    1352 </span>            :             /* no revmap entry for this heap range. Summarize it. */
+<span class="lineNum">    1353 </span><span class="lineCov">         16 :             if (state == NULL)</span>
+<span class="lineNum">    1354 </span>            :             {
+<span class="lineNum">    1355 </span>            :                 /* first time through */
+<span class="lineNum">    1356 </span><span class="lineCov">          6 :                 Assert(!indexInfo);</span>
+<span class="lineNum">    1357 </span><span class="lineCov">          6 :                 state = initialize_brin_buildstate(index, revmap,</span>
+<span class="lineNum">    1358 </span>            :                                                    pagesPerRange);
+<span class="lineNum">    1359 </span><span class="lineCov">          6 :                 indexInfo = BuildIndexInfo(index);</span>
+<span class="lineNum">    1360 </span>            :             }
+<span class="lineNum">    1361 </span><span class="lineCov">         16 :             summarize_range(indexInfo, state, heapRel, startBlk, heapNumBlocks);</span>
+<span class="lineNum">    1362 </span>            : 
+<span class="lineNum">    1363 </span>            :             /* and re-initialize state for the next range */
+<span class="lineNum">    1364 </span><span class="lineCov">         16 :             brin_memtuple_initialize(state-&gt;bs_dtuple, state-&gt;bs_bdesc);</span>
+<span class="lineNum">    1365 </span>            : 
+<span class="lineNum">    1366 </span><span class="lineCov">         16 :             if (numSummarized)</span>
+<span class="lineNum">    1367 </span><span class="lineCov">         16 :                 *numSummarized += 1.0;</span>
+<span class="lineNum">    1368 </span>            :         }
+<span class="lineNum">    1369 </span>            :         else
+<span class="lineNum">    1370 </span>            :         {
+<span class="lineNum">    1371 </span><span class="lineCov">        712 :             if (numExisting)</span>
+<span class="lineNum">    1372 </span><span class="lineCov">        494 :                 *numExisting += 1.0;</span>
+<span class="lineNum">    1373 </span><span class="lineCov">        712 :             LockBuffer(buf, BUFFER_LOCK_UNLOCK);</span>
+<span class="lineNum">    1374 </span>            :         }
+<span class="lineNum">    1375 </span>            :     }
+<span class="lineNum">    1376 </span>            : 
+<span class="lineNum">    1377 </span><span class="lineCov">         18 :     if (BufferIsValid(buf))</span>
+<span class="lineNum">    1378 </span><span class="lineCov">         16 :         ReleaseBuffer(buf);</span>
+<span class="lineNum">    1379 </span>            : 
+<span class="lineNum">    1380 </span>            :     /* free resources */
+<span class="lineNum">    1381 </span><span class="lineCov">         18 :     brinRevmapTerminate(revmap);</span>
+<span class="lineNum">    1382 </span><span class="lineCov">         18 :     if (state)</span>
+<span class="lineNum">    1383 </span>            :     {
+<span class="lineNum">    1384 </span><span class="lineCov">          6 :         terminate_brin_buildstate(state);</span>
+<span class="lineNum">    1385 </span><span class="lineCov">          6 :         pfree(indexInfo);</span>
+<span class="lineNum">    1386 </span>            :     }
+<span class="lineNum">    1387 </span>            : }
+<span class="lineNum">    1388 </span>            : 
+<span class="lineNum">    1389 </span>            : /*
+<span class="lineNum">    1390 </span>            :  * Given a deformed tuple in the build state, convert it into the on-disk
+<span class="lineNum">    1391 </span>            :  * format and insert it into the index, making the revmap point to it.
+<a name="1392"><span class="lineNum">    1392 </span>            :  */</a>
+<span class="lineNum">    1393 </span>            : static void
+<span class="lineNum">    1394 </span><span class="lineCov">        294 : form_and_insert_tuple(BrinBuildState *state)</span>
+<span class="lineNum">    1395 </span>            : {
+<span class="lineNum">    1396 </span>            :     BrinTuple  *tup;
+<span class="lineNum">    1397 </span>            :     Size        size;
+<span class="lineNum">    1398 </span>            : 
+<span class="lineNum">    1399 </span><span class="lineCov">        294 :     tup = brin_form_tuple(state-&gt;bs_bdesc, state-&gt;bs_currRangeStart,</span>
+<span class="lineNum">    1400 </span>            :                           state-&gt;bs_dtuple, &amp;size);
+<span class="lineNum">    1401 </span><span class="lineCov">        294 :     brin_doinsert(state-&gt;bs_irel, state-&gt;bs_pagesPerRange, state-&gt;bs_rmAccess,</span>
+<span class="lineNum">    1402 </span>            :                   &amp;state-&gt;bs_currentInsertBuf, state-&gt;bs_currRangeStart,
+<span class="lineNum">    1403 </span>            :                   tup, size);
+<span class="lineNum">    1404 </span><span class="lineCov">        294 :     state-&gt;bs_numtuples++;</span>
+<span class="lineNum">    1405 </span>            : 
+<span class="lineNum">    1406 </span><span class="lineCov">        294 :     pfree(tup);</span>
+<span class="lineNum">    1407 </span><span class="lineCov">        294 : }</span>
+<span class="lineNum">    1408 </span>            : 
+<span class="lineNum">    1409 </span>            : /*
+<span class="lineNum">    1410 </span>            :  * Given two deformed tuples, adjust the first one so that it's consistent
+<span class="lineNum">    1411 </span>            :  * with the summary values in both.
+<a name="1412"><span class="lineNum">    1412 </span>            :  */</a>
+<span class="lineNum">    1413 </span>            : static void
+<span class="lineNum">    1414 </span><span class="lineNoCov">          0 : union_tuples(BrinDesc *bdesc, BrinMemTuple *a, BrinTuple *b)</span>
+<span class="lineNum">    1415 </span>            : {
+<span class="lineNum">    1416 </span>            :     int         keyno;
+<span class="lineNum">    1417 </span>            :     BrinMemTuple *db;
+<span class="lineNum">    1418 </span>            :     MemoryContext cxt;
+<span class="lineNum">    1419 </span>            :     MemoryContext oldcxt;
+<span class="lineNum">    1420 </span>            : 
+<span class="lineNum">    1421 </span>            :     /* Use our own memory context to avoid retail pfree */
+<span class="lineNum">    1422 </span><span class="lineNoCov">          0 :     cxt = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">    1423 </span>            :                                 &quot;brin union&quot;,
+<span class="lineNum">    1424 </span>            :                                 ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">    1425 </span><span class="lineNoCov">          0 :     oldcxt = MemoryContextSwitchTo(cxt);</span>
+<span class="lineNum">    1426 </span><span class="lineNoCov">          0 :     db = brin_deform_tuple(bdesc, b, NULL);</span>
+<span class="lineNum">    1427 </span><span class="lineNoCov">          0 :     MemoryContextSwitchTo(oldcxt);</span>
+<span class="lineNum">    1428 </span>            : 
+<span class="lineNum">    1429 </span><span class="lineNoCov">          0 :     for (keyno = 0; keyno &lt; bdesc-&gt;bd_tupdesc-&gt;natts; keyno++)</span>
+<span class="lineNum">    1430 </span>            :     {
+<span class="lineNum">    1431 </span>            :         FmgrInfo   *unionFn;
+<span class="lineNum">    1432 </span><span class="lineNoCov">          0 :         BrinValues *col_a = &amp;a-&gt;bt_columns[keyno];</span>
+<span class="lineNum">    1433 </span><span class="lineNoCov">          0 :         BrinValues *col_b = &amp;db-&gt;bt_columns[keyno];</span>
+<span class="lineNum">    1434 </span>            : 
+<span class="lineNum">    1435 </span><span class="lineNoCov">          0 :         unionFn = index_getprocinfo(bdesc-&gt;bd_index, keyno + 1,</span>
+<span class="lineNum">    1436 </span>            :                                     BRIN_PROCNUM_UNION);
+<span class="lineNum">    1437 </span><span class="lineNoCov">          0 :         FunctionCall3Coll(unionFn,</span>
+<span class="lineNum">    1438 </span><span class="lineNoCov">          0 :                           bdesc-&gt;bd_index-&gt;rd_indcollation[keyno],</span>
+<span class="lineNum">    1439 </span>            :                           PointerGetDatum(bdesc),
+<span class="lineNum">    1440 </span>            :                           PointerGetDatum(col_a),
+<span class="lineNum">    1441 </span>            :                           PointerGetDatum(col_b));
+<span class="lineNum">    1442 </span>            :     }
+<span class="lineNum">    1443 </span>            : 
+<span class="lineNum">    1444 </span><span class="lineNoCov">          0 :     MemoryContextDelete(cxt);</span>
+<span class="lineNum">    1445 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1446 </span>            : 
+<span class="lineNum">    1447 </span>            : /*
+<span class="lineNum">    1448 </span>            :  * brin_vacuum_scan
+<span class="lineNum">    1449 </span>            :  *      Do a complete scan of the index during VACUUM.
+<span class="lineNum">    1450 </span>            :  *
+<span class="lineNum">    1451 </span>            :  * This routine scans the complete index looking for uncatalogued index pages,
+<span class="lineNum">    1452 </span>            :  * i.e. those that might have been lost due to a crash after index extension
+<span class="lineNum">    1453 </span>            :  * and such.
+<a name="1454"><span class="lineNum">    1454 </span>            :  */</a>
+<span class="lineNum">    1455 </span>            : static void
+<span class="lineNum">    1456 </span><span class="lineCov">          8 : brin_vacuum_scan(Relation idxrel, BufferAccessStrategy strategy)</span>
+<span class="lineNum">    1457 </span>            : {
+<span class="lineNum">    1458 </span>            :     BlockNumber nblocks;
+<span class="lineNum">    1459 </span>            :     BlockNumber blkno;
+<span class="lineNum">    1460 </span>            : 
+<span class="lineNum">    1461 </span>            :     /*
+<span class="lineNum">    1462 </span>            :      * Scan the index in physical order, and clean up any possible mess in
+<span class="lineNum">    1463 </span>            :      * each page.
+<span class="lineNum">    1464 </span>            :      */
+<span class="lineNum">    1465 </span><span class="lineCov">          8 :     nblocks = RelationGetNumberOfBlocks(idxrel);</span>
+<span class="lineNum">    1466 </span><span class="lineCov">         70 :     for (blkno = 0; blkno &lt; nblocks; blkno++)</span>
+<span class="lineNum">    1467 </span>            :     {
+<span class="lineNum">    1468 </span>            :         Buffer      buf;
+<span class="lineNum">    1469 </span>            : 
+<span class="lineNum">    1470 </span><span class="lineCov">         62 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1471 </span>            : 
+<span class="lineNum">    1472 </span><span class="lineCov">         62 :         buf = ReadBufferExtended(idxrel, MAIN_FORKNUM, blkno,</span>
+<span class="lineNum">    1473 </span>            :                                  RBM_NORMAL, strategy);
+<span class="lineNum">    1474 </span>            : 
+<span class="lineNum">    1475 </span><span class="lineCov">         62 :         brin_page_cleanup(idxrel, buf);</span>
+<span class="lineNum">    1476 </span>            : 
+<span class="lineNum">    1477 </span><span class="lineCov">         62 :         ReleaseBuffer(buf);</span>
+<span class="lineNum">    1478 </span>            :     }
+<span class="lineNum">    1479 </span>            : 
+<span class="lineNum">    1480 </span>            :     /*
+<span class="lineNum">    1481 </span>            :      * Update all upper pages in the index's FSM, as well.  This ensures not
+<span class="lineNum">    1482 </span>            :      * only that we propagate leaf-page FSM updates made by brin_page_cleanup,
+<span class="lineNum">    1483 </span>            :      * but also that any pre-existing damage or out-of-dateness is repaired.
+<span class="lineNum">    1484 </span>            :      */
+<span class="lineNum">    1485 </span><span class="lineCov">          8 :     FreeSpaceMapVacuum(idxrel);</span>
+<span class="lineNum">    1486 </span><span class="lineCov">          8 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

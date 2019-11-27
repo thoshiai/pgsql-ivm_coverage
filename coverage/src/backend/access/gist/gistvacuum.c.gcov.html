@@ -1,0 +1,768 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/gist/gistvacuum.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/gist</a> - gistvacuum.c<span style="font-size: 80%;"> (source / <a href="gistvacuum.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">176</td>
+            <td class="headerCovTableEntry">199</td>
+            <td class="headerCovTableEntryMed">88.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * gistvacuum.c
+<span class="lineNum">       4 </span>            :  *    vacuuming routines for the postgres GiST index access method.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/access/gist/gistvacuum.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/genam.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;access/gist_private.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;access/transam.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;commands/vacuum.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;lib/integerset.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;storage/indexfsm.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;storage/lmgr.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : /*
+<span class="lineNum">      28 </span>            :  * State kept across vacuum stages.
+<span class="lineNum">      29 </span>            :  */
+<span class="lineNum">      30 </span>            : typedef struct
+<span class="lineNum">      31 </span>            : {
+<span class="lineNum">      32 </span>            :     IndexBulkDeleteResult stats;    /* must be first */
+<span class="lineNum">      33 </span>            : 
+<span class="lineNum">      34 </span>            :     /*
+<span class="lineNum">      35 </span>            :      * These are used to memorize all internal and empty leaf pages in the 1st
+<span class="lineNum">      36 </span>            :      * vacuum stage.  They are used in the 2nd stage, to delete all the empty
+<span class="lineNum">      37 </span>            :      * pages.
+<span class="lineNum">      38 </span>            :      */
+<span class="lineNum">      39 </span>            :     IntegerSet *internal_page_set;
+<span class="lineNum">      40 </span>            :     IntegerSet *empty_leaf_set;
+<span class="lineNum">      41 </span>            :     MemoryContext page_set_context;
+<span class="lineNum">      42 </span>            : } GistBulkDeleteResult;
+<span class="lineNum">      43 </span>            : 
+<span class="lineNum">      44 </span>            : /* Working state needed by gistbulkdelete */
+<span class="lineNum">      45 </span>            : typedef struct
+<span class="lineNum">      46 </span>            : {
+<span class="lineNum">      47 </span>            :     IndexVacuumInfo *info;
+<span class="lineNum">      48 </span>            :     GistBulkDeleteResult *stats;
+<span class="lineNum">      49 </span>            :     IndexBulkDeleteCallback callback;
+<span class="lineNum">      50 </span>            :     void       *callback_state;
+<span class="lineNum">      51 </span>            :     GistNSN     startNSN;
+<span class="lineNum">      52 </span>            : } GistVacState;
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            : static void gistvacuumscan(IndexVacuumInfo *info, GistBulkDeleteResult *stats,
+<span class="lineNum">      55 </span>            :                            IndexBulkDeleteCallback callback, void *callback_state);
+<span class="lineNum">      56 </span>            : static void gistvacuumpage(GistVacState *vstate, BlockNumber blkno,
+<span class="lineNum">      57 </span>            :                            BlockNumber orig_blkno);
+<span class="lineNum">      58 </span>            : static void gistvacuum_delete_empty_pages(IndexVacuumInfo *info,
+<span class="lineNum">      59 </span>            :                                           GistBulkDeleteResult *stats);
+<span class="lineNum">      60 </span>            : static bool gistdeletepage(IndexVacuumInfo *info, GistBulkDeleteResult *stats,
+<span class="lineNum">      61 </span>            :                            Buffer buffer, OffsetNumber downlink,
+<span class="lineNum">      62 </span>            :                            Buffer leafBuffer);
+<span class="lineNum">      63 </span>            : 
+<a name="64"><span class="lineNum">      64 </span>            : /* allocate the 'stats' struct that's kept over vacuum stages */</a>
+<span class="lineNum">      65 </span>            : static GistBulkDeleteResult *
+<span class="lineNum">      66 </span><span class="lineCov">         20 : create_GistBulkDeleteResult(void)</span>
+<span class="lineNum">      67 </span>            : {
+<span class="lineNum">      68 </span>            :     GistBulkDeleteResult *gist_stats;
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span><span class="lineCov">         20 :     gist_stats = (GistBulkDeleteResult *) palloc0(sizeof(GistBulkDeleteResult));</span>
+<span class="lineNum">      71 </span><span class="lineCov">         20 :     gist_stats-&gt;page_set_context =</span>
+<span class="lineNum">      72 </span><span class="lineCov">         20 :         GenerationContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">      73 </span>            :                                 &quot;GiST VACUUM page set context&quot;,
+<span class="lineNum">      74 </span>            :                                 16 * 1024);
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span><span class="lineCov">         20 :     return gist_stats;</span>
+<span class="lineNum">      77 </span>            : }
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            : /*
+<span class="lineNum">      80 </span>            :  * VACUUM bulkdelete stage: remove index entries.
+<a name="81"><span class="lineNum">      81 </span>            :  */</a>
+<span class="lineNum">      82 </span>            : IndexBulkDeleteResult *
+<span class="lineNum">      83 </span><span class="lineCov">          8 : gistbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,</span>
+<span class="lineNum">      84 </span>            :                IndexBulkDeleteCallback callback, void *callback_state)
+<span class="lineNum">      85 </span>            : {
+<span class="lineNum">      86 </span><span class="lineCov">          8 :     GistBulkDeleteResult *gist_stats = (GistBulkDeleteResult *) stats;</span>
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            :     /* allocate stats if first time through, else re-use existing struct */
+<span class="lineNum">      89 </span><span class="lineCov">          8 :     if (gist_stats == NULL)</span>
+<span class="lineNum">      90 </span><span class="lineCov">          8 :         gist_stats = create_GistBulkDeleteResult();</span>
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span><span class="lineCov">          8 :     gistvacuumscan(info, gist_stats, callback, callback_state);</span>
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span><span class="lineCov">          8 :     return (IndexBulkDeleteResult *) gist_stats;</span>
+<span class="lineNum">      95 </span>            : }
+<span class="lineNum">      96 </span>            : 
+<span class="lineNum">      97 </span>            : /*
+<span class="lineNum">      98 </span>            :  * VACUUM cleanup stage: delete empty pages, and update index statistics.
+<a name="99"><span class="lineNum">      99 </span>            :  */</a>
+<span class="lineNum">     100 </span>            : IndexBulkDeleteResult *
+<span class="lineNum">     101 </span><span class="lineCov">         22 : gistvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)</span>
+<span class="lineNum">     102 </span>            : {
+<span class="lineNum">     103 </span><span class="lineCov">         22 :     GistBulkDeleteResult *gist_stats = (GistBulkDeleteResult *) stats;</span>
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span>            :     /* No-op in ANALYZE ONLY mode */
+<span class="lineNum">     106 </span><span class="lineCov">         22 :     if (info-&gt;analyze_only)</span>
+<span class="lineNum">     107 </span><span class="lineCov">          4 :         return stats;</span>
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span>            :     /*
+<span class="lineNum">     110 </span>            :      * If gistbulkdelete was called, we need not do anything, just return the
+<span class="lineNum">     111 </span>            :      * stats from the latest gistbulkdelete call.  If it wasn't called, we
+<span class="lineNum">     112 </span>            :      * still need to do a pass over the index, to obtain index statistics.
+<span class="lineNum">     113 </span>            :      */
+<span class="lineNum">     114 </span><span class="lineCov">         18 :     if (gist_stats == NULL)</span>
+<span class="lineNum">     115 </span>            :     {
+<span class="lineNum">     116 </span><span class="lineCov">         12 :         gist_stats = create_GistBulkDeleteResult();</span>
+<span class="lineNum">     117 </span><span class="lineCov">         12 :         gistvacuumscan(info, gist_stats, NULL, NULL);</span>
+<span class="lineNum">     118 </span>            :     }
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            :     /*
+<span class="lineNum">     121 </span>            :      * If we saw any empty pages, try to unlink them from the tree so that
+<span class="lineNum">     122 </span>            :      * they can be reused.
+<span class="lineNum">     123 </span>            :      */
+<span class="lineNum">     124 </span><span class="lineCov">         18 :     gistvacuum_delete_empty_pages(info, gist_stats);</span>
+<span class="lineNum">     125 </span>            : 
+<span class="lineNum">     126 </span>            :     /* we don't need the internal and empty page sets anymore */
+<span class="lineNum">     127 </span><span class="lineCov">         18 :     MemoryContextDelete(gist_stats-&gt;page_set_context);</span>
+<span class="lineNum">     128 </span><span class="lineCov">         18 :     gist_stats-&gt;page_set_context = NULL;</span>
+<span class="lineNum">     129 </span><span class="lineCov">         18 :     gist_stats-&gt;internal_page_set = NULL;</span>
+<span class="lineNum">     130 </span><span class="lineCov">         18 :     gist_stats-&gt;empty_leaf_set = NULL;</span>
+<span class="lineNum">     131 </span>            : 
+<span class="lineNum">     132 </span>            :     /*
+<span class="lineNum">     133 </span>            :      * It's quite possible for us to be fooled by concurrent page splits into
+<span class="lineNum">     134 </span>            :      * double-counting some index tuples, so disbelieve any total that exceeds
+<span class="lineNum">     135 </span>            :      * the underlying heap's count ... if we know that accurately.  Otherwise
+<span class="lineNum">     136 </span>            :      * this might just make matters worse.
+<span class="lineNum">     137 </span>            :      */
+<span class="lineNum">     138 </span><span class="lineCov">         18 :     if (!info-&gt;estimated_count)</span>
+<span class="lineNum">     139 </span>            :     {
+<span class="lineNum">     140 </span><span class="lineCov">         18 :         if (gist_stats-&gt;stats.num_index_tuples &gt; info-&gt;num_heap_tuples)</span>
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 :             gist_stats-&gt;stats.num_index_tuples = info-&gt;num_heap_tuples;</span>
+<span class="lineNum">     142 </span>            :     }
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span><span class="lineCov">         18 :     return (IndexBulkDeleteResult *) gist_stats;</span>
+<span class="lineNum">     145 </span>            : }
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            : /*
+<span class="lineNum">     148 </span>            :  * gistvacuumscan --- scan the index for VACUUMing purposes
+<span class="lineNum">     149 </span>            :  *
+<span class="lineNum">     150 </span>            :  * This scans the index for leaf tuples that are deletable according to the
+<span class="lineNum">     151 </span>            :  * vacuum callback, and updates the stats.  Both btbulkdelete and
+<span class="lineNum">     152 </span>            :  * btvacuumcleanup invoke this (the latter only if no btbulkdelete call
+<span class="lineNum">     153 </span>            :  * occurred).
+<span class="lineNum">     154 </span>            :  *
+<span class="lineNum">     155 </span>            :  * This also makes note of any empty leaf pages, as well as all internal
+<span class="lineNum">     156 </span>            :  * pages.  The second stage, gistvacuum_delete_empty_pages(), needs that
+<span class="lineNum">     157 </span>            :  * information.  Any deleted pages are added directly to the free space map.
+<span class="lineNum">     158 </span>            :  * (They should've been added there when they were originally deleted, already,
+<span class="lineNum">     159 </span>            :  * but it's possible that the FSM was lost at a crash, for example.)
+<span class="lineNum">     160 </span>            :  *
+<span class="lineNum">     161 </span>            :  * The caller is responsible for initially allocating/zeroing a stats struct.
+<a name="162"><span class="lineNum">     162 </span>            :  */</a>
+<span class="lineNum">     163 </span>            : static void
+<span class="lineNum">     164 </span><span class="lineCov">         20 : gistvacuumscan(IndexVacuumInfo *info, GistBulkDeleteResult *stats,</span>
+<span class="lineNum">     165 </span>            :                IndexBulkDeleteCallback callback, void *callback_state)
+<span class="lineNum">     166 </span>            : {
+<span class="lineNum">     167 </span><span class="lineCov">         20 :     Relation    rel = info-&gt;index;</span>
+<span class="lineNum">     168 </span>            :     GistVacState vstate;
+<span class="lineNum">     169 </span>            :     BlockNumber num_pages;
+<span class="lineNum">     170 </span>            :     bool        needLock;
+<span class="lineNum">     171 </span>            :     BlockNumber blkno;
+<span class="lineNum">     172 </span>            :     MemoryContext oldctx;
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span>            :     /*
+<span class="lineNum">     175 </span>            :      * Reset counts that will be incremented during the scan; needed in case
+<span class="lineNum">     176 </span>            :      * of multiple scans during a single VACUUM command.
+<span class="lineNum">     177 </span>            :      */
+<span class="lineNum">     178 </span><span class="lineCov">         20 :     stats-&gt;stats.estimated_count = false;</span>
+<span class="lineNum">     179 </span><span class="lineCov">         20 :     stats-&gt;stats.num_index_tuples = 0;</span>
+<span class="lineNum">     180 </span><span class="lineCov">         20 :     stats-&gt;stats.pages_deleted = 0;</span>
+<span class="lineNum">     181 </span><span class="lineCov">         20 :     stats-&gt;stats.pages_free = 0;</span>
+<span class="lineNum">     182 </span><span class="lineCov">         20 :     MemoryContextReset(stats-&gt;page_set_context);</span>
+<span class="lineNum">     183 </span>            : 
+<span class="lineNum">     184 </span>            :     /*
+<span class="lineNum">     185 </span>            :      * Create the integer sets to remember all the internal and the empty leaf
+<span class="lineNum">     186 </span>            :      * pages in page_set_context.  Internally, the integer set will remember
+<span class="lineNum">     187 </span>            :      * this context so that the subsequent allocations for these integer sets
+<span class="lineNum">     188 </span>            :      * will be done from the same context.
+<span class="lineNum">     189 </span>            :      */
+<span class="lineNum">     190 </span><span class="lineCov">         20 :     oldctx = MemoryContextSwitchTo(stats-&gt;page_set_context);</span>
+<span class="lineNum">     191 </span><span class="lineCov">         20 :     stats-&gt;internal_page_set = intset_create();</span>
+<span class="lineNum">     192 </span><span class="lineCov">         20 :     stats-&gt;empty_leaf_set = intset_create();</span>
+<span class="lineNum">     193 </span><span class="lineCov">         20 :     MemoryContextSwitchTo(oldctx);</span>
+<span class="lineNum">     194 </span>            : 
+<span class="lineNum">     195 </span>            :     /* Set up info to pass down to gistvacuumpage */
+<span class="lineNum">     196 </span><span class="lineCov">         20 :     vstate.info = info;</span>
+<span class="lineNum">     197 </span><span class="lineCov">         20 :     vstate.stats = stats;</span>
+<span class="lineNum">     198 </span><span class="lineCov">         20 :     vstate.callback = callback;</span>
+<span class="lineNum">     199 </span><span class="lineCov">         20 :     vstate.callback_state = callback_state;</span>
+<span class="lineNum">     200 </span><span class="lineCov">         20 :     if (RelationNeedsWAL(rel))</span>
+<span class="lineNum">     201 </span><span class="lineCov">         20 :         vstate.startNSN = GetInsertRecPtr();</span>
+<span class="lineNum">     202 </span>            :     else
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :         vstate.startNSN = gistGetFakeLSN(rel);</span>
+<span class="lineNum">     204 </span>            : 
+<span class="lineNum">     205 </span>            :     /*
+<span class="lineNum">     206 </span>            :      * The outer loop iterates over all index pages, in physical order (we
+<span class="lineNum">     207 </span>            :      * hope the kernel will cooperate in providing read-ahead for speed).  It
+<span class="lineNum">     208 </span>            :      * is critical that we visit all leaf pages, including ones added after we
+<span class="lineNum">     209 </span>            :      * start the scan, else we might fail to delete some deletable tuples.
+<span class="lineNum">     210 </span>            :      * Hence, we must repeatedly check the relation length.  We must acquire
+<span class="lineNum">     211 </span>            :      * the relation-extension lock while doing so to avoid a race condition:
+<span class="lineNum">     212 </span>            :      * if someone else is extending the relation, there is a window where
+<span class="lineNum">     213 </span>            :      * bufmgr/smgr have created a new all-zero page but it hasn't yet been
+<span class="lineNum">     214 </span>            :      * write-locked by gistNewBuffer().  If we manage to scan such a page
+<span class="lineNum">     215 </span>            :      * here, we'll improperly assume it can be recycled.  Taking the lock
+<span class="lineNum">     216 </span>            :      * synchronizes things enough to prevent a problem: either num_pages won't
+<span class="lineNum">     217 </span>            :      * include the new page, or gistNewBuffer already has write lock on the
+<span class="lineNum">     218 </span>            :      * buffer and it will be fully initialized before we can examine it.  (See
+<span class="lineNum">     219 </span>            :      * also vacuumlazy.c, which has the same issue.)  Also, we need not worry
+<span class="lineNum">     220 </span>            :      * if a page is added immediately after we look; the page splitting code
+<span class="lineNum">     221 </span>            :      * already has write-lock on the left page before it adds a right page, so
+<span class="lineNum">     222 </span>            :      * we must already have processed any tuples due to be moved into such a
+<span class="lineNum">     223 </span>            :      * page.
+<span class="lineNum">     224 </span>            :      *
+<span class="lineNum">     225 </span>            :      * We can skip locking for new or temp relations, however, since no one
+<span class="lineNum">     226 </span>            :      * else could be accessing them.
+<span class="lineNum">     227 </span>            :      */
+<span class="lineNum">     228 </span><span class="lineCov">         20 :     needLock = !RELATION_IS_LOCAL(rel);</span>
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span><span class="lineCov">         20 :     blkno = GIST_ROOT_BLKNO;</span>
+<span class="lineNum">     231 </span>            :     for (;;)
+<span class="lineNum">     232 </span>            :     {
+<span class="lineNum">     233 </span>            :         /* Get the current relation length */
+<span class="lineNum">     234 </span><span class="lineCov">         40 :         if (needLock)</span>
+<span class="lineNum">     235 </span><span class="lineCov">         40 :             LockRelationForExtension(rel, ExclusiveLock);</span>
+<span class="lineNum">     236 </span><span class="lineCov">         40 :         num_pages = RelationGetNumberOfBlocks(rel);</span>
+<span class="lineNum">     237 </span><span class="lineCov">         40 :         if (needLock)</span>
+<span class="lineNum">     238 </span><span class="lineCov">         40 :             UnlockRelationForExtension(rel, ExclusiveLock);</span>
+<span class="lineNum">     239 </span>            : 
+<span class="lineNum">     240 </span>            :         /* Quit if we've scanned the whole relation */
+<span class="lineNum">     241 </span><span class="lineCov">         40 :         if (blkno &gt;= num_pages)</span>
+<span class="lineNum">     242 </span><span class="lineCov">         20 :             break;</span>
+<span class="lineNum">     243 </span>            :         /* Iterate over pages, then loop back to recheck length */
+<span class="lineNum">     244 </span><span class="lineCov">       1706 :         for (; blkno &lt; num_pages; blkno++)</span>
+<span class="lineNum">     245 </span><span class="lineCov">       1686 :             gistvacuumpage(&amp;vstate, blkno, blkno);</span>
+<span class="lineNum">     246 </span><span class="lineCov">         20 :     }</span>
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span>            :     /*
+<span class="lineNum">     249 </span>            :      * If we found any recyclable pages (and recorded them in the FSM), then
+<span class="lineNum">     250 </span>            :      * forcibly update the upper-level FSM pages to ensure that searchers can
+<span class="lineNum">     251 </span>            :      * find them.  It's possible that the pages were also found during
+<span class="lineNum">     252 </span>            :      * previous scans and so this is a waste of time, but it's cheap enough
+<span class="lineNum">     253 </span>            :      * relative to scanning the index that it shouldn't matter much, and
+<span class="lineNum">     254 </span>            :      * making sure that free pages are available sooner not later seems
+<span class="lineNum">     255 </span>            :      * worthwhile.
+<span class="lineNum">     256 </span>            :      *
+<span class="lineNum">     257 </span>            :      * Note that if no recyclable pages exist, we don't bother vacuuming the
+<span class="lineNum">     258 </span>            :      * FSM at all.
+<span class="lineNum">     259 </span>            :      */
+<span class="lineNum">     260 </span><span class="lineCov">         20 :     if (stats-&gt;stats.pages_free &gt; 0)</span>
+<span class="lineNum">     261 </span><span class="lineNoCov">          0 :         IndexFreeSpaceMapVacuum(rel);</span>
+<span class="lineNum">     262 </span>            : 
+<span class="lineNum">     263 </span>            :     /* update statistics */
+<span class="lineNum">     264 </span><span class="lineCov">         20 :     stats-&gt;stats.num_pages = num_pages;</span>
+<span class="lineNum">     265 </span><span class="lineCov">         20 : }</span>
+<span class="lineNum">     266 </span>            : 
+<span class="lineNum">     267 </span>            : /*
+<span class="lineNum">     268 </span>            :  * gistvacuumpage --- VACUUM one page
+<span class="lineNum">     269 </span>            :  *
+<span class="lineNum">     270 </span>            :  * This processes a single page for gistbulkdelete().  In some cases we
+<span class="lineNum">     271 </span>            :  * must go back and re-examine previously-scanned pages; this routine
+<span class="lineNum">     272 </span>            :  * recurses when necessary to handle that case.
+<span class="lineNum">     273 </span>            :  *
+<span class="lineNum">     274 </span>            :  * blkno is the page to process.  orig_blkno is the highest block number
+<span class="lineNum">     275 </span>            :  * reached by the outer gistvacuumscan loop (the same as blkno, unless we
+<span class="lineNum">     276 </span>            :  * are recursing to re-examine a previous page).
+<a name="277"><span class="lineNum">     277 </span>            :  */</a>
+<span class="lineNum">     278 </span>            : static void
+<span class="lineNum">     279 </span><span class="lineCov">       1686 : gistvacuumpage(GistVacState *vstate, BlockNumber blkno, BlockNumber orig_blkno)</span>
+<span class="lineNum">     280 </span>            : {
+<span class="lineNum">     281 </span><span class="lineCov">       1686 :     GistBulkDeleteResult *stats = vstate-&gt;stats;</span>
+<span class="lineNum">     282 </span><span class="lineCov">       1686 :     IndexVacuumInfo *info = vstate-&gt;info;</span>
+<span class="lineNum">     283 </span><span class="lineCov">       1686 :     IndexBulkDeleteCallback callback = vstate-&gt;callback;</span>
+<span class="lineNum">     284 </span><span class="lineCov">       1686 :     void       *callback_state = vstate-&gt;callback_state;</span>
+<span class="lineNum">     285 </span><span class="lineCov">       1686 :     Relation    rel = info-&gt;index;</span>
+<span class="lineNum">     286 </span>            :     Buffer      buffer;
+<span class="lineNum">     287 </span>            :     Page        page;
+<span class="lineNum">     288 </span>            :     BlockNumber recurse_to;
+<span class="lineNum">     289 </span>            : 
+<span class="lineNum">     290 </span>            : restart:
+<span class="lineNum">     291 </span><span class="lineCov">       1686 :     recurse_to = InvalidBlockNumber;</span>
+<span class="lineNum">     292 </span>            : 
+<span class="lineNum">     293 </span>            :     /* call vacuum_delay_point while not holding any buffer lock */
+<span class="lineNum">     294 </span><span class="lineCov">       1686 :     vacuum_delay_point();</span>
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span><span class="lineCov">       1686 :     buffer = ReadBufferExtended(rel, MAIN_FORKNUM, blkno, RBM_NORMAL,</span>
+<span class="lineNum">     297 </span>            :                                 info-&gt;strategy);
+<span class="lineNum">     298 </span>            : 
+<span class="lineNum">     299 </span>            :     /*
+<span class="lineNum">     300 </span>            :      * We are not going to stay here for a long time, aggressively grab an
+<span class="lineNum">     301 </span>            :      * exclusive lock.
+<span class="lineNum">     302 </span>            :      */
+<span class="lineNum">     303 </span><span class="lineCov">       1686 :     LockBuffer(buffer, GIST_EXCLUSIVE);</span>
+<span class="lineNum">     304 </span><span class="lineCov">       1686 :     page = (Page) BufferGetPage(buffer);</span>
+<span class="lineNum">     305 </span>            : 
+<span class="lineNum">     306 </span><span class="lineCov">       1686 :     if (gistPageRecyclable(page))</span>
+<span class="lineNum">     307 </span>            :     {
+<span class="lineNum">     308 </span>            :         /* Okay to recycle this page */
+<span class="lineNum">     309 </span><span class="lineNoCov">          0 :         RecordFreeIndexPage(rel, blkno);</span>
+<span class="lineNum">     310 </span><span class="lineNoCov">          0 :         stats-&gt;stats.pages_free++;</span>
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :         stats-&gt;stats.pages_deleted++;</span>
+<span class="lineNum">     312 </span>            :     }
+<span class="lineNum">     313 </span><span class="lineCov">       1686 :     else if (GistPageIsDeleted(page))</span>
+<span class="lineNum">     314 </span>            :     {
+<span class="lineNum">     315 </span>            :         /* Already deleted, but can't recycle yet */
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :         stats-&gt;stats.pages_deleted++;</span>
+<span class="lineNum">     317 </span>            :     }
+<span class="lineNum">     318 </span><span class="lineCov">       1686 :     else if (GistPageIsLeaf(page))</span>
+<span class="lineNum">     319 </span>            :     {
+<span class="lineNum">     320 </span>            :         OffsetNumber todelete[MaxOffsetNumber];
+<span class="lineNum">     321 </span><span class="lineCov">       1646 :         int         ntodelete = 0;</span>
+<span class="lineNum">     322 </span>            :         int         nremain;
+<span class="lineNum">     323 </span><span class="lineCov">       1646 :         GISTPageOpaque opaque = GistPageGetOpaque(page);</span>
+<span class="lineNum">     324 </span><span class="lineCov">       1646 :         OffsetNumber maxoff = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span>            :         /*
+<span class="lineNum">     327 </span>            :          * Check whether we need to recurse back to earlier pages.  What we
+<span class="lineNum">     328 </span>            :          * are concerned about is a page split that happened since we started
+<span class="lineNum">     329 </span>            :          * the vacuum scan.  If the split moved some tuples to a lower page
+<span class="lineNum">     330 </span>            :          * then we might have missed 'em.  If so, set up for tail recursion.
+<span class="lineNum">     331 </span>            :          *
+<span class="lineNum">     332 </span>            :          * This is similar to the checks we do during searches, when following
+<span class="lineNum">     333 </span>            :          * a downlink, but we don't need to jump to higher-numbered pages,
+<span class="lineNum">     334 </span>            :          * because we will process them later, anyway.
+<span class="lineNum">     335 </span>            :          */
+<span class="lineNum">     336 </span><span class="lineCov">       3292 :         if ((GistFollowRight(page) ||</span>
+<span class="lineNum">     337 </span><span class="lineCov">       1646 :              vstate-&gt;startNSN &lt; GistPageGetNSN(page)) &amp;&amp;</span>
+<span class="lineNum">     338 </span><span class="lineNoCov">          0 :             (opaque-&gt;rightlink != InvalidBlockNumber) &amp;&amp;</span>
+<span class="lineNum">     339 </span><span class="lineNoCov">          0 :             (opaque-&gt;rightlink &lt; orig_blkno))</span>
+<span class="lineNum">     340 </span>            :         {
+<span class="lineNum">     341 </span><span class="lineNoCov">          0 :             recurse_to = opaque-&gt;rightlink;</span>
+<span class="lineNum">     342 </span>            :         }
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span>            :         /*
+<span class="lineNum">     345 </span>            :          * Scan over all items to see which ones need to be deleted according
+<span class="lineNum">     346 </span>            :          * to the callback function.
+<span class="lineNum">     347 </span>            :          */
+<span class="lineNum">     348 </span><span class="lineCov">       1646 :         if (callback)</span>
+<span class="lineNum">     349 </span>            :         {
+<span class="lineNum">     350 </span>            :             OffsetNumber off;
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span><span class="lineCov">      42210 :             for (off = FirstOffsetNumber;</span>
+<span class="lineNum">     353 </span>            :                  off &lt;= maxoff;
+<span class="lineNum">     354 </span><span class="lineCov">      40038 :                  off = OffsetNumberNext(off))</span>
+<span class="lineNum">     355 </span>            :             {
+<span class="lineNum">     356 </span><span class="lineCov">      40038 :                 ItemId      iid = PageGetItemId(page, off);</span>
+<span class="lineNum">     357 </span><span class="lineCov">      40038 :                 IndexTuple  idxtuple = (IndexTuple) PageGetItem(page, iid);</span>
+<span class="lineNum">     358 </span>            : 
+<span class="lineNum">     359 </span><span class="lineCov">      40038 :                 if (callback(&amp;(idxtuple-&gt;t_tid), callback_state))</span>
+<span class="lineNum">     360 </span><span class="lineCov">      35006 :                     todelete[ntodelete++] = off;</span>
+<span class="lineNum">     361 </span>            :             }
+<span class="lineNum">     362 </span>            :         }
+<span class="lineNum">     363 </span>            : 
+<span class="lineNum">     364 </span>            :         /*
+<span class="lineNum">     365 </span>            :          * Apply any needed deletes.  We issue just one WAL record per page,
+<span class="lineNum">     366 </span>            :          * so as to minimize WAL traffic.
+<span class="lineNum">     367 </span>            :          */
+<span class="lineNum">     368 </span><span class="lineCov">       1646 :         if (ntodelete &gt; 0)</span>
+<span class="lineNum">     369 </span>            :         {
+<span class="lineNum">     370 </span><span class="lineCov">       1084 :             START_CRIT_SECTION();</span>
+<span class="lineNum">     371 </span>            : 
+<span class="lineNum">     372 </span><span class="lineCov">       1084 :             MarkBufferDirty(buffer);</span>
+<span class="lineNum">     373 </span>            : 
+<span class="lineNum">     374 </span><span class="lineCov">       1084 :             PageIndexMultiDelete(page, todelete, ntodelete);</span>
+<span class="lineNum">     375 </span><span class="lineCov">       1084 :             GistMarkTuplesDeleted(page);</span>
+<span class="lineNum">     376 </span>            : 
+<span class="lineNum">     377 </span><span class="lineCov">       1084 :             if (RelationNeedsWAL(rel))</span>
+<span class="lineNum">     378 </span>            :             {
+<span class="lineNum">     379 </span>            :                 XLogRecPtr  recptr;
+<span class="lineNum">     380 </span>            : 
+<span class="lineNum">     381 </span><span class="lineCov">       1084 :                 recptr = gistXLogUpdate(buffer,</span>
+<span class="lineNum">     382 </span>            :                                         todelete, ntodelete,
+<span class="lineNum">     383 </span>            :                                         NULL, 0, InvalidBuffer);
+<span class="lineNum">     384 </span><span class="lineCov">       1084 :                 PageSetLSN(page, recptr);</span>
+<span class="lineNum">     385 </span>            :             }
+<span class="lineNum">     386 </span>            :             else
+<span class="lineNum">     387 </span><span class="lineNoCov">          0 :                 PageSetLSN(page, gistGetFakeLSN(rel));</span>
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span><span class="lineCov">       1084 :             END_CRIT_SECTION();</span>
+<span class="lineNum">     390 </span>            : 
+<span class="lineNum">     391 </span><span class="lineCov">       1084 :             stats-&gt;stats.tuples_removed += ntodelete;</span>
+<span class="lineNum">     392 </span>            :             /* must recompute maxoff */
+<span class="lineNum">     393 </span><span class="lineCov">       1084 :             maxoff = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">     394 </span>            :         }
+<span class="lineNum">     395 </span>            : 
+<span class="lineNum">     396 </span><span class="lineCov">       1646 :         nremain = maxoff - FirstOffsetNumber + 1;</span>
+<span class="lineNum">     397 </span><span class="lineCov">       1646 :         if (nremain == 0)</span>
+<span class="lineNum">     398 </span>            :         {
+<span class="lineNum">     399 </span>            :             /*
+<span class="lineNum">     400 </span>            :              * The page is now completely empty.  Remember its block number,
+<span class="lineNum">     401 </span>            :              * so that we will try to delete the page in the second stage.
+<span class="lineNum">     402 </span>            :              *
+<span class="lineNum">     403 </span>            :              * Skip this when recursing, because IntegerSet requires that the
+<span class="lineNum">     404 </span>            :              * values are added in ascending order.  The next VACUUM will pick
+<span class="lineNum">     405 </span>            :              * it up.
+<span class="lineNum">     406 </span>            :              */
+<span class="lineNum">     407 </span><span class="lineCov">        538 :             if (blkno == orig_blkno)</span>
+<span class="lineNum">     408 </span><span class="lineCov">        538 :                 intset_add_member(stats-&gt;empty_leaf_set, blkno);</span>
+<span class="lineNum">     409 </span>            :         }
+<span class="lineNum">     410 </span>            :         else
+<span class="lineNum">     411 </span><span class="lineCov">       1108 :             stats-&gt;stats.num_index_tuples += nremain;</span>
+<span class="lineNum">     412 </span>            :     }
+<span class="lineNum">     413 </span>            :     else
+<span class="lineNum">     414 </span>            :     {
+<span class="lineNum">     415 </span>            :         /*
+<span class="lineNum">     416 </span>            :          * On an internal page, check for &quot;invalid tuples&quot;, left behind by an
+<span class="lineNum">     417 </span>            :          * incomplete page split on PostgreSQL 9.0 or below.  These are not
+<span class="lineNum">     418 </span>            :          * created by newer PostgreSQL versions, but unfortunately, there is
+<span class="lineNum">     419 </span>            :          * no version number anywhere in a GiST index, so we don't know
+<span class="lineNum">     420 </span>            :          * whether this index might still contain invalid tuples or not.
+<span class="lineNum">     421 </span>            :          */
+<span class="lineNum">     422 </span><span class="lineCov">         40 :         OffsetNumber maxoff = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">     423 </span>            :         OffsetNumber off;
+<span class="lineNum">     424 </span>            : 
+<span class="lineNum">     425 </span><span class="lineCov">       1746 :         for (off = FirstOffsetNumber;</span>
+<span class="lineNum">     426 </span>            :              off &lt;= maxoff;
+<span class="lineNum">     427 </span><span class="lineCov">       1666 :              off = OffsetNumberNext(off))</span>
+<span class="lineNum">     428 </span>            :         {
+<span class="lineNum">     429 </span><span class="lineCov">       1666 :             ItemId      iid = PageGetItemId(page, off);</span>
+<span class="lineNum">     430 </span><span class="lineCov">       1666 :             IndexTuple  idxtuple = (IndexTuple) PageGetItem(page, iid);</span>
+<span class="lineNum">     431 </span>            : 
+<span class="lineNum">     432 </span><span class="lineCov">       1666 :             if (GistTupleIsInvalid(idxtuple))</span>
+<span class="lineNum">     433 </span><span class="lineNoCov">          0 :                 ereport(LOG,</span>
+<span class="lineNum">     434 </span>            :                         (errmsg(&quot;index \&quot;%s\&quot; contains an inner tuple marked as invalid&quot;,
+<span class="lineNum">     435 </span>            :                                 RelationGetRelationName(rel)),
+<span class="lineNum">     436 </span>            :                          errdetail(&quot;This is caused by an incomplete page split at crash recovery before upgrading to PostgreSQL 9.1.&quot;),
+<span class="lineNum">     437 </span>            :                          errhint(&quot;Please REINDEX it.&quot;)));
+<span class="lineNum">     438 </span>            :         }
+<span class="lineNum">     439 </span>            : 
+<span class="lineNum">     440 </span>            :         /*
+<span class="lineNum">     441 </span>            :          * Remember the block number of this page, so that we can revisit it
+<span class="lineNum">     442 </span>            :          * later in gistvacuum_delete_empty_pages(), when we search for
+<span class="lineNum">     443 </span>            :          * parents of empty leaf pages.
+<span class="lineNum">     444 </span>            :          */
+<span class="lineNum">     445 </span><span class="lineCov">         40 :         if (blkno == orig_blkno)</span>
+<span class="lineNum">     446 </span><span class="lineCov">         40 :             intset_add_member(stats-&gt;internal_page_set, blkno);</span>
+<span class="lineNum">     447 </span>            :     }
+<span class="lineNum">     448 </span>            : 
+<span class="lineNum">     449 </span><span class="lineCov">       1686 :     UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">     450 </span>            : 
+<span class="lineNum">     451 </span>            :     /*
+<span class="lineNum">     452 </span>            :      * This is really tail recursion, but if the compiler is too stupid to
+<span class="lineNum">     453 </span>            :      * optimize it as such, we'd eat an uncomfortably large amount of stack
+<span class="lineNum">     454 </span>            :      * space per recursion level (due to the deletable[] array).  A failure is
+<span class="lineNum">     455 </span>            :      * improbable since the number of levels isn't likely to be large ... but
+<span class="lineNum">     456 </span>            :      * just in case, let's hand-optimize into a loop.
+<span class="lineNum">     457 </span>            :      */
+<span class="lineNum">     458 </span><span class="lineCov">       1686 :     if (recurse_to != InvalidBlockNumber)</span>
+<span class="lineNum">     459 </span>            :     {
+<span class="lineNum">     460 </span><span class="lineNoCov">          0 :         blkno = recurse_to;</span>
+<span class="lineNum">     461 </span><span class="lineNoCov">          0 :         goto restart;</span>
+<span class="lineNum">     462 </span>            :     }
+<span class="lineNum">     463 </span><span class="lineCov">       1686 : }</span>
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span>            : /*
+<span class="lineNum">     466 </span>            :  * Scan all internal pages, and try to delete their empty child pages.
+<a name="467"><span class="lineNum">     467 </span>            :  */</a>
+<span class="lineNum">     468 </span>            : static void
+<span class="lineNum">     469 </span><span class="lineCov">         18 : gistvacuum_delete_empty_pages(IndexVacuumInfo *info, GistBulkDeleteResult *stats)</span>
+<span class="lineNum">     470 </span>            : {
+<span class="lineNum">     471 </span><span class="lineCov">         18 :     Relation    rel = info-&gt;index;</span>
+<span class="lineNum">     472 </span>            :     BlockNumber empty_pages_remaining;
+<span class="lineNum">     473 </span>            :     uint64      blkno;
+<span class="lineNum">     474 </span>            : 
+<span class="lineNum">     475 </span>            :     /*
+<span class="lineNum">     476 </span>            :      * Rescan all inner pages to find those that have empty child pages.
+<span class="lineNum">     477 </span>            :      */
+<span class="lineNum">     478 </span><span class="lineCov">         18 :     empty_pages_remaining = intset_num_entries(stats-&gt;empty_leaf_set);</span>
+<span class="lineNum">     479 </span><span class="lineCov">         18 :     intset_begin_iterate(stats-&gt;internal_page_set);</span>
+<span class="lineNum">     480 </span><span class="lineCov">         98 :     while (empty_pages_remaining &gt; 0 &amp;&amp;</span>
+<span class="lineNum">     481 </span><span class="lineCov">         32 :            intset_iterate_next(stats-&gt;internal_page_set, &amp;blkno))</span>
+<span class="lineNum">     482 </span>            :     {
+<span class="lineNum">     483 </span>            :         Buffer      buffer;
+<span class="lineNum">     484 </span>            :         Page        page;
+<span class="lineNum">     485 </span>            :         OffsetNumber off,
+<span class="lineNum">     486 </span>            :                     maxoff;
+<span class="lineNum">     487 </span>            :         OffsetNumber todelete[MaxOffsetNumber];
+<span class="lineNum">     488 </span>            :         BlockNumber leafs_to_delete[MaxOffsetNumber];
+<span class="lineNum">     489 </span>            :         int         ntodelete;
+<span class="lineNum">     490 </span>            :         int         deleted;
+<span class="lineNum">     491 </span>            : 
+<span class="lineNum">     492 </span><span class="lineCov">         30 :         buffer = ReadBufferExtended(rel, MAIN_FORKNUM, (BlockNumber) blkno,</span>
+<span class="lineNum">     493 </span>            :                                     RBM_NORMAL, info-&gt;strategy);
+<span class="lineNum">     494 </span>            : 
+<span class="lineNum">     495 </span><span class="lineCov">         30 :         LockBuffer(buffer, GIST_SHARE);</span>
+<span class="lineNum">     496 </span><span class="lineCov">         30 :         page = (Page) BufferGetPage(buffer);</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span><span class="lineCov">         30 :         if (PageIsNew(page) || GistPageIsDeleted(page) || GistPageIsLeaf(page))</span>
+<span class="lineNum">     499 </span>            :         {
+<span class="lineNum">     500 </span>            :             /*
+<span class="lineNum">     501 </span>            :              * This page was an internal page earlier, but now it's something
+<span class="lineNum">     502 </span>            :              * else. Shouldn't happen...
+<span class="lineNum">     503 </span>            :              */
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :             Assert(false);</span>
+<span class="lineNum">     505 </span>            :             UnlockReleaseBuffer(buffer);
+<span class="lineNum">     506 </span>            :             continue;
+<span class="lineNum">     507 </span>            :         }
+<span class="lineNum">     508 </span>            : 
+<span class="lineNum">     509 </span>            :         /*
+<span class="lineNum">     510 </span>            :          * Scan all the downlinks, and see if any of them point to empty leaf
+<span class="lineNum">     511 </span>            :          * pages.
+<span class="lineNum">     512 </span>            :          */
+<span class="lineNum">     513 </span><span class="lineCov">         30 :         maxoff = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">     514 </span><span class="lineCov">         30 :         ntodelete = 0;</span>
+<span class="lineNum">     515 </span><span class="lineCov">       1156 :         for (off = FirstOffsetNumber;</span>
+<span class="lineNum">     516 </span><span class="lineCov">       1108 :              off &lt;= maxoff &amp;&amp; ntodelete &lt; maxoff - 1;</span>
+<span class="lineNum">     517 </span><span class="lineCov">       1096 :              off = OffsetNumberNext(off))</span>
+<span class="lineNum">     518 </span>            :         {
+<span class="lineNum">     519 </span><span class="lineCov">       1096 :             ItemId      iid = PageGetItemId(page, off);</span>
+<span class="lineNum">     520 </span><span class="lineCov">       1096 :             IndexTuple  idxtuple = (IndexTuple) PageGetItem(page, iid);</span>
+<span class="lineNum">     521 </span>            :             BlockNumber leafblk;
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span><span class="lineCov">       1096 :             leafblk = ItemPointerGetBlockNumber(&amp;(idxtuple-&gt;t_tid));</span>
+<span class="lineNum">     524 </span><span class="lineCov">       1096 :             if (intset_is_member(stats-&gt;empty_leaf_set, leafblk))</span>
+<span class="lineNum">     525 </span>            :             {
+<span class="lineNum">     526 </span><span class="lineCov">        526 :                 leafs_to_delete[ntodelete] = leafblk;</span>
+<span class="lineNum">     527 </span><span class="lineCov">        526 :                 todelete[ntodelete++] = off;</span>
+<span class="lineNum">     528 </span>            :             }
+<span class="lineNum">     529 </span>            :         }
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span>            :         /*
+<span class="lineNum">     532 </span>            :          * In order to avoid deadlock, child page must be locked before
+<span class="lineNum">     533 </span>            :          * parent, so we must release the lock on the parent, lock the child,
+<span class="lineNum">     534 </span>            :          * and then re-acquire the lock the parent.  (And we wouldn't want to
+<span class="lineNum">     535 </span>            :          * do I/O, while holding a lock, anyway.)
+<span class="lineNum">     536 </span>            :          *
+<span class="lineNum">     537 </span>            :          * At the instant that we're not holding a lock on the parent, the
+<span class="lineNum">     538 </span>            :          * downlink might get moved by a concurrent insert, so we must
+<span class="lineNum">     539 </span>            :          * re-check that it still points to the same child page after we have
+<span class="lineNum">     540 </span>            :          * acquired both locks.  Also, another backend might have inserted a
+<span class="lineNum">     541 </span>            :          * tuple to the page, so that it is no longer empty.  gistdeletepage()
+<span class="lineNum">     542 </span>            :          * re-checks all these conditions.
+<span class="lineNum">     543 </span>            :          */
+<span class="lineNum">     544 </span><span class="lineCov">         30 :         LockBuffer(buffer, GIST_UNLOCK);</span>
+<span class="lineNum">     545 </span>            : 
+<span class="lineNum">     546 </span><span class="lineCov">         30 :         deleted = 0;</span>
+<span class="lineNum">     547 </span><span class="lineCov">        556 :         for (int i = 0; i &lt; ntodelete; i++)</span>
+<span class="lineNum">     548 </span>            :         {
+<span class="lineNum">     549 </span>            :             Buffer      leafbuf;
+<span class="lineNum">     550 </span>            : 
+<span class="lineNum">     551 </span>            :             /*
+<span class="lineNum">     552 </span>            :              * Don't remove the last downlink from the parent.  That would
+<span class="lineNum">     553 </span>            :              * confuse the insertion code.
+<span class="lineNum">     554 </span>            :              */
+<span class="lineNum">     555 </span><span class="lineCov">        526 :             if (PageGetMaxOffsetNumber(page) == FirstOffsetNumber)</span>
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">     557 </span>            : 
+<span class="lineNum">     558 </span><span class="lineCov">        526 :             leafbuf = ReadBufferExtended(rel, MAIN_FORKNUM, leafs_to_delete[i],</span>
+<span class="lineNum">     559 </span>            :                                          RBM_NORMAL, info-&gt;strategy);
+<span class="lineNum">     560 </span><span class="lineCov">        526 :             LockBuffer(leafbuf, GIST_EXCLUSIVE);</span>
+<span class="lineNum">     561 </span><span class="lineCov">        526 :             gistcheckpage(rel, leafbuf);</span>
+<span class="lineNum">     562 </span>            : 
+<span class="lineNum">     563 </span><span class="lineCov">        526 :             LockBuffer(buffer, GIST_EXCLUSIVE);</span>
+<span class="lineNum">     564 </span><span class="lineCov">        526 :             if (gistdeletepage(info, stats,</span>
+<span class="lineNum">     565 </span><span class="lineCov">        526 :                                buffer, todelete[i] - deleted,</span>
+<span class="lineNum">     566 </span>            :                                leafbuf))
+<span class="lineNum">     567 </span><span class="lineCov">        526 :                 deleted++;</span>
+<span class="lineNum">     568 </span><span class="lineCov">        526 :             LockBuffer(buffer, GIST_UNLOCK);</span>
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span><span class="lineCov">        526 :             UnlockReleaseBuffer(leafbuf);</span>
+<span class="lineNum">     571 </span>            :         }
+<span class="lineNum">     572 </span>            : 
+<span class="lineNum">     573 </span><span class="lineCov">         30 :         ReleaseBuffer(buffer);</span>
+<span class="lineNum">     574 </span>            : 
+<span class="lineNum">     575 </span>            :         /* update stats */
+<span class="lineNum">     576 </span><span class="lineCov">         30 :         stats-&gt;stats.pages_removed += deleted;</span>
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span>            :         /*
+<span class="lineNum">     579 </span>            :          * We can stop the scan as soon as we have seen the downlinks, even if
+<span class="lineNum">     580 </span>            :          * we were not able to remove them all.
+<span class="lineNum">     581 </span>            :          */
+<span class="lineNum">     582 </span><span class="lineCov">         30 :         empty_pages_remaining -= ntodelete;</span>
+<span class="lineNum">     583 </span>            :     }
+<span class="lineNum">     584 </span><span class="lineCov">         18 : }</span>
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span>            : /*
+<span class="lineNum">     587 </span>            :  * gistdeletepage takes a leaf page, and its parent, and tries to delete the
+<span class="lineNum">     588 </span>            :  * leaf.  Both pages must be locked.
+<span class="lineNum">     589 </span>            :  *
+<span class="lineNum">     590 </span>            :  * Even if the page was empty when we first saw it, a concurrent inserter might
+<span class="lineNum">     591 </span>            :  * have added a tuple to it since.  Similarly, the downlink might have moved.
+<span class="lineNum">     592 </span>            :  * We re-check all the conditions, to make sure the page is still deletable,
+<span class="lineNum">     593 </span>            :  * before modifying anything.
+<span class="lineNum">     594 </span>            :  *
+<span class="lineNum">     595 </span>            :  * Returns true, if the page was deleted, and false if a concurrent update
+<span class="lineNum">     596 </span>            :  * prevented it.
+<a name="597"><span class="lineNum">     597 </span>            :  */</a>
+<span class="lineNum">     598 </span>            : static bool
+<span class="lineNum">     599 </span><span class="lineCov">        526 : gistdeletepage(IndexVacuumInfo *info, GistBulkDeleteResult *stats,</span>
+<span class="lineNum">     600 </span>            :                Buffer parentBuffer, OffsetNumber downlink,
+<span class="lineNum">     601 </span>            :                Buffer leafBuffer)
+<span class="lineNum">     602 </span>            : {
+<span class="lineNum">     603 </span><span class="lineCov">        526 :     Page        parentPage = BufferGetPage(parentBuffer);</span>
+<span class="lineNum">     604 </span><span class="lineCov">        526 :     Page        leafPage = BufferGetPage(leafBuffer);</span>
+<span class="lineNum">     605 </span>            :     ItemId      iid;
+<span class="lineNum">     606 </span>            :     IndexTuple  idxtuple;
+<span class="lineNum">     607 </span>            :     XLogRecPtr  recptr;
+<span class="lineNum">     608 </span>            :     FullTransactionId txid;
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span>            :     /*
+<span class="lineNum">     611 </span>            :      * Check that the leaf is still empty and deletable.
+<span class="lineNum">     612 </span>            :      */
+<span class="lineNum">     613 </span><span class="lineCov">        526 :     if (!GistPageIsLeaf(leafPage))</span>
+<span class="lineNum">     614 </span>            :     {
+<span class="lineNum">     615 </span>            :         /* a leaf page should never become a non-leaf page */
+<span class="lineNum">     616 </span><span class="lineNoCov">          0 :         Assert(false);</span>
+<span class="lineNum">     617 </span>            :         return false;
+<span class="lineNum">     618 </span>            :     }
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span><span class="lineCov">        526 :     if (GistFollowRight(leafPage))</span>
+<span class="lineNum">     621 </span><span class="lineNoCov">          0 :         return false;           /* don't mess with a concurrent page split */</span>
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span><span class="lineCov">        526 :     if (PageGetMaxOffsetNumber(leafPage) != InvalidOffsetNumber)</span>
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :         return false;           /* not empty anymore */</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span>            :     /*
+<span class="lineNum">     627 </span>            :      * Ok, the leaf is deletable.  Is the downlink in the parent page still
+<span class="lineNum">     628 </span>            :      * valid?  It might have been moved by a concurrent insert.  We could try
+<span class="lineNum">     629 </span>            :      * to re-find it by scanning the page again, possibly moving right if the
+<span class="lineNum">     630 </span>            :      * was split.  But for now, let's keep it simple and just give up.  The
+<span class="lineNum">     631 </span>            :      * next VACUUM will pick it up.
+<span class="lineNum">     632 </span>            :      */
+<span class="lineNum">     633 </span><span class="lineCov">       1052 :     if (PageIsNew(parentPage) || GistPageIsDeleted(parentPage) ||</span>
+<span class="lineNum">     634 </span><span class="lineCov">        526 :         GistPageIsLeaf(parentPage))</span>
+<span class="lineNum">     635 </span>            :     {
+<span class="lineNum">     636 </span>            :         /* shouldn't happen, internal pages are never deleted */
+<span class="lineNum">     637 </span><span class="lineNoCov">          0 :         Assert(false);</span>
+<span class="lineNum">     638 </span>            :         return false;
+<span class="lineNum">     639 </span>            :     }
+<span class="lineNum">     640 </span>            : 
+<span class="lineNum">     641 </span><span class="lineCov">        526 :     if (PageGetMaxOffsetNumber(parentPage) &lt; downlink</span>
+<span class="lineNum">     642 </span><span class="lineCov">        526 :         || PageGetMaxOffsetNumber(parentPage) &lt;= FirstOffsetNumber)</span>
+<span class="lineNum">     643 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span><span class="lineCov">        526 :     iid = PageGetItemId(parentPage, downlink);</span>
+<span class="lineNum">     646 </span><span class="lineCov">        526 :     idxtuple = (IndexTuple) PageGetItem(parentPage, iid);</span>
+<span class="lineNum">     647 </span><span class="lineCov">       1052 :     if (BufferGetBlockNumber(leafBuffer) !=</span>
+<span class="lineNum">     648 </span><span class="lineCov">       1052 :         ItemPointerGetBlockNumber(&amp;(idxtuple-&gt;t_tid)))</span>
+<span class="lineNum">     649 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     650 </span>            : 
+<span class="lineNum">     651 </span>            :     /*
+<span class="lineNum">     652 </span>            :      * All good, proceed with the deletion.
+<span class="lineNum">     653 </span>            :      *
+<span class="lineNum">     654 </span>            :      * The page cannot be immediately recycled, because in-progress scans that
+<span class="lineNum">     655 </span>            :      * saw the downlink might still visit it.  Mark the page with the current
+<span class="lineNum">     656 </span>            :      * next-XID counter, so that we know when it can be recycled.  Once that
+<span class="lineNum">     657 </span>            :      * XID becomes older than GlobalXmin, we know that all scans that are
+<span class="lineNum">     658 </span>            :      * currently in progress must have ended.  (That's much more conservative
+<span class="lineNum">     659 </span>            :      * than needed, but let's keep it safe and simple.)
+<span class="lineNum">     660 </span>            :      */
+<span class="lineNum">     661 </span><span class="lineCov">        526 :     txid = ReadNextFullTransactionId();</span>
+<span class="lineNum">     662 </span>            : 
+<span class="lineNum">     663 </span><span class="lineCov">        526 :     START_CRIT_SECTION();</span>
+<span class="lineNum">     664 </span>            : 
+<span class="lineNum">     665 </span>            :     /* mark the page as deleted */
+<span class="lineNum">     666 </span><span class="lineCov">        526 :     MarkBufferDirty(leafBuffer);</span>
+<span class="lineNum">     667 </span><span class="lineCov">        526 :     GistPageSetDeleted(leafPage, txid);</span>
+<span class="lineNum">     668 </span><span class="lineCov">        526 :     stats-&gt;stats.pages_deleted++;</span>
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span>            :     /* remove the downlink from the parent */
+<span class="lineNum">     671 </span><span class="lineCov">        526 :     MarkBufferDirty(parentBuffer);</span>
+<span class="lineNum">     672 </span><span class="lineCov">        526 :     PageIndexTupleDelete(parentPage, downlink);</span>
+<span class="lineNum">     673 </span>            : 
+<span class="lineNum">     674 </span><span class="lineCov">        526 :     if (RelationNeedsWAL(info-&gt;index))</span>
+<span class="lineNum">     675 </span><span class="lineCov">        526 :         recptr = gistXLogPageDelete(leafBuffer, txid, parentBuffer, downlink);</span>
+<span class="lineNum">     676 </span>            :     else
+<span class="lineNum">     677 </span><span class="lineNoCov">          0 :         recptr = gistGetFakeLSN(info-&gt;index);</span>
+<span class="lineNum">     678 </span><span class="lineCov">        526 :     PageSetLSN(parentPage, recptr);</span>
+<span class="lineNum">     679 </span><span class="lineCov">        526 :     PageSetLSN(leafPage, recptr);</span>
+<span class="lineNum">     680 </span>            : 
+<span class="lineNum">     681 </span><span class="lineCov">        526 :     END_CRIT_SECTION();</span>
+<span class="lineNum">     682 </span>            : 
+<span class="lineNum">     683 </span><span class="lineCov">        526 :     return true;</span>
+<span class="lineNum">     684 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

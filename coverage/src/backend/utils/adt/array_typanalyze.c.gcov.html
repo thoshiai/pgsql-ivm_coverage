@@ -1,0 +1,878 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/array_typanalyze.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - array_typanalyze.c<span style="font-size: 80%;"> (source / <a href="array_typanalyze.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">201</td>
+            <td class="headerCovTableEntry">224</td>
+            <td class="headerCovTableEntryMed">89.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntryMed">77.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * array_typanalyze.c
+<span class="lineNum">       4 </span>            :  *    Functions for gathering statistics from array columns
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/utils/adt/array_typanalyze.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/detoast.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;commands/vacuum.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;utils/array.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;utils/builtins.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;utils/datum.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;utils/typcache.h&quot;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : 
+<span class="lineNum">      26 </span>            : /*
+<span class="lineNum">      27 </span>            :  * To avoid consuming too much memory, IO and CPU load during analysis, and/or
+<span class="lineNum">      28 </span>            :  * too much space in the resulting pg_statistic rows, we ignore arrays that
+<span class="lineNum">      29 </span>            :  * are wider than ARRAY_WIDTH_THRESHOLD (after detoasting!).  Note that this
+<span class="lineNum">      30 </span>            :  * number is considerably more than the similar WIDTH_THRESHOLD limit used
+<span class="lineNum">      31 </span>            :  * in analyze.c's standard typanalyze code.
+<span class="lineNum">      32 </span>            :  */
+<span class="lineNum">      33 </span>            : #define ARRAY_WIDTH_THRESHOLD 0x10000
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : /* Extra data for compute_array_stats function */
+<span class="lineNum">      36 </span>            : typedef struct
+<span class="lineNum">      37 </span>            : {
+<span class="lineNum">      38 </span>            :     /* Information about array element type */
+<span class="lineNum">      39 </span>            :     Oid         type_id;        /* element type's OID */
+<span class="lineNum">      40 </span>            :     Oid         eq_opr;         /* default equality operator's OID */
+<span class="lineNum">      41 </span>            :     Oid         coll_id;        /* collation to use */
+<span class="lineNum">      42 </span>            :     bool        typbyval;       /* physical properties of element type */
+<span class="lineNum">      43 </span>            :     int16       typlen;
+<span class="lineNum">      44 </span>            :     char        typalign;
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span>            :     /*
+<span class="lineNum">      47 </span>            :      * Lookup data for element type's comparison and hash functions (these are
+<span class="lineNum">      48 </span>            :      * in the type's typcache entry, which we expect to remain valid over the
+<span class="lineNum">      49 </span>            :      * lifespan of the ANALYZE run)
+<span class="lineNum">      50 </span>            :      */
+<span class="lineNum">      51 </span>            :     FmgrInfo   *cmp;
+<span class="lineNum">      52 </span>            :     FmgrInfo   *hash;
+<span class="lineNum">      53 </span>            : 
+<span class="lineNum">      54 </span>            :     /* Saved state from std_typanalyze() */
+<span class="lineNum">      55 </span>            :     AnalyzeAttrComputeStatsFunc std_compute_stats;
+<span class="lineNum">      56 </span>            :     void       *std_extra_data;
+<span class="lineNum">      57 </span>            : } ArrayAnalyzeExtraData;
+<span class="lineNum">      58 </span>            : 
+<span class="lineNum">      59 </span>            : /*
+<span class="lineNum">      60 </span>            :  * While compute_array_stats is running, we keep a pointer to the extra data
+<span class="lineNum">      61 </span>            :  * here for use by assorted subroutines.  compute_array_stats doesn't
+<span class="lineNum">      62 </span>            :  * currently need to be re-entrant, so avoiding this is not worth the extra
+<span class="lineNum">      63 </span>            :  * notational cruft that would be needed.
+<span class="lineNum">      64 </span>            :  */
+<span class="lineNum">      65 </span>            : static ArrayAnalyzeExtraData *array_extra_data;
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : /* A hash table entry for the Lossy Counting algorithm */
+<span class="lineNum">      68 </span>            : typedef struct
+<span class="lineNum">      69 </span>            : {
+<span class="lineNum">      70 </span>            :     Datum       key;            /* This is 'e' from the LC algorithm. */
+<span class="lineNum">      71 </span>            :     int         frequency;      /* This is 'f'. */
+<span class="lineNum">      72 </span>            :     int         delta;          /* And this is 'delta'. */
+<span class="lineNum">      73 </span>            :     int         last_container; /* For de-duplication of array elements. */
+<span class="lineNum">      74 </span>            : } TrackItem;
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            : /* A hash table entry for distinct-elements counts */
+<span class="lineNum">      77 </span>            : typedef struct
+<span class="lineNum">      78 </span>            : {
+<span class="lineNum">      79 </span>            :     int         count;          /* Count of distinct elements in an array */
+<span class="lineNum">      80 </span>            :     int         frequency;      /* Number of arrays seen with this count */
+<span class="lineNum">      81 </span>            : } DECountItem;
+<span class="lineNum">      82 </span>            : 
+<span class="lineNum">      83 </span>            : static void compute_array_stats(VacAttrStats *stats,
+<span class="lineNum">      84 </span>            :                                 AnalyzeAttrFetchFunc fetchfunc, int samplerows, double totalrows);
+<span class="lineNum">      85 </span>            : static void prune_element_hashtable(HTAB *elements_tab, int b_current);
+<span class="lineNum">      86 </span>            : static uint32 element_hash(const void *key, Size keysize);
+<span class="lineNum">      87 </span>            : static int  element_match(const void *key1, const void *key2, Size keysize);
+<span class="lineNum">      88 </span>            : static int  element_compare(const void *key1, const void *key2);
+<span class="lineNum">      89 </span>            : static int  trackitem_compare_frequencies_desc(const void *e1, const void *e2);
+<span class="lineNum">      90 </span>            : static int  trackitem_compare_element(const void *e1, const void *e2);
+<span class="lineNum">      91 </span>            : static int  countitem_compare_count(const void *e1, const void *e2);
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span>            : /*
+<span class="lineNum">      95 </span>            :  * array_typanalyze -- typanalyze function for array columns
+<a name="96"><span class="lineNum">      96 </span>            :  */</a>
+<span class="lineNum">      97 </span>            : Datum
+<span class="lineNum">      98 </span><span class="lineCov">        146 : array_typanalyze(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      99 </span>            : {
+<span class="lineNum">     100 </span><span class="lineCov">        146 :     VacAttrStats *stats = (VacAttrStats *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     101 </span>            :     Oid         element_typeid;
+<span class="lineNum">     102 </span>            :     TypeCacheEntry *typentry;
+<span class="lineNum">     103 </span>            :     ArrayAnalyzeExtraData *extra_data;
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span>            :     /*
+<span class="lineNum">     106 </span>            :      * Call the standard typanalyze function.  It may fail to find needed
+<span class="lineNum">     107 </span>            :      * operators, in which case we also can't do anything, so just fail.
+<span class="lineNum">     108 </span>            :      */
+<span class="lineNum">     109 </span><span class="lineCov">        146 :     if (!std_typanalyze(stats))</span>
+<span class="lineNum">     110 </span><span class="lineNoCov">          0 :         PG_RETURN_BOOL(false);</span>
+<span class="lineNum">     111 </span>            : 
+<span class="lineNum">     112 </span>            :     /*
+<span class="lineNum">     113 </span>            :      * Check attribute data type is a varlena array (or a domain over one).
+<span class="lineNum">     114 </span>            :      */
+<span class="lineNum">     115 </span><span class="lineCov">        146 :     element_typeid = get_base_element_type(stats-&gt;attrtypid);</span>
+<span class="lineNum">     116 </span><span class="lineCov">        146 :     if (!OidIsValid(element_typeid))</span>
+<span class="lineNum">     117 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;array_typanalyze was invoked for non-array type %u&quot;,</span>
+<span class="lineNum">     118 </span>            :              stats-&gt;attrtypid);
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            :     /*
+<span class="lineNum">     121 </span>            :      * Gather information about the element type.  If we fail to find
+<span class="lineNum">     122 </span>            :      * something, return leaving the state from std_typanalyze() in place.
+<span class="lineNum">     123 </span>            :      */
+<span class="lineNum">     124 </span><span class="lineCov">        146 :     typentry = lookup_type_cache(element_typeid,</span>
+<span class="lineNum">     125 </span>            :                                  TYPECACHE_EQ_OPR |
+<span class="lineNum">     126 </span>            :                                  TYPECACHE_CMP_PROC_FINFO |
+<span class="lineNum">     127 </span>            :                                  TYPECACHE_HASH_PROC_FINFO);
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span><span class="lineCov">        292 :     if (!OidIsValid(typentry-&gt;eq_opr) ||</span>
+<span class="lineNum">     130 </span><span class="lineCov">        254 :         !OidIsValid(typentry-&gt;cmp_proc_finfo.fn_oid) ||</span>
+<span class="lineNum">     131 </span><span class="lineCov">        108 :         !OidIsValid(typentry-&gt;hash_proc_finfo.fn_oid))</span>
+<span class="lineNum">     132 </span><span class="lineCov">         38 :         PG_RETURN_BOOL(true);</span>
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span>            :     /* Store our findings for use by compute_array_stats() */
+<span class="lineNum">     135 </span><span class="lineCov">        108 :     extra_data = (ArrayAnalyzeExtraData *) palloc(sizeof(ArrayAnalyzeExtraData));</span>
+<span class="lineNum">     136 </span><span class="lineCov">        108 :     extra_data-&gt;type_id = typentry-&gt;type_id;</span>
+<span class="lineNum">     137 </span><span class="lineCov">        108 :     extra_data-&gt;eq_opr = typentry-&gt;eq_opr;</span>
+<span class="lineNum">     138 </span><span class="lineCov">        108 :     extra_data-&gt;coll_id = stats-&gt;attrcollid;  /* collation we should use */</span>
+<span class="lineNum">     139 </span><span class="lineCov">        108 :     extra_data-&gt;typbyval = typentry-&gt;typbyval;</span>
+<span class="lineNum">     140 </span><span class="lineCov">        108 :     extra_data-&gt;typlen = typentry-&gt;typlen;</span>
+<span class="lineNum">     141 </span><span class="lineCov">        108 :     extra_data-&gt;typalign = typentry-&gt;typalign;</span>
+<span class="lineNum">     142 </span><span class="lineCov">        108 :     extra_data-&gt;cmp = &amp;typentry-&gt;cmp_proc_finfo;</span>
+<span class="lineNum">     143 </span><span class="lineCov">        108 :     extra_data-&gt;hash = &amp;typentry-&gt;hash_proc_finfo;</span>
+<span class="lineNum">     144 </span>            : 
+<span class="lineNum">     145 </span>            :     /* Save old compute_stats and extra_data for scalar statistics ... */
+<span class="lineNum">     146 </span><span class="lineCov">        108 :     extra_data-&gt;std_compute_stats = stats-&gt;compute_stats;</span>
+<span class="lineNum">     147 </span><span class="lineCov">        108 :     extra_data-&gt;std_extra_data = stats-&gt;extra_data;</span>
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :     /* ... and replace with our info */
+<span class="lineNum">     150 </span><span class="lineCov">        108 :     stats-&gt;compute_stats = compute_array_stats;</span>
+<span class="lineNum">     151 </span><span class="lineCov">        108 :     stats-&gt;extra_data = extra_data;</span>
+<span class="lineNum">     152 </span>            : 
+<span class="lineNum">     153 </span>            :     /*
+<span class="lineNum">     154 </span>            :      * Note we leave stats-&gt;minrows set as std_typanalyze set it.  Should it
+<span class="lineNum">     155 </span>            :      * be increased for array analysis purposes?
+<span class="lineNum">     156 </span>            :      */
+<span class="lineNum">     157 </span>            : 
+<span class="lineNum">     158 </span><span class="lineCov">        108 :     PG_RETURN_BOOL(true);</span>
+<span class="lineNum">     159 </span>            : }
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span>            : /*
+<span class="lineNum">     162 </span>            :  * compute_array_stats() -- compute statistics for an array column
+<span class="lineNum">     163 </span>            :  *
+<span class="lineNum">     164 </span>            :  * This function computes statistics useful for determining selectivity of
+<span class="lineNum">     165 </span>            :  * the array operators &lt;@, &amp;&amp;, and @&gt;.  It is invoked by ANALYZE via the
+<span class="lineNum">     166 </span>            :  * compute_stats hook after sample rows have been collected.
+<span class="lineNum">     167 </span>            :  *
+<span class="lineNum">     168 </span>            :  * We also invoke the standard compute_stats function, which will compute
+<span class="lineNum">     169 </span>            :  * &quot;scalar&quot; statistics relevant to the btree-style array comparison operators.
+<span class="lineNum">     170 </span>            :  * However, exact duplicates of an entire array may be rare despite many
+<span class="lineNum">     171 </span>            :  * arrays sharing individual elements.  This especially afflicts long arrays,
+<span class="lineNum">     172 </span>            :  * which are also liable to lack all scalar statistics due to the low
+<span class="lineNum">     173 </span>            :  * WIDTH_THRESHOLD used in analyze.c.  So, in addition to the standard stats,
+<span class="lineNum">     174 </span>            :  * we find the most common array elements and compute a histogram of distinct
+<span class="lineNum">     175 </span>            :  * element counts.
+<span class="lineNum">     176 </span>            :  *
+<span class="lineNum">     177 </span>            :  * The algorithm used is Lossy Counting, as proposed in the paper &quot;Approximate
+<span class="lineNum">     178 </span>            :  * frequency counts over data streams&quot; by G. S. Manku and R. Motwani, in
+<span class="lineNum">     179 </span>            :  * Proceedings of the 28th International Conference on Very Large Data Bases,
+<span class="lineNum">     180 </span>            :  * Hong Kong, China, August 2002, section 4.2. The paper is available at
+<span class="lineNum">     181 </span>            :  * http://www.vldb.org/conf/2002/S10P03.pdf
+<span class="lineNum">     182 </span>            :  *
+<span class="lineNum">     183 </span>            :  * The Lossy Counting (aka LC) algorithm goes like this:
+<span class="lineNum">     184 </span>            :  * Let s be the threshold frequency for an item (the minimum frequency we
+<span class="lineNum">     185 </span>            :  * are interested in) and epsilon the error margin for the frequency. Let D
+<span class="lineNum">     186 </span>            :  * be a set of triples (e, f, delta), where e is an element value, f is that
+<span class="lineNum">     187 </span>            :  * element's frequency (actually, its current occurrence count) and delta is
+<span class="lineNum">     188 </span>            :  * the maximum error in f. We start with D empty and process the elements in
+<span class="lineNum">     189 </span>            :  * batches of size w. (The batch size is also known as &quot;bucket size&quot; and is
+<span class="lineNum">     190 </span>            :  * equal to 1/epsilon.) Let the current batch number be b_current, starting
+<span class="lineNum">     191 </span>            :  * with 1. For each element e we either increment its f count, if it's
+<span class="lineNum">     192 </span>            :  * already in D, or insert a new triple into D with values (e, 1, b_current
+<span class="lineNum">     193 </span>            :  * - 1). After processing each batch we prune D, by removing from it all
+<span class="lineNum">     194 </span>            :  * elements with f + delta &lt;= b_current.  After the algorithm finishes we
+<span class="lineNum">     195 </span>            :  * suppress all elements from D that do not satisfy f &gt;= (s - epsilon) * N,
+<span class="lineNum">     196 </span>            :  * where N is the total number of elements in the input.  We emit the
+<span class="lineNum">     197 </span>            :  * remaining elements with estimated frequency f/N.  The LC paper proves
+<span class="lineNum">     198 </span>            :  * that this algorithm finds all elements with true frequency at least s,
+<span class="lineNum">     199 </span>            :  * and that no frequency is overestimated or is underestimated by more than
+<span class="lineNum">     200 </span>            :  * epsilon.  Furthermore, given reasonable assumptions about the input
+<span class="lineNum">     201 </span>            :  * distribution, the required table size is no more than about 7 times w.
+<span class="lineNum">     202 </span>            :  *
+<span class="lineNum">     203 </span>            :  * In the absence of a principled basis for other particular values, we
+<span class="lineNum">     204 </span>            :  * follow ts_typanalyze() and use parameters s = 0.07/K, epsilon = s/10.
+<span class="lineNum">     205 </span>            :  * But we leave out the correction for stopwords, which do not apply to
+<span class="lineNum">     206 </span>            :  * arrays.  These parameters give bucket width w = K/0.007 and maximum
+<span class="lineNum">     207 </span>            :  * expected hashtable size of about 1000 * K.
+<span class="lineNum">     208 </span>            :  *
+<span class="lineNum">     209 </span>            :  * Elements may repeat within an array.  Since duplicates do not change the
+<span class="lineNum">     210 </span>            :  * behavior of &lt;@, &amp;&amp; or @&gt;, we want to count each element only once per
+<span class="lineNum">     211 </span>            :  * array.  Therefore, we store in the finished pg_statistic entry each
+<span class="lineNum">     212 </span>            :  * element's frequency as the fraction of all non-null rows that contain it.
+<span class="lineNum">     213 </span>            :  * We divide the raw counts by nonnull_cnt to get those figures.
+<a name="214"><span class="lineNum">     214 </span>            :  */</a>
+<span class="lineNum">     215 </span>            : static void
+<span class="lineNum">     216 </span><span class="lineCov">         90 : compute_array_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc,</span>
+<span class="lineNum">     217 </span>            :                     int samplerows, double totalrows)
+<span class="lineNum">     218 </span>            : {
+<span class="lineNum">     219 </span>            :     ArrayAnalyzeExtraData *extra_data;
+<span class="lineNum">     220 </span>            :     int         num_mcelem;
+<span class="lineNum">     221 </span><span class="lineCov">         90 :     int         null_cnt = 0;</span>
+<span class="lineNum">     222 </span><span class="lineCov">         90 :     int         null_elem_cnt = 0;</span>
+<span class="lineNum">     223 </span><span class="lineCov">         90 :     int         analyzed_rows = 0;</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span>            :     /* This is D from the LC algorithm. */
+<span class="lineNum">     226 </span>            :     HTAB       *elements_tab;
+<span class="lineNum">     227 </span>            :     HASHCTL     elem_hash_ctl;
+<span class="lineNum">     228 </span>            :     HASH_SEQ_STATUS scan_status;
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span>            :     /* This is the current bucket number from the LC algorithm */
+<span class="lineNum">     231 </span>            :     int         b_current;
+<span class="lineNum">     232 </span>            : 
+<span class="lineNum">     233 </span>            :     /* This is 'w' from the LC algorithm */
+<span class="lineNum">     234 </span>            :     int         bucket_width;
+<span class="lineNum">     235 </span>            :     int         array_no;
+<span class="lineNum">     236 </span>            :     int64       element_no;
+<span class="lineNum">     237 </span>            :     TrackItem  *item;
+<span class="lineNum">     238 </span>            :     int         slot_idx;
+<span class="lineNum">     239 </span>            :     HTAB       *count_tab;
+<span class="lineNum">     240 </span>            :     HASHCTL     count_hash_ctl;
+<span class="lineNum">     241 </span>            :     DECountItem *count_item;
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span><span class="lineCov">         90 :     extra_data = (ArrayAnalyzeExtraData *) stats-&gt;extra_data;</span>
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span>            :     /*
+<span class="lineNum">     246 </span>            :      * Invoke analyze.c's standard analysis function to create scalar-style
+<span class="lineNum">     247 </span>            :      * stats for the column.  It will expect its own extra_data pointer, so
+<span class="lineNum">     248 </span>            :      * temporarily install that.
+<span class="lineNum">     249 </span>            :      */
+<span class="lineNum">     250 </span><span class="lineCov">         90 :     stats-&gt;extra_data = extra_data-&gt;std_extra_data;</span>
+<span class="lineNum">     251 </span><span class="lineCov">         90 :     extra_data-&gt;std_compute_stats(stats, fetchfunc, samplerows, totalrows);</span>
+<span class="lineNum">     252 </span><span class="lineCov">         90 :     stats-&gt;extra_data = extra_data;</span>
+<span class="lineNum">     253 </span>            : 
+<span class="lineNum">     254 </span>            :     /*
+<span class="lineNum">     255 </span>            :      * Set up static pointer for use by subroutines.  We wait till here in
+<span class="lineNum">     256 </span>            :      * case std_compute_stats somehow recursively invokes us (probably not
+<span class="lineNum">     257 </span>            :      * possible, but ...)
+<span class="lineNum">     258 </span>            :      */
+<span class="lineNum">     259 </span><span class="lineCov">         90 :     array_extra_data = extra_data;</span>
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span>            :     /*
+<span class="lineNum">     262 </span>            :      * We want statistics_target * 10 elements in the MCELEM array. This
+<span class="lineNum">     263 </span>            :      * multiplier is pretty arbitrary, but is meant to reflect the fact that
+<span class="lineNum">     264 </span>            :      * the number of individual elements tracked in pg_statistic ought to be
+<span class="lineNum">     265 </span>            :      * more than the number of values for a simple scalar column.
+<span class="lineNum">     266 </span>            :      */
+<span class="lineNum">     267 </span><span class="lineCov">         90 :     num_mcelem = stats-&gt;attr-&gt;attstattarget * 10;</span>
+<span class="lineNum">     268 </span>            : 
+<span class="lineNum">     269 </span>            :     /*
+<span class="lineNum">     270 </span>            :      * We set bucket width equal to num_mcelem / 0.007 as per the comment
+<span class="lineNum">     271 </span>            :      * above.
+<span class="lineNum">     272 </span>            :      */
+<span class="lineNum">     273 </span><span class="lineCov">         90 :     bucket_width = num_mcelem * 1000 / 7;</span>
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span>            :     /*
+<span class="lineNum">     276 </span>            :      * Create the hashtable. It will be in local memory, so we don't need to
+<span class="lineNum">     277 </span>            :      * worry about overflowing the initial size. Also we don't need to pay any
+<span class="lineNum">     278 </span>            :      * attention to locking and memory management.
+<span class="lineNum">     279 </span>            :      */
+<span class="lineNum">     280 </span><span class="lineCov">         90 :     MemSet(&amp;elem_hash_ctl, 0, sizeof(elem_hash_ctl));</span>
+<span class="lineNum">     281 </span><span class="lineCov">         90 :     elem_hash_ctl.keysize = sizeof(Datum);</span>
+<span class="lineNum">     282 </span><span class="lineCov">         90 :     elem_hash_ctl.entrysize = sizeof(TrackItem);</span>
+<span class="lineNum">     283 </span><span class="lineCov">         90 :     elem_hash_ctl.hash = element_hash;</span>
+<span class="lineNum">     284 </span><span class="lineCov">         90 :     elem_hash_ctl.match = element_match;</span>
+<span class="lineNum">     285 </span><span class="lineCov">         90 :     elem_hash_ctl.hcxt = CurrentMemoryContext;</span>
+<span class="lineNum">     286 </span><span class="lineCov">         90 :     elements_tab = hash_create(&quot;Analyzed elements table&quot;,</span>
+<span class="lineNum">     287 </span>            :                                num_mcelem,
+<span class="lineNum">     288 </span>            :                                &amp;elem_hash_ctl,
+<span class="lineNum">     289 </span>            :                                HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+<span class="lineNum">     290 </span>            : 
+<span class="lineNum">     291 </span>            :     /* hashtable for array distinct elements counts */
+<span class="lineNum">     292 </span><span class="lineCov">         90 :     MemSet(&amp;count_hash_ctl, 0, sizeof(count_hash_ctl));</span>
+<span class="lineNum">     293 </span><span class="lineCov">         90 :     count_hash_ctl.keysize = sizeof(int);</span>
+<span class="lineNum">     294 </span><span class="lineCov">         90 :     count_hash_ctl.entrysize = sizeof(DECountItem);</span>
+<span class="lineNum">     295 </span><span class="lineCov">         90 :     count_hash_ctl.hcxt = CurrentMemoryContext;</span>
+<span class="lineNum">     296 </span><span class="lineCov">         90 :     count_tab = hash_create(&quot;Array distinct element count table&quot;,</span>
+<span class="lineNum">     297 </span>            :                             64,
+<span class="lineNum">     298 </span>            :                             &amp;count_hash_ctl,
+<span class="lineNum">     299 </span>            :                             HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            :     /* Initialize counters. */
+<span class="lineNum">     302 </span><span class="lineCov">         90 :     b_current = 1;</span>
+<span class="lineNum">     303 </span><span class="lineCov">         90 :     element_no = 0;</span>
+<span class="lineNum">     304 </span>            : 
+<span class="lineNum">     305 </span>            :     /* Loop over the arrays. */
+<span class="lineNum">     306 </span><span class="lineCov">     167870 :     for (array_no = 0; array_no &lt; samplerows; array_no++)</span>
+<span class="lineNum">     307 </span>            :     {
+<span class="lineNum">     308 </span>            :         Datum       value;
+<span class="lineNum">     309 </span>            :         bool        isnull;
+<span class="lineNum">     310 </span>            :         ArrayType  *array;
+<span class="lineNum">     311 </span>            :         int         num_elems;
+<span class="lineNum">     312 </span>            :         Datum      *elem_values;
+<span class="lineNum">     313 </span>            :         bool       *elem_nulls;
+<span class="lineNum">     314 </span>            :         bool        null_present;
+<span class="lineNum">     315 </span>            :         int         j;
+<span class="lineNum">     316 </span><span class="lineCov">     167780 :         int64       prev_element_no = element_no;</span>
+<span class="lineNum">     317 </span>            :         int         distinct_count;
+<span class="lineNum">     318 </span>            :         bool        count_item_found;
+<span class="lineNum">     319 </span>            : 
+<span class="lineNum">     320 </span><span class="lineCov">     167780 :         vacuum_delay_point();</span>
+<span class="lineNum">     321 </span>            : 
+<span class="lineNum">     322 </span><span class="lineCov">     167780 :         value = fetchfunc(stats, array_no, &amp;isnull);</span>
+<span class="lineNum">     323 </span><span class="lineCov">     167780 :         if (isnull)</span>
+<span class="lineNum">     324 </span>            :         {
+<span class="lineNum">     325 </span>            :             /* array is null, just count that */
+<span class="lineNum">     326 </span><span class="lineCov">     105274 :             null_cnt++;</span>
+<span class="lineNum">     327 </span><span class="lineCov">     210548 :             continue;</span>
+<span class="lineNum">     328 </span>            :         }
+<span class="lineNum">     329 </span>            : 
+<span class="lineNum">     330 </span>            :         /* Skip too-large values. */
+<span class="lineNum">     331 </span><span class="lineCov">      62506 :         if (toast_raw_datum_size(value) &gt; ARRAY_WIDTH_THRESHOLD)</span>
+<span class="lineNum">     332 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     333 </span>            :         else
+<span class="lineNum">     334 </span><span class="lineCov">      62506 :             analyzed_rows++;</span>
+<span class="lineNum">     335 </span>            : 
+<span class="lineNum">     336 </span>            :         /*
+<span class="lineNum">     337 </span>            :          * Now detoast the array if needed, and deconstruct into datums.
+<span class="lineNum">     338 </span>            :          */
+<span class="lineNum">     339 </span><span class="lineCov">      62506 :         array = DatumGetArrayTypeP(value);</span>
+<span class="lineNum">     340 </span>            : 
+<span class="lineNum">     341 </span><span class="lineCov">      62506 :         Assert(ARR_ELEMTYPE(array) == extra_data-&gt;type_id);</span>
+<span class="lineNum">     342 </span><span class="lineCov">     187518 :         deconstruct_array(array,</span>
+<span class="lineNum">     343 </span>            :                           extra_data-&gt;type_id,
+<span class="lineNum">     344 </span><span class="lineCov">      62506 :                           extra_data-&gt;typlen,</span>
+<span class="lineNum">     345 </span><span class="lineCov">      62506 :                           extra_data-&gt;typbyval,</span>
+<span class="lineNum">     346 </span><span class="lineCov">      62506 :                           extra_data-&gt;typalign,</span>
+<span class="lineNum">     347 </span>            :                           &amp;elem_values, &amp;elem_nulls, &amp;num_elems);
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span>            :         /*
+<span class="lineNum">     350 </span>            :          * We loop through the elements in the array and add them to our
+<span class="lineNum">     351 </span>            :          * tracking hashtable.
+<span class="lineNum">     352 </span>            :          */
+<span class="lineNum">     353 </span><span class="lineCov">      62506 :         null_present = false;</span>
+<span class="lineNum">     354 </span><span class="lineCov">     254394 :         for (j = 0; j &lt; num_elems; j++)</span>
+<span class="lineNum">     355 </span>            :         {
+<span class="lineNum">     356 </span>            :             Datum       elem_value;
+<span class="lineNum">     357 </span>            :             bool        found;
+<span class="lineNum">     358 </span>            : 
+<span class="lineNum">     359 </span>            :             /* No null element processing other than flag setting here */
+<span class="lineNum">     360 </span><span class="lineCov">     191888 :             if (elem_nulls[j])</span>
+<span class="lineNum">     361 </span>            :             {
+<span class="lineNum">     362 </span><span class="lineCov">          8 :                 null_present = true;</span>
+<span class="lineNum">     363 </span><span class="lineCov">       2540 :                 continue;</span>
+<span class="lineNum">     364 </span>            :             }
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span>            :             /* Lookup current element in hashtable, adding it if new */
+<span class="lineNum">     367 </span><span class="lineCov">     191880 :             elem_value = elem_values[j];</span>
+<span class="lineNum">     368 </span><span class="lineCov">     191880 :             item = (TrackItem *) hash_search(elements_tab,</span>
+<span class="lineNum">     369 </span>            :                                              (const void *) &amp;elem_value,
+<span class="lineNum">     370 </span>            :                                              HASH_ENTER, &amp;found);
+<span class="lineNum">     371 </span>            : 
+<span class="lineNum">     372 </span><span class="lineCov">     191880 :             if (found)</span>
+<span class="lineNum">     373 </span>            :             {
+<span class="lineNum">     374 </span>            :                 /* The element value is already on the tracking list */
+<span class="lineNum">     375 </span>            : 
+<span class="lineNum">     376 </span>            :                 /*
+<span class="lineNum">     377 </span>            :                  * The operators we assist ignore duplicate array elements, so
+<span class="lineNum">     378 </span>            :                  * count a given distinct element only once per array.
+<span class="lineNum">     379 </span>            :                  */
+<span class="lineNum">     380 </span><span class="lineCov">     188464 :                 if (item-&gt;last_container == array_no)</span>
+<span class="lineNum">     381 </span><span class="lineCov">       2524 :                     continue;</span>
+<span class="lineNum">     382 </span>            : 
+<span class="lineNum">     383 </span><span class="lineCov">     185940 :                 item-&gt;frequency++;</span>
+<span class="lineNum">     384 </span><span class="lineCov">     185940 :                 item-&gt;last_container = array_no;</span>
+<span class="lineNum">     385 </span>            :             }
+<span class="lineNum">     386 </span>            :             else
+<span class="lineNum">     387 </span>            :             {
+<span class="lineNum">     388 </span>            :                 /* Initialize new tracking list element */
+<span class="lineNum">     389 </span>            : 
+<span class="lineNum">     390 </span>            :                 /*
+<span class="lineNum">     391 </span>            :                  * If element type is pass-by-reference, we must copy it into
+<span class="lineNum">     392 </span>            :                  * palloc'd space, so that we can release the array below. (We
+<span class="lineNum">     393 </span>            :                  * do this so that the space needed for element values is
+<span class="lineNum">     394 </span>            :                  * limited by the size of the hashtable; if we kept all the
+<span class="lineNum">     395 </span>            :                  * array values around, it could be much more.)
+<span class="lineNum">     396 </span>            :                  */
+<span class="lineNum">     397 </span><span class="lineCov">       6832 :                 item-&gt;key = datumCopy(elem_value,</span>
+<span class="lineNum">     398 </span><span class="lineCov">       3416 :                                       extra_data-&gt;typbyval,</span>
+<span class="lineNum">     399 </span><span class="lineCov">       3416 :                                       extra_data-&gt;typlen);</span>
+<span class="lineNum">     400 </span>            : 
+<span class="lineNum">     401 </span><span class="lineCov">       3416 :                 item-&gt;frequency = 1;</span>
+<span class="lineNum">     402 </span><span class="lineCov">       3416 :                 item-&gt;delta = b_current - 1;</span>
+<span class="lineNum">     403 </span><span class="lineCov">       3416 :                 item-&gt;last_container = array_no;</span>
+<span class="lineNum">     404 </span>            :             }
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span>            :             /* element_no is the number of elements processed (ie N) */
+<span class="lineNum">     407 </span><span class="lineCov">     189356 :             element_no++;</span>
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span>            :             /* We prune the D structure after processing each bucket */
+<span class="lineNum">     410 </span><span class="lineCov">     189356 :             if (element_no % bucket_width == 0)</span>
+<span class="lineNum">     411 </span>            :             {
+<span class="lineNum">     412 </span><span class="lineNoCov">          0 :                 prune_element_hashtable(elements_tab, b_current);</span>
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :                 b_current++;</span>
+<span class="lineNum">     414 </span>            :             }
+<span class="lineNum">     415 </span>            :         }
+<span class="lineNum">     416 </span>            : 
+<span class="lineNum">     417 </span>            :         /* Count null element presence once per array. */
+<span class="lineNum">     418 </span><span class="lineCov">      62506 :         if (null_present)</span>
+<span class="lineNum">     419 </span><span class="lineCov">          8 :             null_elem_cnt++;</span>
+<span class="lineNum">     420 </span>            : 
+<span class="lineNum">     421 </span>            :         /* Update frequency of the particular array distinct element count. */
+<span class="lineNum">     422 </span><span class="lineCov">      62506 :         distinct_count = (int) (element_no - prev_element_no);</span>
+<span class="lineNum">     423 </span><span class="lineCov">      62506 :         count_item = (DECountItem *) hash_search(count_tab, &amp;distinct_count,</span>
+<span class="lineNum">     424 </span>            :                                                  HASH_ENTER,
+<span class="lineNum">     425 </span>            :                                                  &amp;count_item_found);
+<span class="lineNum">     426 </span>            : 
+<span class="lineNum">     427 </span><span class="lineCov">      62506 :         if (count_item_found)</span>
+<span class="lineNum">     428 </span><span class="lineCov">      62258 :             count_item-&gt;frequency++;</span>
+<span class="lineNum">     429 </span>            :         else
+<span class="lineNum">     430 </span><span class="lineCov">        248 :             count_item-&gt;frequency = 1;</span>
+<span class="lineNum">     431 </span>            : 
+<span class="lineNum">     432 </span>            :         /* Free memory allocated while detoasting. */
+<span class="lineNum">     433 </span><span class="lineCov">      62506 :         if (PointerGetDatum(array) != value)</span>
+<span class="lineNum">     434 </span><span class="lineCov">      42172 :             pfree(array);</span>
+<span class="lineNum">     435 </span><span class="lineCov">      62506 :         pfree(elem_values);</span>
+<span class="lineNum">     436 </span><span class="lineCov">      62506 :         pfree(elem_nulls);</span>
+<span class="lineNum">     437 </span>            :     }
+<span class="lineNum">     438 </span>            : 
+<span class="lineNum">     439 </span>            :     /* Skip pg_statistic slots occupied by standard statistics */
+<span class="lineNum">     440 </span><span class="lineCov">         90 :     slot_idx = 0;</span>
+<span class="lineNum">     441 </span><span class="lineCov">        308 :     while (slot_idx &lt; STATISTIC_NUM_SLOTS &amp;&amp; stats-&gt;stakind[slot_idx] != 0)</span>
+<span class="lineNum">     442 </span><span class="lineCov">        128 :         slot_idx++;</span>
+<span class="lineNum">     443 </span><span class="lineCov">         90 :     if (slot_idx &gt; STATISTIC_NUM_SLOTS - 2)</span>
+<span class="lineNum">     444 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;insufficient pg_statistic slots for array stats&quot;);</span>
+<span class="lineNum">     445 </span>            : 
+<span class="lineNum">     446 </span>            :     /* We can only compute real stats if we found some non-null values. */
+<span class="lineNum">     447 </span><span class="lineCov">         90 :     if (analyzed_rows &gt; 0)</span>
+<span class="lineNum">     448 </span>            :     {
+<span class="lineNum">     449 </span><span class="lineCov">         58 :         int         nonnull_cnt = analyzed_rows;</span>
+<span class="lineNum">     450 </span>            :         int         count_items_count;
+<span class="lineNum">     451 </span>            :         int         i;
+<span class="lineNum">     452 </span>            :         TrackItem **sort_table;
+<span class="lineNum">     453 </span>            :         int         track_len;
+<span class="lineNum">     454 </span>            :         int64       cutoff_freq;
+<span class="lineNum">     455 </span>            :         int64       minfreq,
+<span class="lineNum">     456 </span>            :                     maxfreq;
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span>            :         /*
+<span class="lineNum">     459 </span>            :          * We assume the standard stats code already took care of setting
+<span class="lineNum">     460 </span>            :          * stats_valid, stanullfrac, stawidth, stadistinct.  We'd have to
+<span class="lineNum">     461 </span>            :          * re-compute those values if we wanted to not store the standard
+<span class="lineNum">     462 </span>            :          * stats.
+<span class="lineNum">     463 </span>            :          */
+<span class="lineNum">     464 </span>            : 
+<span class="lineNum">     465 </span>            :         /*
+<span class="lineNum">     466 </span>            :          * Construct an array of the interesting hashtable items, that is,
+<span class="lineNum">     467 </span>            :          * those meeting the cutoff frequency (s - epsilon)*N.  Also identify
+<span class="lineNum">     468 </span>            :          * the minimum and maximum frequencies among these items.
+<span class="lineNum">     469 </span>            :          *
+<span class="lineNum">     470 </span>            :          * Since epsilon = s/10 and bucket_width = 1/epsilon, the cutoff
+<span class="lineNum">     471 </span>            :          * frequency is 9*N / bucket_width.
+<span class="lineNum">     472 </span>            :          */
+<span class="lineNum">     473 </span><span class="lineCov">         58 :         cutoff_freq = 9 * element_no / bucket_width;</span>
+<span class="lineNum">     474 </span>            : 
+<span class="lineNum">     475 </span><span class="lineCov">         58 :         i = hash_get_num_entries(elements_tab); /* surely enough space */</span>
+<span class="lineNum">     476 </span><span class="lineCov">         58 :         sort_table = (TrackItem **) palloc(sizeof(TrackItem *) * i);</span>
+<span class="lineNum">     477 </span>            : 
+<span class="lineNum">     478 </span><span class="lineCov">         58 :         hash_seq_init(&amp;scan_status, elements_tab);</span>
+<span class="lineNum">     479 </span><span class="lineCov">         58 :         track_len = 0;</span>
+<span class="lineNum">     480 </span><span class="lineCov">         58 :         minfreq = element_no;</span>
+<span class="lineNum">     481 </span><span class="lineCov">         58 :         maxfreq = 0;</span>
+<span class="lineNum">     482 </span><span class="lineCov">       3532 :         while ((item = (TrackItem *) hash_seq_search(&amp;scan_status)) != NULL)</span>
+<span class="lineNum">     483 </span>            :         {
+<span class="lineNum">     484 </span><span class="lineCov">       3416 :             if (item-&gt;frequency &gt; cutoff_freq)</span>
+<span class="lineNum">     485 </span>            :             {
+<span class="lineNum">     486 </span><span class="lineCov">       3416 :                 sort_table[track_len++] = item;</span>
+<span class="lineNum">     487 </span><span class="lineCov">       3416 :                 minfreq = Min(minfreq, item-&gt;frequency);</span>
+<span class="lineNum">     488 </span><span class="lineCov">       3416 :                 maxfreq = Max(maxfreq, item-&gt;frequency);</span>
+<span class="lineNum">     489 </span>            :             }
+<span class="lineNum">     490 </span>            :         }
+<span class="lineNum">     491 </span><span class="lineCov">         58 :         Assert(track_len &lt;= i);</span>
+<span class="lineNum">     492 </span>            : 
+<span class="lineNum">     493 </span>            :         /* emit some statistics for debug purposes */
+<span class="lineNum">     494 </span><span class="lineCov">         58 :         elog(DEBUG3, &quot;compute_array_stats: target # mces = %d, &quot;</span>
+<span class="lineNum">     495 </span>            :              &quot;bucket width = %d, &quot;
+<span class="lineNum">     496 </span>            :              &quot;# elements = &quot; INT64_FORMAT &quot;, hashtable size = %d, &quot;
+<span class="lineNum">     497 </span>            :              &quot;usable entries = %d&quot;,
+<span class="lineNum">     498 </span>            :              num_mcelem, bucket_width, element_no, i, track_len);
+<span class="lineNum">     499 </span>            : 
+<span class="lineNum">     500 </span>            :         /*
+<span class="lineNum">     501 </span>            :          * If we obtained more elements than we really want, get rid of those
+<span class="lineNum">     502 </span>            :          * with least frequencies.  The easiest way is to qsort the array into
+<span class="lineNum">     503 </span>            :          * descending frequency order and truncate the array.
+<span class="lineNum">     504 </span>            :          */
+<span class="lineNum">     505 </span><span class="lineCov">         58 :         if (num_mcelem &lt; track_len)</span>
+<span class="lineNum">     506 </span>            :         {
+<span class="lineNum">     507 </span><span class="lineNoCov">          0 :             qsort(sort_table, track_len, sizeof(TrackItem *),</span>
+<span class="lineNum">     508 </span>            :                   trackitem_compare_frequencies_desc);
+<span class="lineNum">     509 </span>            :             /* reset minfreq to the smallest frequency we're keeping */
+<span class="lineNum">     510 </span><span class="lineNoCov">          0 :             minfreq = sort_table[num_mcelem - 1]-&gt;frequency;</span>
+<span class="lineNum">     511 </span>            :         }
+<span class="lineNum">     512 </span>            :         else
+<span class="lineNum">     513 </span><span class="lineCov">         58 :             num_mcelem = track_len;</span>
+<span class="lineNum">     514 </span>            : 
+<span class="lineNum">     515 </span>            :         /* Generate MCELEM slot entry */
+<span class="lineNum">     516 </span><span class="lineCov">         58 :         if (num_mcelem &gt; 0)</span>
+<span class="lineNum">     517 </span>            :         {
+<span class="lineNum">     518 </span>            :             MemoryContext old_context;
+<span class="lineNum">     519 </span>            :             Datum      *mcelem_values;
+<span class="lineNum">     520 </span>            :             float4     *mcelem_freqs;
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            :             /*
+<span class="lineNum">     523 </span>            :              * We want to store statistics sorted on the element value using
+<span class="lineNum">     524 </span>            :              * the element type's default comparison function.  This permits
+<span class="lineNum">     525 </span>            :              * fast binary searches in selectivity estimation functions.
+<span class="lineNum">     526 </span>            :              */
+<span class="lineNum">     527 </span><span class="lineCov">         58 :             qsort(sort_table, num_mcelem, sizeof(TrackItem *),</span>
+<span class="lineNum">     528 </span>            :                   trackitem_compare_element);
+<span class="lineNum">     529 </span>            : 
+<span class="lineNum">     530 </span>            :             /* Must copy the target values into anl_context */
+<span class="lineNum">     531 </span><span class="lineCov">         58 :             old_context = MemoryContextSwitchTo(stats-&gt;anl_context);</span>
+<span class="lineNum">     532 </span>            : 
+<span class="lineNum">     533 </span>            :             /*
+<span class="lineNum">     534 </span>            :              * We sorted statistics on the element value, but we want to be
+<span class="lineNum">     535 </span>            :              * able to find the minimal and maximal frequencies without going
+<span class="lineNum">     536 </span>            :              * through all the values.  We also want the frequency of null
+<span class="lineNum">     537 </span>            :              * elements.  Store these three values at the end of mcelem_freqs.
+<span class="lineNum">     538 </span>            :              */
+<span class="lineNum">     539 </span><span class="lineCov">         58 :             mcelem_values = (Datum *) palloc(num_mcelem * sizeof(Datum));</span>
+<span class="lineNum">     540 </span><span class="lineCov">         58 :             mcelem_freqs = (float4 *) palloc((num_mcelem + 3) * sizeof(float4));</span>
+<span class="lineNum">     541 </span>            : 
+<span class="lineNum">     542 </span>            :             /*
+<span class="lineNum">     543 </span>            :              * See comments above about use of nonnull_cnt as the divisor for
+<span class="lineNum">     544 </span>            :              * the final frequency estimates.
+<span class="lineNum">     545 </span>            :              */
+<span class="lineNum">     546 </span><span class="lineCov">       3474 :             for (i = 0; i &lt; num_mcelem; i++)</span>
+<span class="lineNum">     547 </span>            :             {
+<span class="lineNum">     548 </span><span class="lineCov">       3416 :                 TrackItem  *item = sort_table[i];</span>
+<span class="lineNum">     549 </span>            : 
+<span class="lineNum">     550 </span><span class="lineCov">      10248 :                 mcelem_values[i] = datumCopy(item-&gt;key,</span>
+<span class="lineNum">     551 </span><span class="lineCov">       3416 :                                              extra_data-&gt;typbyval,</span>
+<span class="lineNum">     552 </span><span class="lineCov">       3416 :                                              extra_data-&gt;typlen);</span>
+<span class="lineNum">     553 </span><span class="lineCov">       6832 :                 mcelem_freqs[i] = (double) item-&gt;frequency /</span>
+<span class="lineNum">     554 </span><span class="lineCov">       3416 :                     (double) nonnull_cnt;</span>
+<span class="lineNum">     555 </span>            :             }
+<span class="lineNum">     556 </span><span class="lineCov">         58 :             mcelem_freqs[i++] = (double) minfreq / (double) nonnull_cnt;</span>
+<span class="lineNum">     557 </span><span class="lineCov">         58 :             mcelem_freqs[i++] = (double) maxfreq / (double) nonnull_cnt;</span>
+<span class="lineNum">     558 </span><span class="lineCov">         58 :             mcelem_freqs[i++] = (double) null_elem_cnt / (double) nonnull_cnt;</span>
+<span class="lineNum">     559 </span>            : 
+<span class="lineNum">     560 </span><span class="lineCov">         58 :             MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">     561 </span>            : 
+<span class="lineNum">     562 </span><span class="lineCov">         58 :             stats-&gt;stakind[slot_idx] = STATISTIC_KIND_MCELEM;</span>
+<span class="lineNum">     563 </span><span class="lineCov">         58 :             stats-&gt;staop[slot_idx] = extra_data-&gt;eq_opr;</span>
+<span class="lineNum">     564 </span><span class="lineCov">         58 :             stats-&gt;stacoll[slot_idx] = extra_data-&gt;coll_id;</span>
+<span class="lineNum">     565 </span><span class="lineCov">         58 :             stats-&gt;stanumbers[slot_idx] = mcelem_freqs;</span>
+<span class="lineNum">     566 </span>            :             /* See above comment about extra stanumber entries */
+<span class="lineNum">     567 </span><span class="lineCov">         58 :             stats-&gt;numnumbers[slot_idx] = num_mcelem + 3;</span>
+<span class="lineNum">     568 </span><span class="lineCov">         58 :             stats-&gt;stavalues[slot_idx] = mcelem_values;</span>
+<span class="lineNum">     569 </span><span class="lineCov">         58 :             stats-&gt;numvalues[slot_idx] = num_mcelem;</span>
+<span class="lineNum">     570 </span>            :             /* We are storing values of element type */
+<span class="lineNum">     571 </span><span class="lineCov">         58 :             stats-&gt;statypid[slot_idx] = extra_data-&gt;type_id;</span>
+<span class="lineNum">     572 </span><span class="lineCov">         58 :             stats-&gt;statyplen[slot_idx] = extra_data-&gt;typlen;</span>
+<span class="lineNum">     573 </span><span class="lineCov">         58 :             stats-&gt;statypbyval[slot_idx] = extra_data-&gt;typbyval;</span>
+<span class="lineNum">     574 </span><span class="lineCov">         58 :             stats-&gt;statypalign[slot_idx] = extra_data-&gt;typalign;</span>
+<span class="lineNum">     575 </span><span class="lineCov">         58 :             slot_idx++;</span>
+<span class="lineNum">     576 </span>            :         }
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span>            :         /* Generate DECHIST slot entry */
+<span class="lineNum">     579 </span><span class="lineCov">         58 :         count_items_count = hash_get_num_entries(count_tab);</span>
+<span class="lineNum">     580 </span><span class="lineCov">         58 :         if (count_items_count &gt; 0)</span>
+<span class="lineNum">     581 </span>            :         {
+<span class="lineNum">     582 </span><span class="lineCov">         58 :             int         num_hist = stats-&gt;attr-&gt;attstattarget;</span>
+<span class="lineNum">     583 </span>            :             DECountItem **sorted_count_items;
+<span class="lineNum">     584 </span>            :             int         j;
+<span class="lineNum">     585 </span>            :             int         delta;
+<span class="lineNum">     586 </span>            :             int64       frac;
+<span class="lineNum">     587 </span>            :             float4     *hist;
+<span class="lineNum">     588 </span>            : 
+<span class="lineNum">     589 </span>            :             /* num_hist must be at least 2 for the loop below to work */
+<span class="lineNum">     590 </span><span class="lineCov">         58 :             num_hist = Max(num_hist, 2);</span>
+<span class="lineNum">     591 </span>            : 
+<span class="lineNum">     592 </span>            :             /*
+<span class="lineNum">     593 </span>            :              * Create an array of DECountItem pointers, and sort them into
+<span class="lineNum">     594 </span>            :              * increasing count order.
+<span class="lineNum">     595 </span>            :              */
+<span class="lineNum">     596 </span><span class="lineCov">         58 :             sorted_count_items = (DECountItem **)</span>
+<span class="lineNum">     597 </span><span class="lineCov">         58 :                 palloc(sizeof(DECountItem *) * count_items_count);</span>
+<span class="lineNum">     598 </span><span class="lineCov">         58 :             hash_seq_init(&amp;scan_status, count_tab);</span>
+<span class="lineNum">     599 </span><span class="lineCov">         58 :             j = 0;</span>
+<span class="lineNum">     600 </span><span class="lineCov">        364 :             while ((count_item = (DECountItem *) hash_seq_search(&amp;scan_status)) != NULL)</span>
+<span class="lineNum">     601 </span>            :             {
+<span class="lineNum">     602 </span><span class="lineCov">        248 :                 sorted_count_items[j++] = count_item;</span>
+<span class="lineNum">     603 </span>            :             }
+<span class="lineNum">     604 </span><span class="lineCov">         58 :             qsort(sorted_count_items, count_items_count,</span>
+<span class="lineNum">     605 </span>            :                   sizeof(DECountItem *), countitem_compare_count);
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span>            :             /*
+<span class="lineNum">     608 </span>            :              * Prepare to fill stanumbers with the histogram, followed by the
+<span class="lineNum">     609 </span>            :              * average count.  This array must be stored in anl_context.
+<span class="lineNum">     610 </span>            :              */
+<span class="lineNum">     611 </span><span class="lineCov">         58 :             hist = (float4 *)</span>
+<span class="lineNum">     612 </span><span class="lineCov">         58 :                 MemoryContextAlloc(stats-&gt;anl_context,</span>
+<span class="lineNum">     613 </span><span class="lineCov">         58 :                                    sizeof(float4) * (num_hist + 1));</span>
+<span class="lineNum">     614 </span><span class="lineCov">         58 :             hist[num_hist] = (double) element_no / (double) nonnull_cnt;</span>
+<span class="lineNum">     615 </span>            : 
+<span class="lineNum">     616 </span>            :             /*----------
+<span class="lineNum">     617 </span>            :              * Construct the histogram of distinct-element counts (DECs).
+<span class="lineNum">     618 </span>            :              *
+<span class="lineNum">     619 </span>            :              * The object of this loop is to copy the min and max DECs to
+<span class="lineNum">     620 </span>            :              * hist[0] and hist[num_hist - 1], along with evenly-spaced DECs
+<span class="lineNum">     621 </span>            :              * in between (where &quot;evenly-spaced&quot; is with reference to the
+<span class="lineNum">     622 </span>            :              * whole input population of arrays).  If we had a complete sorted
+<span class="lineNum">     623 </span>            :              * array of DECs, one per analyzed row, the i'th hist value would
+<span class="lineNum">     624 </span>            :              * come from DECs[i * (analyzed_rows - 1) / (num_hist - 1)]
+<span class="lineNum">     625 </span>            :              * (compare the histogram-making loop in compute_scalar_stats()).
+<span class="lineNum">     626 </span>            :              * But instead of that we have the sorted_count_items[] array,
+<span class="lineNum">     627 </span>            :              * which holds unique DEC values with their frequencies (that is,
+<span class="lineNum">     628 </span>            :              * a run-length-compressed version of the full array).  So we
+<span class="lineNum">     629 </span>            :              * control advancing through sorted_count_items[] with the
+<span class="lineNum">     630 </span>            :              * variable &quot;frac&quot;, which is defined as (x - y) * (num_hist - 1),
+<span class="lineNum">     631 </span>            :              * where x is the index in the notional DECs array corresponding
+<span class="lineNum">     632 </span>            :              * to the start of the next sorted_count_items[] element's run,
+<span class="lineNum">     633 </span>            :              * and y is the index in DECs from which we should take the next
+<span class="lineNum">     634 </span>            :              * histogram value.  We have to advance whenever x &lt;= y, that is
+<span class="lineNum">     635 </span>            :              * frac &lt;= 0.  The x component is the sum of the frequencies seen
+<span class="lineNum">     636 </span>            :              * so far (up through the current sorted_count_items[] element),
+<span class="lineNum">     637 </span>            :              * and of course y * (num_hist - 1) = i * (analyzed_rows - 1),
+<span class="lineNum">     638 </span>            :              * per the subscript calculation above.  (The subscript calculation
+<span class="lineNum">     639 </span>            :              * implies dropping any fractional part of y; in this formulation
+<span class="lineNum">     640 </span>            :              * that's handled by not advancing until frac reaches 1.)
+<span class="lineNum">     641 </span>            :              *
+<span class="lineNum">     642 </span>            :              * Even though frac has a bounded range, it could overflow int32
+<span class="lineNum">     643 </span>            :              * when working with very large statistics targets, so we do that
+<span class="lineNum">     644 </span>            :              * math in int64.
+<span class="lineNum">     645 </span>            :              *----------
+<span class="lineNum">     646 </span>            :              */
+<span class="lineNum">     647 </span><span class="lineCov">         58 :             delta = analyzed_rows - 1;</span>
+<span class="lineNum">     648 </span><span class="lineCov">         58 :             j = 0;              /* current index in sorted_count_items */</span>
+<span class="lineNum">     649 </span>            :             /* Initialize frac for sorted_count_items[0]; y is initially 0 */
+<span class="lineNum">     650 </span><span class="lineCov">         58 :             frac = (int64) sorted_count_items[0]-&gt;frequency * (num_hist - 1);</span>
+<span class="lineNum">     651 </span><span class="lineCov">       5858 :             for (i = 0; i &lt; num_hist; i++)</span>
+<span class="lineNum">     652 </span>            :             {
+<span class="lineNum">     653 </span><span class="lineCov">      11790 :                 while (frac &lt;= 0)</span>
+<span class="lineNum">     654 </span>            :                 {
+<span class="lineNum">     655 </span>            :                     /* Advance, and update x component of frac */
+<span class="lineNum">     656 </span><span class="lineCov">        190 :                     j++;</span>
+<span class="lineNum">     657 </span><span class="lineCov">        190 :                     frac += (int64) sorted_count_items[j]-&gt;frequency * (num_hist - 1);</span>
+<span class="lineNum">     658 </span>            :                 }
+<span class="lineNum">     659 </span><span class="lineCov">       5800 :                 hist[i] = sorted_count_items[j]-&gt;count;</span>
+<span class="lineNum">     660 </span><span class="lineCov">       5800 :                 frac -= delta;  /* update y for upcoming i increment */</span>
+<span class="lineNum">     661 </span>            :             }
+<span class="lineNum">     662 </span><span class="lineCov">         58 :             Assert(j == count_items_count - 1);</span>
+<span class="lineNum">     663 </span>            : 
+<span class="lineNum">     664 </span><span class="lineCov">         58 :             stats-&gt;stakind[slot_idx] = STATISTIC_KIND_DECHIST;</span>
+<span class="lineNum">     665 </span><span class="lineCov">         58 :             stats-&gt;staop[slot_idx] = extra_data-&gt;eq_opr;</span>
+<span class="lineNum">     666 </span><span class="lineCov">         58 :             stats-&gt;stacoll[slot_idx] = extra_data-&gt;coll_id;</span>
+<span class="lineNum">     667 </span><span class="lineCov">         58 :             stats-&gt;stanumbers[slot_idx] = hist;</span>
+<span class="lineNum">     668 </span><span class="lineCov">         58 :             stats-&gt;numnumbers[slot_idx] = num_hist + 1;</span>
+<span class="lineNum">     669 </span><span class="lineCov">         58 :             slot_idx++;</span>
+<span class="lineNum">     670 </span>            :         }
+<span class="lineNum">     671 </span>            :     }
+<span class="lineNum">     672 </span>            : 
+<span class="lineNum">     673 </span>            :     /*
+<span class="lineNum">     674 </span>            :      * We don't need to bother cleaning up any of our temporary palloc's. The
+<span class="lineNum">     675 </span>            :      * hashtable should also go away, as it used a child memory context.
+<span class="lineNum">     676 </span>            :      */
+<span class="lineNum">     677 </span><span class="lineCov">         90 : }</span>
+<span class="lineNum">     678 </span>            : 
+<span class="lineNum">     679 </span>            : /*
+<span class="lineNum">     680 </span>            :  * A function to prune the D structure from the Lossy Counting algorithm.
+<span class="lineNum">     681 </span>            :  * Consult compute_tsvector_stats() for wider explanation.
+<a name="682"><span class="lineNum">     682 </span>            :  */</a>
+<span class="lineNum">     683 </span>            : static void
+<span class="lineNum">     684 </span><span class="lineNoCov">          0 : prune_element_hashtable(HTAB *elements_tab, int b_current)</span>
+<span class="lineNum">     685 </span>            : {
+<span class="lineNum">     686 </span>            :     HASH_SEQ_STATUS scan_status;
+<span class="lineNum">     687 </span>            :     TrackItem  *item;
+<span class="lineNum">     688 </span>            : 
+<span class="lineNum">     689 </span><span class="lineNoCov">          0 :     hash_seq_init(&amp;scan_status, elements_tab);</span>
+<span class="lineNum">     690 </span><span class="lineNoCov">          0 :     while ((item = (TrackItem *) hash_seq_search(&amp;scan_status)) != NULL)</span>
+<span class="lineNum">     691 </span>            :     {
+<span class="lineNum">     692 </span><span class="lineNoCov">          0 :         if (item-&gt;frequency + item-&gt;delta &lt;= b_current)</span>
+<span class="lineNum">     693 </span>            :         {
+<span class="lineNum">     694 </span><span class="lineNoCov">          0 :             Datum       value = item-&gt;key;</span>
+<span class="lineNum">     695 </span>            : 
+<span class="lineNum">     696 </span><span class="lineNoCov">          0 :             if (hash_search(elements_tab, (const void *) &amp;item-&gt;key,</span>
+<span class="lineNum">     697 </span>            :                             HASH_REMOVE, NULL) == NULL)
+<span class="lineNum">     698 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;hash table corrupted&quot;);</span>
+<span class="lineNum">     699 </span>            :             /* We should free memory if element is not passed by value */
+<span class="lineNum">     700 </span><span class="lineNoCov">          0 :             if (!array_extra_data-&gt;typbyval)</span>
+<span class="lineNum">     701 </span><span class="lineNoCov">          0 :                 pfree(DatumGetPointer(value));</span>
+<span class="lineNum">     702 </span>            :         }
+<span class="lineNum">     703 </span>            :     }
+<span class="lineNum">     704 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span>            : /*
+<span class="lineNum">     707 </span>            :  * Hash function for elements.
+<span class="lineNum">     708 </span>            :  *
+<span class="lineNum">     709 </span>            :  * We use the element type's default hash opclass, and the column collation
+<span class="lineNum">     710 </span>            :  * if the type is collation-sensitive.
+<a name="711"><span class="lineNum">     711 </span>            :  */</a>
+<span class="lineNum">     712 </span>            : static uint32
+<span class="lineNum">     713 </span><span class="lineCov">     191880 : element_hash(const void *key, Size keysize)</span>
+<span class="lineNum">     714 </span>            : {
+<span class="lineNum">     715 </span><span class="lineCov">     191880 :     Datum       d = *((const Datum *) key);</span>
+<span class="lineNum">     716 </span>            :     Datum       h;
+<span class="lineNum">     717 </span>            : 
+<span class="lineNum">     718 </span><span class="lineCov">     191880 :     h = FunctionCall1Coll(array_extra_data-&gt;hash,</span>
+<span class="lineNum">     719 </span><span class="lineCov">     191880 :                           array_extra_data-&gt;coll_id,</span>
+<span class="lineNum">     720 </span>            :                           d);
+<span class="lineNum">     721 </span><span class="lineCov">     191880 :     return DatumGetUInt32(h);</span>
+<span class="lineNum">     722 </span>            : }
+<span class="lineNum">     723 </span>            : 
+<span class="lineNum">     724 </span>            : /*
+<span class="lineNum">     725 </span>            :  * Matching function for elements, to be used in hashtable lookups.
+<a name="726"><span class="lineNum">     726 </span>            :  */</a>
+<span class="lineNum">     727 </span>            : static int
+<span class="lineNum">     728 </span><span class="lineCov">     189660 : element_match(const void *key1, const void *key2, Size keysize)</span>
+<span class="lineNum">     729 </span>            : {
+<span class="lineNum">     730 </span>            :     /* The keysize parameter is superfluous here */
+<span class="lineNum">     731 </span><span class="lineCov">     189660 :     return element_compare(key1, key2);</span>
+<span class="lineNum">     732 </span>            : }
+<span class="lineNum">     733 </span>            : 
+<span class="lineNum">     734 </span>            : /*
+<span class="lineNum">     735 </span>            :  * Comparison function for elements.
+<span class="lineNum">     736 </span>            :  *
+<span class="lineNum">     737 </span>            :  * We use the element type's default btree opclass, and the column collation
+<span class="lineNum">     738 </span>            :  * if the type is collation-sensitive.
+<span class="lineNum">     739 </span>            :  *
+<span class="lineNum">     740 </span>            :  * XXX consider using SortSupport infrastructure
+<a name="741"><span class="lineNum">     741 </span>            :  */</a>
+<span class="lineNum">     742 </span>            : static int
+<span class="lineNum">     743 </span><span class="lineCov">     214716 : element_compare(const void *key1, const void *key2)</span>
+<span class="lineNum">     744 </span>            : {
+<span class="lineNum">     745 </span><span class="lineCov">     214716 :     Datum       d1 = *((const Datum *) key1);</span>
+<span class="lineNum">     746 </span><span class="lineCov">     214716 :     Datum       d2 = *((const Datum *) key2);</span>
+<span class="lineNum">     747 </span>            :     Datum       c;
+<span class="lineNum">     748 </span>            : 
+<span class="lineNum">     749 </span><span class="lineCov">     214716 :     c = FunctionCall2Coll(array_extra_data-&gt;cmp,</span>
+<span class="lineNum">     750 </span><span class="lineCov">     214716 :                           array_extra_data-&gt;coll_id,</span>
+<span class="lineNum">     751 </span>            :                           d1, d2);
+<span class="lineNum">     752 </span><span class="lineCov">     214716 :     return DatumGetInt32(c);</span>
+<span class="lineNum">     753 </span>            : }
+<span class="lineNum">     754 </span>            : 
+<span class="lineNum">     755 </span>            : /*
+<span class="lineNum">     756 </span>            :  * qsort() comparator for sorting TrackItems by frequencies (descending sort)
+<a name="757"><span class="lineNum">     757 </span>            :  */</a>
+<span class="lineNum">     758 </span>            : static int
+<span class="lineNum">     759 </span><span class="lineNoCov">          0 : trackitem_compare_frequencies_desc(const void *e1, const void *e2)</span>
+<span class="lineNum">     760 </span>            : {
+<span class="lineNum">     761 </span><span class="lineNoCov">          0 :     const TrackItem *const *t1 = (const TrackItem *const *) e1;</span>
+<span class="lineNum">     762 </span><span class="lineNoCov">          0 :     const TrackItem *const *t2 = (const TrackItem *const *) e2;</span>
+<span class="lineNum">     763 </span>            : 
+<span class="lineNum">     764 </span><span class="lineNoCov">          0 :     return (*t2)-&gt;frequency - (*t1)-&gt;frequency;</span>
+<span class="lineNum">     765 </span>            : }
+<span class="lineNum">     766 </span>            : 
+<span class="lineNum">     767 </span>            : /*
+<span class="lineNum">     768 </span>            :  * qsort() comparator for sorting TrackItems by element values
+<a name="769"><span class="lineNum">     769 </span>            :  */</a>
+<span class="lineNum">     770 </span>            : static int
+<span class="lineNum">     771 </span><span class="lineCov">      25056 : trackitem_compare_element(const void *e1, const void *e2)</span>
+<span class="lineNum">     772 </span>            : {
+<span class="lineNum">     773 </span><span class="lineCov">      25056 :     const TrackItem *const *t1 = (const TrackItem *const *) e1;</span>
+<span class="lineNum">     774 </span><span class="lineCov">      25056 :     const TrackItem *const *t2 = (const TrackItem *const *) e2;</span>
+<span class="lineNum">     775 </span>            : 
+<span class="lineNum">     776 </span><span class="lineCov">      25056 :     return element_compare(&amp;(*t1)-&gt;key, &amp;(*t2)-&gt;key);</span>
+<span class="lineNum">     777 </span>            : }
+<span class="lineNum">     778 </span>            : 
+<span class="lineNum">     779 </span>            : /*
+<span class="lineNum">     780 </span>            :  * qsort() comparator for sorting DECountItems by count
+<a name="781"><span class="lineNum">     781 </span>            :  */</a>
+<span class="lineNum">     782 </span>            : static int
+<span class="lineNum">     783 </span><span class="lineCov">        614 : countitem_compare_count(const void *e1, const void *e2)</span>
+<span class="lineNum">     784 </span>            : {
+<span class="lineNum">     785 </span><span class="lineCov">        614 :     const DECountItem *const *t1 = (const DECountItem *const *) e1;</span>
+<span class="lineNum">     786 </span><span class="lineCov">        614 :     const DECountItem *const *t2 = (const DECountItem *const *) e2;</span>
+<span class="lineNum">     787 </span>            : 
+<span class="lineNum">     788 </span><span class="lineCov">        614 :     if ((*t1)-&gt;count &lt; (*t2)-&gt;count)</span>
+<span class="lineNum">     789 </span><span class="lineCov">        262 :         return -1;</span>
+<span class="lineNum">     790 </span><span class="lineCov">        352 :     else if ((*t1)-&gt;count == (*t2)-&gt;count)</span>
+<span class="lineNum">     791 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">     792 </span>            :     else
+<span class="lineNum">     793 </span><span class="lineCov">        352 :         return 1;</span>
+<span class="lineNum">     794 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

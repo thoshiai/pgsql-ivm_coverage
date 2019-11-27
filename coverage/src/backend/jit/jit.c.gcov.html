@@ -1,0 +1,292 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/jit/jit.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/jit</a> - jit.c<span style="font-size: 80%;"> (source / <a href="jit.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">34</td>
+            <td class="headerCovTableEntry">56</td>
+            <td class="headerCovTableEntryLo">60.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">5</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntryLo">71.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * jit.c
+<span class="lineNum">       4 </span>            :  *    Provider independent JIT infrastructure.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Code related to loading JIT providers, redirecting calls into JIT providers
+<span class="lineNum">       7 </span>            :  * and error handling.  No code specific to a specific JIT implementation
+<span class="lineNum">       8 </span>            :  * should end up here.
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * Copyright (c) 2016-2019, PostgreSQL Global Development Group
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  * IDENTIFICATION
+<span class="lineNum">      14 </span>            :  *    src/backend/jit/jit.c
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      17 </span>            :  */
+<span class="lineNum">      18 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      19 </span>            : 
+<span class="lineNum">      20 </span>            : #include &lt;sys/types.h&gt;
+<span class="lineNum">      21 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      22 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : #include &quot;executor/execExpr.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;fmgr.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;jit/jit.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;utils/fmgrprotos.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/resowner_private.h&quot;
+<span class="lineNum">      30 </span>            : 
+<span class="lineNum">      31 </span>            : /* GUCs */
+<span class="lineNum">      32 </span>            : bool        jit_enabled = true;
+<span class="lineNum">      33 </span>            : char       *jit_provider = NULL;
+<span class="lineNum">      34 </span>            : bool        jit_debugging_support = false;
+<span class="lineNum">      35 </span>            : bool        jit_dump_bitcode = false;
+<span class="lineNum">      36 </span>            : bool        jit_expressions = true;
+<span class="lineNum">      37 </span>            : bool        jit_profiling_support = false;
+<span class="lineNum">      38 </span>            : bool        jit_tuple_deforming = true;
+<span class="lineNum">      39 </span>            : double      jit_above_cost = 100000;
+<span class="lineNum">      40 </span>            : double      jit_inline_above_cost = 500000;
+<span class="lineNum">      41 </span>            : double      jit_optimize_above_cost = 500000;
+<span class="lineNum">      42 </span>            : 
+<span class="lineNum">      43 </span>            : static JitProviderCallbacks provider;
+<span class="lineNum">      44 </span>            : static bool provider_successfully_loaded = false;
+<span class="lineNum">      45 </span>            : static bool provider_failed_loading = false;
+<span class="lineNum">      46 </span>            : 
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span>            : static bool provider_init(void);
+<span class="lineNum">      49 </span>            : static bool file_exists(const char *name);
+<span class="lineNum">      50 </span>            : 
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            : /*
+<span class="lineNum">      53 </span>            :  * SQL level function returning whether JIT is available in the current
+<span class="lineNum">      54 </span>            :  * backend. Will attempt to load JIT provider if necessary.
+<a name="55"><span class="lineNum">      55 </span>            :  */</a>
+<span class="lineNum">      56 </span>            : Datum
+<span class="lineNum">      57 </span><span class="lineNoCov">          0 : pg_jit_available(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">      58 </span>            : {
+<span class="lineNum">      59 </span><span class="lineNoCov">          0 :     PG_RETURN_BOOL(provider_init());</span>
+<span class="lineNum">      60 </span>            : }
+<span class="lineNum">      61 </span>            : 
+<span class="lineNum">      62 </span>            : 
+<span class="lineNum">      63 </span>            : /*
+<span class="lineNum">      64 </span>            :  * Return whether a JIT provider has successfully been loaded, caching the
+<span class="lineNum">      65 </span>            :  * result.
+<a name="66"><span class="lineNum">      66 </span>            :  */</a>
+<span class="lineNum">      67 </span>            : static bool
+<span class="lineNum">      68 </span><span class="lineCov">      16352 : provider_init(void)</span>
+<span class="lineNum">      69 </span>            : {
+<span class="lineNum">      70 </span>            :     char        path[MAXPGPATH];
+<span class="lineNum">      71 </span>            :     JitProviderInit init;
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            :     /* don't even try to load if not enabled */
+<span class="lineNum">      74 </span><span class="lineCov">      16352 :     if (!jit_enabled)</span>
+<span class="lineNum">      75 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span>            :     /*
+<span class="lineNum">      78 </span>            :      * Don't retry loading after failing - attempting to load JIT provider
+<span class="lineNum">      79 </span>            :      * isn't cheap.
+<span class="lineNum">      80 </span>            :      */
+<span class="lineNum">      81 </span><span class="lineCov">      16352 :     if (provider_failed_loading)</span>
+<span class="lineNum">      82 </span><span class="lineCov">      16120 :         return false;</span>
+<span class="lineNum">      83 </span><span class="lineCov">        232 :     if (provider_successfully_loaded)</span>
+<span class="lineNum">      84 </span><span class="lineNoCov">          0 :         return true;</span>
+<span class="lineNum">      85 </span>            : 
+<span class="lineNum">      86 </span>            :     /*
+<span class="lineNum">      87 </span>            :      * Check whether shared library exists. We do that check before actually
+<span class="lineNum">      88 </span>            :      * attempting to load the shared library (via load_external_function()),
+<span class="lineNum">      89 </span>            :      * because that'd error out in case the shlib isn't available.
+<span class="lineNum">      90 </span>            :      */
+<span class="lineNum">      91 </span><span class="lineCov">        232 :     snprintf(path, MAXPGPATH, &quot;%s/%s%s&quot;, pkglib_path, jit_provider, DLSUFFIX);</span>
+<span class="lineNum">      92 </span><span class="lineCov">        232 :     elog(DEBUG1, &quot;probing availability of JIT provider at %s&quot;, path);</span>
+<span class="lineNum">      93 </span><span class="lineCov">        232 :     if (!file_exists(path))</span>
+<span class="lineNum">      94 </span>            :     {
+<span class="lineNum">      95 </span><span class="lineCov">        232 :         elog(DEBUG1,</span>
+<span class="lineNum">      96 </span>            :              &quot;provider not available, disabling JIT for current session&quot;);
+<span class="lineNum">      97 </span><span class="lineCov">        232 :         provider_failed_loading = true;</span>
+<span class="lineNum">      98 </span><span class="lineCov">        232 :         return false;</span>
+<span class="lineNum">      99 </span>            :     }
+<span class="lineNum">     100 </span>            : 
+<span class="lineNum">     101 </span>            :     /*
+<span class="lineNum">     102 </span>            :      * If loading functions fails, signal failure. We do so because
+<span class="lineNum">     103 </span>            :      * load_external_function() might error out despite the above check if
+<span class="lineNum">     104 </span>            :      * e.g. the library's dependencies aren't installed. We want to signal
+<span class="lineNum">     105 </span>            :      * ERROR in that case, so the user is notified, but we don't want to
+<span class="lineNum">     106 </span>            :      * continually retry.
+<span class="lineNum">     107 </span>            :      */
+<span class="lineNum">     108 </span><span class="lineNoCov">          0 :     provider_failed_loading = true;</span>
+<span class="lineNum">     109 </span>            : 
+<span class="lineNum">     110 </span>            :     /* and initialize */
+<span class="lineNum">     111 </span><span class="lineNoCov">          0 :     init = (JitProviderInit)</span>
+<span class="lineNum">     112 </span>            :         load_external_function(path, &quot;_PG_jit_provider_init&quot;, true, NULL);
+<span class="lineNum">     113 </span><span class="lineNoCov">          0 :     init(&amp;provider);</span>
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span><span class="lineNoCov">          0 :     provider_successfully_loaded = true;</span>
+<span class="lineNum">     116 </span><span class="lineNoCov">          0 :     provider_failed_loading = false;</span>
+<span class="lineNum">     117 </span>            : 
+<span class="lineNum">     118 </span><span class="lineNoCov">          0 :     elog(DEBUG1, &quot;successfully loaded JIT provider in current session&quot;);</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span><span class="lineNoCov">          0 :     return true;</span>
+<span class="lineNum">     121 </span>            : }
+<span class="lineNum">     122 </span>            : 
+<span class="lineNum">     123 </span>            : /*
+<span class="lineNum">     124 </span>            :  * Reset JIT provider's error handling. This'll be called after an error has
+<span class="lineNum">     125 </span>            :  * been thrown and the main-loop has re-established control.
+<a name="126"><span class="lineNum">     126 </span>            :  */</a>
+<span class="lineNum">     127 </span>            : void
+<span class="lineNum">     128 </span><span class="lineCov">       8060 : jit_reset_after_error(void)</span>
+<span class="lineNum">     129 </span>            : {
+<span class="lineNum">     130 </span><span class="lineCov">       8060 :     if (provider_successfully_loaded)</span>
+<span class="lineNum">     131 </span><span class="lineNoCov">          0 :         provider.reset_after_error();</span>
+<span class="lineNum">     132 </span><span class="lineCov">       8060 : }</span>
+<span class="lineNum">     133 </span>            : 
+<span class="lineNum">     134 </span>            : /*
+<span class="lineNum">     135 </span>            :  * Release resources required by one JIT context.
+<a name="136"><span class="lineNum">     136 </span>            :  */</a>
+<span class="lineNum">     137 </span>            : void
+<span class="lineNum">     138 </span><span class="lineNoCov">          0 : jit_release_context(JitContext *context)</span>
+<span class="lineNum">     139 </span>            : {
+<span class="lineNum">     140 </span><span class="lineNoCov">          0 :     if (provider_successfully_loaded)</span>
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 :         provider.release_context(context);</span>
+<span class="lineNum">     142 </span>            : 
+<span class="lineNum">     143 </span><span class="lineNoCov">          0 :     ResourceOwnerForgetJIT(context-&gt;resowner, PointerGetDatum(context));</span>
+<span class="lineNum">     144 </span><span class="lineNoCov">          0 :     pfree(context);</span>
+<span class="lineNum">     145 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">     146 </span>            : 
+<span class="lineNum">     147 </span>            : /*
+<span class="lineNum">     148 </span>            :  * Ask provider to JIT compile an expression.
+<span class="lineNum">     149 </span>            :  *
+<span class="lineNum">     150 </span>            :  * Returns true if successful, false if not.
+<a name="151"><span class="lineNum">     151 </span>            :  */</a>
+<span class="lineNum">     152 </span>            : bool
+<span class="lineNum">     153 </span><span class="lineCov">     314652 : jit_compile_expr(struct ExprState *state)</span>
+<span class="lineNum">     154 </span>            : {
+<span class="lineNum">     155 </span>            :     /*
+<span class="lineNum">     156 </span>            :      * We can easily create a one-off context for functions without an
+<span class="lineNum">     157 </span>            :      * associated PlanState (and thus EState). But because there's no executor
+<span class="lineNum">     158 </span>            :      * shutdown callback that could deallocate the created function, they'd
+<span class="lineNum">     159 </span>            :      * live to the end of the transactions, where they'd be cleaned up by the
+<span class="lineNum">     160 </span>            :      * resowner machinery. That can lead to a noticeable amount of memory
+<span class="lineNum">     161 </span>            :      * usage, and worse, trigger some quadratic behaviour in gdb. Therefore,
+<span class="lineNum">     162 </span>            :      * at least for now, don't create a JITed function in those circumstances.
+<span class="lineNum">     163 </span>            :      */
+<span class="lineNum">     164 </span><span class="lineCov">     314652 :     if (!state-&gt;parent)</span>
+<span class="lineNum">     165 </span><span class="lineCov">      48424 :         return false;</span>
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span>            :     /* if no jitting should be performed at all */
+<span class="lineNum">     168 </span><span class="lineCov">     266228 :     if (!(state-&gt;parent-&gt;state-&gt;es_jit_flags &amp; PGJIT_PERFORM))</span>
+<span class="lineNum">     169 </span><span class="lineCov">     249876 :         return false;</span>
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span>            :     /* or if expressions aren't JITed */
+<span class="lineNum">     172 </span><span class="lineCov">      16352 :     if (!(state-&gt;parent-&gt;state-&gt;es_jit_flags &amp; PGJIT_EXPR))</span>
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span>            :     /* this also takes !jit_enabled into account */
+<span class="lineNum">     176 </span><span class="lineCov">      16352 :     if (provider_init())</span>
+<span class="lineNum">     177 </span><span class="lineNoCov">          0 :         return provider.compile_expr(state);</span>
+<span class="lineNum">     178 </span>            : 
+<span class="lineNum">     179 </span><span class="lineCov">      16352 :     return false;</span>
+<span class="lineNum">     180 </span>            : }
+<span class="lineNum">     181 </span>            : 
+<a name="182"><span class="lineNum">     182 </span>            : /* Aggregate JIT instrumentation information */</a>
+<span class="lineNum">     183 </span>            : void
+<span class="lineNum">     184 </span><span class="lineCov">         24 : InstrJitAgg(JitInstrumentation *dst, JitInstrumentation *add)</span>
+<span class="lineNum">     185 </span>            : {
+<span class="lineNum">     186 </span><span class="lineCov">         24 :     dst-&gt;created_functions += add-&gt;created_functions;</span>
+<span class="lineNum">     187 </span><span class="lineCov">         24 :     INSTR_TIME_ADD(dst-&gt;generation_counter, add-&gt;generation_counter);</span>
+<span class="lineNum">     188 </span><span class="lineCov">         24 :     INSTR_TIME_ADD(dst-&gt;inlining_counter, add-&gt;inlining_counter);</span>
+<span class="lineNum">     189 </span><span class="lineCov">         24 :     INSTR_TIME_ADD(dst-&gt;optimization_counter, add-&gt;optimization_counter);</span>
+<span class="lineNum">     190 </span><span class="lineCov">         24 :     INSTR_TIME_ADD(dst-&gt;emission_counter, add-&gt;emission_counter);</span>
+<span class="lineNum">     191 </span><span class="lineCov">         24 : }</span>
+<a name="192"><span class="lineNum">     192 </span>            : </a>
+<span class="lineNum">     193 </span>            : static bool
+<span class="lineNum">     194 </span><span class="lineCov">        232 : file_exists(const char *name)</span>
+<span class="lineNum">     195 </span>            : {
+<span class="lineNum">     196 </span>            :     struct stat st;
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span><span class="lineCov">        232 :     AssertArg(name != NULL);</span>
+<span class="lineNum">     199 </span>            : 
+<span class="lineNum">     200 </span><span class="lineCov">        232 :     if (stat(name, &amp;st) == 0)</span>
+<span class="lineNum">     201 </span><span class="lineNoCov">          0 :         return S_ISDIR(st.st_mode) ? false : true;</span>
+<span class="lineNum">     202 </span><span class="lineCov">        232 :     else if (!(errno == ENOENT || errno == ENOTDIR))</span>
+<span class="lineNum">     203 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     204 </span>            :                 (errcode_for_file_access(),
+<span class="lineNum">     205 </span>            :                  errmsg(&quot;could not access file \&quot;%s\&quot;: %m&quot;, name)));
+<span class="lineNum">     206 </span>            : 
+<span class="lineNum">     207 </span><span class="lineCov">        232 :     return false;</span>
+<span class="lineNum">     208 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,1685 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/ipc/latch.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/ipc</a> - latch.c<span style="font-size: 80%;"> (source / <a href="latch.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">237</td>
+            <td class="headerCovTableEntry">282</td>
+            <td class="headerCovTableEntryMed">84.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">19</td>
+            <td class="headerCovTableEntry">19</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * latch.c
+<span class="lineNum">       4 </span>            :  *    Routines for inter-process latches
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * The Unix implementation uses the so-called self-pipe trick to overcome the
+<span class="lineNum">       7 </span>            :  * race condition involved with poll() (or epoll_wait() on linux) and setting
+<span class="lineNum">       8 </span>            :  * a global flag in the signal handler. When a latch is set and the current
+<span class="lineNum">       9 </span>            :  * process is waiting for it, the signal handler wakes up the poll() in
+<span class="lineNum">      10 </span>            :  * WaitLatch by writing a byte to a pipe. A signal by itself doesn't interrupt
+<span class="lineNum">      11 </span>            :  * poll() on all platforms, and even on platforms where it does, a signal that
+<span class="lineNum">      12 </span>            :  * arrives just before the poll() call does not prevent poll() from entering
+<span class="lineNum">      13 </span>            :  * sleep. An incoming byte on a pipe however reliably interrupts the sleep,
+<span class="lineNum">      14 </span>            :  * and causes poll() to return immediately even if the signal arrives before
+<span class="lineNum">      15 </span>            :  * poll() begins.
+<span class="lineNum">      16 </span>            :  *
+<span class="lineNum">      17 </span>            :  * When SetLatch is called from the same process that owns the latch,
+<span class="lineNum">      18 </span>            :  * SetLatch writes the byte directly to the pipe. If it's owned by another
+<span class="lineNum">      19 </span>            :  * process, SIGUSR1 is sent and the signal handler in the waiting process
+<span class="lineNum">      20 </span>            :  * writes the byte to the pipe on behalf of the signaling process.
+<span class="lineNum">      21 </span>            :  *
+<span class="lineNum">      22 </span>            :  * The Windows implementation uses Windows events that are inherited by all
+<span class="lineNum">      23 </span>            :  * postmaster child processes. There's no need for the self-pipe trick there.
+<span class="lineNum">      24 </span>            :  *
+<span class="lineNum">      25 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      26 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      27 </span>            :  *
+<span class="lineNum">      28 </span>            :  * IDENTIFICATION
+<span class="lineNum">      29 </span>            :  *    src/backend/storage/ipc/latch.c
+<span class="lineNum">      30 </span>            :  *
+<span class="lineNum">      31 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      32 </span>            :  */
+<span class="lineNum">      33 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : #include &lt;fcntl.h&gt;
+<span class="lineNum">      36 </span>            : #include &lt;limits.h&gt;
+<span class="lineNum">      37 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      38 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      39 </span>            : #ifdef HAVE_SYS_EPOLL_H
+<span class="lineNum">      40 </span>            : #include &lt;sys/epoll.h&gt;
+<span class="lineNum">      41 </span>            : #endif
+<span class="lineNum">      42 </span>            : #ifdef HAVE_POLL_H
+<span class="lineNum">      43 </span>            : #include &lt;poll.h&gt;
+<span class="lineNum">      44 </span>            : #endif
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      47 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      48 </span>            : #include &quot;port/atomics.h&quot;
+<span class="lineNum">      49 </span>            : #include &quot;portability/instr_time.h&quot;
+<span class="lineNum">      50 </span>            : #include &quot;postmaster/postmaster.h&quot;
+<span class="lineNum">      51 </span>            : #include &quot;storage/ipc.h&quot;
+<span class="lineNum">      52 </span>            : #include &quot;storage/latch.h&quot;
+<span class="lineNum">      53 </span>            : #include &quot;storage/pmsignal.h&quot;
+<span class="lineNum">      54 </span>            : #include &quot;storage/shmem.h&quot;
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : /*
+<span class="lineNum">      57 </span>            :  * Select the fd readiness primitive to use. Normally the &quot;most modern&quot;
+<span class="lineNum">      58 </span>            :  * primitive supported by the OS will be used, but for testing it can be
+<span class="lineNum">      59 </span>            :  * useful to manually specify the used primitive.  If desired, just add a
+<span class="lineNum">      60 </span>            :  * define somewhere before this block.
+<span class="lineNum">      61 </span>            :  */
+<span class="lineNum">      62 </span>            : #if defined(WAIT_USE_EPOLL) || defined(WAIT_USE_POLL) || \
+<span class="lineNum">      63 </span>            :     defined(WAIT_USE_WIN32)
+<span class="lineNum">      64 </span>            : /* don't overwrite manual choice */
+<span class="lineNum">      65 </span>            : #elif defined(HAVE_SYS_EPOLL_H)
+<span class="lineNum">      66 </span>            : #define WAIT_USE_EPOLL
+<span class="lineNum">      67 </span>            : #elif defined(HAVE_POLL)
+<span class="lineNum">      68 </span>            : #define WAIT_USE_POLL
+<span class="lineNum">      69 </span>            : #elif WIN32
+<span class="lineNum">      70 </span>            : #define WAIT_USE_WIN32
+<span class="lineNum">      71 </span>            : #else
+<span class="lineNum">      72 </span>            : #error &quot;no wait set implementation available&quot;
+<span class="lineNum">      73 </span>            : #endif
+<span class="lineNum">      74 </span>            : 
+<span class="lineNum">      75 </span>            : /* typedef in latch.h */
+<span class="lineNum">      76 </span>            : struct WaitEventSet
+<span class="lineNum">      77 </span>            : {
+<span class="lineNum">      78 </span>            :     int         nevents;        /* number of registered events */
+<span class="lineNum">      79 </span>            :     int         nevents_space;  /* maximum number of events in this set */
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span>            :     /*
+<span class="lineNum">      82 </span>            :      * Array, of nevents_space length, storing the definition of events this
+<span class="lineNum">      83 </span>            :      * set is waiting for.
+<span class="lineNum">      84 </span>            :      */
+<span class="lineNum">      85 </span>            :     WaitEvent  *events;
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            :     /*
+<span class="lineNum">      88 </span>            :      * If WL_LATCH_SET is specified in any wait event, latch is a pointer to
+<span class="lineNum">      89 </span>            :      * said latch, and latch_pos the offset in the -&gt;events array. This is
+<span class="lineNum">      90 </span>            :      * useful because we check the state of the latch before performing doing
+<span class="lineNum">      91 </span>            :      * syscalls related to waiting.
+<span class="lineNum">      92 </span>            :      */
+<span class="lineNum">      93 </span>            :     Latch      *latch;
+<span class="lineNum">      94 </span>            :     int         latch_pos;
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span>            :     /*
+<span class="lineNum">      97 </span>            :      * WL_EXIT_ON_PM_DEATH is converted to WL_POSTMASTER_DEATH, but this flag
+<span class="lineNum">      98 </span>            :      * is set so that we'll exit immediately if postmaster death is detected,
+<span class="lineNum">      99 </span>            :      * instead of returning.
+<span class="lineNum">     100 </span>            :      */
+<span class="lineNum">     101 </span>            :     bool        exit_on_postmaster_death;
+<span class="lineNum">     102 </span>            : 
+<span class="lineNum">     103 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     104 </span>            :     int         epoll_fd;
+<span class="lineNum">     105 </span>            :     /* epoll_wait returns events in a user provided arrays, allocate once */
+<span class="lineNum">     106 </span>            :     struct epoll_event *epoll_ret_events;
+<span class="lineNum">     107 </span>            : #elif defined(WAIT_USE_POLL)
+<span class="lineNum">     108 </span>            :     /* poll expects events to be waited on every poll() call, prepare once */
+<span class="lineNum">     109 </span>            :     struct pollfd *pollfds;
+<span class="lineNum">     110 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     111 </span>            : 
+<span class="lineNum">     112 </span>            :     /*
+<span class="lineNum">     113 </span>            :      * Array of windows events. The first element always contains
+<span class="lineNum">     114 </span>            :      * pgwin32_signal_event, so the remaining elements are offset by one (i.e.
+<span class="lineNum">     115 </span>            :      * event-&gt;pos + 1).
+<span class="lineNum">     116 </span>            :      */
+<span class="lineNum">     117 </span>            :     HANDLE     *handles;
+<span class="lineNum">     118 </span>            : #endif
+<span class="lineNum">     119 </span>            : };
+<span class="lineNum">     120 </span>            : 
+<span class="lineNum">     121 </span>            : #ifndef WIN32
+<span class="lineNum">     122 </span>            : /* Are we currently in WaitLatch? The signal handler would like to know. */
+<span class="lineNum">     123 </span>            : static volatile sig_atomic_t waiting = false;
+<span class="lineNum">     124 </span>            : 
+<span class="lineNum">     125 </span>            : /* Read and write ends of the self-pipe */
+<span class="lineNum">     126 </span>            : static int  selfpipe_readfd = -1;
+<span class="lineNum">     127 </span>            : static int  selfpipe_writefd = -1;
+<span class="lineNum">     128 </span>            : 
+<span class="lineNum">     129 </span>            : /* Process owning the self-pipe --- needed for checking purposes */
+<span class="lineNum">     130 </span>            : static int  selfpipe_owner_pid = 0;
+<span class="lineNum">     131 </span>            : 
+<span class="lineNum">     132 </span>            : /* Private function prototypes */
+<span class="lineNum">     133 </span>            : static void sendSelfPipeByte(void);
+<span class="lineNum">     134 </span>            : static void drainSelfPipe(void);
+<span class="lineNum">     135 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     138 </span>            : static void WaitEventAdjustEpoll(WaitEventSet *set, WaitEvent *event, int action);
+<span class="lineNum">     139 </span>            : #elif defined(WAIT_USE_POLL)
+<span class="lineNum">     140 </span>            : static void WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event);
+<span class="lineNum">     141 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     142 </span>            : static void WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event);
+<span class="lineNum">     143 </span>            : #endif
+<span class="lineNum">     144 </span>            : 
+<span class="lineNum">     145 </span>            : static inline int WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
+<span class="lineNum">     146 </span>            :                                         WaitEvent *occurred_events, int nevents);
+<span class="lineNum">     147 </span>            : 
+<span class="lineNum">     148 </span>            : /*
+<span class="lineNum">     149 </span>            :  * Initialize the process-local latch infrastructure.
+<span class="lineNum">     150 </span>            :  *
+<span class="lineNum">     151 </span>            :  * This must be called once during startup of any process that can wait on
+<span class="lineNum">     152 </span>            :  * latches, before it issues any InitLatch() or OwnLatch() calls.
+<a name="153"><span class="lineNum">     153 </span>            :  */</a>
+<span class="lineNum">     154 </span>            : void
+<span class="lineNum">     155 </span><span class="lineCov">       1226 : InitializeLatchSupport(void)</span>
+<span class="lineNum">     156 </span>            : {
+<span class="lineNum">     157 </span>            : #ifndef WIN32
+<span class="lineNum">     158 </span>            :     int         pipefd[2];
+<span class="lineNum">     159 </span>            : 
+<span class="lineNum">     160 </span><span class="lineCov">       1226 :     if (IsUnderPostmaster)</span>
+<span class="lineNum">     161 </span>            :     {
+<span class="lineNum">     162 </span>            :         /*
+<span class="lineNum">     163 </span>            :          * We might have inherited connections to a self-pipe created by the
+<span class="lineNum">     164 </span>            :          * postmaster.  It's critical that child processes create their own
+<span class="lineNum">     165 </span>            :          * self-pipes, of course, and we really want them to close the
+<span class="lineNum">     166 </span>            :          * inherited FDs for safety's sake.
+<span class="lineNum">     167 </span>            :          */
+<span class="lineNum">     168 </span><span class="lineCov">       1218 :         if (selfpipe_owner_pid != 0)</span>
+<span class="lineNum">     169 </span>            :         {
+<span class="lineNum">     170 </span>            :             /* Assert we go through here but once in a child process */
+<span class="lineNum">     171 </span><span class="lineNoCov">          0 :             Assert(selfpipe_owner_pid != MyProcPid);</span>
+<span class="lineNum">     172 </span>            :             /* Release postmaster's pipe FDs; ignore any error */
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :             (void) close(selfpipe_readfd);</span>
+<span class="lineNum">     174 </span><span class="lineNoCov">          0 :             (void) close(selfpipe_writefd);</span>
+<span class="lineNum">     175 </span>            :             /* Clean up, just for safety's sake; we'll set these below */
+<span class="lineNum">     176 </span><span class="lineNoCov">          0 :             selfpipe_readfd = selfpipe_writefd = -1;</span>
+<span class="lineNum">     177 </span><span class="lineNoCov">          0 :             selfpipe_owner_pid = 0;</span>
+<span class="lineNum">     178 </span>            :         }
+<span class="lineNum">     179 </span>            :         else
+<span class="lineNum">     180 </span>            :         {
+<span class="lineNum">     181 </span>            :             /*
+<span class="lineNum">     182 </span>            :              * Postmaster didn't create a self-pipe ... or else we're in an
+<span class="lineNum">     183 </span>            :              * EXEC_BACKEND build, in which case it doesn't matter since the
+<span class="lineNum">     184 </span>            :              * postmaster's pipe FDs were closed by the action of FD_CLOEXEC.
+<span class="lineNum">     185 </span>            :              */
+<span class="lineNum">     186 </span><span class="lineCov">       1218 :             Assert(selfpipe_readfd == -1);</span>
+<span class="lineNum">     187 </span>            :         }
+<span class="lineNum">     188 </span>            :     }
+<span class="lineNum">     189 </span>            :     else
+<span class="lineNum">     190 </span>            :     {
+<span class="lineNum">     191 </span>            :         /* In postmaster or standalone backend, assert we do this but once */
+<span class="lineNum">     192 </span><span class="lineCov">          8 :         Assert(selfpipe_readfd == -1);</span>
+<span class="lineNum">     193 </span><span class="lineCov">          8 :         Assert(selfpipe_owner_pid == 0);</span>
+<span class="lineNum">     194 </span>            :     }
+<span class="lineNum">     195 </span>            : 
+<span class="lineNum">     196 </span>            :     /*
+<span class="lineNum">     197 </span>            :      * Set up the self-pipe that allows a signal handler to wake up the
+<span class="lineNum">     198 </span>            :      * poll()/epoll_wait() in WaitLatch. Make the write-end non-blocking, so
+<span class="lineNum">     199 </span>            :      * that SetLatch won't block if the event has already been set many times
+<span class="lineNum">     200 </span>            :      * filling the kernel buffer. Make the read-end non-blocking too, so that
+<span class="lineNum">     201 </span>            :      * we can easily clear the pipe by reading until EAGAIN or EWOULDBLOCK.
+<span class="lineNum">     202 </span>            :      * Also, make both FDs close-on-exec, since we surely do not want any
+<span class="lineNum">     203 </span>            :      * child processes messing with them.
+<span class="lineNum">     204 </span>            :      */
+<span class="lineNum">     205 </span><span class="lineCov">       1226 :     if (pipe(pipefd) &lt; 0)</span>
+<span class="lineNum">     206 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;pipe() failed: %m&quot;);</span>
+<span class="lineNum">     207 </span><span class="lineCov">       1226 :     if (fcntl(pipefd[0], F_SETFL, O_NONBLOCK) == -1)</span>
+<span class="lineNum">     208 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;fcntl(F_SETFL) failed on read-end of self-pipe: %m&quot;);</span>
+<span class="lineNum">     209 </span><span class="lineCov">       1226 :     if (fcntl(pipefd[1], F_SETFL, O_NONBLOCK) == -1)</span>
+<span class="lineNum">     210 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;fcntl(F_SETFL) failed on write-end of self-pipe: %m&quot;);</span>
+<span class="lineNum">     211 </span><span class="lineCov">       1226 :     if (fcntl(pipefd[0], F_SETFD, FD_CLOEXEC) == -1)</span>
+<span class="lineNum">     212 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;fcntl(F_SETFD) failed on read-end of self-pipe: %m&quot;);</span>
+<span class="lineNum">     213 </span><span class="lineCov">       1226 :     if (fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) == -1)</span>
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 :         elog(FATAL, &quot;fcntl(F_SETFD) failed on write-end of self-pipe: %m&quot;);</span>
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span><span class="lineCov">       1226 :     selfpipe_readfd = pipefd[0];</span>
+<span class="lineNum">     217 </span><span class="lineCov">       1226 :     selfpipe_writefd = pipefd[1];</span>
+<span class="lineNum">     218 </span><span class="lineCov">       1226 :     selfpipe_owner_pid = MyProcPid;</span>
+<span class="lineNum">     219 </span>            : #else
+<span class="lineNum">     220 </span>            :     /* currently, nothing to do here for Windows */
+<span class="lineNum">     221 </span>            : #endif
+<span class="lineNum">     222 </span><span class="lineCov">       1226 : }</span>
+<span class="lineNum">     223 </span>            : 
+<span class="lineNum">     224 </span>            : /*
+<span class="lineNum">     225 </span>            :  * Initialize a process-local latch.
+<a name="226"><span class="lineNum">     226 </span>            :  */</a>
+<span class="lineNum">     227 </span>            : void
+<span class="lineNum">     228 </span><span class="lineCov">       1226 : InitLatch(Latch *latch)</span>
+<span class="lineNum">     229 </span>            : {
+<span class="lineNum">     230 </span><span class="lineCov">       1226 :     latch-&gt;is_set = false;</span>
+<span class="lineNum">     231 </span><span class="lineCov">       1226 :     latch-&gt;owner_pid = MyProcPid;</span>
+<span class="lineNum">     232 </span><span class="lineCov">       1226 :     latch-&gt;is_shared = false;</span>
+<span class="lineNum">     233 </span>            : 
+<span class="lineNum">     234 </span>            : #ifndef WIN32
+<span class="lineNum">     235 </span>            :     /* Assert InitializeLatchSupport has been called in this process */
+<span class="lineNum">     236 </span><span class="lineCov">       1226 :     Assert(selfpipe_readfd &gt;= 0 &amp;&amp; selfpipe_owner_pid == MyProcPid);</span>
+<span class="lineNum">     237 </span>            : #else
+<span class="lineNum">     238 </span>            :     latch-&gt;event = CreateEvent(NULL, TRUE, FALSE, NULL);
+<span class="lineNum">     239 </span>            :     if (latch-&gt;event == NULL)
+<span class="lineNum">     240 </span>            :         elog(ERROR, &quot;CreateEvent failed: error code %lu&quot;, GetLastError());
+<span class="lineNum">     241 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     242 </span><span class="lineCov">       1226 : }</span>
+<span class="lineNum">     243 </span>            : 
+<span class="lineNum">     244 </span>            : /*
+<span class="lineNum">     245 </span>            :  * Initialize a shared latch that can be set from other processes. The latch
+<span class="lineNum">     246 </span>            :  * is initially owned by no-one; use OwnLatch to associate it with the
+<span class="lineNum">     247 </span>            :  * current process.
+<span class="lineNum">     248 </span>            :  *
+<span class="lineNum">     249 </span>            :  * InitSharedLatch needs to be called in postmaster before forking child
+<span class="lineNum">     250 </span>            :  * processes, usually right after allocating the shared memory block
+<span class="lineNum">     251 </span>            :  * containing the latch with ShmemInitStruct. (The Unix implementation
+<span class="lineNum">     252 </span>            :  * doesn't actually require that, but the Windows one does.) Because of
+<span class="lineNum">     253 </span>            :  * this restriction, we have no concurrency issues to worry about here.
+<span class="lineNum">     254 </span>            :  *
+<span class="lineNum">     255 </span>            :  * Note that other handles created in this module are never marked as
+<span class="lineNum">     256 </span>            :  * inheritable.  Thus we do not need to worry about cleaning up child
+<span class="lineNum">     257 </span>            :  * process references to postmaster-private latches or WaitEventSets.
+<a name="258"><span class="lineNum">     258 </span>            :  */</a>
+<span class="lineNum">     259 </span>            : void
+<span class="lineNum">     260 </span><span class="lineCov">     155956 : InitSharedLatch(Latch *latch)</span>
+<span class="lineNum">     261 </span>            : {
+<span class="lineNum">     262 </span>            : #ifdef WIN32
+<span class="lineNum">     263 </span>            :     SECURITY_ATTRIBUTES sa;
+<span class="lineNum">     264 </span>            : 
+<span class="lineNum">     265 </span>            :     /*
+<span class="lineNum">     266 </span>            :      * Set up security attributes to specify that the events are inherited.
+<span class="lineNum">     267 </span>            :      */
+<span class="lineNum">     268 </span>            :     ZeroMemory(&amp;sa, sizeof(sa));
+<span class="lineNum">     269 </span>            :     sa.nLength = sizeof(sa);
+<span class="lineNum">     270 </span>            :     sa.bInheritHandle = TRUE;
+<span class="lineNum">     271 </span>            : 
+<span class="lineNum">     272 </span>            :     latch-&gt;event = CreateEvent(&amp;sa, TRUE, FALSE, NULL);
+<span class="lineNum">     273 </span>            :     if (latch-&gt;event == NULL)
+<span class="lineNum">     274 </span>            :         elog(ERROR, &quot;CreateEvent failed: error code %lu&quot;, GetLastError());
+<span class="lineNum">     275 </span>            : #endif
+<span class="lineNum">     276 </span>            : 
+<span class="lineNum">     277 </span><span class="lineCov">     155956 :     latch-&gt;is_set = false;</span>
+<span class="lineNum">     278 </span><span class="lineCov">     155956 :     latch-&gt;owner_pid = 0;</span>
+<span class="lineNum">     279 </span><span class="lineCov">     155956 :     latch-&gt;is_shared = true;</span>
+<span class="lineNum">     280 </span><span class="lineCov">     155956 : }</span>
+<span class="lineNum">     281 </span>            : 
+<span class="lineNum">     282 </span>            : /*
+<span class="lineNum">     283 </span>            :  * Associate a shared latch with the current process, allowing it to
+<span class="lineNum">     284 </span>            :  * wait on the latch.
+<span class="lineNum">     285 </span>            :  *
+<span class="lineNum">     286 </span>            :  * Although there is a sanity check for latch-already-owned, we don't do
+<span class="lineNum">     287 </span>            :  * any sort of locking here, meaning that we could fail to detect the error
+<span class="lineNum">     288 </span>            :  * if two processes try to own the same latch at about the same time.  If
+<span class="lineNum">     289 </span>            :  * there is any risk of that, caller must provide an interlock to prevent it.
+<span class="lineNum">     290 </span>            :  *
+<span class="lineNum">     291 </span>            :  * In any process that calls OwnLatch(), make sure that
+<span class="lineNum">     292 </span>            :  * latch_sigusr1_handler() is called from the SIGUSR1 signal handler,
+<span class="lineNum">     293 </span>            :  * as shared latches use SIGUSR1 for inter-process communication.
+<a name="294"><span class="lineNum">     294 </span>            :  */</a>
+<span class="lineNum">     295 </span>            : void
+<span class="lineNum">     296 </span><span class="lineCov">       1220 : OwnLatch(Latch *latch)</span>
+<span class="lineNum">     297 </span>            : {
+<span class="lineNum">     298 </span>            :     /* Sanity checks */
+<span class="lineNum">     299 </span><span class="lineCov">       1220 :     Assert(latch-&gt;is_shared);</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            : #ifndef WIN32
+<span class="lineNum">     302 </span>            :     /* Assert InitializeLatchSupport has been called in this process */
+<span class="lineNum">     303 </span><span class="lineCov">       1220 :     Assert(selfpipe_readfd &gt;= 0 &amp;&amp; selfpipe_owner_pid == MyProcPid);</span>
+<span class="lineNum">     304 </span>            : #endif
+<span class="lineNum">     305 </span>            : 
+<span class="lineNum">     306 </span><span class="lineCov">       1220 :     if (latch-&gt;owner_pid != 0)</span>
+<span class="lineNum">     307 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;latch already owned&quot;);</span>
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span><span class="lineCov">       1220 :     latch-&gt;owner_pid = MyProcPid;</span>
+<span class="lineNum">     310 </span><span class="lineCov">       1220 : }</span>
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span>            : /*
+<span class="lineNum">     313 </span>            :  * Disown a shared latch currently owned by the current process.
+<a name="314"><span class="lineNum">     314 </span>            :  */</a>
+<span class="lineNum">     315 </span>            : void
+<span class="lineNum">     316 </span><span class="lineCov">       1220 : DisownLatch(Latch *latch)</span>
+<span class="lineNum">     317 </span>            : {
+<span class="lineNum">     318 </span><span class="lineCov">       1220 :     Assert(latch-&gt;is_shared);</span>
+<span class="lineNum">     319 </span><span class="lineCov">       1220 :     Assert(latch-&gt;owner_pid == MyProcPid);</span>
+<span class="lineNum">     320 </span>            : 
+<span class="lineNum">     321 </span><span class="lineCov">       1220 :     latch-&gt;owner_pid = 0;</span>
+<span class="lineNum">     322 </span><span class="lineCov">       1220 : }</span>
+<span class="lineNum">     323 </span>            : 
+<span class="lineNum">     324 </span>            : /*
+<span class="lineNum">     325 </span>            :  * Wait for a given latch to be set, or for postmaster death, or until timeout
+<span class="lineNum">     326 </span>            :  * is exceeded. 'wakeEvents' is a bitmask that specifies which of those events
+<span class="lineNum">     327 </span>            :  * to wait for. If the latch is already set (and WL_LATCH_SET is given), the
+<span class="lineNum">     328 </span>            :  * function returns immediately.
+<span class="lineNum">     329 </span>            :  *
+<span class="lineNum">     330 </span>            :  * The &quot;timeout&quot; is given in milliseconds. It must be &gt;= 0 if WL_TIMEOUT flag
+<span class="lineNum">     331 </span>            :  * is given.  Although it is declared as &quot;long&quot;, we don't actually support
+<span class="lineNum">     332 </span>            :  * timeouts longer than INT_MAX milliseconds.  Note that some extra overhead
+<span class="lineNum">     333 </span>            :  * is incurred when WL_TIMEOUT is given, so avoid using a timeout if possible.
+<span class="lineNum">     334 </span>            :  *
+<span class="lineNum">     335 </span>            :  * The latch must be owned by the current process, ie. it must be a
+<span class="lineNum">     336 </span>            :  * process-local latch initialized with InitLatch, or a shared latch
+<span class="lineNum">     337 </span>            :  * associated with the current process by calling OwnLatch.
+<span class="lineNum">     338 </span>            :  *
+<span class="lineNum">     339 </span>            :  * Returns bit mask indicating which condition(s) caused the wake-up. Note
+<span class="lineNum">     340 </span>            :  * that if multiple wake-up conditions are true, there is no guarantee that
+<span class="lineNum">     341 </span>            :  * we return all of them in one call, but we will return at least one.
+<a name="342"><span class="lineNum">     342 </span>            :  */</a>
+<span class="lineNum">     343 </span>            : int
+<span class="lineNum">     344 </span><span class="lineCov">      12038 : WaitLatch(Latch *latch, int wakeEvents, long timeout,</span>
+<span class="lineNum">     345 </span>            :           uint32 wait_event_info)
+<span class="lineNum">     346 </span>            : {
+<span class="lineNum">     347 </span><span class="lineCov">      12038 :     return WaitLatchOrSocket(latch, wakeEvents, PGINVALID_SOCKET, timeout,</span>
+<span class="lineNum">     348 </span>            :                              wait_event_info);
+<span class="lineNum">     349 </span>            : }
+<span class="lineNum">     350 </span>            : 
+<span class="lineNum">     351 </span>            : /*
+<span class="lineNum">     352 </span>            :  * Like WaitLatch, but with an extra socket argument for WL_SOCKET_*
+<span class="lineNum">     353 </span>            :  * conditions.
+<span class="lineNum">     354 </span>            :  *
+<span class="lineNum">     355 </span>            :  * When waiting on a socket, EOF and error conditions always cause the socket
+<span class="lineNum">     356 </span>            :  * to be reported as readable/writable/connected, so that the caller can deal
+<span class="lineNum">     357 </span>            :  * with the condition.
+<span class="lineNum">     358 </span>            :  *
+<span class="lineNum">     359 </span>            :  * wakeEvents must include either WL_EXIT_ON_PM_DEATH for automatic exit
+<span class="lineNum">     360 </span>            :  * if the postmaster dies or WL_POSTMASTER_DEATH for a flag set in the
+<span class="lineNum">     361 </span>            :  * return value if the postmaster dies.  The latter is useful for rare cases
+<span class="lineNum">     362 </span>            :  * where some behavior other than immediate exit is needed.
+<span class="lineNum">     363 </span>            :  *
+<span class="lineNum">     364 </span>            :  * NB: These days this is just a wrapper around the WaitEventSet API. When
+<span class="lineNum">     365 </span>            :  * using a latch very frequently, consider creating a longer living
+<span class="lineNum">     366 </span>            :  * WaitEventSet instead; that's more efficient.
+<a name="367"><span class="lineNum">     367 </span>            :  */</a>
+<span class="lineNum">     368 </span>            : int
+<span class="lineNum">     369 </span><span class="lineCov">      16830 : WaitLatchOrSocket(Latch *latch, int wakeEvents, pgsocket sock,</span>
+<span class="lineNum">     370 </span>            :                   long timeout, uint32 wait_event_info)
+<span class="lineNum">     371 </span>            : {
+<span class="lineNum">     372 </span><span class="lineCov">      16830 :     int         ret = 0;</span>
+<span class="lineNum">     373 </span>            :     int         rc;
+<span class="lineNum">     374 </span>            :     WaitEvent   event;
+<span class="lineNum">     375 </span><span class="lineCov">      16830 :     WaitEventSet *set = CreateWaitEventSet(CurrentMemoryContext, 3);</span>
+<span class="lineNum">     376 </span>            : 
+<span class="lineNum">     377 </span><span class="lineCov">      16830 :     if (wakeEvents &amp; WL_TIMEOUT)</span>
+<span class="lineNum">     378 </span><span class="lineCov">       2686 :         Assert(timeout &gt;= 0);</span>
+<span class="lineNum">     379 </span>            :     else
+<span class="lineNum">     380 </span><span class="lineCov">      14144 :         timeout = -1;</span>
+<span class="lineNum">     381 </span>            : 
+<span class="lineNum">     382 </span><span class="lineCov">      16830 :     if (wakeEvents &amp; WL_LATCH_SET)</span>
+<span class="lineNum">     383 </span><span class="lineCov">      16830 :         AddWaitEventToSet(set, WL_LATCH_SET, PGINVALID_SOCKET,</span>
+<span class="lineNum">     384 </span>            :                           latch, NULL);
+<span class="lineNum">     385 </span>            : 
+<span class="lineNum">     386 </span>            :     /* Postmaster-managed callers must handle postmaster death somehow. */
+<span class="lineNum">     387 </span><span class="lineCov">      16830 :     Assert(!IsUnderPostmaster ||</span>
+<span class="lineNum">     388 </span>            :            (wakeEvents &amp; WL_EXIT_ON_PM_DEATH) ||
+<span class="lineNum">     389 </span>            :            (wakeEvents &amp; WL_POSTMASTER_DEATH));
+<span class="lineNum">     390 </span>            : 
+<span class="lineNum">     391 </span><span class="lineCov">      16830 :     if ((wakeEvents &amp; WL_POSTMASTER_DEATH) &amp;&amp; IsUnderPostmaster)</span>
+<span class="lineNum">     392 </span><span class="lineCov">       5502 :         AddWaitEventToSet(set, WL_POSTMASTER_DEATH, PGINVALID_SOCKET,</span>
+<span class="lineNum">     393 </span>            :                           NULL, NULL);
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span><span class="lineCov">      16830 :     if ((wakeEvents &amp; WL_EXIT_ON_PM_DEATH) &amp;&amp; IsUnderPostmaster)</span>
+<span class="lineNum">     396 </span><span class="lineCov">      11328 :         AddWaitEventToSet(set, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,</span>
+<span class="lineNum">     397 </span>            :                           NULL, NULL);
+<span class="lineNum">     398 </span>            : 
+<span class="lineNum">     399 </span><span class="lineCov">      16830 :     if (wakeEvents &amp; WL_SOCKET_MASK)</span>
+<span class="lineNum">     400 </span>            :     {
+<span class="lineNum">     401 </span>            :         int         ev;
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span><span class="lineCov">       4792 :         ev = wakeEvents &amp; WL_SOCKET_MASK;</span>
+<span class="lineNum">     404 </span><span class="lineCov">       4792 :         AddWaitEventToSet(set, ev, sock, NULL, NULL);</span>
+<span class="lineNum">     405 </span>            :     }
+<span class="lineNum">     406 </span>            : 
+<span class="lineNum">     407 </span><span class="lineCov">      16830 :     rc = WaitEventSetWait(set, timeout, &amp;event, 1, wait_event_info);</span>
+<span class="lineNum">     408 </span>            : 
+<span class="lineNum">     409 </span><span class="lineCov">      16830 :     if (rc == 0)</span>
+<span class="lineNum">     410 </span><span class="lineCov">        834 :         ret |= WL_TIMEOUT;</span>
+<span class="lineNum">     411 </span>            :     else
+<span class="lineNum">     412 </span>            :     {
+<span class="lineNum">     413 </span><span class="lineCov">      15996 :         ret |= event.events &amp; (WL_LATCH_SET |</span>
+<span class="lineNum">     414 </span>            :                                WL_POSTMASTER_DEATH |
+<span class="lineNum">     415 </span>            :                                WL_SOCKET_MASK);
+<span class="lineNum">     416 </span>            :     }
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span><span class="lineCov">      16830 :     FreeWaitEventSet(set);</span>
+<span class="lineNum">     419 </span>            : 
+<span class="lineNum">     420 </span><span class="lineCov">      16830 :     return ret;</span>
+<span class="lineNum">     421 </span>            : }
+<span class="lineNum">     422 </span>            : 
+<span class="lineNum">     423 </span>            : /*
+<span class="lineNum">     424 </span>            :  * Sets a latch and wakes up anyone waiting on it.
+<span class="lineNum">     425 </span>            :  *
+<span class="lineNum">     426 </span>            :  * This is cheap if the latch is already set, otherwise not so much.
+<span class="lineNum">     427 </span>            :  *
+<span class="lineNum">     428 </span>            :  * NB: when calling this in a signal handler, be sure to save and restore
+<span class="lineNum">     429 </span>            :  * errno around it.  (That's standard practice in most signal handlers, of
+<span class="lineNum">     430 </span>            :  * course, but we used to omit it in handlers that only set a flag.)
+<span class="lineNum">     431 </span>            :  *
+<span class="lineNum">     432 </span>            :  * NB: this function is called from critical sections and signal handlers so
+<span class="lineNum">     433 </span>            :  * throwing an error is not a good idea.
+<a name="434"><span class="lineNum">     434 </span>            :  */</a>
+<span class="lineNum">     435 </span>            : void
+<span class="lineNum">     436 </span><span class="lineCov">     652922 : SetLatch(Latch *latch)</span>
+<span class="lineNum">     437 </span>            : {
+<span class="lineNum">     438 </span>            : #ifndef WIN32
+<span class="lineNum">     439 </span>            :     pid_t       owner_pid;
+<span class="lineNum">     440 </span>            : #else
+<span class="lineNum">     441 </span>            :     HANDLE      handle;
+<span class="lineNum">     442 </span>            : #endif
+<span class="lineNum">     443 </span>            : 
+<span class="lineNum">     444 </span>            :     /*
+<span class="lineNum">     445 </span>            :      * The memory barrier has to be placed here to ensure that any flag
+<span class="lineNum">     446 </span>            :      * variables possibly changed by this process have been flushed to main
+<span class="lineNum">     447 </span>            :      * memory, before we check/set is_set.
+<span class="lineNum">     448 </span>            :      */
+<span class="lineNum">     449 </span><span class="lineCov">     652922 :     pg_memory_barrier();</span>
+<span class="lineNum">     450 </span>            : 
+<span class="lineNum">     451 </span>            :     /* Quick exit if already set */
+<span class="lineNum">     452 </span><span class="lineCov">     652922 :     if (latch-&gt;is_set)</span>
+<span class="lineNum">     453 </span><span class="lineCov">     639582 :         return;</span>
+<span class="lineNum">     454 </span>            : 
+<span class="lineNum">     455 </span><span class="lineCov">      13340 :     latch-&gt;is_set = true;</span>
+<span class="lineNum">     456 </span>            : 
+<span class="lineNum">     457 </span>            : #ifndef WIN32
+<span class="lineNum">     458 </span>            : 
+<span class="lineNum">     459 </span>            :     /*
+<span class="lineNum">     460 </span>            :      * See if anyone's waiting for the latch. It can be the current process if
+<span class="lineNum">     461 </span>            :      * we're in a signal handler. We use the self-pipe to wake up the
+<span class="lineNum">     462 </span>            :      * poll()/epoll_wait() in that case. If it's another process, send a
+<span class="lineNum">     463 </span>            :      * signal.
+<span class="lineNum">     464 </span>            :      *
+<span class="lineNum">     465 </span>            :      * Fetch owner_pid only once, in case the latch is concurrently getting
+<span class="lineNum">     466 </span>            :      * owned or disowned. XXX: This assumes that pid_t is atomic, which isn't
+<span class="lineNum">     467 </span>            :      * guaranteed to be true! In practice, the effective range of pid_t fits
+<span class="lineNum">     468 </span>            :      * in a 32 bit integer, and so should be atomic. In the worst case, we
+<span class="lineNum">     469 </span>            :      * might end up signaling the wrong process. Even then, you're very
+<span class="lineNum">     470 </span>            :      * unlucky if a process with that bogus pid exists and belongs to
+<span class="lineNum">     471 </span>            :      * Postgres; and PG database processes should handle excess SIGUSR1
+<span class="lineNum">     472 </span>            :      * interrupts without a problem anyhow.
+<span class="lineNum">     473 </span>            :      *
+<span class="lineNum">     474 </span>            :      * Another sort of race condition that's possible here is for a new
+<span class="lineNum">     475 </span>            :      * process to own the latch immediately after we look, so we don't signal
+<span class="lineNum">     476 </span>            :      * it. This is okay so long as all callers of ResetLatch/WaitLatch follow
+<span class="lineNum">     477 </span>            :      * the standard coding convention of waiting at the bottom of their loops,
+<span class="lineNum">     478 </span>            :      * not the top, so that they'll correctly process latch-setting events
+<span class="lineNum">     479 </span>            :      * that happen before they enter the loop.
+<span class="lineNum">     480 </span>            :      */
+<span class="lineNum">     481 </span><span class="lineCov">      13340 :     owner_pid = latch-&gt;owner_pid;</span>
+<span class="lineNum">     482 </span><span class="lineCov">      13340 :     if (owner_pid == 0)</span>
+<span class="lineNum">     483 </span><span class="lineCov">         20 :         return;</span>
+<span class="lineNum">     484 </span><span class="lineCov">      13320 :     else if (owner_pid == MyProcPid)</span>
+<span class="lineNum">     485 </span>            :     {
+<span class="lineNum">     486 </span><span class="lineCov">       3310 :         if (waiting)</span>
+<span class="lineNum">     487 </span><span class="lineCov">       1328 :             sendSelfPipeByte();</span>
+<span class="lineNum">     488 </span>            :     }
+<span class="lineNum">     489 </span>            :     else
+<span class="lineNum">     490 </span><span class="lineCov">      10010 :         kill(owner_pid, SIGUSR1);</span>
+<span class="lineNum">     491 </span>            : #else
+<span class="lineNum">     492 </span>            : 
+<span class="lineNum">     493 </span>            :     /*
+<span class="lineNum">     494 </span>            :      * See if anyone's waiting for the latch. It can be the current process if
+<span class="lineNum">     495 </span>            :      * we're in a signal handler.
+<span class="lineNum">     496 </span>            :      *
+<span class="lineNum">     497 </span>            :      * Use a local variable here just in case somebody changes the event field
+<span class="lineNum">     498 </span>            :      * concurrently (which really should not happen).
+<span class="lineNum">     499 </span>            :      */
+<span class="lineNum">     500 </span>            :     handle = latch-&gt;event;
+<span class="lineNum">     501 </span>            :     if (handle)
+<span class="lineNum">     502 </span>            :     {
+<span class="lineNum">     503 </span>            :         SetEvent(handle);
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span>            :         /*
+<span class="lineNum">     506 </span>            :          * Note that we silently ignore any errors. We might be in a signal
+<span class="lineNum">     507 </span>            :          * handler or other critical path where it's not safe to call elog().
+<span class="lineNum">     508 </span>            :          */
+<span class="lineNum">     509 </span>            :     }
+<span class="lineNum">     510 </span>            : #endif
+<span class="lineNum">     511 </span>            : 
+<span class="lineNum">     512 </span>            : }
+<span class="lineNum">     513 </span>            : 
+<span class="lineNum">     514 </span>            : /*
+<span class="lineNum">     515 </span>            :  * Clear the latch. Calling WaitLatch after this will sleep, unless
+<span class="lineNum">     516 </span>            :  * the latch is set again before the WaitLatch call.
+<a name="517"><span class="lineNum">     517 </span>            :  */</a>
+<span class="lineNum">     518 </span>            : void
+<span class="lineNum">     519 </span><span class="lineCov">      17794 : ResetLatch(Latch *latch)</span>
+<span class="lineNum">     520 </span>            : {
+<span class="lineNum">     521 </span>            :     /* Only the owner should reset the latch */
+<span class="lineNum">     522 </span><span class="lineCov">      17794 :     Assert(latch-&gt;owner_pid == MyProcPid);</span>
+<span class="lineNum">     523 </span>            : 
+<span class="lineNum">     524 </span><span class="lineCov">      17794 :     latch-&gt;is_set = false;</span>
+<span class="lineNum">     525 </span>            : 
+<span class="lineNum">     526 </span>            :     /*
+<span class="lineNum">     527 </span>            :      * Ensure that the write to is_set gets flushed to main memory before we
+<span class="lineNum">     528 </span>            :      * examine any flag variables.  Otherwise a concurrent SetLatch might
+<span class="lineNum">     529 </span>            :      * falsely conclude that it needn't signal us, even though we have missed
+<span class="lineNum">     530 </span>            :      * seeing some flag updates that SetLatch was supposed to inform us of.
+<span class="lineNum">     531 </span>            :      */
+<span class="lineNum">     532 </span><span class="lineCov">      17794 :     pg_memory_barrier();</span>
+<span class="lineNum">     533 </span><span class="lineCov">      17794 : }</span>
+<span class="lineNum">     534 </span>            : 
+<span class="lineNum">     535 </span>            : /*
+<span class="lineNum">     536 </span>            :  * Create a WaitEventSet with space for nevents different events to wait for.
+<span class="lineNum">     537 </span>            :  *
+<span class="lineNum">     538 </span>            :  * These events can then be efficiently waited upon together, using
+<span class="lineNum">     539 </span>            :  * WaitEventSetWait().
+<a name="540"><span class="lineNum">     540 </span>            :  */</a>
+<span class="lineNum">     541 </span>            : WaitEventSet *
+<span class="lineNum">     542 </span><span class="lineCov">      17364 : CreateWaitEventSet(MemoryContext context, int nevents)</span>
+<span class="lineNum">     543 </span>            : {
+<span class="lineNum">     544 </span>            :     WaitEventSet *set;
+<span class="lineNum">     545 </span>            :     char       *data;
+<span class="lineNum">     546 </span><span class="lineCov">      17364 :     Size        sz = 0;</span>
+<span class="lineNum">     547 </span>            : 
+<span class="lineNum">     548 </span>            :     /*
+<span class="lineNum">     549 </span>            :      * Use MAXALIGN size/alignment to guarantee that later uses of memory are
+<span class="lineNum">     550 </span>            :      * aligned correctly. E.g. epoll_event might need 8 byte alignment on some
+<span class="lineNum">     551 </span>            :      * platforms, but earlier allocations like WaitEventSet and WaitEvent
+<span class="lineNum">     552 </span>            :      * might not sized to guarantee that when purely using sizeof().
+<span class="lineNum">     553 </span>            :      */
+<span class="lineNum">     554 </span><span class="lineCov">      17364 :     sz += MAXALIGN(sizeof(WaitEventSet));</span>
+<span class="lineNum">     555 </span><span class="lineCov">      17364 :     sz += MAXALIGN(sizeof(WaitEvent) * nevents);</span>
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     558 </span><span class="lineCov">      17364 :     sz += MAXALIGN(sizeof(struct epoll_event) * nevents);</span>
+<span class="lineNum">     559 </span>            : #elif defined(WAIT_USE_POLL)
+<span class="lineNum">     560 </span>            :     sz += MAXALIGN(sizeof(struct pollfd) * nevents);
+<span class="lineNum">     561 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     562 </span>            :     /* need space for the pgwin32_signal_event */
+<span class="lineNum">     563 </span>            :     sz += MAXALIGN(sizeof(HANDLE) * (nevents + 1));
+<span class="lineNum">     564 </span>            : #endif
+<span class="lineNum">     565 </span>            : 
+<span class="lineNum">     566 </span><span class="lineCov">      17364 :     data = (char *) MemoryContextAllocZero(context, sz);</span>
+<span class="lineNum">     567 </span>            : 
+<span class="lineNum">     568 </span><span class="lineCov">      17364 :     set = (WaitEventSet *) data;</span>
+<span class="lineNum">     569 </span><span class="lineCov">      17364 :     data += MAXALIGN(sizeof(WaitEventSet));</span>
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span><span class="lineCov">      17364 :     set-&gt;events = (WaitEvent *) data;</span>
+<span class="lineNum">     572 </span><span class="lineCov">      17364 :     data += MAXALIGN(sizeof(WaitEvent) * nevents);</span>
+<span class="lineNum">     573 </span>            : 
+<span class="lineNum">     574 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     575 </span><span class="lineCov">      17364 :     set-&gt;epoll_ret_events = (struct epoll_event *) data;</span>
+<span class="lineNum">     576 </span><span class="lineCov">      17364 :     data += MAXALIGN(sizeof(struct epoll_event) * nevents);</span>
+<span class="lineNum">     577 </span>            : #elif defined(WAIT_USE_POLL)
+<span class="lineNum">     578 </span>            :     set-&gt;pollfds = (struct pollfd *) data;
+<span class="lineNum">     579 </span>            :     data += MAXALIGN(sizeof(struct pollfd) * nevents);
+<span class="lineNum">     580 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     581 </span>            :     set-&gt;handles = (HANDLE) data;
+<span class="lineNum">     582 </span>            :     data += MAXALIGN(sizeof(HANDLE) * nevents);
+<span class="lineNum">     583 </span>            : #endif
+<span class="lineNum">     584 </span>            : 
+<span class="lineNum">     585 </span><span class="lineCov">      17364 :     set-&gt;latch = NULL;</span>
+<span class="lineNum">     586 </span><span class="lineCov">      17364 :     set-&gt;nevents_space = nevents;</span>
+<span class="lineNum">     587 </span><span class="lineCov">      17364 :     set-&gt;exit_on_postmaster_death = false;</span>
+<span class="lineNum">     588 </span>            : 
+<span class="lineNum">     589 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     590 </span>            : #ifdef EPOLL_CLOEXEC
+<span class="lineNum">     591 </span><span class="lineCov">      17364 :     set-&gt;epoll_fd = epoll_create1(EPOLL_CLOEXEC);</span>
+<span class="lineNum">     592 </span><span class="lineCov">      17364 :     if (set-&gt;epoll_fd &lt; 0)</span>
+<span class="lineNum">     593 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;epoll_create1 failed: %m&quot;);</span>
+<span class="lineNum">     594 </span>            : #else
+<span class="lineNum">     595 </span>            :     /* cope with ancient glibc lacking epoll_create1 (e.g., RHEL5) */
+<span class="lineNum">     596 </span>            :     set-&gt;epoll_fd = epoll_create(nevents);
+<span class="lineNum">     597 </span>            :     if (set-&gt;epoll_fd &lt; 0)
+<span class="lineNum">     598 </span>            :         elog(ERROR, &quot;epoll_create failed: %m&quot;);
+<span class="lineNum">     599 </span>            :     if (fcntl(set-&gt;epoll_fd, F_SETFD, FD_CLOEXEC) == -1)
+<span class="lineNum">     600 </span>            :         elog(ERROR, &quot;fcntl(F_SETFD) failed on epoll descriptor: %m&quot;);
+<span class="lineNum">     601 </span>            : #endif                          /* EPOLL_CLOEXEC */
+<span class="lineNum">     602 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     603 </span>            : 
+<span class="lineNum">     604 </span>            :     /*
+<span class="lineNum">     605 </span>            :      * To handle signals while waiting, we need to add a win32 specific event.
+<span class="lineNum">     606 </span>            :      * We accounted for the additional event at the top of this routine. See
+<span class="lineNum">     607 </span>            :      * port/win32/signal.c for more details.
+<span class="lineNum">     608 </span>            :      *
+<span class="lineNum">     609 </span>            :      * Note: pgwin32_signal_event should be first to ensure that it will be
+<span class="lineNum">     610 </span>            :      * reported when multiple events are set.  We want to guarantee that
+<span class="lineNum">     611 </span>            :      * pending signals are serviced.
+<span class="lineNum">     612 </span>            :      */
+<span class="lineNum">     613 </span>            :     set-&gt;handles[0] = pgwin32_signal_event;
+<span class="lineNum">     614 </span>            :     StaticAssertStmt(WSA_INVALID_EVENT == NULL, &quot;&quot;);
+<span class="lineNum">     615 </span>            : #endif
+<span class="lineNum">     616 </span>            : 
+<span class="lineNum">     617 </span><span class="lineCov">      17364 :     return set;</span>
+<span class="lineNum">     618 </span>            : }
+<span class="lineNum">     619 </span>            : 
+<span class="lineNum">     620 </span>            : /*
+<span class="lineNum">     621 </span>            :  * Free a previously created WaitEventSet.
+<span class="lineNum">     622 </span>            :  *
+<span class="lineNum">     623 </span>            :  * Note: preferably, this shouldn't have to free any resources that could be
+<span class="lineNum">     624 </span>            :  * inherited across an exec().  If it did, we'd likely leak those resources in
+<span class="lineNum">     625 </span>            :  * many scenarios.  For the epoll case, we ensure that by setting FD_CLOEXEC
+<span class="lineNum">     626 </span>            :  * when the FD is created.  For the Windows case, we assume that the handles
+<span class="lineNum">     627 </span>            :  * involved are non-inheritable.
+<a name="628"><span class="lineNum">     628 </span>            :  */</a>
+<span class="lineNum">     629 </span>            : void
+<span class="lineNum">     630 </span><span class="lineCov">      16830 : FreeWaitEventSet(WaitEventSet *set)</span>
+<span class="lineNum">     631 </span>            : {
+<span class="lineNum">     632 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     633 </span><span class="lineCov">      16830 :     close(set-&gt;epoll_fd);</span>
+<span class="lineNum">     634 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     635 </span>            :     WaitEvent  *cur_event;
+<span class="lineNum">     636 </span>            : 
+<span class="lineNum">     637 </span>            :     for (cur_event = set-&gt;events;
+<span class="lineNum">     638 </span>            :          cur_event &lt; (set-&gt;events + set-&gt;nevents);
+<span class="lineNum">     639 </span>            :          cur_event++)
+<span class="lineNum">     640 </span>            :     {
+<span class="lineNum">     641 </span>            :         if (cur_event-&gt;events &amp; WL_LATCH_SET)
+<span class="lineNum">     642 </span>            :         {
+<span class="lineNum">     643 </span>            :             /* uses the latch's HANDLE */
+<span class="lineNum">     644 </span>            :         }
+<span class="lineNum">     645 </span>            :         else if (cur_event-&gt;events &amp; WL_POSTMASTER_DEATH)
+<span class="lineNum">     646 </span>            :         {
+<span class="lineNum">     647 </span>            :             /* uses PostmasterHandle */
+<span class="lineNum">     648 </span>            :         }
+<span class="lineNum">     649 </span>            :         else
+<span class="lineNum">     650 </span>            :         {
+<span class="lineNum">     651 </span>            :             /* Clean up the event object we created for the socket */
+<span class="lineNum">     652 </span>            :             WSAEventSelect(cur_event-&gt;fd, NULL, 0);
+<span class="lineNum">     653 </span>            :             WSACloseEvent(set-&gt;handles[cur_event-&gt;pos + 1]);
+<span class="lineNum">     654 </span>            :         }
+<span class="lineNum">     655 </span>            :     }
+<span class="lineNum">     656 </span>            : #endif
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span><span class="lineCov">      16830 :     pfree(set);</span>
+<span class="lineNum">     659 </span><span class="lineCov">      16830 : }</span>
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span>            : /* ---
+<span class="lineNum">     662 </span>            :  * Add an event to the set. Possible events are:
+<span class="lineNum">     663 </span>            :  * - WL_LATCH_SET: Wait for the latch to be set
+<span class="lineNum">     664 </span>            :  * - WL_POSTMASTER_DEATH: Wait for postmaster to die
+<span class="lineNum">     665 </span>            :  * - WL_SOCKET_READABLE: Wait for socket to become readable,
+<span class="lineNum">     666 </span>            :  *   can be combined in one event with other WL_SOCKET_* events
+<span class="lineNum">     667 </span>            :  * - WL_SOCKET_WRITEABLE: Wait for socket to become writeable,
+<span class="lineNum">     668 </span>            :  *   can be combined with other WL_SOCKET_* events
+<span class="lineNum">     669 </span>            :  * - WL_SOCKET_CONNECTED: Wait for socket connection to be established,
+<span class="lineNum">     670 </span>            :  *   can be combined with other WL_SOCKET_* events (on non-Windows
+<span class="lineNum">     671 </span>            :  *   platforms, this is the same as WL_SOCKET_WRITEABLE)
+<span class="lineNum">     672 </span>            :  * - WL_EXIT_ON_PM_DEATH: Exit immediately if the postmaster dies
+<span class="lineNum">     673 </span>            :  *
+<span class="lineNum">     674 </span>            :  * Returns the offset in WaitEventSet-&gt;events (starting from 0), which can be
+<span class="lineNum">     675 </span>            :  * used to modify previously added wait events using ModifyWaitEvent().
+<span class="lineNum">     676 </span>            :  *
+<span class="lineNum">     677 </span>            :  * In the WL_LATCH_SET case the latch must be owned by the current process,
+<span class="lineNum">     678 </span>            :  * i.e. it must be a process-local latch initialized with InitLatch, or a
+<span class="lineNum">     679 </span>            :  * shared latch associated with the current process by calling OwnLatch.
+<span class="lineNum">     680 </span>            :  *
+<span class="lineNum">     681 </span>            :  * In the WL_SOCKET_READABLE/WRITEABLE/CONNECTED cases, EOF and error
+<span class="lineNum">     682 </span>            :  * conditions cause the socket to be reported as readable/writable/connected,
+<span class="lineNum">     683 </span>            :  * so that the caller can deal with the condition.
+<span class="lineNum">     684 </span>            :  *
+<span class="lineNum">     685 </span>            :  * The user_data pointer specified here will be set for the events returned
+<span class="lineNum">     686 </span>            :  * by WaitEventSetWait(), allowing to easily associate additional data with
+<span class="lineNum">     687 </span>            :  * events.
+<a name="688"><span class="lineNum">     688 </span>            :  */</a>
+<span class="lineNum">     689 </span>            : int
+<span class="lineNum">     690 </span><span class="lineCov">      39974 : AddWaitEventToSet(WaitEventSet *set, uint32 events, pgsocket fd, Latch *latch,</span>
+<span class="lineNum">     691 </span>            :                   void *user_data)
+<span class="lineNum">     692 </span>            : {
+<span class="lineNum">     693 </span>            :     WaitEvent  *event;
+<span class="lineNum">     694 </span>            : 
+<span class="lineNum">     695 </span>            :     /* not enough space */
+<span class="lineNum">     696 </span><span class="lineCov">      39974 :     Assert(set-&gt;nevents &lt; set-&gt;nevents_space);</span>
+<span class="lineNum">     697 </span>            : 
+<span class="lineNum">     698 </span><span class="lineCov">      39974 :     if (events == WL_EXIT_ON_PM_DEATH)</span>
+<span class="lineNum">     699 </span>            :     {
+<span class="lineNum">     700 </span><span class="lineCov">      11408 :         events = WL_POSTMASTER_DEATH;</span>
+<span class="lineNum">     701 </span><span class="lineCov">      11408 :         set-&gt;exit_on_postmaster_death = true;</span>
+<span class="lineNum">     702 </span>            :     }
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span><span class="lineCov">      39974 :     if (latch)</span>
+<span class="lineNum">     705 </span>            :     {
+<span class="lineNum">     706 </span><span class="lineCov">      17364 :         if (latch-&gt;owner_pid != MyProcPid)</span>
+<span class="lineNum">     707 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;cannot wait on a latch owned by another process&quot;);</span>
+<span class="lineNum">     708 </span><span class="lineCov">      17364 :         if (set-&gt;latch)</span>
+<span class="lineNum">     709 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;cannot wait on more than one latch&quot;);</span>
+<span class="lineNum">     710 </span><span class="lineCov">      17364 :         if ((events &amp; WL_LATCH_SET) != WL_LATCH_SET)</span>
+<span class="lineNum">     711 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;latch events only support being set&quot;);</span>
+<span class="lineNum">     712 </span>            :     }
+<span class="lineNum">     713 </span>            :     else
+<span class="lineNum">     714 </span>            :     {
+<span class="lineNum">     715 </span><span class="lineCov">      22610 :         if (events &amp; WL_LATCH_SET)</span>
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;cannot wait on latch without a specified latch&quot;);</span>
+<span class="lineNum">     717 </span>            :     }
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span>            :     /* waiting for socket readiness without a socket indicates a bug */
+<span class="lineNum">     720 </span><span class="lineCov">      39974 :     if (fd == PGINVALID_SOCKET &amp;&amp; (events &amp; WL_SOCKET_MASK))</span>
+<span class="lineNum">     721 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot wait on socket event without a socket&quot;);</span>
+<span class="lineNum">     722 </span>            : 
+<span class="lineNum">     723 </span><span class="lineCov">      39974 :     event = &amp;set-&gt;events[set-&gt;nevents];</span>
+<span class="lineNum">     724 </span><span class="lineCov">      39974 :     event-&gt;pos = set-&gt;nevents++;</span>
+<span class="lineNum">     725 </span><span class="lineCov">      39974 :     event-&gt;fd = fd;</span>
+<span class="lineNum">     726 </span><span class="lineCov">      39974 :     event-&gt;events = events;</span>
+<span class="lineNum">     727 </span><span class="lineCov">      39974 :     event-&gt;user_data = user_data;</span>
+<span class="lineNum">     728 </span>            : #ifdef WIN32
+<span class="lineNum">     729 </span>            :     event-&gt;reset = false;
+<span class="lineNum">     730 </span>            : #endif
+<span class="lineNum">     731 </span>            : 
+<span class="lineNum">     732 </span><span class="lineCov">      39974 :     if (events == WL_LATCH_SET)</span>
+<span class="lineNum">     733 </span>            :     {
+<span class="lineNum">     734 </span><span class="lineCov">      17364 :         set-&gt;latch = latch;</span>
+<span class="lineNum">     735 </span><span class="lineCov">      17364 :         set-&gt;latch_pos = event-&gt;pos;</span>
+<span class="lineNum">     736 </span>            : #ifndef WIN32
+<span class="lineNum">     737 </span><span class="lineCov">      17364 :         event-&gt;fd = selfpipe_readfd;</span>
+<span class="lineNum">     738 </span>            : #endif
+<span class="lineNum">     739 </span>            :     }
+<span class="lineNum">     740 </span><span class="lineCov">      22610 :     else if (events == WL_POSTMASTER_DEATH)</span>
+<span class="lineNum">     741 </span>            :     {
+<span class="lineNum">     742 </span>            : #ifndef WIN32
+<span class="lineNum">     743 </span><span class="lineCov">      17364 :         event-&gt;fd = postmaster_alive_fds[POSTMASTER_FD_WATCH];</span>
+<span class="lineNum">     744 </span>            : #endif
+<span class="lineNum">     745 </span>            :     }
+<span class="lineNum">     746 </span>            : 
+<span class="lineNum">     747 </span>            :     /* perform wait primitive specific initialization, if needed */
+<span class="lineNum">     748 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     749 </span><span class="lineCov">      39974 :     WaitEventAdjustEpoll(set, event, EPOLL_CTL_ADD);</span>
+<span class="lineNum">     750 </span>            : #elif defined(WAIT_USE_POLL)
+<span class="lineNum">     751 </span>            :     WaitEventAdjustPoll(set, event);
+<span class="lineNum">     752 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     753 </span>            :     WaitEventAdjustWin32(set, event);
+<span class="lineNum">     754 </span>            : #endif
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span><span class="lineCov">      39974 :     return event-&gt;pos;</span>
+<span class="lineNum">     757 </span>            : }
+<span class="lineNum">     758 </span>            : 
+<span class="lineNum">     759 </span>            : /*
+<span class="lineNum">     760 </span>            :  * Change the event mask and, in the WL_LATCH_SET case, the latch associated
+<span class="lineNum">     761 </span>            :  * with the WaitEvent.
+<span class="lineNum">     762 </span>            :  *
+<span class="lineNum">     763 </span>            :  * 'pos' is the id returned by AddWaitEventToSet.
+<a name="764"><span class="lineNum">     764 </span>            :  */</a>
+<span class="lineNum">     765 </span>            : void
+<span class="lineNum">     766 </span><span class="lineCov">      73094 : ModifyWaitEvent(WaitEventSet *set, int pos, uint32 events, Latch *latch)</span>
+<span class="lineNum">     767 </span>            : {
+<span class="lineNum">     768 </span>            :     WaitEvent  *event;
+<span class="lineNum">     769 </span>            : 
+<span class="lineNum">     770 </span><span class="lineCov">      73094 :     Assert(pos &lt; set-&gt;nevents);</span>
+<span class="lineNum">     771 </span>            : 
+<span class="lineNum">     772 </span><span class="lineCov">      73094 :     event = &amp;set-&gt;events[pos];</span>
+<span class="lineNum">     773 </span>            : 
+<span class="lineNum">     774 </span>            :     /*
+<span class="lineNum">     775 </span>            :      * If neither the event mask nor the associated latch changes, return
+<span class="lineNum">     776 </span>            :      * early. That's an important optimization for some sockets, where
+<span class="lineNum">     777 </span>            :      * ModifyWaitEvent is frequently used to switch from waiting for reads to
+<span class="lineNum">     778 </span>            :      * waiting on writes.
+<span class="lineNum">     779 </span>            :      */
+<span class="lineNum">     780 </span><span class="lineCov">     145734 :     if (events == event-&gt;events &amp;&amp;</span>
+<span class="lineNum">     781 </span><span class="lineCov">      73548 :         (!(event-&gt;events &amp; WL_LATCH_SET) || set-&gt;latch == latch))</span>
+<span class="lineNum">     782 </span><span class="lineCov">     144826 :         return;</span>
+<span class="lineNum">     783 </span>            : 
+<span class="lineNum">     784 </span><span class="lineCov">       2270 :     if (event-&gt;events &amp; WL_LATCH_SET &amp;&amp;</span>
+<span class="lineNum">     785 </span><span class="lineCov">        908 :         events != event-&gt;events)</span>
+<span class="lineNum">     786 </span>            :     {
+<span class="lineNum">     787 </span>            :         /* we could allow to disable latch events for a while */
+<span class="lineNum">     788 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot modify latch event&quot;);</span>
+<span class="lineNum">     789 </span>            :     }
+<span class="lineNum">     790 </span>            : 
+<span class="lineNum">     791 </span><span class="lineCov">       1362 :     if (event-&gt;events &amp; WL_POSTMASTER_DEATH)</span>
+<span class="lineNum">     792 </span>            :     {
+<span class="lineNum">     793 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;cannot modify postmaster death event&quot;);</span>
+<span class="lineNum">     794 </span>            :     }
+<span class="lineNum">     795 </span>            : 
+<span class="lineNum">     796 </span>            :     /* FIXME: validate event mask */
+<span class="lineNum">     797 </span><span class="lineCov">       1362 :     event-&gt;events = events;</span>
+<span class="lineNum">     798 </span>            : 
+<span class="lineNum">     799 </span><span class="lineCov">       1362 :     if (events == WL_LATCH_SET)</span>
+<span class="lineNum">     800 </span>            :     {
+<span class="lineNum">     801 </span><span class="lineCov">        908 :         set-&gt;latch = latch;</span>
+<span class="lineNum">     802 </span>            :     }
+<span class="lineNum">     803 </span>            : 
+<span class="lineNum">     804 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     805 </span><span class="lineCov">       1362 :     WaitEventAdjustEpoll(set, event, EPOLL_CTL_MOD);</span>
+<span class="lineNum">     806 </span>            : #elif defined(WAIT_USE_POLL)
+<span class="lineNum">     807 </span>            :     WaitEventAdjustPoll(set, event);
+<span class="lineNum">     808 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">     809 </span>            :     WaitEventAdjustWin32(set, event);
+<span class="lineNum">     810 </span>            : #endif
+<span class="lineNum">     811 </span>            : }
+<span class="lineNum">     812 </span>            : 
+<span class="lineNum">     813 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">     814 </span>            : /*
+<span class="lineNum">     815 </span>            :  * action can be one of EPOLL_CTL_ADD | EPOLL_CTL_MOD | EPOLL_CTL_DEL
+<a name="816"><span class="lineNum">     816 </span>            :  */</a>
+<span class="lineNum">     817 </span>            : static void
+<span class="lineNum">     818 </span><span class="lineCov">      41336 : WaitEventAdjustEpoll(WaitEventSet *set, WaitEvent *event, int action)</span>
+<span class="lineNum">     819 </span>            : {
+<span class="lineNum">     820 </span>            :     struct epoll_event epoll_ev;
+<span class="lineNum">     821 </span>            :     int         rc;
+<span class="lineNum">     822 </span>            : 
+<span class="lineNum">     823 </span>            :     /* pointer to our event, returned by epoll_wait */
+<span class="lineNum">     824 </span><span class="lineCov">      41336 :     epoll_ev.data.ptr = event;</span>
+<span class="lineNum">     825 </span>            :     /* always wait for errors */
+<span class="lineNum">     826 </span><span class="lineCov">      41336 :     epoll_ev.events = EPOLLERR | EPOLLHUP;</span>
+<span class="lineNum">     827 </span>            : 
+<span class="lineNum">     828 </span>            :     /* prepare pollfd entry once */
+<span class="lineNum">     829 </span><span class="lineCov">      41336 :     if (event-&gt;events == WL_LATCH_SET)</span>
+<span class="lineNum">     830 </span>            :     {
+<span class="lineNum">     831 </span><span class="lineCov">      18272 :         Assert(set-&gt;latch != NULL);</span>
+<span class="lineNum">     832 </span><span class="lineCov">      18272 :         epoll_ev.events |= EPOLLIN;</span>
+<span class="lineNum">     833 </span>            :     }
+<span class="lineNum">     834 </span><span class="lineCov">      23064 :     else if (event-&gt;events == WL_POSTMASTER_DEATH)</span>
+<span class="lineNum">     835 </span>            :     {
+<span class="lineNum">     836 </span><span class="lineCov">      17364 :         epoll_ev.events |= EPOLLIN;</span>
+<span class="lineNum">     837 </span>            :     }
+<span class="lineNum">     838 </span>            :     else
+<span class="lineNum">     839 </span>            :     {
+<span class="lineNum">     840 </span><span class="lineCov">       5700 :         Assert(event-&gt;fd != PGINVALID_SOCKET);</span>
+<span class="lineNum">     841 </span><span class="lineCov">       5700 :         Assert(event-&gt;events &amp; (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE));</span>
+<span class="lineNum">     842 </span>            : 
+<span class="lineNum">     843 </span><span class="lineCov">       5700 :         if (event-&gt;events &amp; WL_SOCKET_READABLE)</span>
+<span class="lineNum">     844 </span><span class="lineCov">       5246 :             epoll_ev.events |= EPOLLIN;</span>
+<span class="lineNum">     845 </span><span class="lineCov">       5700 :         if (event-&gt;events &amp; WL_SOCKET_WRITEABLE)</span>
+<span class="lineNum">     846 </span><span class="lineCov">        454 :             epoll_ev.events |= EPOLLOUT;</span>
+<span class="lineNum">     847 </span>            :     }
+<span class="lineNum">     848 </span>            : 
+<span class="lineNum">     849 </span>            :     /*
+<span class="lineNum">     850 </span>            :      * Even though unused, we also pass epoll_ev as the data argument if
+<span class="lineNum">     851 </span>            :      * EPOLL_CTL_DEL is passed as action.  There used to be an epoll bug
+<span class="lineNum">     852 </span>            :      * requiring that, and actually it makes the code simpler...
+<span class="lineNum">     853 </span>            :      */
+<span class="lineNum">     854 </span><span class="lineCov">      41336 :     rc = epoll_ctl(set-&gt;epoll_fd, action, event-&gt;fd, &amp;epoll_ev);</span>
+<span class="lineNum">     855 </span>            : 
+<span class="lineNum">     856 </span><span class="lineCov">      41336 :     if (rc &lt; 0)</span>
+<span class="lineNum">     857 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     858 </span>            :                 (errcode_for_socket_access(),
+<span class="lineNum">     859 </span>            :         /* translator: %s is a syscall name, such as &quot;poll()&quot; */
+<span class="lineNum">     860 </span>            :                  errmsg(&quot;%s failed: %m&quot;,
+<span class="lineNum">     861 </span>            :                         &quot;epoll_ctl()&quot;)));
+<span class="lineNum">     862 </span><span class="lineCov">      41336 : }</span>
+<span class="lineNum">     863 </span>            : #endif
+<span class="lineNum">     864 </span>            : 
+<span class="lineNum">     865 </span>            : #if defined(WAIT_USE_POLL)
+<span class="lineNum">     866 </span>            : static void
+<span class="lineNum">     867 </span>            : WaitEventAdjustPoll(WaitEventSet *set, WaitEvent *event)
+<span class="lineNum">     868 </span>            : {
+<span class="lineNum">     869 </span>            :     struct pollfd *pollfd = &amp;set-&gt;pollfds[event-&gt;pos];
+<span class="lineNum">     870 </span>            : 
+<span class="lineNum">     871 </span>            :     pollfd-&gt;revents = 0;
+<span class="lineNum">     872 </span>            :     pollfd-&gt;fd = event-&gt;fd;
+<span class="lineNum">     873 </span>            : 
+<span class="lineNum">     874 </span>            :     /* prepare pollfd entry once */
+<span class="lineNum">     875 </span>            :     if (event-&gt;events == WL_LATCH_SET)
+<span class="lineNum">     876 </span>            :     {
+<span class="lineNum">     877 </span>            :         Assert(set-&gt;latch != NULL);
+<span class="lineNum">     878 </span>            :         pollfd-&gt;events = POLLIN;
+<span class="lineNum">     879 </span>            :     }
+<span class="lineNum">     880 </span>            :     else if (event-&gt;events == WL_POSTMASTER_DEATH)
+<span class="lineNum">     881 </span>            :     {
+<span class="lineNum">     882 </span>            :         pollfd-&gt;events = POLLIN;
+<span class="lineNum">     883 </span>            :     }
+<span class="lineNum">     884 </span>            :     else
+<span class="lineNum">     885 </span>            :     {
+<span class="lineNum">     886 </span>            :         Assert(event-&gt;events &amp; (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE));
+<span class="lineNum">     887 </span>            :         pollfd-&gt;events = 0;
+<span class="lineNum">     888 </span>            :         if (event-&gt;events &amp; WL_SOCKET_READABLE)
+<span class="lineNum">     889 </span>            :             pollfd-&gt;events |= POLLIN;
+<span class="lineNum">     890 </span>            :         if (event-&gt;events &amp; WL_SOCKET_WRITEABLE)
+<span class="lineNum">     891 </span>            :             pollfd-&gt;events |= POLLOUT;
+<span class="lineNum">     892 </span>            :     }
+<span class="lineNum">     893 </span>            : 
+<span class="lineNum">     894 </span>            :     Assert(event-&gt;fd != PGINVALID_SOCKET);
+<span class="lineNum">     895 </span>            : }
+<span class="lineNum">     896 </span>            : #endif
+<span class="lineNum">     897 </span>            : 
+<span class="lineNum">     898 </span>            : #if defined(WAIT_USE_WIN32)
+<span class="lineNum">     899 </span>            : static void
+<span class="lineNum">     900 </span>            : WaitEventAdjustWin32(WaitEventSet *set, WaitEvent *event)
+<span class="lineNum">     901 </span>            : {
+<span class="lineNum">     902 </span>            :     HANDLE     *handle = &amp;set-&gt;handles[event-&gt;pos + 1];
+<span class="lineNum">     903 </span>            : 
+<span class="lineNum">     904 </span>            :     if (event-&gt;events == WL_LATCH_SET)
+<span class="lineNum">     905 </span>            :     {
+<span class="lineNum">     906 </span>            :         Assert(set-&gt;latch != NULL);
+<span class="lineNum">     907 </span>            :         *handle = set-&gt;latch-&gt;event;
+<span class="lineNum">     908 </span>            :     }
+<span class="lineNum">     909 </span>            :     else if (event-&gt;events == WL_POSTMASTER_DEATH)
+<span class="lineNum">     910 </span>            :     {
+<span class="lineNum">     911 </span>            :         *handle = PostmasterHandle;
+<span class="lineNum">     912 </span>            :     }
+<span class="lineNum">     913 </span>            :     else
+<span class="lineNum">     914 </span>            :     {
+<span class="lineNum">     915 </span>            :         int         flags = FD_CLOSE;   /* always check for errors/EOF */
+<span class="lineNum">     916 </span>            : 
+<span class="lineNum">     917 </span>            :         if (event-&gt;events &amp; WL_SOCKET_READABLE)
+<span class="lineNum">     918 </span>            :             flags |= FD_READ;
+<span class="lineNum">     919 </span>            :         if (event-&gt;events &amp; WL_SOCKET_WRITEABLE)
+<span class="lineNum">     920 </span>            :             flags |= FD_WRITE;
+<span class="lineNum">     921 </span>            :         if (event-&gt;events &amp; WL_SOCKET_CONNECTED)
+<span class="lineNum">     922 </span>            :             flags |= FD_CONNECT;
+<span class="lineNum">     923 </span>            : 
+<span class="lineNum">     924 </span>            :         if (*handle == WSA_INVALID_EVENT)
+<span class="lineNum">     925 </span>            :         {
+<span class="lineNum">     926 </span>            :             *handle = WSACreateEvent();
+<span class="lineNum">     927 </span>            :             if (*handle == WSA_INVALID_EVENT)
+<span class="lineNum">     928 </span>            :                 elog(ERROR, &quot;failed to create event for socket: error code %u&quot;,
+<span class="lineNum">     929 </span>            :                      WSAGetLastError());
+<span class="lineNum">     930 </span>            :         }
+<span class="lineNum">     931 </span>            :         if (WSAEventSelect(event-&gt;fd, *handle, flags) != 0)
+<span class="lineNum">     932 </span>            :             elog(ERROR, &quot;failed to set up event for socket: error code %u&quot;,
+<span class="lineNum">     933 </span>            :                  WSAGetLastError());
+<span class="lineNum">     934 </span>            : 
+<span class="lineNum">     935 </span>            :         Assert(event-&gt;fd != PGINVALID_SOCKET);
+<span class="lineNum">     936 </span>            :     }
+<span class="lineNum">     937 </span>            : }
+<span class="lineNum">     938 </span>            : #endif
+<span class="lineNum">     939 </span>            : 
+<span class="lineNum">     940 </span>            : /*
+<span class="lineNum">     941 </span>            :  * Wait for events added to the set to happen, or until the timeout is
+<span class="lineNum">     942 </span>            :  * reached.  At most nevents occurred events are returned.
+<span class="lineNum">     943 </span>            :  *
+<span class="lineNum">     944 </span>            :  * If timeout = -1, block until an event occurs; if 0, check sockets for
+<span class="lineNum">     945 </span>            :  * readiness, but don't block; if &gt; 0, block for at most timeout milliseconds.
+<span class="lineNum">     946 </span>            :  *
+<span class="lineNum">     947 </span>            :  * Returns the number of events occurred, or 0 if the timeout was reached.
+<span class="lineNum">     948 </span>            :  *
+<span class="lineNum">     949 </span>            :  * Returned events will have the fd, pos, user_data fields set to the
+<span class="lineNum">     950 </span>            :  * values associated with the registered event.
+<a name="951"><span class="lineNum">     951 </span>            :  */</a>
+<span class="lineNum">     952 </span>            : int
+<span class="lineNum">     953 </span><span class="lineCov">      89224 : WaitEventSetWait(WaitEventSet *set, long timeout,</span>
+<span class="lineNum">     954 </span>            :                  WaitEvent *occurred_events, int nevents,
+<span class="lineNum">     955 </span>            :                  uint32 wait_event_info)
+<span class="lineNum">     956 </span>            : {
+<span class="lineNum">     957 </span><span class="lineCov">      89224 :     int         returned_events = 0;</span>
+<span class="lineNum">     958 </span>            :     instr_time  start_time;
+<span class="lineNum">     959 </span>            :     instr_time  cur_time;
+<span class="lineNum">     960 </span><span class="lineCov">      89224 :     long        cur_timeout = -1;</span>
+<span class="lineNum">     961 </span>            : 
+<span class="lineNum">     962 </span><span class="lineCov">      89224 :     Assert(nevents &gt; 0);</span>
+<span class="lineNum">     963 </span>            : 
+<span class="lineNum">     964 </span>            :     /*
+<span class="lineNum">     965 </span>            :      * Initialize timeout if requested.  We must record the current time so
+<span class="lineNum">     966 </span>            :      * that we can determine the remaining timeout if interrupted.
+<span class="lineNum">     967 </span>            :      */
+<span class="lineNum">     968 </span><span class="lineCov">      89224 :     if (timeout &gt;= 0)</span>
+<span class="lineNum">     969 </span>            :     {
+<span class="lineNum">     970 </span><span class="lineCov">       2686 :         INSTR_TIME_SET_CURRENT(start_time);</span>
+<span class="lineNum">     971 </span><span class="lineCov">       2686 :         Assert(timeout &gt;= 0 &amp;&amp; timeout &lt;= INT_MAX);</span>
+<span class="lineNum">     972 </span><span class="lineCov">       2686 :         cur_timeout = timeout;</span>
+<span class="lineNum">     973 </span>            :     }
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span><span class="lineCov">      89224 :     pgstat_report_wait_start(wait_event_info);</span>
+<span class="lineNum">     976 </span>            : 
+<span class="lineNum">     977 </span>            : #ifndef WIN32
+<span class="lineNum">     978 </span><span class="lineCov">      89224 :     waiting = true;</span>
+<span class="lineNum">     979 </span>            : #else
+<span class="lineNum">     980 </span>            :     /* Ensure that signals are serviced even if latch is already set */
+<span class="lineNum">     981 </span>            :     pgwin32_dispatch_queued_signals();
+<span class="lineNum">     982 </span>            : #endif
+<span class="lineNum">     983 </span><span class="lineCov">     263894 :     while (returned_events == 0)</span>
+<span class="lineNum">     984 </span>            :     {
+<span class="lineNum">     985 </span>            :         int         rc;
+<span class="lineNum">     986 </span>            : 
+<span class="lineNum">     987 </span>            :         /*
+<span class="lineNum">     988 </span>            :          * Check if the latch is set already. If so, leave the loop
+<span class="lineNum">     989 </span>            :          * immediately, avoid blocking again. We don't attempt to report any
+<span class="lineNum">     990 </span>            :          * other events that might also be satisfied.
+<span class="lineNum">     991 </span>            :          *
+<span class="lineNum">     992 </span>            :          * If someone sets the latch between this and the
+<span class="lineNum">     993 </span>            :          * WaitEventSetWaitBlock() below, the setter will write a byte to the
+<span class="lineNum">     994 </span>            :          * pipe (or signal us and the signal handler will do that), and the
+<span class="lineNum">     995 </span>            :          * readiness routine will return immediately.
+<span class="lineNum">     996 </span>            :          *
+<span class="lineNum">     997 </span>            :          * On unix, If there's a pending byte in the self pipe, we'll notice
+<span class="lineNum">     998 </span>            :          * whenever blocking. Only clearing the pipe in that case avoids
+<span class="lineNum">     999 </span>            :          * having to drain it every time WaitLatchOrSocket() is used. Should
+<span class="lineNum">    1000 </span>            :          * the pipe-buffer fill up we're still ok, because the pipe is in
+<span class="lineNum">    1001 </span>            :          * nonblocking mode. It's unlikely for that to happen, because the
+<span class="lineNum">    1002 </span>            :          * self pipe isn't filled unless we're blocking (waiting = true), or
+<span class="lineNum">    1003 </span>            :          * from inside a signal handler in latch_sigusr1_handler().
+<span class="lineNum">    1004 </span>            :          *
+<span class="lineNum">    1005 </span>            :          * On windows, we'll also notice if there's a pending event for the
+<span class="lineNum">    1006 </span>            :          * latch when blocking, but there's no danger of anything filling up,
+<span class="lineNum">    1007 </span>            :          * as &quot;Setting an event that is already set has no effect.&quot;.
+<span class="lineNum">    1008 </span>            :          *
+<span class="lineNum">    1009 </span>            :          * Note: we assume that the kernel calls involved in latch management
+<span class="lineNum">    1010 </span>            :          * will provide adequate synchronization on machines with weak memory
+<span class="lineNum">    1011 </span>            :          * ordering, so that we cannot miss seeing is_set if a notification
+<span class="lineNum">    1012 </span>            :          * has already been queued.
+<span class="lineNum">    1013 </span>            :          */
+<span class="lineNum">    1014 </span><span class="lineCov">      98018 :         if (set-&gt;latch &amp;&amp; set-&gt;latch-&gt;is_set)</span>
+<span class="lineNum">    1015 </span>            :         {
+<span class="lineNum">    1016 </span><span class="lineCov">      11738 :             occurred_events-&gt;fd = PGINVALID_SOCKET;</span>
+<span class="lineNum">    1017 </span><span class="lineCov">      11738 :             occurred_events-&gt;pos = set-&gt;latch_pos;</span>
+<span class="lineNum">    1018 </span><span class="lineCov">      11738 :             occurred_events-&gt;user_data =</span>
+<span class="lineNum">    1019 </span><span class="lineCov">      11738 :                 set-&gt;events[set-&gt;latch_pos].user_data;</span>
+<span class="lineNum">    1020 </span><span class="lineCov">      11738 :             occurred_events-&gt;events = WL_LATCH_SET;</span>
+<span class="lineNum">    1021 </span><span class="lineCov">      11738 :             occurred_events++;</span>
+<span class="lineNum">    1022 </span><span class="lineCov">      11738 :             returned_events++;</span>
+<span class="lineNum">    1023 </span>            : 
+<span class="lineNum">    1024 </span><span class="lineCov">      11738 :             break;</span>
+<span class="lineNum">    1025 </span>            :         }
+<span class="lineNum">    1026 </span>            : 
+<span class="lineNum">    1027 </span>            :         /*
+<span class="lineNum">    1028 </span>            :          * Wait for events using the readiness primitive chosen at the top of
+<span class="lineNum">    1029 </span>            :          * this file. If -1 is returned, a timeout has occurred, if 0 we have
+<span class="lineNum">    1030 </span>            :          * to retry, everything &gt;= 1 is the number of returned events.
+<span class="lineNum">    1031 </span>            :          */
+<span class="lineNum">    1032 </span><span class="lineCov">      86280 :         rc = WaitEventSetWaitBlock(set, cur_timeout,</span>
+<span class="lineNum">    1033 </span>            :                                    occurred_events, nevents);
+<span class="lineNum">    1034 </span>            : 
+<span class="lineNum">    1035 </span><span class="lineCov">      86280 :         if (rc == -1)</span>
+<span class="lineNum">    1036 </span><span class="lineCov">        832 :             break;              /* timeout occurred */</span>
+<span class="lineNum">    1037 </span>            :         else
+<span class="lineNum">    1038 </span><span class="lineCov">      85448 :             returned_events = rc;</span>
+<span class="lineNum">    1039 </span>            : 
+<span class="lineNum">    1040 </span>            :         /* If we're not done, update cur_timeout for next iteration */
+<span class="lineNum">    1041 </span><span class="lineCov">      85448 :         if (returned_events == 0 &amp;&amp; timeout &gt;= 0)</span>
+<span class="lineNum">    1042 </span>            :         {
+<span class="lineNum">    1043 </span><span class="lineCov">       3654 :             INSTR_TIME_SET_CURRENT(cur_time);</span>
+<span class="lineNum">    1044 </span><span class="lineCov">       3654 :             INSTR_TIME_SUBTRACT(cur_time, start_time);</span>
+<span class="lineNum">    1045 </span><span class="lineCov">       3654 :             cur_timeout = timeout - (long) INSTR_TIME_GET_MILLISEC(cur_time);</span>
+<span class="lineNum">    1046 </span><span class="lineCov">       3654 :             if (cur_timeout &lt;= 0)</span>
+<span class="lineNum">    1047 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">    1048 </span>            :         }
+<span class="lineNum">    1049 </span>            :     }
+<span class="lineNum">    1050 </span>            : #ifndef WIN32
+<span class="lineNum">    1051 </span><span class="lineCov">      89224 :     waiting = false;</span>
+<span class="lineNum">    1052 </span>            : #endif
+<span class="lineNum">    1053 </span>            : 
+<span class="lineNum">    1054 </span><span class="lineCov">      89224 :     pgstat_report_wait_end();</span>
+<span class="lineNum">    1055 </span>            : 
+<span class="lineNum">    1056 </span><span class="lineCov">      89224 :     return returned_events;</span>
+<span class="lineNum">    1057 </span>            : }
+<span class="lineNum">    1058 </span>            : 
+<span class="lineNum">    1059 </span>            : 
+<span class="lineNum">    1060 </span>            : #if defined(WAIT_USE_EPOLL)
+<span class="lineNum">    1061 </span>            : 
+<span class="lineNum">    1062 </span>            : /*
+<span class="lineNum">    1063 </span>            :  * Wait using linux's epoll_wait(2).
+<span class="lineNum">    1064 </span>            :  *
+<span class="lineNum">    1065 </span>            :  * This is the preferable wait method, as several readiness notifications are
+<span class="lineNum">    1066 </span>            :  * delivered, without having to iterate through all of set-&gt;events. The return
+<span class="lineNum">    1067 </span>            :  * epoll_event struct contain a pointer to our events, making association
+<span class="lineNum">    1068 </span>            :  * easy.
+<a name="1069"><span class="lineNum">    1069 </span>            :  */</a>
+<span class="lineNum">    1070 </span>            : static inline int
+<span class="lineNum">    1071 </span><span class="lineCov">      86280 : WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,</span>
+<span class="lineNum">    1072 </span>            :                       WaitEvent *occurred_events, int nevents)
+<span class="lineNum">    1073 </span>            : {
+<span class="lineNum">    1074 </span><span class="lineCov">      86280 :     int         returned_events = 0;</span>
+<span class="lineNum">    1075 </span>            :     int         rc;
+<span class="lineNum">    1076 </span>            :     WaitEvent  *cur_event;
+<span class="lineNum">    1077 </span>            :     struct epoll_event *cur_epoll_event;
+<span class="lineNum">    1078 </span>            : 
+<span class="lineNum">    1079 </span>            :     /* Sleep */
+<span class="lineNum">    1080 </span><span class="lineCov">      86280 :     rc = epoll_wait(set-&gt;epoll_fd, set-&gt;epoll_ret_events,</span>
+<span class="lineNum">    1081 </span>            :                     nevents, cur_timeout);
+<span class="lineNum">    1082 </span>            : 
+<span class="lineNum">    1083 </span>            :     /* Check return code */
+<span class="lineNum">    1084 </span><span class="lineCov">      86280 :     if (rc &lt; 0)</span>
+<span class="lineNum">    1085 </span>            :     {
+<span class="lineNum">    1086 </span>            :         /* EINTR is okay, otherwise complain */
+<span class="lineNum">    1087 </span><span class="lineCov">       4474 :         if (errno != EINTR)</span>
+<span class="lineNum">    1088 </span>            :         {
+<span class="lineNum">    1089 </span><span class="lineNoCov">          0 :             waiting = false;</span>
+<span class="lineNum">    1090 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">    1091 </span>            :                     (errcode_for_socket_access(),
+<span class="lineNum">    1092 </span>            :             /* translator: %s is a syscall name, such as &quot;poll()&quot; */
+<span class="lineNum">    1093 </span>            :                      errmsg(&quot;%s failed: %m&quot;,
+<span class="lineNum">    1094 </span>            :                             &quot;epoll_wait()&quot;)));
+<span class="lineNum">    1095 </span>            :         }
+<span class="lineNum">    1096 </span><span class="lineCov">       4474 :         return 0;</span>
+<span class="lineNum">    1097 </span>            :     }
+<span class="lineNum">    1098 </span><span class="lineCov">      81806 :     else if (rc == 0)</span>
+<span class="lineNum">    1099 </span>            :     {
+<span class="lineNum">    1100 </span>            :         /* timeout exceeded */
+<span class="lineNum">    1101 </span><span class="lineCov">        832 :         return -1;</span>
+<span class="lineNum">    1102 </span>            :     }
+<span class="lineNum">    1103 </span>            : 
+<span class="lineNum">    1104 </span>            :     /*
+<span class="lineNum">    1105 </span>            :      * At least one event occurred, iterate over the returned epoll events
+<span class="lineNum">    1106 </span>            :      * until they're either all processed, or we've returned all the events
+<span class="lineNum">    1107 </span>            :      * the caller desired.
+<span class="lineNum">    1108 </span>            :      */
+<span class="lineNum">    1109 </span><span class="lineCov">     242922 :     for (cur_epoll_event = set-&gt;epoll_ret_events;</span>
+<span class="lineNum">    1110 </span><span class="lineCov">     242922 :          cur_epoll_event &lt; (set-&gt;epoll_ret_events + rc) &amp;&amp;</span>
+<span class="lineNum">    1111 </span>            :          returned_events &lt; nevents;
+<span class="lineNum">    1112 </span><span class="lineCov">      80974 :          cur_epoll_event++)</span>
+<span class="lineNum">    1113 </span>            :     {
+<span class="lineNum">    1114 </span>            :         /* epoll's data pointer is set to the associated WaitEvent */
+<span class="lineNum">    1115 </span><span class="lineCov">      80974 :         cur_event = (WaitEvent *) cur_epoll_event-&gt;data.ptr;</span>
+<span class="lineNum">    1116 </span>            : 
+<span class="lineNum">    1117 </span><span class="lineCov">      80974 :         occurred_events-&gt;pos = cur_event-&gt;pos;</span>
+<span class="lineNum">    1118 </span><span class="lineCov">      80974 :         occurred_events-&gt;user_data = cur_event-&gt;user_data;</span>
+<span class="lineNum">    1119 </span><span class="lineCov">      80974 :         occurred_events-&gt;events = 0;</span>
+<span class="lineNum">    1120 </span>            : 
+<span class="lineNum">    1121 </span><span class="lineCov">      85516 :         if (cur_event-&gt;events == WL_LATCH_SET &amp;&amp;</span>
+<span class="lineNum">    1122 </span><span class="lineCov">       4542 :             cur_epoll_event-&gt;events &amp; (EPOLLIN | EPOLLERR | EPOLLHUP))</span>
+<span class="lineNum">    1123 </span>            :         {
+<span class="lineNum">    1124 </span>            :             /* There's data in the self-pipe, clear it. */
+<span class="lineNum">    1125 </span><span class="lineCov">       4542 :             drainSelfPipe();</span>
+<span class="lineNum">    1126 </span>            : 
+<span class="lineNum">    1127 </span><span class="lineCov">       9084 :             if (set-&gt;latch-&gt;is_set)</span>
+<span class="lineNum">    1128 </span>            :             {
+<span class="lineNum">    1129 </span><span class="lineCov">        220 :                 occurred_events-&gt;fd = PGINVALID_SOCKET;</span>
+<span class="lineNum">    1130 </span><span class="lineCov">        220 :                 occurred_events-&gt;events = WL_LATCH_SET;</span>
+<span class="lineNum">    1131 </span><span class="lineCov">        220 :                 occurred_events++;</span>
+<span class="lineNum">    1132 </span><span class="lineCov">        220 :                 returned_events++;</span>
+<span class="lineNum">    1133 </span>            :             }
+<span class="lineNum">    1134 </span>            :         }
+<span class="lineNum">    1135 </span><span class="lineCov">      76432 :         else if (cur_event-&gt;events == WL_POSTMASTER_DEATH &amp;&amp;</span>
+<span class="lineNum">    1136 </span><span class="lineNoCov">          0 :                  cur_epoll_event-&gt;events &amp; (EPOLLIN | EPOLLERR | EPOLLHUP))</span>
+<span class="lineNum">    1137 </span>            :         {
+<span class="lineNum">    1138 </span>            :             /*
+<span class="lineNum">    1139 </span>            :              * We expect an EPOLLHUP when the remote end is closed, but
+<span class="lineNum">    1140 </span>            :              * because we don't expect the pipe to become readable or to have
+<span class="lineNum">    1141 </span>            :              * any errors either, treat those cases as postmaster death, too.
+<span class="lineNum">    1142 </span>            :              *
+<span class="lineNum">    1143 </span>            :              * Be paranoid about a spurious event signalling the postmaster as
+<span class="lineNum">    1144 </span>            :              * being dead.  There have been reports about that happening with
+<span class="lineNum">    1145 </span>            :              * older primitives (select(2) to be specific), and a spurious
+<span class="lineNum">    1146 </span>            :              * WL_POSTMASTER_DEATH event would be painful. Re-checking doesn't
+<span class="lineNum">    1147 </span>            :              * cost much.
+<span class="lineNum">    1148 </span>            :              */
+<span class="lineNum">    1149 </span><span class="lineNoCov">          0 :             if (!PostmasterIsAliveInternal())</span>
+<span class="lineNum">    1150 </span>            :             {
+<span class="lineNum">    1151 </span><span class="lineNoCov">          0 :                 if (set-&gt;exit_on_postmaster_death)</span>
+<span class="lineNum">    1152 </span><span class="lineNoCov">          0 :                     proc_exit(1);</span>
+<span class="lineNum">    1153 </span><span class="lineNoCov">          0 :                 occurred_events-&gt;fd = PGINVALID_SOCKET;</span>
+<span class="lineNum">    1154 </span><span class="lineNoCov">          0 :                 occurred_events-&gt;events = WL_POSTMASTER_DEATH;</span>
+<span class="lineNum">    1155 </span><span class="lineNoCov">          0 :                 occurred_events++;</span>
+<span class="lineNum">    1156 </span><span class="lineNoCov">          0 :                 returned_events++;</span>
+<span class="lineNum">    1157 </span>            :             }
+<span class="lineNum">    1158 </span>            :         }
+<span class="lineNum">    1159 </span><span class="lineCov">      76432 :         else if (cur_event-&gt;events &amp; (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE))</span>
+<span class="lineNum">    1160 </span>            :         {
+<span class="lineNum">    1161 </span><span class="lineCov">      76432 :             Assert(cur_event-&gt;fd != PGINVALID_SOCKET);</span>
+<span class="lineNum">    1162 </span>            : 
+<span class="lineNum">    1163 </span><span class="lineCov">     152864 :             if ((cur_event-&gt;events &amp; WL_SOCKET_READABLE) &amp;&amp;</span>
+<span class="lineNum">    1164 </span><span class="lineCov">      76432 :                 (cur_epoll_event-&gt;events &amp; (EPOLLIN | EPOLLERR | EPOLLHUP)))</span>
+<span class="lineNum">    1165 </span>            :             {
+<span class="lineNum">    1166 </span>            :                 /* data available in socket, or EOF */
+<span class="lineNum">    1167 </span><span class="lineCov">      76432 :                 occurred_events-&gt;events |= WL_SOCKET_READABLE;</span>
+<span class="lineNum">    1168 </span>            :             }
+<span class="lineNum">    1169 </span>            : 
+<span class="lineNum">    1170 </span><span class="lineCov">      76432 :             if ((cur_event-&gt;events &amp; WL_SOCKET_WRITEABLE) &amp;&amp;</span>
+<span class="lineNum">    1171 </span><span class="lineNoCov">          0 :                 (cur_epoll_event-&gt;events &amp; (EPOLLOUT | EPOLLERR | EPOLLHUP)))</span>
+<span class="lineNum">    1172 </span>            :             {
+<span class="lineNum">    1173 </span>            :                 /* writable, or EOF */
+<span class="lineNum">    1174 </span><span class="lineNoCov">          0 :                 occurred_events-&gt;events |= WL_SOCKET_WRITEABLE;</span>
+<span class="lineNum">    1175 </span>            :             }
+<span class="lineNum">    1176 </span>            : 
+<span class="lineNum">    1177 </span><span class="lineCov">      76432 :             if (occurred_events-&gt;events != 0)</span>
+<span class="lineNum">    1178 </span>            :             {
+<span class="lineNum">    1179 </span><span class="lineCov">      76432 :                 occurred_events-&gt;fd = cur_event-&gt;fd;</span>
+<span class="lineNum">    1180 </span><span class="lineCov">      76432 :                 occurred_events++;</span>
+<span class="lineNum">    1181 </span><span class="lineCov">      76432 :                 returned_events++;</span>
+<span class="lineNum">    1182 </span>            :             }
+<span class="lineNum">    1183 </span>            :         }
+<span class="lineNum">    1184 </span>            :     }
+<span class="lineNum">    1185 </span>            : 
+<span class="lineNum">    1186 </span><span class="lineCov">      80974 :     return returned_events;</span>
+<span class="lineNum">    1187 </span>            : }
+<span class="lineNum">    1188 </span>            : 
+<span class="lineNum">    1189 </span>            : #elif defined(WAIT_USE_POLL)
+<span class="lineNum">    1190 </span>            : 
+<span class="lineNum">    1191 </span>            : /*
+<span class="lineNum">    1192 </span>            :  * Wait using poll(2).
+<span class="lineNum">    1193 </span>            :  *
+<span class="lineNum">    1194 </span>            :  * This allows to receive readiness notifications for several events at once,
+<span class="lineNum">    1195 </span>            :  * but requires iterating through all of set-&gt;pollfds.
+<span class="lineNum">    1196 </span>            :  */
+<span class="lineNum">    1197 </span>            : static inline int
+<span class="lineNum">    1198 </span>            : WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
+<span class="lineNum">    1199 </span>            :                       WaitEvent *occurred_events, int nevents)
+<span class="lineNum">    1200 </span>            : {
+<span class="lineNum">    1201 </span>            :     int         returned_events = 0;
+<span class="lineNum">    1202 </span>            :     int         rc;
+<span class="lineNum">    1203 </span>            :     WaitEvent  *cur_event;
+<span class="lineNum">    1204 </span>            :     struct pollfd *cur_pollfd;
+<span class="lineNum">    1205 </span>            : 
+<span class="lineNum">    1206 </span>            :     /* Sleep */
+<span class="lineNum">    1207 </span>            :     rc = poll(set-&gt;pollfds, set-&gt;nevents, (int) cur_timeout);
+<span class="lineNum">    1208 </span>            : 
+<span class="lineNum">    1209 </span>            :     /* Check return code */
+<span class="lineNum">    1210 </span>            :     if (rc &lt; 0)
+<span class="lineNum">    1211 </span>            :     {
+<span class="lineNum">    1212 </span>            :         /* EINTR is okay, otherwise complain */
+<span class="lineNum">    1213 </span>            :         if (errno != EINTR)
+<span class="lineNum">    1214 </span>            :         {
+<span class="lineNum">    1215 </span>            :             waiting = false;
+<span class="lineNum">    1216 </span>            :             ereport(ERROR,
+<span class="lineNum">    1217 </span>            :                     (errcode_for_socket_access(),
+<span class="lineNum">    1218 </span>            :             /* translator: %s is a syscall name, such as &quot;poll()&quot; */
+<span class="lineNum">    1219 </span>            :                      errmsg(&quot;%s failed: %m&quot;,
+<span class="lineNum">    1220 </span>            :                             &quot;poll()&quot;)));
+<span class="lineNum">    1221 </span>            :         }
+<span class="lineNum">    1222 </span>            :         return 0;
+<span class="lineNum">    1223 </span>            :     }
+<span class="lineNum">    1224 </span>            :     else if (rc == 0)
+<span class="lineNum">    1225 </span>            :     {
+<span class="lineNum">    1226 </span>            :         /* timeout exceeded */
+<span class="lineNum">    1227 </span>            :         return -1;
+<span class="lineNum">    1228 </span>            :     }
+<span class="lineNum">    1229 </span>            : 
+<span class="lineNum">    1230 </span>            :     for (cur_event = set-&gt;events, cur_pollfd = set-&gt;pollfds;
+<span class="lineNum">    1231 </span>            :          cur_event &lt; (set-&gt;events + set-&gt;nevents) &amp;&amp;
+<span class="lineNum">    1232 </span>            :          returned_events &lt; nevents;
+<span class="lineNum">    1233 </span>            :          cur_event++, cur_pollfd++)
+<span class="lineNum">    1234 </span>            :     {
+<span class="lineNum">    1235 </span>            :         /* no activity on this FD, skip */
+<span class="lineNum">    1236 </span>            :         if (cur_pollfd-&gt;revents == 0)
+<span class="lineNum">    1237 </span>            :             continue;
+<span class="lineNum">    1238 </span>            : 
+<span class="lineNum">    1239 </span>            :         occurred_events-&gt;pos = cur_event-&gt;pos;
+<span class="lineNum">    1240 </span>            :         occurred_events-&gt;user_data = cur_event-&gt;user_data;
+<span class="lineNum">    1241 </span>            :         occurred_events-&gt;events = 0;
+<span class="lineNum">    1242 </span>            : 
+<span class="lineNum">    1243 </span>            :         if (cur_event-&gt;events == WL_LATCH_SET &amp;&amp;
+<span class="lineNum">    1244 </span>            :             (cur_pollfd-&gt;revents &amp; (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
+<span class="lineNum">    1245 </span>            :         {
+<span class="lineNum">    1246 </span>            :             /* There's data in the self-pipe, clear it. */
+<span class="lineNum">    1247 </span>            :             drainSelfPipe();
+<span class="lineNum">    1248 </span>            : 
+<span class="lineNum">    1249 </span>            :             if (set-&gt;latch-&gt;is_set)
+<span class="lineNum">    1250 </span>            :             {
+<span class="lineNum">    1251 </span>            :                 occurred_events-&gt;fd = PGINVALID_SOCKET;
+<span class="lineNum">    1252 </span>            :                 occurred_events-&gt;events = WL_LATCH_SET;
+<span class="lineNum">    1253 </span>            :                 occurred_events++;
+<span class="lineNum">    1254 </span>            :                 returned_events++;
+<span class="lineNum">    1255 </span>            :             }
+<span class="lineNum">    1256 </span>            :         }
+<span class="lineNum">    1257 </span>            :         else if (cur_event-&gt;events == WL_POSTMASTER_DEATH &amp;&amp;
+<span class="lineNum">    1258 </span>            :                  (cur_pollfd-&gt;revents &amp; (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
+<span class="lineNum">    1259 </span>            :         {
+<span class="lineNum">    1260 </span>            :             /*
+<span class="lineNum">    1261 </span>            :              * We expect an POLLHUP when the remote end is closed, but because
+<span class="lineNum">    1262 </span>            :              * we don't expect the pipe to become readable or to have any
+<span class="lineNum">    1263 </span>            :              * errors either, treat those cases as postmaster death, too.
+<span class="lineNum">    1264 </span>            :              *
+<span class="lineNum">    1265 </span>            :              * Be paranoid about a spurious event signalling the postmaster as
+<span class="lineNum">    1266 </span>            :              * being dead.  There have been reports about that happening with
+<span class="lineNum">    1267 </span>            :              * older primitives (select(2) to be specific), and a spurious
+<span class="lineNum">    1268 </span>            :              * WL_POSTMASTER_DEATH event would be painful. Re-checking doesn't
+<span class="lineNum">    1269 </span>            :              * cost much.
+<span class="lineNum">    1270 </span>            :              */
+<span class="lineNum">    1271 </span>            :             if (!PostmasterIsAliveInternal())
+<span class="lineNum">    1272 </span>            :             {
+<span class="lineNum">    1273 </span>            :                 if (set-&gt;exit_on_postmaster_death)
+<span class="lineNum">    1274 </span>            :                     proc_exit(1);
+<span class="lineNum">    1275 </span>            :                 occurred_events-&gt;fd = PGINVALID_SOCKET;
+<span class="lineNum">    1276 </span>            :                 occurred_events-&gt;events = WL_POSTMASTER_DEATH;
+<span class="lineNum">    1277 </span>            :                 occurred_events++;
+<span class="lineNum">    1278 </span>            :                 returned_events++;
+<span class="lineNum">    1279 </span>            :             }
+<span class="lineNum">    1280 </span>            :         }
+<span class="lineNum">    1281 </span>            :         else if (cur_event-&gt;events &amp; (WL_SOCKET_READABLE | WL_SOCKET_WRITEABLE))
+<span class="lineNum">    1282 </span>            :         {
+<span class="lineNum">    1283 </span>            :             int         errflags = POLLHUP | POLLERR | POLLNVAL;
+<span class="lineNum">    1284 </span>            : 
+<span class="lineNum">    1285 </span>            :             Assert(cur_event-&gt;fd &gt;= PGINVALID_SOCKET);
+<span class="lineNum">    1286 </span>            : 
+<span class="lineNum">    1287 </span>            :             if ((cur_event-&gt;events &amp; WL_SOCKET_READABLE) &amp;&amp;
+<span class="lineNum">    1288 </span>            :                 (cur_pollfd-&gt;revents &amp; (POLLIN | errflags)))
+<span class="lineNum">    1289 </span>            :             {
+<span class="lineNum">    1290 </span>            :                 /* data available in socket, or EOF */
+<span class="lineNum">    1291 </span>            :                 occurred_events-&gt;events |= WL_SOCKET_READABLE;
+<span class="lineNum">    1292 </span>            :             }
+<span class="lineNum">    1293 </span>            : 
+<span class="lineNum">    1294 </span>            :             if ((cur_event-&gt;events &amp; WL_SOCKET_WRITEABLE) &amp;&amp;
+<span class="lineNum">    1295 </span>            :                 (cur_pollfd-&gt;revents &amp; (POLLOUT | errflags)))
+<span class="lineNum">    1296 </span>            :             {
+<span class="lineNum">    1297 </span>            :                 /* writeable, or EOF */
+<span class="lineNum">    1298 </span>            :                 occurred_events-&gt;events |= WL_SOCKET_WRITEABLE;
+<span class="lineNum">    1299 </span>            :             }
+<span class="lineNum">    1300 </span>            : 
+<span class="lineNum">    1301 </span>            :             if (occurred_events-&gt;events != 0)
+<span class="lineNum">    1302 </span>            :             {
+<span class="lineNum">    1303 </span>            :                 occurred_events-&gt;fd = cur_event-&gt;fd;
+<span class="lineNum">    1304 </span>            :                 occurred_events++;
+<span class="lineNum">    1305 </span>            :                 returned_events++;
+<span class="lineNum">    1306 </span>            :             }
+<span class="lineNum">    1307 </span>            :         }
+<span class="lineNum">    1308 </span>            :     }
+<span class="lineNum">    1309 </span>            :     return returned_events;
+<span class="lineNum">    1310 </span>            : }
+<span class="lineNum">    1311 </span>            : 
+<span class="lineNum">    1312 </span>            : #elif defined(WAIT_USE_WIN32)
+<span class="lineNum">    1313 </span>            : 
+<span class="lineNum">    1314 </span>            : /*
+<span class="lineNum">    1315 </span>            :  * Wait using Windows' WaitForMultipleObjects().
+<span class="lineNum">    1316 </span>            :  *
+<span class="lineNum">    1317 </span>            :  * Unfortunately this will only ever return a single readiness notification at
+<span class="lineNum">    1318 </span>            :  * a time.  Note that while the official documentation for
+<span class="lineNum">    1319 </span>            :  * WaitForMultipleObjects is ambiguous about multiple events being &quot;consumed&quot;
+<span class="lineNum">    1320 </span>            :  * with a single bWaitAll = FALSE call,
+<span class="lineNum">    1321 </span>            :  * https://blogs.msdn.microsoft.com/oldnewthing/20150409-00/?p=44273 confirms
+<span class="lineNum">    1322 </span>            :  * that only one event is &quot;consumed&quot;.
+<span class="lineNum">    1323 </span>            :  */
+<span class="lineNum">    1324 </span>            : static inline int
+<span class="lineNum">    1325 </span>            : WaitEventSetWaitBlock(WaitEventSet *set, int cur_timeout,
+<span class="lineNum">    1326 </span>            :                       WaitEvent *occurred_events, int nevents)
+<span class="lineNum">    1327 </span>            : {
+<span class="lineNum">    1328 </span>            :     int         returned_events = 0;
+<span class="lineNum">    1329 </span>            :     DWORD       rc;
+<span class="lineNum">    1330 </span>            :     WaitEvent  *cur_event;
+<span class="lineNum">    1331 </span>            : 
+<span class="lineNum">    1332 </span>            :     /* Reset any wait events that need it */
+<span class="lineNum">    1333 </span>            :     for (cur_event = set-&gt;events;
+<span class="lineNum">    1334 </span>            :          cur_event &lt; (set-&gt;events + set-&gt;nevents);
+<span class="lineNum">    1335 </span>            :          cur_event++)
+<span class="lineNum">    1336 </span>            :     {
+<span class="lineNum">    1337 </span>            :         if (cur_event-&gt;reset)
+<span class="lineNum">    1338 </span>            :         {
+<span class="lineNum">    1339 </span>            :             WaitEventAdjustWin32(set, cur_event);
+<span class="lineNum">    1340 </span>            :             cur_event-&gt;reset = false;
+<span class="lineNum">    1341 </span>            :         }
+<span class="lineNum">    1342 </span>            : 
+<span class="lineNum">    1343 </span>            :         /*
+<span class="lineNum">    1344 </span>            :          * Windows does not guarantee to log an FD_WRITE network event
+<span class="lineNum">    1345 </span>            :          * indicating that more data can be sent unless the previous send()
+<span class="lineNum">    1346 </span>            :          * failed with WSAEWOULDBLOCK.  While our caller might well have made
+<span class="lineNum">    1347 </span>            :          * such a call, we cannot assume that here.  Therefore, if waiting for
+<span class="lineNum">    1348 </span>            :          * write-ready, force the issue by doing a dummy send().  If the dummy
+<span class="lineNum">    1349 </span>            :          * send() succeeds, assume that the socket is in fact write-ready, and
+<span class="lineNum">    1350 </span>            :          * return immediately.  Also, if it fails with something other than
+<span class="lineNum">    1351 </span>            :          * WSAEWOULDBLOCK, return a write-ready indication to let our caller
+<span class="lineNum">    1352 </span>            :          * deal with the error condition.
+<span class="lineNum">    1353 </span>            :          */
+<span class="lineNum">    1354 </span>            :         if (cur_event-&gt;events &amp; WL_SOCKET_WRITEABLE)
+<span class="lineNum">    1355 </span>            :         {
+<span class="lineNum">    1356 </span>            :             char        c;
+<span class="lineNum">    1357 </span>            :             WSABUF      buf;
+<span class="lineNum">    1358 </span>            :             DWORD       sent;
+<span class="lineNum">    1359 </span>            :             int         r;
+<span class="lineNum">    1360 </span>            : 
+<span class="lineNum">    1361 </span>            :             buf.buf = &amp;c;
+<span class="lineNum">    1362 </span>            :             buf.len = 0;
+<span class="lineNum">    1363 </span>            : 
+<span class="lineNum">    1364 </span>            :             r = WSASend(cur_event-&gt;fd, &amp;buf, 1, &amp;sent, 0, NULL, NULL);
+<span class="lineNum">    1365 </span>            :             if (r == 0 || WSAGetLastError() != WSAEWOULDBLOCK)
+<span class="lineNum">    1366 </span>            :             {
+<span class="lineNum">    1367 </span>            :                 occurred_events-&gt;pos = cur_event-&gt;pos;
+<span class="lineNum">    1368 </span>            :                 occurred_events-&gt;user_data = cur_event-&gt;user_data;
+<span class="lineNum">    1369 </span>            :                 occurred_events-&gt;events = WL_SOCKET_WRITEABLE;
+<span class="lineNum">    1370 </span>            :                 occurred_events-&gt;fd = cur_event-&gt;fd;
+<span class="lineNum">    1371 </span>            :                 return 1;
+<span class="lineNum">    1372 </span>            :             }
+<span class="lineNum">    1373 </span>            :         }
+<span class="lineNum">    1374 </span>            :     }
+<span class="lineNum">    1375 </span>            : 
+<span class="lineNum">    1376 </span>            :     /*
+<span class="lineNum">    1377 </span>            :      * Sleep.
+<span class="lineNum">    1378 </span>            :      *
+<span class="lineNum">    1379 </span>            :      * Need to wait for -&gt;nevents + 1, because signal handle is in [0].
+<span class="lineNum">    1380 </span>            :      */
+<span class="lineNum">    1381 </span>            :     rc = WaitForMultipleObjects(set-&gt;nevents + 1, set-&gt;handles, FALSE,
+<span class="lineNum">    1382 </span>            :                                 cur_timeout);
+<span class="lineNum">    1383 </span>            : 
+<span class="lineNum">    1384 </span>            :     /* Check return code */
+<span class="lineNum">    1385 </span>            :     if (rc == WAIT_FAILED)
+<span class="lineNum">    1386 </span>            :         elog(ERROR, &quot;WaitForMultipleObjects() failed: error code %lu&quot;,
+<span class="lineNum">    1387 </span>            :              GetLastError());
+<span class="lineNum">    1388 </span>            :     else if (rc == WAIT_TIMEOUT)
+<span class="lineNum">    1389 </span>            :     {
+<span class="lineNum">    1390 </span>            :         /* timeout exceeded */
+<span class="lineNum">    1391 </span>            :         return -1;
+<span class="lineNum">    1392 </span>            :     }
+<span class="lineNum">    1393 </span>            : 
+<span class="lineNum">    1394 </span>            :     if (rc == WAIT_OBJECT_0)
+<span class="lineNum">    1395 </span>            :     {
+<span class="lineNum">    1396 </span>            :         /* Service newly-arrived signals */
+<span class="lineNum">    1397 </span>            :         pgwin32_dispatch_queued_signals();
+<span class="lineNum">    1398 </span>            :         return 0;               /* retry */
+<span class="lineNum">    1399 </span>            :     }
+<span class="lineNum">    1400 </span>            : 
+<span class="lineNum">    1401 </span>            :     /*
+<span class="lineNum">    1402 </span>            :      * With an offset of one, due to the always present pgwin32_signal_event,
+<span class="lineNum">    1403 </span>            :      * the handle offset directly corresponds to a wait event.
+<span class="lineNum">    1404 </span>            :      */
+<span class="lineNum">    1405 </span>            :     cur_event = (WaitEvent *) &amp;set-&gt;events[rc - WAIT_OBJECT_0 - 1];
+<span class="lineNum">    1406 </span>            : 
+<span class="lineNum">    1407 </span>            :     occurred_events-&gt;pos = cur_event-&gt;pos;
+<span class="lineNum">    1408 </span>            :     occurred_events-&gt;user_data = cur_event-&gt;user_data;
+<span class="lineNum">    1409 </span>            :     occurred_events-&gt;events = 0;
+<span class="lineNum">    1410 </span>            : 
+<span class="lineNum">    1411 </span>            :     if (cur_event-&gt;events == WL_LATCH_SET)
+<span class="lineNum">    1412 </span>            :     {
+<span class="lineNum">    1413 </span>            :         if (!ResetEvent(set-&gt;latch-&gt;event))
+<span class="lineNum">    1414 </span>            :             elog(ERROR, &quot;ResetEvent failed: error code %lu&quot;, GetLastError());
+<span class="lineNum">    1415 </span>            : 
+<span class="lineNum">    1416 </span>            :         if (set-&gt;latch-&gt;is_set)
+<span class="lineNum">    1417 </span>            :         {
+<span class="lineNum">    1418 </span>            :             occurred_events-&gt;fd = PGINVALID_SOCKET;
+<span class="lineNum">    1419 </span>            :             occurred_events-&gt;events = WL_LATCH_SET;
+<span class="lineNum">    1420 </span>            :             occurred_events++;
+<span class="lineNum">    1421 </span>            :             returned_events++;
+<span class="lineNum">    1422 </span>            :         }
+<span class="lineNum">    1423 </span>            :     }
+<span class="lineNum">    1424 </span>            :     else if (cur_event-&gt;events == WL_POSTMASTER_DEATH)
+<span class="lineNum">    1425 </span>            :     {
+<span class="lineNum">    1426 </span>            :         /*
+<span class="lineNum">    1427 </span>            :          * Postmaster apparently died.  Since the consequences of falsely
+<span class="lineNum">    1428 </span>            :          * returning WL_POSTMASTER_DEATH could be pretty unpleasant, we take
+<span class="lineNum">    1429 </span>            :          * the trouble to positively verify this with PostmasterIsAlive(),
+<span class="lineNum">    1430 </span>            :          * even though there is no known reason to think that the event could
+<span class="lineNum">    1431 </span>            :          * be falsely set on Windows.
+<span class="lineNum">    1432 </span>            :          */
+<span class="lineNum">    1433 </span>            :         if (!PostmasterIsAliveInternal())
+<span class="lineNum">    1434 </span>            :         {
+<span class="lineNum">    1435 </span>            :             if (set-&gt;exit_on_postmaster_death)
+<span class="lineNum">    1436 </span>            :                 proc_exit(1);
+<span class="lineNum">    1437 </span>            :             occurred_events-&gt;fd = PGINVALID_SOCKET;
+<span class="lineNum">    1438 </span>            :             occurred_events-&gt;events = WL_POSTMASTER_DEATH;
+<span class="lineNum">    1439 </span>            :             occurred_events++;
+<span class="lineNum">    1440 </span>            :             returned_events++;
+<span class="lineNum">    1441 </span>            :         }
+<span class="lineNum">    1442 </span>            :     }
+<span class="lineNum">    1443 </span>            :     else if (cur_event-&gt;events &amp; WL_SOCKET_MASK)
+<span class="lineNum">    1444 </span>            :     {
+<span class="lineNum">    1445 </span>            :         WSANETWORKEVENTS resEvents;
+<span class="lineNum">    1446 </span>            :         HANDLE      handle = set-&gt;handles[cur_event-&gt;pos + 1];
+<span class="lineNum">    1447 </span>            : 
+<span class="lineNum">    1448 </span>            :         Assert(cur_event-&gt;fd);
+<span class="lineNum">    1449 </span>            : 
+<span class="lineNum">    1450 </span>            :         occurred_events-&gt;fd = cur_event-&gt;fd;
+<span class="lineNum">    1451 </span>            : 
+<span class="lineNum">    1452 </span>            :         ZeroMemory(&amp;resEvents, sizeof(resEvents));
+<span class="lineNum">    1453 </span>            :         if (WSAEnumNetworkEvents(cur_event-&gt;fd, handle, &amp;resEvents) != 0)
+<span class="lineNum">    1454 </span>            :             elog(ERROR, &quot;failed to enumerate network events: error code %u&quot;,
+<span class="lineNum">    1455 </span>            :                  WSAGetLastError());
+<span class="lineNum">    1456 </span>            :         if ((cur_event-&gt;events &amp; WL_SOCKET_READABLE) &amp;&amp;
+<span class="lineNum">    1457 </span>            :             (resEvents.lNetworkEvents &amp; FD_READ))
+<span class="lineNum">    1458 </span>            :         {
+<span class="lineNum">    1459 </span>            :             /* data available in socket */
+<span class="lineNum">    1460 </span>            :             occurred_events-&gt;events |= WL_SOCKET_READABLE;
+<span class="lineNum">    1461 </span>            : 
+<span class="lineNum">    1462 </span>            :             /*------
+<span class="lineNum">    1463 </span>            :              * WaitForMultipleObjects doesn't guarantee that a read event will
+<span class="lineNum">    1464 </span>            :              * be returned if the latch is set at the same time.  Even if it
+<span class="lineNum">    1465 </span>            :              * did, the caller might drop that event expecting it to reoccur
+<span class="lineNum">    1466 </span>            :              * on next call.  So, we must force the event to be reset if this
+<span class="lineNum">    1467 </span>            :              * WaitEventSet is used again in order to avoid an indefinite
+<span class="lineNum">    1468 </span>            :              * hang.  Refer https://msdn.microsoft.com/en-us/library/windows/desktop/ms741576(v=vs.85).aspx
+<span class="lineNum">    1469 </span>            :              * for the behavior of socket events.
+<span class="lineNum">    1470 </span>            :              *------
+<span class="lineNum">    1471 </span>            :              */
+<span class="lineNum">    1472 </span>            :             cur_event-&gt;reset = true;
+<span class="lineNum">    1473 </span>            :         }
+<span class="lineNum">    1474 </span>            :         if ((cur_event-&gt;events &amp; WL_SOCKET_WRITEABLE) &amp;&amp;
+<span class="lineNum">    1475 </span>            :             (resEvents.lNetworkEvents &amp; FD_WRITE))
+<span class="lineNum">    1476 </span>            :         {
+<span class="lineNum">    1477 </span>            :             /* writeable */
+<span class="lineNum">    1478 </span>            :             occurred_events-&gt;events |= WL_SOCKET_WRITEABLE;
+<span class="lineNum">    1479 </span>            :         }
+<span class="lineNum">    1480 </span>            :         if ((cur_event-&gt;events &amp; WL_SOCKET_CONNECTED) &amp;&amp;
+<span class="lineNum">    1481 </span>            :             (resEvents.lNetworkEvents &amp; FD_CONNECT))
+<span class="lineNum">    1482 </span>            :         {
+<span class="lineNum">    1483 </span>            :             /* connected */
+<span class="lineNum">    1484 </span>            :             occurred_events-&gt;events |= WL_SOCKET_CONNECTED;
+<span class="lineNum">    1485 </span>            :         }
+<span class="lineNum">    1486 </span>            :         if (resEvents.lNetworkEvents &amp; FD_CLOSE)
+<span class="lineNum">    1487 </span>            :         {
+<span class="lineNum">    1488 </span>            :             /* EOF/error, so signal all caller-requested socket flags */
+<span class="lineNum">    1489 </span>            :             occurred_events-&gt;events |= (cur_event-&gt;events &amp; WL_SOCKET_MASK);
+<span class="lineNum">    1490 </span>            :         }
+<span class="lineNum">    1491 </span>            : 
+<span class="lineNum">    1492 </span>            :         if (occurred_events-&gt;events != 0)
+<span class="lineNum">    1493 </span>            :         {
+<span class="lineNum">    1494 </span>            :             occurred_events++;
+<span class="lineNum">    1495 </span>            :             returned_events++;
+<span class="lineNum">    1496 </span>            :         }
+<span class="lineNum">    1497 </span>            :     }
+<span class="lineNum">    1498 </span>            : 
+<span class="lineNum">    1499 </span>            :     return returned_events;
+<span class="lineNum">    1500 </span>            : }
+<span class="lineNum">    1501 </span>            : #endif
+<span class="lineNum">    1502 </span>            : 
+<span class="lineNum">    1503 </span>            : /*
+<span class="lineNum">    1504 </span>            :  * SetLatch uses SIGUSR1 to wake up the process waiting on the latch.
+<span class="lineNum">    1505 </span>            :  *
+<span class="lineNum">    1506 </span>            :  * Wake up WaitLatch, if we're waiting.  (We might not be, since SIGUSR1 is
+<span class="lineNum">    1507 </span>            :  * overloaded for multiple purposes; or we might not have reached WaitLatch
+<span class="lineNum">    1508 </span>            :  * yet, in which case we don't need to fill the pipe either.)
+<span class="lineNum">    1509 </span>            :  *
+<span class="lineNum">    1510 </span>            :  * NB: when calling this in a signal handler, be sure to save and restore
+<span class="lineNum">    1511 </span>            :  * errno around it.
+<span class="lineNum">    1512 </span>            :  */
+<a name="1513"><span class="lineNum">    1513 </span>            : #ifndef WIN32</a>
+<span class="lineNum">    1514 </span>            : void
+<span class="lineNum">    1515 </span><span class="lineCov">      12474 : latch_sigusr1_handler(void)</span>
+<span class="lineNum">    1516 </span>            : {
+<span class="lineNum">    1517 </span><span class="lineCov">      12474 :     if (waiting)</span>
+<span class="lineNum">    1518 </span><span class="lineCov">       4628 :         sendSelfPipeByte();</span>
+<span class="lineNum">    1519 </span><span class="lineCov">      12474 : }</span>
+<span class="lineNum">    1520 </span>            : #endif                          /* !WIN32 */
+<span class="lineNum">    1521 </span>            : 
+<span class="lineNum">    1522 </span>            : /* Send one byte to the self-pipe, to wake up WaitLatch */
+<a name="1523"><span class="lineNum">    1523 </span>            : #ifndef WIN32</a>
+<span class="lineNum">    1524 </span>            : static void
+<span class="lineNum">    1525 </span><span class="lineCov">       5956 : sendSelfPipeByte(void)</span>
+<span class="lineNum">    1526 </span>            : {
+<span class="lineNum">    1527 </span>            :     int         rc;
+<span class="lineNum">    1528 </span><span class="lineCov">       5956 :     char        dummy = 0;</span>
+<span class="lineNum">    1529 </span>            : 
+<span class="lineNum">    1530 </span>            : retry:
+<span class="lineNum">    1531 </span><span class="lineCov">       5956 :     rc = write(selfpipe_writefd, &amp;dummy, 1);</span>
+<span class="lineNum">    1532 </span><span class="lineCov">       5956 :     if (rc &lt; 0)</span>
+<span class="lineNum">    1533 </span>            :     {
+<span class="lineNum">    1534 </span>            :         /* If interrupted by signal, just retry */
+<span class="lineNum">    1535 </span><span class="lineNoCov">          0 :         if (errno == EINTR)</span>
+<span class="lineNum">    1536 </span><span class="lineNoCov">          0 :             goto retry;</span>
+<span class="lineNum">    1537 </span>            : 
+<span class="lineNum">    1538 </span>            :         /*
+<span class="lineNum">    1539 </span>            :          * If the pipe is full, we don't need to retry, the data that's there
+<span class="lineNum">    1540 </span>            :          * already is enough to wake up WaitLatch.
+<span class="lineNum">    1541 </span>            :          */
+<span class="lineNum">    1542 </span><span class="lineNoCov">          0 :         if (errno == EAGAIN || errno == EWOULDBLOCK)</span>
+<span class="lineNum">    1543 </span><span class="lineNoCov">          0 :             return;</span>
+<span class="lineNum">    1544 </span>            : 
+<span class="lineNum">    1545 </span>            :         /*
+<span class="lineNum">    1546 </span>            :          * Oops, the write() failed for some other reason. We might be in a
+<span class="lineNum">    1547 </span>            :          * signal handler, so it's not safe to elog(). We have no choice but
+<span class="lineNum">    1548 </span>            :          * silently ignore the error.
+<span class="lineNum">    1549 </span>            :          */
+<span class="lineNum">    1550 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1551 </span>            :     }
+<span class="lineNum">    1552 </span>            : }
+<span class="lineNum">    1553 </span>            : #endif                          /* !WIN32 */
+<span class="lineNum">    1554 </span>            : 
+<span class="lineNum">    1555 </span>            : /*
+<span class="lineNum">    1556 </span>            :  * Read all available data from the self-pipe
+<span class="lineNum">    1557 </span>            :  *
+<span class="lineNum">    1558 </span>            :  * Note: this is only called when waiting = true.  If it fails and doesn't
+<span class="lineNum">    1559 </span>            :  * return, it must reset that flag first (though ideally, this will never
+<span class="lineNum">    1560 </span>            :  * happen).
+<span class="lineNum">    1561 </span>            :  */
+<a name="1562"><span class="lineNum">    1562 </span>            : #ifndef WIN32</a>
+<span class="lineNum">    1563 </span>            : static void
+<span class="lineNum">    1564 </span><span class="lineCov">       4542 : drainSelfPipe(void)</span>
+<span class="lineNum">    1565 </span>            : {
+<span class="lineNum">    1566 </span>            :     /*
+<span class="lineNum">    1567 </span>            :      * There shouldn't normally be more than one byte in the pipe, or maybe a
+<span class="lineNum">    1568 </span>            :      * few bytes if multiple processes run SetLatch at the same instant.
+<span class="lineNum">    1569 </span>            :      */
+<span class="lineNum">    1570 </span>            :     char        buf[16];
+<span class="lineNum">    1571 </span>            :     int         rc;
+<span class="lineNum">    1572 </span>            : 
+<span class="lineNum">    1573 </span>            :     for (;;)
+<span class="lineNum">    1574 </span>            :     {
+<span class="lineNum">    1575 </span><span class="lineCov">       4542 :         rc = read(selfpipe_readfd, buf, sizeof(buf));</span>
+<span class="lineNum">    1576 </span><span class="lineCov">       4542 :         if (rc &lt; 0)</span>
+<span class="lineNum">    1577 </span>            :         {
+<span class="lineNum">    1578 </span><span class="lineNoCov">          0 :             if (errno == EAGAIN || errno == EWOULDBLOCK)</span>
+<span class="lineNum">    1579 </span>            :                 break;          /* the pipe is empty */
+<span class="lineNum">    1580 </span><span class="lineNoCov">          0 :             else if (errno == EINTR)</span>
+<span class="lineNum">    1581 </span><span class="lineNoCov">          0 :                 continue;       /* retry */</span>
+<span class="lineNum">    1582 </span>            :             else
+<span class="lineNum">    1583 </span>            :             {
+<span class="lineNum">    1584 </span><span class="lineNoCov">          0 :                 waiting = false;</span>
+<span class="lineNum">    1585 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;read() on self-pipe failed: %m&quot;);</span>
+<span class="lineNum">    1586 </span>            :             }
+<span class="lineNum">    1587 </span>            :         }
+<span class="lineNum">    1588 </span><span class="lineCov">       4542 :         else if (rc == 0)</span>
+<span class="lineNum">    1589 </span>            :         {
+<span class="lineNum">    1590 </span><span class="lineNoCov">          0 :             waiting = false;</span>
+<span class="lineNum">    1591 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unexpected EOF on self-pipe&quot;);</span>
+<span class="lineNum">    1592 </span>            :         }
+<span class="lineNum">    1593 </span><span class="lineCov">       4542 :         else if (rc &lt; sizeof(buf))</span>
+<span class="lineNum">    1594 </span>            :         {
+<span class="lineNum">    1595 </span>            :             /* we successfully drained the pipe; no need to read() again */
+<span class="lineNum">    1596 </span><span class="lineCov">       4542 :             break;</span>
+<span class="lineNum">    1597 </span>            :         }
+<span class="lineNum">    1598 </span>            :         /* else buffer wasn't big enough, so read again */
+<span class="lineNum">    1599 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">    1600 </span><span class="lineCov">       4542 : }</span>
+<span class="lineNum">    1601 </span>            : #endif                          /* !WIN32 */
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,517 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/optimizer/path/tidpath.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/optimizer/path</a> - tidpath.c<span style="font-size: 80%;"> (source / <a href="tidpath.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">112</td>
+            <td class="headerCovTableEntry">117</td>
+            <td class="headerCovTableEntryHi">95.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntry">9</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * tidpath.c
+<span class="lineNum">       4 </span>            :  *    Routines to determine which TID conditions are usable for scanning
+<span class="lineNum">       5 </span>            :  *    a given relation, and create TidPaths accordingly.
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * What we are looking for here is WHERE conditions of the form
+<span class="lineNum">       8 </span>            :  * &quot;CTID = pseudoconstant&quot;, which can be implemented by just fetching
+<span class="lineNum">       9 </span>            :  * the tuple directly via heap_fetch().  We can also handle OR'd conditions
+<span class="lineNum">      10 </span>            :  * such as (CTID = const1) OR (CTID = const2), as well as ScalarArrayOpExpr
+<span class="lineNum">      11 </span>            :  * conditions of the form CTID = ANY(pseudoconstant_array).  In particular
+<span class="lineNum">      12 </span>            :  * this allows
+<span class="lineNum">      13 </span>            :  *      WHERE ctid IN (tid1, tid2, ...)
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  * As with indexscans, our definition of &quot;pseudoconstant&quot; is pretty liberal:
+<span class="lineNum">      16 </span>            :  * we allow anything that doesn't involve a volatile function or a Var of
+<span class="lineNum">      17 </span>            :  * the relation under consideration.  Vars belonging to other relations of
+<span class="lineNum">      18 </span>            :  * the query are allowed, giving rise to parameterized TID scans.
+<span class="lineNum">      19 </span>            :  *
+<span class="lineNum">      20 </span>            :  * We also support &quot;WHERE CURRENT OF cursor&quot; conditions (CurrentOfExpr),
+<span class="lineNum">      21 </span>            :  * which amount to &quot;CTID = run-time-determined-TID&quot;.  These could in
+<span class="lineNum">      22 </span>            :  * theory be translated to a simple comparison of CTID to the result of
+<span class="lineNum">      23 </span>            :  * a function, but in practice it works better to keep the special node
+<span class="lineNum">      24 </span>            :  * representation all the way through to execution.
+<span class="lineNum">      25 </span>            :  *
+<span class="lineNum">      26 </span>            :  *
+<span class="lineNum">      27 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      28 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      29 </span>            :  *
+<span class="lineNum">      30 </span>            :  *
+<span class="lineNum">      31 </span>            :  * IDENTIFICATION
+<span class="lineNum">      32 </span>            :  *    src/backend/optimizer/path/tidpath.c
+<span class="lineNum">      33 </span>            :  *
+<span class="lineNum">      34 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      35 </span>            :  */
+<span class="lineNum">      36 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      37 </span>            : 
+<span class="lineNum">      38 </span>            : #include &quot;access/sysattr.h&quot;
+<span class="lineNum">      39 </span>            : #include &quot;catalog/pg_operator.h&quot;
+<span class="lineNum">      40 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      41 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      42 </span>            : #include &quot;optimizer/clauses.h&quot;
+<span class="lineNum">      43 </span>            : #include &quot;optimizer/optimizer.h&quot;
+<span class="lineNum">      44 </span>            : #include &quot;optimizer/pathnode.h&quot;
+<span class="lineNum">      45 </span>            : #include &quot;optimizer/paths.h&quot;
+<span class="lineNum">      46 </span>            : #include &quot;optimizer/restrictinfo.h&quot;
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : /*
+<span class="lineNum">      50 </span>            :  * Does this Var represent the CTID column of the specified baserel?
+<a name="51"><span class="lineNum">      51 </span>            :  */</a>
+<span class="lineNum">      52 </span>            : static inline bool
+<span class="lineNum">      53 </span><span class="lineCov">      14862 : IsCTIDVar(Var *var, RelOptInfo *rel)</span>
+<span class="lineNum">      54 </span>            : {
+<span class="lineNum">      55 </span>            :     /* The vartype check is strictly paranoia */
+<span class="lineNum">      56 </span><span class="lineCov">      16408 :     if (var-&gt;varattno == SelfItemPointerAttributeNumber &amp;&amp;</span>
+<span class="lineNum">      57 </span><span class="lineCov">       3092 :         var-&gt;vartype == TIDOID &amp;&amp;</span>
+<span class="lineNum">      58 </span><span class="lineCov">       3088 :         var-&gt;varno == rel-&gt;relid &amp;&amp;</span>
+<span class="lineNum">      59 </span><span class="lineCov">       1542 :         var-&gt;varlevelsup == 0)</span>
+<span class="lineNum">      60 </span><span class="lineCov">       1542 :         return true;</span>
+<span class="lineNum">      61 </span><span class="lineCov">      13320 :     return false;</span>
+<span class="lineNum">      62 </span>            : }
+<span class="lineNum">      63 </span>            : 
+<span class="lineNum">      64 </span>            : /*
+<span class="lineNum">      65 </span>            :  * Check to see if a RestrictInfo is of the form
+<span class="lineNum">      66 </span>            :  *      CTID = pseudoconstant
+<span class="lineNum">      67 </span>            :  * or
+<span class="lineNum">      68 </span>            :  *      pseudoconstant = CTID
+<span class="lineNum">      69 </span>            :  * where the CTID Var belongs to relation &quot;rel&quot;, and nothing on the
+<span class="lineNum">      70 </span>            :  * other side of the clause does.
+<a name="71"><span class="lineNum">      71 </span>            :  */</a>
+<span class="lineNum">      72 </span>            : static bool
+<span class="lineNum">      73 </span><span class="lineCov">      63982 : IsTidEqualClause(RestrictInfo *rinfo, RelOptInfo *rel)</span>
+<span class="lineNum">      74 </span>            : {
+<span class="lineNum">      75 </span>            :     OpExpr     *node;
+<span class="lineNum">      76 </span>            :     Node       *arg1,
+<span class="lineNum">      77 </span>            :                *arg2,
+<span class="lineNum">      78 </span>            :                *other;
+<span class="lineNum">      79 </span>            :     Relids      other_relids;
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span>            :     /* Must be an OpExpr */
+<span class="lineNum">      82 </span><span class="lineCov">      63982 :     if (!is_opclause(rinfo-&gt;clause))</span>
+<span class="lineNum">      83 </span><span class="lineCov">      15176 :         return false;</span>
+<span class="lineNum">      84 </span><span class="lineCov">      48806 :     node = (OpExpr *) rinfo-&gt;clause;</span>
+<span class="lineNum">      85 </span>            : 
+<span class="lineNum">      86 </span>            :     /* Operator must be tideq */
+<span class="lineNum">      87 </span><span class="lineCov">      48806 :     if (node-&gt;opno != TIDEqualOperator)</span>
+<span class="lineNum">      88 </span><span class="lineCov">      48016 :         return false;</span>
+<span class="lineNum">      89 </span><span class="lineCov">        790 :     Assert(list_length(node-&gt;args) == 2);</span>
+<span class="lineNum">      90 </span><span class="lineCov">        790 :     arg1 = linitial(node-&gt;args);</span>
+<span class="lineNum">      91 </span><span class="lineCov">        790 :     arg2 = lsecond(node-&gt;args);</span>
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            :     /* Look for CTID as either argument */
+<span class="lineNum">      94 </span><span class="lineCov">        790 :     other = NULL;</span>
+<span class="lineNum">      95 </span><span class="lineCov">        790 :     other_relids = NULL;</span>
+<span class="lineNum">      96 </span><span class="lineCov">       1572 :     if (arg1 &amp;&amp; IsA(arg1, Var) &amp;&amp;</span>
+<span class="lineNum">      97 </span><span class="lineCov">        782 :         IsCTIDVar((Var *) arg1, rel))</span>
+<span class="lineNum">      98 </span>            :     {
+<span class="lineNum">      99 </span><span class="lineCov">        770 :         other = arg2;</span>
+<span class="lineNum">     100 </span><span class="lineCov">        770 :         other_relids = rinfo-&gt;right_relids;</span>
+<span class="lineNum">     101 </span>            :     }
+<span class="lineNum">     102 </span><span class="lineCov">        802 :     if (!other &amp;&amp; arg2 &amp;&amp; IsA(arg2, Var) &amp;&amp;</span>
+<span class="lineNum">     103 </span><span class="lineCov">         12 :         IsCTIDVar((Var *) arg2, rel))</span>
+<span class="lineNum">     104 </span>            :     {
+<span class="lineNum">     105 </span><span class="lineCov">         12 :         other = arg1;</span>
+<span class="lineNum">     106 </span><span class="lineCov">         12 :         other_relids = rinfo-&gt;left_relids;</span>
+<span class="lineNum">     107 </span>            :     }
+<span class="lineNum">     108 </span><span class="lineCov">        790 :     if (!other)</span>
+<span class="lineNum">     109 </span><span class="lineCov">          8 :         return false;</span>
+<span class="lineNum">     110 </span>            : 
+<span class="lineNum">     111 </span>            :     /* The other argument must be a pseudoconstant */
+<span class="lineNum">     112 </span><span class="lineCov">       1564 :     if (bms_is_member(rel-&gt;relid, other_relids) ||</span>
+<span class="lineNum">     113 </span><span class="lineCov">        782 :         contain_volatile_functions(other))</span>
+<span class="lineNum">     114 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     115 </span>            : 
+<span class="lineNum">     116 </span><span class="lineCov">        782 :     return true;                /* success */</span>
+<span class="lineNum">     117 </span>            : }
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span>            : /*
+<span class="lineNum">     120 </span>            :  * Check to see if a RestrictInfo is of the form
+<span class="lineNum">     121 </span>            :  *      CTID = ANY (pseudoconstant_array)
+<span class="lineNum">     122 </span>            :  * where the CTID Var belongs to relation &quot;rel&quot;, and nothing on the
+<span class="lineNum">     123 </span>            :  * other side of the clause does.
+<a name="124"><span class="lineNum">     124 </span>            :  */</a>
+<span class="lineNum">     125 </span>            : static bool
+<span class="lineNum">     126 </span><span class="lineCov">      43158 : IsTidEqualAnyClause(RestrictInfo *rinfo, RelOptInfo *rel)</span>
+<span class="lineNum">     127 </span>            : {
+<span class="lineNum">     128 </span>            :     ScalarArrayOpExpr *node;
+<span class="lineNum">     129 </span>            :     Node       *arg1,
+<span class="lineNum">     130 </span>            :                *arg2;
+<span class="lineNum">     131 </span>            : 
+<span class="lineNum">     132 </span>            :     /* Must be a ScalarArrayOpExpr */
+<span class="lineNum">     133 </span><span class="lineCov">      43158 :     if (!(rinfo-&gt;clause &amp;&amp; IsA(rinfo-&gt;clause, ScalarArrayOpExpr)))</span>
+<span class="lineNum">     134 </span><span class="lineCov">      41304 :         return false;</span>
+<span class="lineNum">     135 </span><span class="lineCov">       1854 :     node = (ScalarArrayOpExpr *) rinfo-&gt;clause;</span>
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span>            :     /* Operator must be tideq */
+<span class="lineNum">     138 </span><span class="lineCov">       1854 :     if (node-&gt;opno != TIDEqualOperator)</span>
+<span class="lineNum">     139 </span><span class="lineCov">       1844 :         return false;</span>
+<span class="lineNum">     140 </span><span class="lineCov">         10 :     if (!node-&gt;useOr)</span>
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">     142 </span><span class="lineCov">         10 :     Assert(list_length(node-&gt;args) == 2);</span>
+<span class="lineNum">     143 </span><span class="lineCov">         10 :     arg1 = linitial(node-&gt;args);</span>
+<span class="lineNum">     144 </span><span class="lineCov">         10 :     arg2 = lsecond(node-&gt;args);</span>
+<span class="lineNum">     145 </span>            : 
+<span class="lineNum">     146 </span>            :     /* CTID must be first argument */
+<span class="lineNum">     147 </span><span class="lineCov">         20 :     if (arg1 &amp;&amp; IsA(arg1, Var) &amp;&amp;</span>
+<span class="lineNum">     148 </span><span class="lineCov">         10 :         IsCTIDVar((Var *) arg1, rel))</span>
+<span class="lineNum">     149 </span>            :     {
+<span class="lineNum">     150 </span>            :         /* The other argument must be a pseudoconstant */
+<span class="lineNum">     151 </span><span class="lineCov">         20 :         if (bms_is_member(rel-&gt;relid, pull_varnos(arg2)) ||</span>
+<span class="lineNum">     152 </span><span class="lineCov">         10 :             contain_volatile_functions(arg2))</span>
+<span class="lineNum">     153 </span><span class="lineNoCov">          0 :             return false;</span>
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span><span class="lineCov">         10 :         return true;            /* success */</span>
+<span class="lineNum">     156 </span>            :     }
+<span class="lineNum">     157 </span>            : 
+<span class="lineNum">     158 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">     159 </span>            : }
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span>            : /*
+<span class="lineNum">     162 </span>            :  * Check to see if a RestrictInfo is a CurrentOfExpr referencing &quot;rel&quot;.
+<a name="163"><span class="lineNum">     163 </span>            :  */</a>
+<span class="lineNum">     164 </span>            : static bool
+<span class="lineNum">     165 </span><span class="lineCov">      43148 : IsCurrentOfClause(RestrictInfo *rinfo, RelOptInfo *rel)</span>
+<span class="lineNum">     166 </span>            : {
+<span class="lineNum">     167 </span>            :     CurrentOfExpr *node;
+<span class="lineNum">     168 </span>            : 
+<span class="lineNum">     169 </span>            :     /* Must be a CurrentOfExpr */
+<span class="lineNum">     170 </span><span class="lineCov">      43148 :     if (!(rinfo-&gt;clause &amp;&amp; IsA(rinfo-&gt;clause, CurrentOfExpr)))</span>
+<span class="lineNum">     171 </span><span class="lineCov">      42960 :         return false;</span>
+<span class="lineNum">     172 </span><span class="lineCov">        188 :     node = (CurrentOfExpr *) rinfo-&gt;clause;</span>
+<span class="lineNum">     173 </span>            : 
+<span class="lineNum">     174 </span>            :     /* If it references this rel, we're good */
+<span class="lineNum">     175 </span><span class="lineCov">        188 :     if (node-&gt;cvarno == rel-&gt;relid)</span>
+<span class="lineNum">     176 </span><span class="lineCov">        188 :         return true;</span>
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span><span class="lineNoCov">          0 :     return false;</span>
+<span class="lineNum">     179 </span>            : }
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span>            : /*
+<span class="lineNum">     182 </span>            :  * Extract a set of CTID conditions from the given RestrictInfo
+<span class="lineNum">     183 </span>            :  *
+<span class="lineNum">     184 </span>            :  * Returns a List of CTID qual RestrictInfos for the specified rel (with
+<span class="lineNum">     185 </span>            :  * implicit OR semantics across the list), or NIL if there are no usable
+<span class="lineNum">     186 </span>            :  * conditions.
+<span class="lineNum">     187 </span>            :  *
+<span class="lineNum">     188 </span>            :  * This function considers only base cases; AND/OR combination is handled
+<span class="lineNum">     189 </span>            :  * below.  Therefore the returned List never has more than one element.
+<span class="lineNum">     190 </span>            :  * (Using a List may seem a bit weird, but it simplifies the caller.)
+<a name="191"><span class="lineNum">     191 </span>            :  */</a>
+<span class="lineNum">     192 </span>            : static List *
+<span class="lineNum">     193 </span><span class="lineCov">      45006 : TidQualFromRestrictInfo(RestrictInfo *rinfo, RelOptInfo *rel)</span>
+<span class="lineNum">     194 </span>            : {
+<span class="lineNum">     195 </span>            :     /*
+<span class="lineNum">     196 </span>            :      * We may ignore pseudoconstant clauses (they can't contain Vars, so could
+<span class="lineNum">     197 </span>            :      * not match anyway).
+<span class="lineNum">     198 </span>            :      */
+<span class="lineNum">     199 </span><span class="lineCov">      45006 :     if (rinfo-&gt;pseudoconstant)</span>
+<span class="lineNum">     200 </span><span class="lineCov">       1224 :         return NIL;</span>
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span>            :     /*
+<span class="lineNum">     203 </span>            :      * If clause must wait till after some lower-security-level restriction
+<span class="lineNum">     204 </span>            :      * clause, reject it.
+<span class="lineNum">     205 </span>            :      */
+<span class="lineNum">     206 </span><span class="lineCov">      43782 :     if (!restriction_is_securely_promotable(rinfo, rel))</span>
+<span class="lineNum">     207 </span><span class="lineCov">        600 :         return NIL;</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span>            :     /*
+<span class="lineNum">     210 </span>            :      * Check all base cases.  If we get a match, return the clause.
+<span class="lineNum">     211 </span>            :      */
+<span class="lineNum">     212 </span><span class="lineCov">      86340 :     if (IsTidEqualClause(rinfo, rel) ||</span>
+<span class="lineNum">     213 </span><span class="lineCov">      86306 :         IsTidEqualAnyClause(rinfo, rel) ||</span>
+<span class="lineNum">     214 </span><span class="lineCov">      43148 :         IsCurrentOfClause(rinfo, rel))</span>
+<span class="lineNum">     215 </span><span class="lineCov">        222 :         return list_make1(rinfo);</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span><span class="lineCov">      42960 :     return NIL;</span>
+<span class="lineNum">     218 </span>            : }
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span>            : /*
+<span class="lineNum">     221 </span>            :  * Extract a set of CTID conditions from implicit-AND List of RestrictInfos
+<span class="lineNum">     222 </span>            :  *
+<span class="lineNum">     223 </span>            :  * Returns a List of CTID qual RestrictInfos for the specified rel (with
+<span class="lineNum">     224 </span>            :  * implicit OR semantics across the list), or NIL if there are no usable
+<span class="lineNum">     225 </span>            :  * conditions.
+<span class="lineNum">     226 </span>            :  *
+<span class="lineNum">     227 </span>            :  * This function is just concerned with handling AND/OR recursion.
+<a name="228"><span class="lineNum">     228 </span>            :  */</a>
+<span class="lineNum">     229 </span>            : static List *
+<span class="lineNum">     230 </span><span class="lineCov">      55658 : TidQualFromRestrictInfoList(List *rlist, RelOptInfo *rel)</span>
+<span class="lineNum">     231 </span>            : {
+<span class="lineNum">     232 </span><span class="lineCov">      55658 :     List       *rlst = NIL;</span>
+<span class="lineNum">     233 </span>            :     ListCell   *l;
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span><span class="lineCov">     100540 :     foreach(l, rlist)</span>
+<span class="lineNum">     236 </span>            :     {
+<span class="lineNum">     237 </span><span class="lineCov">      45104 :         RestrictInfo *rinfo = lfirst_node(RestrictInfo, l);</span>
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span><span class="lineCov">      45104 :         if (restriction_is_or_clause(rinfo))</span>
+<span class="lineNum">     240 </span>            :         {
+<span class="lineNum">     241 </span>            :             ListCell   *j;
+<span class="lineNum">     242 </span>            : 
+<span class="lineNum">     243 </span>            :             /*
+<span class="lineNum">     244 </span>            :              * We must be able to extract a CTID condition from every
+<span class="lineNum">     245 </span>            :              * sub-clause of an OR, or we can't use it.
+<span class="lineNum">     246 </span>            :              */
+<span class="lineNum">     247 </span><span class="lineCov">        682 :             foreach(j, ((BoolExpr *) rinfo-&gt;orclause)-&gt;args)</span>
+<span class="lineNum">     248 </span>            :             {
+<span class="lineNum">     249 </span><span class="lineCov">        674 :                 Node       *orarg = (Node *) lfirst(j);</span>
+<span class="lineNum">     250 </span>            :                 List       *sublist;
+<span class="lineNum">     251 </span>            : 
+<span class="lineNum">     252 </span>            :                 /* OR arguments should be ANDs or sub-RestrictInfos */
+<span class="lineNum">     253 </span><span class="lineCov">        674 :                 if (is_andclause(orarg))</span>
+<span class="lineNum">     254 </span>            :                 {
+<span class="lineNum">     255 </span><span class="lineCov">        106 :                     List       *andargs = ((BoolExpr *) orarg)-&gt;args;</span>
+<span class="lineNum">     256 </span>            : 
+<span class="lineNum">     257 </span>            :                     /* Recurse in case there are sub-ORs */
+<span class="lineNum">     258 </span><span class="lineCov">        106 :                     sublist = TidQualFromRestrictInfoList(andargs, rel);</span>
+<span class="lineNum">     259 </span>            :                 }
+<span class="lineNum">     260 </span>            :                 else
+<span class="lineNum">     261 </span>            :                 {
+<span class="lineNum">     262 </span><span class="lineCov">        568 :                     RestrictInfo *rinfo = castNode(RestrictInfo, orarg);</span>
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span><span class="lineCov">        568 :                     Assert(!restriction_is_or_clause(rinfo));</span>
+<span class="lineNum">     265 </span><span class="lineCov">        568 :                     sublist = TidQualFromRestrictInfo(rinfo, rel);</span>
+<span class="lineNum">     266 </span>            :                 }
+<span class="lineNum">     267 </span>            : 
+<span class="lineNum">     268 </span>            :                 /*
+<span class="lineNum">     269 </span>            :                  * If nothing found in this arm, we can't do anything with
+<span class="lineNum">     270 </span>            :                  * this OR clause.
+<span class="lineNum">     271 </span>            :                  */
+<span class="lineNum">     272 </span><span class="lineCov">        674 :                 if (sublist == NIL)</span>
+<span class="lineNum">     273 </span>            :                 {
+<span class="lineNum">     274 </span><span class="lineCov">        658 :                     rlst = NIL; /* forget anything we had */</span>
+<span class="lineNum">     275 </span><span class="lineCov">        658 :                     break;      /* out of loop over OR args */</span>
+<span class="lineNum">     276 </span>            :                 }
+<span class="lineNum">     277 </span>            : 
+<span class="lineNum">     278 </span>            :                 /*
+<span class="lineNum">     279 </span>            :                  * OK, continue constructing implicitly-OR'ed result list.
+<span class="lineNum">     280 </span>            :                  */
+<span class="lineNum">     281 </span><span class="lineCov">         16 :                 rlst = list_concat(rlst, sublist);</span>
+<span class="lineNum">     282 </span>            :             }
+<span class="lineNum">     283 </span>            :         }
+<span class="lineNum">     284 </span>            :         else
+<span class="lineNum">     285 </span>            :         {
+<span class="lineNum">     286 </span>            :             /* Not an OR clause, so handle base cases */
+<span class="lineNum">     287 </span><span class="lineCov">      44438 :             rlst = TidQualFromRestrictInfo(rinfo, rel);</span>
+<span class="lineNum">     288 </span>            :         }
+<span class="lineNum">     289 </span>            : 
+<span class="lineNum">     290 </span>            :         /*
+<span class="lineNum">     291 </span>            :          * Stop as soon as we find any usable CTID condition.  In theory we
+<span class="lineNum">     292 </span>            :          * could get CTID equality conditions from different AND'ed clauses,
+<span class="lineNum">     293 </span>            :          * in which case we could try to pick the most efficient one.  In
+<span class="lineNum">     294 </span>            :          * practice, such usage seems very unlikely, so we don't bother; we
+<span class="lineNum">     295 </span>            :          * just exit as soon as we find the first candidate.
+<span class="lineNum">     296 </span>            :          */
+<span class="lineNum">     297 </span><span class="lineCov">      45104 :         if (rlst)</span>
+<span class="lineNum">     298 </span><span class="lineCov">        222 :             break;</span>
+<span class="lineNum">     299 </span>            :     }
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span><span class="lineCov">      55658 :     return rlst;</span>
+<span class="lineNum">     302 </span>            : }
+<span class="lineNum">     303 </span>            : 
+<span class="lineNum">     304 </span>            : /*
+<span class="lineNum">     305 </span>            :  * Given a list of join clauses involving our rel, create a parameterized
+<span class="lineNum">     306 </span>            :  * TidPath for each one that is a suitable TidEqual clause.
+<span class="lineNum">     307 </span>            :  *
+<span class="lineNum">     308 </span>            :  * In principle we could combine clauses that reference the same outer rels,
+<span class="lineNum">     309 </span>            :  * but it doesn't seem like such cases would arise often enough to be worth
+<span class="lineNum">     310 </span>            :  * troubling over.
+<a name="311"><span class="lineNum">     311 </span>            :  */</a>
+<span class="lineNum">     312 </span>            : static void
+<span class="lineNum">     313 </span><span class="lineCov">      69564 : BuildParameterizedTidPaths(PlannerInfo *root, RelOptInfo *rel, List *clauses)</span>
+<span class="lineNum">     314 </span>            : {
+<span class="lineNum">     315 </span>            :     ListCell   *l;
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span><span class="lineCov">      90466 :     foreach(l, clauses)</span>
+<span class="lineNum">     318 </span>            :     {
+<span class="lineNum">     319 </span><span class="lineCov">      20902 :         RestrictInfo *rinfo = lfirst_node(RestrictInfo, l);</span>
+<span class="lineNum">     320 </span>            :         List       *tidquals;
+<span class="lineNum">     321 </span>            :         Relids      required_outer;
+<span class="lineNum">     322 </span>            : 
+<span class="lineNum">     323 </span>            :         /*
+<span class="lineNum">     324 </span>            :          * Validate whether each clause is actually usable; we must check this
+<span class="lineNum">     325 </span>            :          * even when examining clauses generated from an EquivalenceClass,
+<span class="lineNum">     326 </span>            :          * since they might not satisfy the restriction on not having Vars of
+<span class="lineNum">     327 </span>            :          * our rel on the other side, or somebody might've built an operator
+<span class="lineNum">     328 </span>            :          * class that accepts type &quot;tid&quot; but has other operators in it.
+<span class="lineNum">     329 </span>            :          *
+<span class="lineNum">     330 </span>            :          * We currently consider only TidEqual join clauses.  In principle we
+<span class="lineNum">     331 </span>            :          * might find a suitable ScalarArrayOpExpr in the rel's joininfo list,
+<span class="lineNum">     332 </span>            :          * but it seems unlikely to be worth expending the cycles to check.
+<span class="lineNum">     333 </span>            :          * And we definitely won't find a CurrentOfExpr here.  Hence, we don't
+<span class="lineNum">     334 </span>            :          * use TidQualFromRestrictInfo; but this must match that function
+<span class="lineNum">     335 </span>            :          * otherwise.
+<span class="lineNum">     336 </span>            :          */
+<span class="lineNum">     337 </span><span class="lineCov">      41702 :         if (rinfo-&gt;pseudoconstant ||</span>
+<span class="lineNum">     338 </span><span class="lineCov">      41600 :             !restriction_is_securely_promotable(rinfo, rel) ||</span>
+<span class="lineNum">     339 </span><span class="lineCov">      20800 :             !IsTidEqualClause(rinfo, rel))</span>
+<span class="lineNum">     340 </span><span class="lineCov">      20144 :             continue;</span>
+<span class="lineNum">     341 </span>            : 
+<span class="lineNum">     342 </span>            :         /*
+<span class="lineNum">     343 </span>            :          * Check if clause can be moved to this rel; this is probably
+<span class="lineNum">     344 </span>            :          * redundant when considering EC-derived clauses, but we must check it
+<span class="lineNum">     345 </span>            :          * for &quot;loose&quot; join clauses.
+<span class="lineNum">     346 </span>            :          */
+<span class="lineNum">     347 </span><span class="lineCov">        758 :         if (!join_clause_is_movable_to(rinfo, rel))</span>
+<span class="lineNum">     348 </span><span class="lineCov">          4 :             continue;</span>
+<span class="lineNum">     349 </span>            : 
+<span class="lineNum">     350 </span>            :         /* OK, make list of clauses for this path */
+<span class="lineNum">     351 </span><span class="lineCov">        754 :         tidquals = list_make1(rinfo);</span>
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span>            :         /* Compute required outer rels for this path */
+<span class="lineNum">     354 </span><span class="lineCov">        754 :         required_outer = bms_union(rinfo-&gt;required_relids, rel-&gt;lateral_relids);</span>
+<span class="lineNum">     355 </span><span class="lineCov">        754 :         required_outer = bms_del_member(required_outer, rel-&gt;relid);</span>
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span><span class="lineCov">        754 :         add_path(rel, (Path *) create_tidscan_path(root, rel, tidquals,</span>
+<span class="lineNum">     358 </span>            :                                                    required_outer));
+<span class="lineNum">     359 </span>            :     }
+<span class="lineNum">     360 </span><span class="lineCov">      69564 : }</span>
+<span class="lineNum">     361 </span>            : 
+<span class="lineNum">     362 </span>            : /*
+<span class="lineNum">     363 </span>            :  * Test whether an EquivalenceClass member matches our rel's CTID Var.
+<span class="lineNum">     364 </span>            :  *
+<span class="lineNum">     365 </span>            :  * This is a callback for use by generate_implied_equalities_for_column.
+<a name="366"><span class="lineNum">     366 </span>            :  */</a>
+<span class="lineNum">     367 </span>            : static bool
+<span class="lineNum">     368 </span><span class="lineCov">      14668 : ec_member_matches_ctid(PlannerInfo *root, RelOptInfo *rel,</span>
+<span class="lineNum">     369 </span>            :                        EquivalenceClass *ec, EquivalenceMember *em,
+<span class="lineNum">     370 </span>            :                        void *arg)
+<span class="lineNum">     371 </span>            : {
+<span class="lineNum">     372 </span><span class="lineCov">      28726 :     if (em-&gt;em_expr &amp;&amp; IsA(em-&gt;em_expr, Var) &amp;&amp;</span>
+<span class="lineNum">     373 </span><span class="lineCov">      14058 :         IsCTIDVar((Var *) em-&gt;em_expr, rel))</span>
+<span class="lineNum">     374 </span><span class="lineCov">        750 :         return true;</span>
+<span class="lineNum">     375 </span><span class="lineCov">      13918 :     return false;</span>
+<span class="lineNum">     376 </span>            : }
+<span class="lineNum">     377 </span>            : 
+<span class="lineNum">     378 </span>            : /*
+<span class="lineNum">     379 </span>            :  * create_tidscan_paths
+<span class="lineNum">     380 </span>            :  *    Create paths corresponding to direct TID scans of the given rel.
+<span class="lineNum">     381 </span>            :  *
+<span class="lineNum">     382 </span>            :  *    Candidate paths are added to the rel's pathlist (using add_path).
+<a name="383"><span class="lineNum">     383 </span>            :  */</a>
+<span class="lineNum">     384 </span>            : void
+<span class="lineNum">     385 </span><span class="lineCov">      55552 : create_tidscan_paths(PlannerInfo *root, RelOptInfo *rel)</span>
+<span class="lineNum">     386 </span>            : {
+<span class="lineNum">     387 </span>            :     List       *tidquals;
+<span class="lineNum">     388 </span>            : 
+<span class="lineNum">     389 </span>            :     /*
+<span class="lineNum">     390 </span>            :      * If any suitable quals exist in the rel's baserestrict list, generate a
+<span class="lineNum">     391 </span>            :      * plain (unparameterized) TidPath with them.
+<span class="lineNum">     392 </span>            :      */
+<span class="lineNum">     393 </span><span class="lineCov">      55552 :     tidquals = TidQualFromRestrictInfoList(rel-&gt;baserestrictinfo, rel);</span>
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span><span class="lineCov">      55552 :     if (tidquals)</span>
+<span class="lineNum">     396 </span>            :     {
+<span class="lineNum">     397 </span>            :         /*
+<span class="lineNum">     398 </span>            :          * This path uses no join clauses, but it could still have required
+<span class="lineNum">     399 </span>            :          * parameterization due to LATERAL refs in its tlist.
+<span class="lineNum">     400 </span>            :          */
+<span class="lineNum">     401 </span><span class="lineCov">        214 :         Relids      required_outer = rel-&gt;lateral_relids;</span>
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span><span class="lineCov">        214 :         add_path(rel, (Path *) create_tidscan_path(root, rel, tidquals,</span>
+<span class="lineNum">     404 </span>            :                                                    required_outer));
+<span class="lineNum">     405 </span>            :     }
+<span class="lineNum">     406 </span>            : 
+<span class="lineNum">     407 </span>            :     /*
+<span class="lineNum">     408 </span>            :      * Try to generate parameterized TidPaths using equality clauses extracted
+<span class="lineNum">     409 </span>            :      * from EquivalenceClasses.  (This is important since simple &quot;t1.ctid =
+<span class="lineNum">     410 </span>            :      * t2.ctid&quot; clauses will turn into ECs.)
+<span class="lineNum">     411 </span>            :      */
+<span class="lineNum">     412 </span><span class="lineCov">      55552 :     if (rel-&gt;has_eclass_joins)</span>
+<span class="lineNum">     413 </span>            :     {
+<span class="lineNum">     414 </span>            :         List       *clauses;
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span>            :         /* Generate clauses, skipping any that join to lateral_referencers */
+<span class="lineNum">     417 </span><span class="lineCov">      14012 :         clauses = generate_implied_equalities_for_column(root,</span>
+<span class="lineNum">     418 </span>            :                                                          rel,
+<span class="lineNum">     419 </span>            :                                                          ec_member_matches_ctid,
+<span class="lineNum">     420 </span>            :                                                          NULL,
+<span class="lineNum">     421 </span>            :                                                          rel-&gt;lateral_referencers);
+<span class="lineNum">     422 </span>            : 
+<span class="lineNum">     423 </span>            :         /* Generate a path for each usable join clause */
+<span class="lineNum">     424 </span><span class="lineCov">      14012 :         BuildParameterizedTidPaths(root, rel, clauses);</span>
+<span class="lineNum">     425 </span>            :     }
+<span class="lineNum">     426 </span>            : 
+<span class="lineNum">     427 </span>            :     /*
+<span class="lineNum">     428 </span>            :      * Also consider parameterized TidPaths using &quot;loose&quot; join quals.  Quals
+<span class="lineNum">     429 </span>            :      * of the form &quot;t1.ctid = t2.ctid&quot; would turn into these if they are outer
+<span class="lineNum">     430 </span>            :      * join quals, for example.
+<span class="lineNum">     431 </span>            :      */
+<span class="lineNum">     432 </span><span class="lineCov">      55552 :     BuildParameterizedTidPaths(root, rel, rel-&gt;joininfo);</span>
+<span class="lineNum">     433 </span><span class="lineCov">      55552 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,1265 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/rangetypes_selfuncs.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - rangetypes_selfuncs.c<span style="font-size: 80%;"> (source / <a href="rangetypes_selfuncs.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">70</td>
+            <td class="headerCovTableEntry">309</td>
+            <td class="headerCovTableEntryLo">22.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">4</td>
+            <td class="headerCovTableEntry">13</td>
+            <td class="headerCovTableEntryLo">30.8 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * rangetypes_selfuncs.c
+<span class="lineNum">       4 </span>            :  *    Functions for selectivity estimation of range operators
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Estimates are based on histograms of lower and upper bounds, and the
+<span class="lineNum">       7 </span>            :  * fraction of empty ranges.
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      10 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      11 </span>            :  *
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  * IDENTIFICATION
+<span class="lineNum">      14 </span>            :  *    src/backend/utils/adt/rangetypes_selfuncs.c
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      17 </span>            :  */
+<span class="lineNum">      18 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      19 </span>            : 
+<span class="lineNum">      20 </span>            : #include &lt;math.h&gt;
+<span class="lineNum">      21 </span>            : 
+<span class="lineNum">      22 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;catalog/pg_operator.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;catalog/pg_statistic.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;catalog/pg_type.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;utils/float.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;utils/fmgrprotos.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;utils/rangetypes.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;utils/selfuncs.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;utils/typcache.h&quot;
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : static double calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata,
+<span class="lineNum">      34 </span>            :                             const RangeType *constval, Oid operator);
+<span class="lineNum">      35 </span>            : static double default_range_selectivity(Oid operator);
+<span class="lineNum">      36 </span>            : static double calc_hist_selectivity(TypeCacheEntry *typcache,
+<span class="lineNum">      37 </span>            :                                     VariableStatData *vardata, const RangeType *constval,
+<span class="lineNum">      38 </span>            :                                     Oid operator);
+<span class="lineNum">      39 </span>            : static double calc_hist_selectivity_scalar(TypeCacheEntry *typcache,
+<span class="lineNum">      40 </span>            :                                            const RangeBound *constbound,
+<span class="lineNum">      41 </span>            :                                            const RangeBound *hist, int hist_nvalues,
+<span class="lineNum">      42 </span>            :                                            bool equal);
+<span class="lineNum">      43 </span>            : static int rbound_bsearch(TypeCacheEntry *typcache, const RangeBound *value,
+<span class="lineNum">      44 </span>            :                           const RangeBound *hist, int hist_length, bool equal);
+<span class="lineNum">      45 </span>            : static float8 get_position(TypeCacheEntry *typcache, const RangeBound *value,
+<span class="lineNum">      46 </span>            :                            const RangeBound *hist1, const RangeBound *hist2);
+<span class="lineNum">      47 </span>            : static float8 get_len_position(double value, double hist1, double hist2);
+<span class="lineNum">      48 </span>            : static float8 get_distance(TypeCacheEntry *typcache, const RangeBound *bound1,
+<span class="lineNum">      49 </span>            :                            const RangeBound *bound2);
+<span class="lineNum">      50 </span>            : static int  length_hist_bsearch(Datum *length_hist_values,
+<span class="lineNum">      51 </span>            :                                 int length_hist_nvalues, double value, bool equal);
+<span class="lineNum">      52 </span>            : static double calc_length_hist_frac(Datum *length_hist_values,
+<span class="lineNum">      53 </span>            :                                     int length_hist_nvalues, double length1, double length2, bool equal);
+<span class="lineNum">      54 </span>            : static double calc_hist_selectivity_contained(TypeCacheEntry *typcache,
+<span class="lineNum">      55 </span>            :                                               const RangeBound *lower, RangeBound *upper,
+<span class="lineNum">      56 </span>            :                                               const RangeBound *hist_lower, int hist_nvalues,
+<span class="lineNum">      57 </span>            :                                               Datum *length_hist_values, int length_hist_nvalues);
+<span class="lineNum">      58 </span>            : static double calc_hist_selectivity_contains(TypeCacheEntry *typcache,
+<span class="lineNum">      59 </span>            :                                              const RangeBound *lower, const RangeBound *upper,
+<span class="lineNum">      60 </span>            :                                              const RangeBound *hist_lower, int hist_nvalues,
+<span class="lineNum">      61 </span>            :                                              Datum *length_hist_values, int length_hist_nvalues);
+<span class="lineNum">      62 </span>            : 
+<span class="lineNum">      63 </span>            : /*
+<span class="lineNum">      64 </span>            :  * Returns a default selectivity estimate for given operator, when we don't
+<span class="lineNum">      65 </span>            :  * have statistics or cannot use them for some reason.
+<a name="66"><span class="lineNum">      66 </span>            :  */</a>
+<span class="lineNum">      67 </span>            : static double
+<span class="lineNum">      68 </span><span class="lineCov">        210 : default_range_selectivity(Oid operator)</span>
+<span class="lineNum">      69 </span>            : {
+<span class="lineNum">      70 </span><span class="lineCov">        210 :     switch (operator)</span>
+<span class="lineNum">      71 </span>            :     {
+<span class="lineNum">      72 </span>            :         case OID_RANGE_OVERLAP_OP:
+<span class="lineNum">      73 </span><span class="lineCov">         20 :             return 0.01;</span>
+<span class="lineNum">      74 </span>            : 
+<span class="lineNum">      75 </span>            :         case OID_RANGE_CONTAINS_OP:
+<span class="lineNum">      76 </span>            :         case OID_RANGE_CONTAINED_OP:
+<span class="lineNum">      77 </span><span class="lineCov">         42 :             return 0.005;</span>
+<span class="lineNum">      78 </span>            : 
+<span class="lineNum">      79 </span>            :         case OID_RANGE_CONTAINS_ELEM_OP:
+<span class="lineNum">      80 </span>            :         case OID_RANGE_ELEM_CONTAINED_OP:
+<span class="lineNum">      81 </span>            : 
+<span class="lineNum">      82 </span>            :             /*
+<span class="lineNum">      83 </span>            :              * &quot;range @&gt; elem&quot; is more or less identical to a scalar
+<span class="lineNum">      84 </span>            :              * inequality &quot;A &gt;= b AND A &lt;= c&quot;.
+<span class="lineNum">      85 </span>            :              */
+<span class="lineNum">      86 </span><span class="lineCov">         24 :             return DEFAULT_RANGE_INEQ_SEL;</span>
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span>            :         case OID_RANGE_LESS_OP:
+<span class="lineNum">      89 </span>            :         case OID_RANGE_LESS_EQUAL_OP:
+<span class="lineNum">      90 </span>            :         case OID_RANGE_GREATER_OP:
+<span class="lineNum">      91 </span>            :         case OID_RANGE_GREATER_EQUAL_OP:
+<span class="lineNum">      92 </span>            :         case OID_RANGE_LEFT_OP:
+<span class="lineNum">      93 </span>            :         case OID_RANGE_RIGHT_OP:
+<span class="lineNum">      94 </span>            :         case OID_RANGE_OVERLAPS_LEFT_OP:
+<span class="lineNum">      95 </span>            :         case OID_RANGE_OVERLAPS_RIGHT_OP:
+<span class="lineNum">      96 </span>            :             /* these are similar to regular scalar inequalities */
+<span class="lineNum">      97 </span><span class="lineCov">        124 :             return DEFAULT_INEQ_SEL;</span>
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            :         default:
+<span class="lineNum">     100 </span>            :             /* all range operators should be handled above, but just in case */
+<span class="lineNum">     101 </span><span class="lineNoCov">          0 :             return 0.01;</span>
+<span class="lineNum">     102 </span>            :     }
+<span class="lineNum">     103 </span>            : }
+<span class="lineNum">     104 </span>            : 
+<span class="lineNum">     105 </span>            : /*
+<span class="lineNum">     106 </span>            :  * rangesel -- restriction selectivity for range operators
+<a name="107"><span class="lineNum">     107 </span>            :  */</a>
+<span class="lineNum">     108 </span>            : Datum
+<span class="lineNum">     109 </span><span class="lineCov">        270 : rangesel(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     110 </span>            : {
+<span class="lineNum">     111 </span><span class="lineCov">        270 :     PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     112 </span><span class="lineCov">        270 :     Oid         operator = PG_GETARG_OID(1);</span>
+<span class="lineNum">     113 </span><span class="lineCov">        270 :     List       *args = (List *) PG_GETARG_POINTER(2);</span>
+<span class="lineNum">     114 </span><span class="lineCov">        270 :     int         varRelid = PG_GETARG_INT32(3);</span>
+<span class="lineNum">     115 </span>            :     VariableStatData vardata;
+<span class="lineNum">     116 </span>            :     Node       *other;
+<span class="lineNum">     117 </span>            :     bool        varonleft;
+<span class="lineNum">     118 </span>            :     Selectivity selec;
+<span class="lineNum">     119 </span><span class="lineCov">        270 :     TypeCacheEntry *typcache = NULL;</span>
+<span class="lineNum">     120 </span><span class="lineCov">        270 :     RangeType  *constrange = NULL;</span>
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span>            :     /*
+<span class="lineNum">     123 </span>            :      * If expression is not (variable op something) or (something op
+<span class="lineNum">     124 </span>            :      * variable), then punt and return a default estimate.
+<span class="lineNum">     125 </span>            :      */
+<span class="lineNum">     126 </span><span class="lineCov">        270 :     if (!get_restriction_variable(root, args, varRelid,</span>
+<span class="lineNum">     127 </span>            :                                   &amp;vardata, &amp;other, &amp;varonleft))
+<span class="lineNum">     128 </span><span class="lineNoCov">          0 :         PG_RETURN_FLOAT8(default_range_selectivity(operator));</span>
+<span class="lineNum">     129 </span>            : 
+<span class="lineNum">     130 </span>            :     /*
+<span class="lineNum">     131 </span>            :      * Can't do anything useful if the something is not a constant, either.
+<span class="lineNum">     132 </span>            :      */
+<span class="lineNum">     133 </span><span class="lineCov">        270 :     if (!IsA(other, Const))</span>
+<span class="lineNum">     134 </span>            :     {
+<span class="lineNum">     135 </span><span class="lineNoCov">          0 :         ReleaseVariableStats(vardata);</span>
+<span class="lineNum">     136 </span><span class="lineNoCov">          0 :         PG_RETURN_FLOAT8(default_range_selectivity(operator));</span>
+<span class="lineNum">     137 </span>            :     }
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span>            :     /*
+<span class="lineNum">     140 </span>            :      * All the range operators are strict, so we can cope with a NULL constant
+<span class="lineNum">     141 </span>            :      * right away.
+<span class="lineNum">     142 </span>            :      */
+<span class="lineNum">     143 </span><span class="lineCov">        270 :     if (((Const *) other)-&gt;constisnull)</span>
+<span class="lineNum">     144 </span>            :     {
+<span class="lineNum">     145 </span><span class="lineNoCov">          0 :         ReleaseVariableStats(vardata);</span>
+<span class="lineNum">     146 </span><span class="lineNoCov">          0 :         PG_RETURN_FLOAT8(0.0);</span>
+<span class="lineNum">     147 </span>            :     }
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :     /*
+<span class="lineNum">     150 </span>            :      * If var is on the right, commute the operator, so that we can assume the
+<span class="lineNum">     151 </span>            :      * var is on the left in what follows.
+<span class="lineNum">     152 </span>            :      */
+<span class="lineNum">     153 </span><span class="lineCov">        270 :     if (!varonleft)</span>
+<span class="lineNum">     154 </span>            :     {
+<span class="lineNum">     155 </span>            :         /* we have other Op var, commute to make var Op other */
+<span class="lineNum">     156 </span><span class="lineCov">          2 :         operator = get_commutator(operator);</span>
+<span class="lineNum">     157 </span><span class="lineCov">          2 :         if (!operator)</span>
+<span class="lineNum">     158 </span>            :         {
+<span class="lineNum">     159 </span>            :             /* Use default selectivity (should we raise an error instead?) */
+<span class="lineNum">     160 </span><span class="lineNoCov">          0 :             ReleaseVariableStats(vardata);</span>
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :             PG_RETURN_FLOAT8(default_range_selectivity(operator));</span>
+<span class="lineNum">     162 </span>            :         }
+<span class="lineNum">     163 </span>            :     }
+<span class="lineNum">     164 </span>            : 
+<span class="lineNum">     165 </span>            :     /*
+<span class="lineNum">     166 </span>            :      * OK, there's a Var and a Const we're dealing with here.  We need the
+<span class="lineNum">     167 </span>            :      * Const to be of same range type as the column, else we can't do anything
+<span class="lineNum">     168 </span>            :      * useful. (Such cases will likely fail at runtime, but here we'd rather
+<span class="lineNum">     169 </span>            :      * just return a default estimate.)
+<span class="lineNum">     170 </span>            :      *
+<span class="lineNum">     171 </span>            :      * If the operator is &quot;range @&gt; element&quot;, the constant should be of the
+<span class="lineNum">     172 </span>            :      * element type of the range column. Convert it to a range that includes
+<span class="lineNum">     173 </span>            :      * only that single point, so that we don't need special handling for that
+<span class="lineNum">     174 </span>            :      * in what follows.
+<span class="lineNum">     175 </span>            :      */
+<span class="lineNum">     176 </span><span class="lineCov">        270 :     if (operator == OID_RANGE_CONTAINS_ELEM_OP)</span>
+<span class="lineNum">     177 </span>            :     {
+<span class="lineNum">     178 </span><span class="lineCov">         22 :         typcache = range_get_typcache(fcinfo, vardata.vartype);</span>
+<span class="lineNum">     179 </span>            : 
+<span class="lineNum">     180 </span><span class="lineCov">         22 :         if (((Const *) other)-&gt;consttype == typcache-&gt;rngelemtype-&gt;type_id)</span>
+<span class="lineNum">     181 </span>            :         {
+<span class="lineNum">     182 </span>            :             RangeBound  lower,
+<span class="lineNum">     183 </span>            :                         upper;
+<span class="lineNum">     184 </span>            : 
+<span class="lineNum">     185 </span><span class="lineCov">         22 :             lower.inclusive = true;</span>
+<span class="lineNum">     186 </span><span class="lineCov">         22 :             lower.val = ((Const *) other)-&gt;constvalue;</span>
+<span class="lineNum">     187 </span><span class="lineCov">         22 :             lower.infinite = false;</span>
+<span class="lineNum">     188 </span><span class="lineCov">         22 :             lower.lower = true;</span>
+<span class="lineNum">     189 </span><span class="lineCov">         22 :             upper.inclusive = true;</span>
+<span class="lineNum">     190 </span><span class="lineCov">         22 :             upper.val = ((Const *) other)-&gt;constvalue;</span>
+<span class="lineNum">     191 </span><span class="lineCov">         22 :             upper.infinite = false;</span>
+<span class="lineNum">     192 </span><span class="lineCov">         22 :             upper.lower = false;</span>
+<span class="lineNum">     193 </span><span class="lineCov">         22 :             constrange = range_serialize(typcache, &amp;lower, &amp;upper, false);</span>
+<span class="lineNum">     194 </span>            :         }
+<span class="lineNum">     195 </span>            :     }
+<span class="lineNum">     196 </span><span class="lineCov">        248 :     else if (operator == OID_RANGE_ELEM_CONTAINED_OP)</span>
+<span class="lineNum">     197 </span>            :     {
+<span class="lineNum">     198 </span>            :         /*
+<span class="lineNum">     199 </span>            :          * Here, the Var is the elem, not the range.  For now we just punt and
+<span class="lineNum">     200 </span>            :          * return the default estimate.  In future we could disassemble the
+<span class="lineNum">     201 </span>            :          * range constant and apply scalarineqsel ...
+<span class="lineNum">     202 </span>            :          */
+<span class="lineNum">     203 </span>            :     }
+<span class="lineNum">     204 </span><span class="lineCov">        246 :     else if (((Const *) other)-&gt;consttype == vardata.vartype)</span>
+<span class="lineNum">     205 </span>            :     {
+<span class="lineNum">     206 </span>            :         /* Both sides are the same range type */
+<span class="lineNum">     207 </span><span class="lineCov">        246 :         typcache = range_get_typcache(fcinfo, vardata.vartype);</span>
+<span class="lineNum">     208 </span>            : 
+<span class="lineNum">     209 </span><span class="lineCov">        246 :         constrange = DatumGetRangeTypeP(((Const *) other)-&gt;constvalue);</span>
+<span class="lineNum">     210 </span>            :     }
+<span class="lineNum">     211 </span>            : 
+<span class="lineNum">     212 </span>            :     /*
+<span class="lineNum">     213 </span>            :      * If we got a valid constant on one side of the operator, proceed to
+<span class="lineNum">     214 </span>            :      * estimate using statistics. Otherwise punt and return a default constant
+<span class="lineNum">     215 </span>            :      * estimate.  Note that calc_rangesel need not handle
+<span class="lineNum">     216 </span>            :      * OID_RANGE_ELEM_CONTAINED_OP.
+<span class="lineNum">     217 </span>            :      */
+<span class="lineNum">     218 </span><span class="lineCov">        270 :     if (constrange)</span>
+<span class="lineNum">     219 </span><span class="lineCov">        268 :         selec = calc_rangesel(typcache, &amp;vardata, constrange, operator);</span>
+<span class="lineNum">     220 </span>            :     else
+<span class="lineNum">     221 </span><span class="lineCov">          2 :         selec = default_range_selectivity(operator);</span>
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span><span class="lineCov">        270 :     ReleaseVariableStats(vardata);</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span><span class="lineCov">        270 :     CLAMP_PROBABILITY(selec);</span>
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span><span class="lineCov">        270 :     PG_RETURN_FLOAT8((float8) selec);</span>
+<span class="lineNum">     228 </span>            : }
+<a name="229"><span class="lineNum">     229 </span>            : </a>
+<span class="lineNum">     230 </span>            : static double
+<span class="lineNum">     231 </span><span class="lineCov">        268 : calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata,</span>
+<span class="lineNum">     232 </span>            :               const RangeType *constval, Oid operator)
+<span class="lineNum">     233 </span>            : {
+<span class="lineNum">     234 </span>            :     double      hist_selec;
+<span class="lineNum">     235 </span>            :     double      selec;
+<span class="lineNum">     236 </span>            :     float4      empty_frac,
+<span class="lineNum">     237 </span>            :                 null_frac;
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span>            :     /*
+<span class="lineNum">     240 </span>            :      * First look up the fraction of NULLs and empty ranges from pg_statistic.
+<span class="lineNum">     241 </span>            :      */
+<span class="lineNum">     242 </span><span class="lineCov">        268 :     if (HeapTupleIsValid(vardata-&gt;statsTuple))</span>
+<span class="lineNum">     243 </span>            :     {
+<span class="lineNum">     244 </span>            :         Form_pg_statistic stats;
+<span class="lineNum">     245 </span>            :         AttStatsSlot sslot;
+<span class="lineNum">     246 </span>            : 
+<span class="lineNum">     247 </span><span class="lineNoCov">          0 :         stats = (Form_pg_statistic) GETSTRUCT(vardata-&gt;statsTuple);</span>
+<span class="lineNum">     248 </span><span class="lineNoCov">          0 :         null_frac = stats-&gt;stanullfrac;</span>
+<span class="lineNum">     249 </span>            : 
+<span class="lineNum">     250 </span>            :         /* Try to get fraction of empty ranges */
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :         if (get_attstatsslot(&amp;sslot, vardata-&gt;statsTuple,</span>
+<span class="lineNum">     252 </span>            :                              STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
+<span class="lineNum">     253 </span>            :                              InvalidOid,
+<span class="lineNum">     254 </span>            :                              ATTSTATSSLOT_NUMBERS))
+<span class="lineNum">     255 </span>            :         {
+<span class="lineNum">     256 </span><span class="lineNoCov">          0 :             if (sslot.nnumbers != 1)</span>
+<span class="lineNum">     257 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;invalid empty fraction statistic&quot;);  /* shouldn't happen */</span>
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :             empty_frac = sslot.numbers[0];</span>
+<span class="lineNum">     259 </span><span class="lineNoCov">          0 :             free_attstatsslot(&amp;sslot);</span>
+<span class="lineNum">     260 </span>            :         }
+<span class="lineNum">     261 </span>            :         else
+<span class="lineNum">     262 </span>            :         {
+<span class="lineNum">     263 </span>            :             /* No empty fraction statistic. Assume no empty ranges. */
+<span class="lineNum">     264 </span><span class="lineNoCov">          0 :             empty_frac = 0.0;</span>
+<span class="lineNum">     265 </span>            :         }
+<span class="lineNum">     266 </span>            :     }
+<span class="lineNum">     267 </span>            :     else
+<span class="lineNum">     268 </span>            :     {
+<span class="lineNum">     269 </span>            :         /*
+<span class="lineNum">     270 </span>            :          * No stats are available. Follow through the calculations below
+<span class="lineNum">     271 </span>            :          * anyway, assuming no NULLs and no empty ranges. This still allows us
+<span class="lineNum">     272 </span>            :          * to give a better-than-nothing estimate based on whether the
+<span class="lineNum">     273 </span>            :          * constant is an empty range or not.
+<span class="lineNum">     274 </span>            :          */
+<span class="lineNum">     275 </span><span class="lineCov">        268 :         null_frac = 0.0;</span>
+<span class="lineNum">     276 </span><span class="lineCov">        268 :         empty_frac = 0.0;</span>
+<span class="lineNum">     277 </span>            :     }
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span><span class="lineCov">        268 :     if (RangeIsEmpty(constval))</span>
+<span class="lineNum">     280 </span>            :     {
+<span class="lineNum">     281 </span>            :         /*
+<span class="lineNum">     282 </span>            :          * An empty range matches all ranges, all empty ranges, or nothing,
+<span class="lineNum">     283 </span>            :          * depending on the operator
+<span class="lineNum">     284 </span>            :          */
+<span class="lineNum">     285 </span><span class="lineCov">         60 :         switch (operator)</span>
+<span class="lineNum">     286 </span>            :         {
+<span class="lineNum">     287 </span>            :                 /* these return false if either argument is empty */
+<span class="lineNum">     288 </span>            :             case OID_RANGE_OVERLAP_OP:
+<span class="lineNum">     289 </span>            :             case OID_RANGE_OVERLAPS_LEFT_OP:
+<span class="lineNum">     290 </span>            :             case OID_RANGE_OVERLAPS_RIGHT_OP:
+<span class="lineNum">     291 </span>            :             case OID_RANGE_LEFT_OP:
+<span class="lineNum">     292 </span>            :             case OID_RANGE_RIGHT_OP:
+<span class="lineNum">     293 </span>            :                 /* nothing is less than an empty range */
+<span class="lineNum">     294 </span>            :             case OID_RANGE_LESS_OP:
+<span class="lineNum">     295 </span><span class="lineCov">          2 :                 selec = 0.0;</span>
+<span class="lineNum">     296 </span><span class="lineCov">          2 :                 break;</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span>            :                 /* only empty ranges can be contained by an empty range */
+<span class="lineNum">     299 </span>            :             case OID_RANGE_CONTAINED_OP:
+<span class="lineNum">     300 </span>            :                 /* only empty ranges are &lt;= an empty range */
+<span class="lineNum">     301 </span>            :             case OID_RANGE_LESS_EQUAL_OP:
+<span class="lineNum">     302 </span><span class="lineCov">         18 :                 selec = empty_frac;</span>
+<span class="lineNum">     303 </span><span class="lineCov">         18 :                 break;</span>
+<span class="lineNum">     304 </span>            : 
+<span class="lineNum">     305 </span>            :                 /* everything contains an empty range */
+<span class="lineNum">     306 </span>            :             case OID_RANGE_CONTAINS_OP:
+<span class="lineNum">     307 </span>            :                 /* everything is &gt;= an empty range */
+<span class="lineNum">     308 </span>            :             case OID_RANGE_GREATER_EQUAL_OP:
+<span class="lineNum">     309 </span><span class="lineCov">         30 :                 selec = 1.0;</span>
+<span class="lineNum">     310 </span><span class="lineCov">         30 :                 break;</span>
+<span class="lineNum">     311 </span>            : 
+<span class="lineNum">     312 </span>            :                 /* all non-empty ranges are &gt; an empty range */
+<span class="lineNum">     313 </span>            :             case OID_RANGE_GREATER_OP:
+<span class="lineNum">     314 </span><span class="lineCov">         10 :                 selec = 1.0 - empty_frac;</span>
+<span class="lineNum">     315 </span><span class="lineCov">         10 :                 break;</span>
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            :                 /* an element cannot be empty */
+<span class="lineNum">     318 </span>            :             case OID_RANGE_CONTAINS_ELEM_OP:
+<span class="lineNum">     319 </span>            :             default:
+<span class="lineNum">     320 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;unexpected operator %u&quot;, operator);</span>
+<span class="lineNum">     321 </span>            :                 selec = 0.0;    /* keep compiler quiet */
+<span class="lineNum">     322 </span>            :                 break;
+<span class="lineNum">     323 </span>            :         }
+<span class="lineNum">     324 </span>            :     }
+<span class="lineNum">     325 </span>            :     else
+<span class="lineNum">     326 </span>            :     {
+<span class="lineNum">     327 </span>            :         /*
+<span class="lineNum">     328 </span>            :          * Calculate selectivity using bound histograms. If that fails for
+<span class="lineNum">     329 </span>            :          * some reason, e.g no histogram in pg_statistic, use the default
+<span class="lineNum">     330 </span>            :          * constant estimate for the fraction of non-empty values. This is
+<span class="lineNum">     331 </span>            :          * still somewhat better than just returning the default estimate,
+<span class="lineNum">     332 </span>            :          * because this still takes into account the fraction of empty and
+<span class="lineNum">     333 </span>            :          * NULL tuples, if we had statistics for them.
+<span class="lineNum">     334 </span>            :          */
+<span class="lineNum">     335 </span><span class="lineCov">        208 :         hist_selec = calc_hist_selectivity(typcache, vardata, constval,</span>
+<span class="lineNum">     336 </span>            :                                            operator);
+<span class="lineNum">     337 </span><span class="lineCov">        208 :         if (hist_selec &lt; 0.0)</span>
+<span class="lineNum">     338 </span><span class="lineCov">        208 :             hist_selec = default_range_selectivity(operator);</span>
+<span class="lineNum">     339 </span>            : 
+<span class="lineNum">     340 </span>            :         /*
+<span class="lineNum">     341 </span>            :          * Now merge the results for the empty ranges and histogram
+<span class="lineNum">     342 </span>            :          * calculations, realizing that the histogram covers only the
+<span class="lineNum">     343 </span>            :          * non-null, non-empty values.
+<span class="lineNum">     344 </span>            :          */
+<span class="lineNum">     345 </span><span class="lineCov">        208 :         if (operator == OID_RANGE_CONTAINED_OP)</span>
+<span class="lineNum">     346 </span>            :         {
+<span class="lineNum">     347 </span>            :             /* empty is contained by anything non-empty */
+<span class="lineNum">     348 </span><span class="lineCov">         20 :             selec = (1.0 - empty_frac) * hist_selec + empty_frac;</span>
+<span class="lineNum">     349 </span>            :         }
+<span class="lineNum">     350 </span>            :         else
+<span class="lineNum">     351 </span>            :         {
+<span class="lineNum">     352 </span>            :             /* with any other operator, empty Op non-empty matches nothing */
+<span class="lineNum">     353 </span><span class="lineCov">        188 :             selec = (1.0 - empty_frac) * hist_selec;</span>
+<span class="lineNum">     354 </span>            :         }
+<span class="lineNum">     355 </span>            :     }
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span>            :     /* all range operators are strict */
+<span class="lineNum">     358 </span><span class="lineCov">        268 :     selec *= (1.0 - null_frac);</span>
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span>            :     /* result should be in range, but make sure... */
+<span class="lineNum">     361 </span><span class="lineCov">        268 :     CLAMP_PROBABILITY(selec);</span>
+<span class="lineNum">     362 </span>            : 
+<span class="lineNum">     363 </span><span class="lineCov">        268 :     return selec;</span>
+<span class="lineNum">     364 </span>            : }
+<span class="lineNum">     365 </span>            : 
+<span class="lineNum">     366 </span>            : /*
+<span class="lineNum">     367 </span>            :  * Calculate range operator selectivity using histograms of range bounds.
+<span class="lineNum">     368 </span>            :  *
+<span class="lineNum">     369 </span>            :  * This estimate is for the portion of values that are not empty and not
+<span class="lineNum">     370 </span>            :  * NULL.
+<a name="371"><span class="lineNum">     371 </span>            :  */</a>
+<span class="lineNum">     372 </span>            : static double
+<span class="lineNum">     373 </span><span class="lineCov">        208 : calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,</span>
+<span class="lineNum">     374 </span>            :                       const RangeType *constval, Oid operator)
+<span class="lineNum">     375 </span>            : {
+<span class="lineNum">     376 </span>            :     AttStatsSlot hslot;
+<span class="lineNum">     377 </span>            :     AttStatsSlot lslot;
+<span class="lineNum">     378 </span>            :     int         nhist;
+<span class="lineNum">     379 </span>            :     RangeBound *hist_lower;
+<span class="lineNum">     380 </span>            :     RangeBound *hist_upper;
+<span class="lineNum">     381 </span>            :     int         i;
+<span class="lineNum">     382 </span>            :     RangeBound  const_lower;
+<span class="lineNum">     383 </span>            :     RangeBound  const_upper;
+<span class="lineNum">     384 </span>            :     bool        empty;
+<span class="lineNum">     385 </span>            :     double      hist_selec;
+<span class="lineNum">     386 </span>            : 
+<span class="lineNum">     387 </span>            :     /* Can't use the histogram with insecure range support functions */
+<span class="lineNum">     388 </span><span class="lineCov">        208 :     if (!statistic_proc_security_check(vardata,</span>
+<span class="lineNum">     389 </span>            :                                        typcache-&gt;rng_cmp_proc_finfo.fn_oid))
+<span class="lineNum">     390 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     391 </span><span class="lineCov">        416 :     if (OidIsValid(typcache-&gt;rng_subdiff_finfo.fn_oid) &amp;&amp;</span>
+<span class="lineNum">     392 </span><span class="lineCov">        208 :         !statistic_proc_security_check(vardata,</span>
+<span class="lineNum">     393 </span>            :                                        typcache-&gt;rng_subdiff_finfo.fn_oid))
+<span class="lineNum">     394 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     395 </span>            : 
+<span class="lineNum">     396 </span>            :     /* Try to get histogram of ranges */
+<span class="lineNum">     397 </span><span class="lineCov">        208 :     if (!(HeapTupleIsValid(vardata-&gt;statsTuple) &amp;&amp;</span>
+<span class="lineNum">     398 </span><span class="lineNoCov">          0 :           get_attstatsslot(&amp;hslot, vardata-&gt;statsTuple,</span>
+<span class="lineNum">     399 </span>            :                            STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
+<span class="lineNum">     400 </span>            :                            ATTSTATSSLOT_VALUES)))
+<span class="lineNum">     401 </span><span class="lineCov">        208 :         return -1.0;</span>
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span>            :     /*
+<span class="lineNum">     404 </span>            :      * Convert histogram of ranges into histograms of its lower and upper
+<span class="lineNum">     405 </span>            :      * bounds.
+<span class="lineNum">     406 </span>            :      */
+<span class="lineNum">     407 </span><span class="lineNoCov">          0 :     nhist = hslot.nvalues;</span>
+<span class="lineNum">     408 </span><span class="lineNoCov">          0 :     hist_lower = (RangeBound *) palloc(sizeof(RangeBound) * nhist);</span>
+<span class="lineNum">     409 </span><span class="lineNoCov">          0 :     hist_upper = (RangeBound *) palloc(sizeof(RangeBound) * nhist);</span>
+<span class="lineNum">     410 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; nhist; i++)</span>
+<span class="lineNum">     411 </span>            :     {
+<span class="lineNum">     412 </span><span class="lineNoCov">          0 :         range_deserialize(typcache, DatumGetRangeTypeP(hslot.values[i]),</span>
+<span class="lineNum">     413 </span><span class="lineNoCov">          0 :                           &amp;hist_lower[i], &amp;hist_upper[i], &amp;empty);</span>
+<span class="lineNum">     414 </span>            :         /* The histogram should not contain any empty ranges */
+<span class="lineNum">     415 </span><span class="lineNoCov">          0 :         if (empty)</span>
+<span class="lineNum">     416 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;bounds histogram contains an empty range&quot;);</span>
+<span class="lineNum">     417 </span>            :     }
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span>            :     /* @&gt; and @&lt; also need a histogram of range lengths */
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :     if (operator == OID_RANGE_CONTAINS_OP ||</span>
+<span class="lineNum">     421 </span>            :         operator == OID_RANGE_CONTAINED_OP)
+<span class="lineNum">     422 </span>            :     {
+<span class="lineNum">     423 </span><span class="lineNoCov">          0 :         if (!(HeapTupleIsValid(vardata-&gt;statsTuple) &amp;&amp;</span>
+<span class="lineNum">     424 </span><span class="lineNoCov">          0 :               get_attstatsslot(&amp;lslot, vardata-&gt;statsTuple,</span>
+<span class="lineNum">     425 </span>            :                                STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
+<span class="lineNum">     426 </span>            :                                InvalidOid,
+<span class="lineNum">     427 </span>            :                                ATTSTATSSLOT_VALUES)))
+<span class="lineNum">     428 </span>            :         {
+<span class="lineNum">     429 </span><span class="lineNoCov">          0 :             free_attstatsslot(&amp;hslot);</span>
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :             return -1.0;</span>
+<span class="lineNum">     431 </span>            :         }
+<span class="lineNum">     432 </span>            : 
+<span class="lineNum">     433 </span>            :         /* check that it's a histogram, not just a dummy entry */
+<span class="lineNum">     434 </span><span class="lineNoCov">          0 :         if (lslot.nvalues &lt; 2)</span>
+<span class="lineNum">     435 </span>            :         {
+<span class="lineNum">     436 </span><span class="lineNoCov">          0 :             free_attstatsslot(&amp;lslot);</span>
+<span class="lineNum">     437 </span><span class="lineNoCov">          0 :             free_attstatsslot(&amp;hslot);</span>
+<span class="lineNum">     438 </span><span class="lineNoCov">          0 :             return -1.0;</span>
+<span class="lineNum">     439 </span>            :         }
+<span class="lineNum">     440 </span>            :     }
+<span class="lineNum">     441 </span>            :     else
+<span class="lineNum">     442 </span><span class="lineNoCov">          0 :         memset(&amp;lslot, 0, sizeof(lslot));</span>
+<span class="lineNum">     443 </span>            : 
+<span class="lineNum">     444 </span>            :     /* Extract the bounds of the constant value. */
+<span class="lineNum">     445 </span><span class="lineNoCov">          0 :     range_deserialize(typcache, constval, &amp;const_lower, &amp;const_upper, &amp;empty);</span>
+<span class="lineNum">     446 </span><span class="lineNoCov">          0 :     Assert(!empty);</span>
+<span class="lineNum">     447 </span>            : 
+<span class="lineNum">     448 </span>            :     /*
+<span class="lineNum">     449 </span>            :      * Calculate selectivity comparing the lower or upper bound of the
+<span class="lineNum">     450 </span>            :      * constant with the histogram of lower or upper bounds.
+<span class="lineNum">     451 </span>            :      */
+<span class="lineNum">     452 </span><span class="lineNoCov">          0 :     switch (operator)</span>
+<span class="lineNum">     453 </span>            :     {
+<span class="lineNum">     454 </span>            :         case OID_RANGE_LESS_OP:
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span>            :             /*
+<span class="lineNum">     457 </span>            :              * The regular b-tree comparison operators (&lt;, &lt;=, &gt;, &gt;=) compare
+<span class="lineNum">     458 </span>            :              * the lower bounds first, and the upper bounds for values with
+<span class="lineNum">     459 </span>            :              * equal lower bounds. Estimate that by comparing the lower bounds
+<span class="lineNum">     460 </span>            :              * only. This gives a fairly accurate estimate assuming there
+<span class="lineNum">     461 </span>            :              * aren't many rows with a lower bound equal to the constant's
+<span class="lineNum">     462 </span>            :              * lower bound.
+<span class="lineNum">     463 </span>            :              */
+<span class="lineNum">     464 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     465 </span>            :                 calc_hist_selectivity_scalar(typcache, &amp;const_lower,
+<span class="lineNum">     466 </span>            :                                              hist_lower, nhist, false);
+<span class="lineNum">     467 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span>            :         case OID_RANGE_LESS_EQUAL_OP:
+<span class="lineNum">     470 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     471 </span>            :                 calc_hist_selectivity_scalar(typcache, &amp;const_lower,
+<span class="lineNum">     472 </span>            :                                              hist_lower, nhist, true);
+<span class="lineNum">     473 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     474 </span>            : 
+<span class="lineNum">     475 </span>            :         case OID_RANGE_GREATER_OP:
+<span class="lineNum">     476 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :                 1 - calc_hist_selectivity_scalar(typcache, &amp;const_lower,</span>
+<span class="lineNum">     478 </span>            :                                                  hist_lower, nhist, false);
+<span class="lineNum">     479 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     480 </span>            : 
+<span class="lineNum">     481 </span>            :         case OID_RANGE_GREATER_EQUAL_OP:
+<span class="lineNum">     482 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     483 </span><span class="lineNoCov">          0 :                 1 - calc_hist_selectivity_scalar(typcache, &amp;const_lower,</span>
+<span class="lineNum">     484 </span>            :                                                  hist_lower, nhist, true);
+<span class="lineNum">     485 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            :         case OID_RANGE_LEFT_OP:
+<span class="lineNum">     488 </span>            :             /* var &lt;&lt; const when upper(var) &lt; lower(const) */
+<span class="lineNum">     489 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     490 </span>            :                 calc_hist_selectivity_scalar(typcache, &amp;const_lower,
+<span class="lineNum">     491 </span>            :                                              hist_upper, nhist, false);
+<span class="lineNum">     492 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     493 </span>            : 
+<span class="lineNum">     494 </span>            :         case OID_RANGE_RIGHT_OP:
+<span class="lineNum">     495 </span>            :             /* var &gt;&gt; const when lower(var) &gt; upper(const) */
+<span class="lineNum">     496 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     497 </span><span class="lineNoCov">          0 :                 1 - calc_hist_selectivity_scalar(typcache, &amp;const_upper,</span>
+<span class="lineNum">     498 </span>            :                                                  hist_lower, nhist, true);
+<span class="lineNum">     499 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span>            :         case OID_RANGE_OVERLAPS_RIGHT_OP:
+<span class="lineNum">     502 </span>            :             /* compare lower bounds */
+<span class="lineNum">     503 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     504 </span><span class="lineNoCov">          0 :                 1 - calc_hist_selectivity_scalar(typcache, &amp;const_lower,</span>
+<span class="lineNum">     505 </span>            :                                                  hist_lower, nhist, false);
+<span class="lineNum">     506 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     507 </span>            : 
+<span class="lineNum">     508 </span>            :         case OID_RANGE_OVERLAPS_LEFT_OP:
+<span class="lineNum">     509 </span>            :             /* compare upper bounds */
+<span class="lineNum">     510 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     511 </span>            :                 calc_hist_selectivity_scalar(typcache, &amp;const_upper,
+<span class="lineNum">     512 </span>            :                                              hist_upper, nhist, true);
+<span class="lineNum">     513 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     514 </span>            : 
+<span class="lineNum">     515 </span>            :         case OID_RANGE_OVERLAP_OP:
+<span class="lineNum">     516 </span>            :         case OID_RANGE_CONTAINS_ELEM_OP:
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span>            :             /*
+<span class="lineNum">     519 </span>            :              * A &amp;&amp; B &lt;=&gt; NOT (A &lt;&lt; B OR A &gt;&gt; B).
+<span class="lineNum">     520 </span>            :              *
+<span class="lineNum">     521 </span>            :              * Since A &lt;&lt; B and A &gt;&gt; B are mutually exclusive events we can
+<span class="lineNum">     522 </span>            :              * sum their probabilities to find probability of (A &lt;&lt; B OR A &gt;&gt;
+<span class="lineNum">     523 </span>            :              * B).
+<span class="lineNum">     524 </span>            :              *
+<span class="lineNum">     525 </span>            :              * &quot;range @&gt; elem&quot; is equivalent to &quot;range &amp;&amp; [elem,elem]&quot;. The
+<span class="lineNum">     526 </span>            :              * caller already constructed the singular range from the element
+<span class="lineNum">     527 </span>            :              * constant, so just treat it the same as &amp;&amp;.
+<span class="lineNum">     528 </span>            :              */
+<span class="lineNum">     529 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     530 </span>            :                 calc_hist_selectivity_scalar(typcache, &amp;const_lower, hist_upper,
+<span class="lineNum">     531 </span>            :                                              nhist, false);
+<span class="lineNum">     532 </span><span class="lineNoCov">          0 :             hist_selec +=</span>
+<span class="lineNum">     533 </span><span class="lineNoCov">          0 :                 (1.0 - calc_hist_selectivity_scalar(typcache, &amp;const_upper, hist_lower,</span>
+<span class="lineNum">     534 </span>            :                                                     nhist, true));
+<span class="lineNum">     535 </span><span class="lineNoCov">          0 :             hist_selec = 1.0 - hist_selec;</span>
+<span class="lineNum">     536 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span>            :         case OID_RANGE_CONTAINS_OP:
+<span class="lineNum">     539 </span><span class="lineNoCov">          0 :             hist_selec =</span>
+<span class="lineNum">     540 </span><span class="lineNoCov">          0 :                 calc_hist_selectivity_contains(typcache, &amp;const_lower,</span>
+<span class="lineNum">     541 </span>            :                                                &amp;const_upper, hist_lower, nhist,
+<span class="lineNum">     542 </span>            :                                                lslot.values, lslot.nvalues);
+<span class="lineNum">     543 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     544 </span>            : 
+<span class="lineNum">     545 </span>            :         case OID_RANGE_CONTAINED_OP:
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 :             if (const_lower.infinite)</span>
+<span class="lineNum">     547 </span>            :             {
+<span class="lineNum">     548 </span>            :                 /*
+<span class="lineNum">     549 </span>            :                  * Lower bound no longer matters. Just estimate the fraction
+<span class="lineNum">     550 </span>            :                  * with an upper bound &lt;= const upper bound
+<span class="lineNum">     551 </span>            :                  */
+<span class="lineNum">     552 </span><span class="lineNoCov">          0 :                 hist_selec =</span>
+<span class="lineNum">     553 </span>            :                     calc_hist_selectivity_scalar(typcache, &amp;const_upper,
+<span class="lineNum">     554 </span>            :                                                  hist_upper, nhist, true);
+<span class="lineNum">     555 </span>            :             }
+<span class="lineNum">     556 </span><span class="lineNoCov">          0 :             else if (const_upper.infinite)</span>
+<span class="lineNum">     557 </span>            :             {
+<span class="lineNum">     558 </span><span class="lineNoCov">          0 :                 hist_selec =</span>
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :                     1.0 - calc_hist_selectivity_scalar(typcache, &amp;const_lower,</span>
+<span class="lineNum">     560 </span>            :                                                        hist_lower, nhist, false);
+<span class="lineNum">     561 </span>            :             }
+<span class="lineNum">     562 </span>            :             else
+<span class="lineNum">     563 </span>            :             {
+<span class="lineNum">     564 </span><span class="lineNoCov">          0 :                 hist_selec =</span>
+<span class="lineNum">     565 </span><span class="lineNoCov">          0 :                     calc_hist_selectivity_contained(typcache, &amp;const_lower,</span>
+<span class="lineNum">     566 </span>            :                                                     &amp;const_upper, hist_lower, nhist,
+<span class="lineNum">     567 </span>            :                                                     lslot.values, lslot.nvalues);
+<span class="lineNum">     568 </span>            :             }
+<span class="lineNum">     569 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     570 </span>            : 
+<span class="lineNum">     571 </span>            :         default:
+<span class="lineNum">     572 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unknown range operator %u&quot;, operator);</span>
+<span class="lineNum">     573 </span>            :             hist_selec = -1.0;  /* keep compiler quiet */
+<span class="lineNum">     574 </span>            :             break;
+<span class="lineNum">     575 </span>            :     }
+<span class="lineNum">     576 </span>            : 
+<span class="lineNum">     577 </span><span class="lineNoCov">          0 :     free_attstatsslot(&amp;lslot);</span>
+<span class="lineNum">     578 </span><span class="lineNoCov">          0 :     free_attstatsslot(&amp;hslot);</span>
+<span class="lineNum">     579 </span>            : 
+<span class="lineNum">     580 </span><span class="lineNoCov">          0 :     return hist_selec;</span>
+<span class="lineNum">     581 </span>            : }
+<span class="lineNum">     582 </span>            : 
+<span class="lineNum">     583 </span>            : 
+<span class="lineNum">     584 </span>            : /*
+<span class="lineNum">     585 </span>            :  * Look up the fraction of values less than (or equal, if 'equal' argument
+<span class="lineNum">     586 </span>            :  * is true) a given const in a histogram of range bounds.
+<a name="587"><span class="lineNum">     587 </span>            :  */</a>
+<span class="lineNum">     588 </span>            : static double
+<span class="lineNum">     589 </span><span class="lineNoCov">          0 : calc_hist_selectivity_scalar(TypeCacheEntry *typcache, const RangeBound *constbound,</span>
+<span class="lineNum">     590 </span>            :                              const RangeBound *hist, int hist_nvalues, bool equal)
+<span class="lineNum">     591 </span>            : {
+<span class="lineNum">     592 </span>            :     Selectivity selec;
+<span class="lineNum">     593 </span>            :     int         index;
+<span class="lineNum">     594 </span>            : 
+<span class="lineNum">     595 </span>            :     /*
+<span class="lineNum">     596 </span>            :      * Find the histogram bin the given constant falls into. Estimate
+<span class="lineNum">     597 </span>            :      * selectivity as the number of preceding whole bins.
+<span class="lineNum">     598 </span>            :      */
+<span class="lineNum">     599 </span><span class="lineNoCov">          0 :     index = rbound_bsearch(typcache, constbound, hist, hist_nvalues, equal);</span>
+<span class="lineNum">     600 </span><span class="lineNoCov">          0 :     selec = (Selectivity) (Max(index, 0)) / (Selectivity) (hist_nvalues - 1);</span>
+<span class="lineNum">     601 </span>            : 
+<span class="lineNum">     602 </span>            :     /* Adjust using linear interpolation within the bin */
+<span class="lineNum">     603 </span><span class="lineNoCov">          0 :     if (index &gt;= 0 &amp;&amp; index &lt; hist_nvalues - 1)</span>
+<span class="lineNum">     604 </span><span class="lineNoCov">          0 :         selec += get_position(typcache, constbound, &amp;hist[index],</span>
+<span class="lineNum">     605 </span><span class="lineNoCov">          0 :                               &amp;hist[index + 1]) / (Selectivity) (hist_nvalues - 1);</span>
+<span class="lineNum">     606 </span>            : 
+<span class="lineNum">     607 </span><span class="lineNoCov">          0 :     return selec;</span>
+<span class="lineNum">     608 </span>            : }
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span>            : /*
+<span class="lineNum">     611 </span>            :  * Binary search on an array of range bounds. Returns greatest index of range
+<span class="lineNum">     612 </span>            :  * bound in array which is less(less or equal) than given range bound. If all
+<span class="lineNum">     613 </span>            :  * range bounds in array are greater or equal(greater) than given range bound,
+<span class="lineNum">     614 </span>            :  * return -1. When &quot;equal&quot; flag is set conditions in brackets are used.
+<span class="lineNum">     615 </span>            :  *
+<span class="lineNum">     616 </span>            :  * This function is used in scalar operator selectivity estimation. Another
+<span class="lineNum">     617 </span>            :  * goal of this function is to find a histogram bin where to stop
+<span class="lineNum">     618 </span>            :  * interpolation of portion of bounds which are less or equal to given bound.
+<a name="619"><span class="lineNum">     619 </span>            :  */</a>
+<span class="lineNum">     620 </span>            : static int
+<span class="lineNum">     621 </span><span class="lineNoCov">          0 : rbound_bsearch(TypeCacheEntry *typcache, const RangeBound *value, const RangeBound *hist,</span>
+<span class="lineNum">     622 </span>            :                int hist_length, bool equal)
+<span class="lineNum">     623 </span>            : {
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :     int         lower = -1,</span>
+<span class="lineNum">     625 </span><span class="lineNoCov">          0 :                 upper = hist_length - 1,</span>
+<span class="lineNum">     626 </span>            :                 cmp,
+<span class="lineNum">     627 </span>            :                 middle;
+<span class="lineNum">     628 </span>            : 
+<span class="lineNum">     629 </span><span class="lineNoCov">          0 :     while (lower &lt; upper)</span>
+<span class="lineNum">     630 </span>            :     {
+<span class="lineNum">     631 </span><span class="lineNoCov">          0 :         middle = (lower + upper + 1) / 2;</span>
+<span class="lineNum">     632 </span><span class="lineNoCov">          0 :         cmp = range_cmp_bounds(typcache, &amp;hist[middle], value);</span>
+<span class="lineNum">     633 </span>            : 
+<span class="lineNum">     634 </span><span class="lineNoCov">          0 :         if (cmp &lt; 0 || (equal &amp;&amp; cmp == 0))</span>
+<span class="lineNum">     635 </span><span class="lineNoCov">          0 :             lower = middle;</span>
+<span class="lineNum">     636 </span>            :         else
+<span class="lineNum">     637 </span><span class="lineNoCov">          0 :             upper = middle - 1;</span>
+<span class="lineNum">     638 </span>            :     }
+<span class="lineNum">     639 </span><span class="lineNoCov">          0 :     return lower;</span>
+<span class="lineNum">     640 </span>            : }
+<span class="lineNum">     641 </span>            : 
+<span class="lineNum">     642 </span>            : 
+<span class="lineNum">     643 </span>            : /*
+<span class="lineNum">     644 </span>            :  * Binary search on length histogram. Returns greatest index of range length in
+<span class="lineNum">     645 </span>            :  * histogram which is less than (less than or equal) the given length value. If
+<span class="lineNum">     646 </span>            :  * all lengths in the histogram are greater than (greater than or equal) the
+<span class="lineNum">     647 </span>            :  * given length, returns -1.
+<a name="648"><span class="lineNum">     648 </span>            :  */</a>
+<span class="lineNum">     649 </span>            : static int
+<span class="lineNum">     650 </span><span class="lineNoCov">          0 : length_hist_bsearch(Datum *length_hist_values, int length_hist_nvalues,</span>
+<span class="lineNum">     651 </span>            :                     double value, bool equal)
+<span class="lineNum">     652 </span>            : {
+<span class="lineNum">     653 </span><span class="lineNoCov">          0 :     int         lower = -1,</span>
+<span class="lineNum">     654 </span><span class="lineNoCov">          0 :                 upper = length_hist_nvalues - 1,</span>
+<span class="lineNum">     655 </span>            :                 middle;
+<span class="lineNum">     656 </span>            : 
+<span class="lineNum">     657 </span><span class="lineNoCov">          0 :     while (lower &lt; upper)</span>
+<span class="lineNum">     658 </span>            :     {
+<span class="lineNum">     659 </span>            :         double      middleval;
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span><span class="lineNoCov">          0 :         middle = (lower + upper + 1) / 2;</span>
+<span class="lineNum">     662 </span>            : 
+<span class="lineNum">     663 </span><span class="lineNoCov">          0 :         middleval = DatumGetFloat8(length_hist_values[middle]);</span>
+<span class="lineNum">     664 </span><span class="lineNoCov">          0 :         if (middleval &lt; value || (equal &amp;&amp; middleval &lt;= value))</span>
+<span class="lineNum">     665 </span><span class="lineNoCov">          0 :             lower = middle;</span>
+<span class="lineNum">     666 </span>            :         else
+<span class="lineNum">     667 </span><span class="lineNoCov">          0 :             upper = middle - 1;</span>
+<span class="lineNum">     668 </span>            :     }
+<span class="lineNum">     669 </span><span class="lineNoCov">          0 :     return lower;</span>
+<span class="lineNum">     670 </span>            : }
+<span class="lineNum">     671 </span>            : 
+<span class="lineNum">     672 </span>            : /*
+<span class="lineNum">     673 </span>            :  * Get relative position of value in histogram bin in [0,1] range.
+<a name="674"><span class="lineNum">     674 </span>            :  */</a>
+<span class="lineNum">     675 </span>            : static float8
+<span class="lineNum">     676 </span><span class="lineNoCov">          0 : get_position(TypeCacheEntry *typcache, const RangeBound *value, const RangeBound *hist1,</span>
+<span class="lineNum">     677 </span>            :              const RangeBound *hist2)
+<span class="lineNum">     678 </span>            : {
+<span class="lineNum">     679 </span><span class="lineNoCov">          0 :     bool        has_subdiff = OidIsValid(typcache-&gt;rng_subdiff_finfo.fn_oid);</span>
+<span class="lineNum">     680 </span>            :     float8      position;
+<span class="lineNum">     681 </span>            : 
+<span class="lineNum">     682 </span><span class="lineNoCov">          0 :     if (!hist1-&gt;infinite &amp;&amp; !hist2-&gt;infinite)</span>
+<span class="lineNum">     683 </span>            :     {
+<span class="lineNum">     684 </span>            :         float8      bin_width;
+<span class="lineNum">     685 </span>            : 
+<span class="lineNum">     686 </span>            :         /*
+<span class="lineNum">     687 </span>            :          * Both bounds are finite. Assuming the subtype's comparison function
+<span class="lineNum">     688 </span>            :          * works sanely, the value must be finite, too, because it lies
+<span class="lineNum">     689 </span>            :          * somewhere between the bounds. If it doesn't, just return something.
+<span class="lineNum">     690 </span>            :          */
+<span class="lineNum">     691 </span><span class="lineNoCov">          0 :         if (value-&gt;infinite)</span>
+<span class="lineNum">     692 </span><span class="lineNoCov">          0 :             return 0.5;</span>
+<span class="lineNum">     693 </span>            : 
+<span class="lineNum">     694 </span>            :         /* Can't interpolate without subdiff function */
+<span class="lineNum">     695 </span><span class="lineNoCov">          0 :         if (!has_subdiff)</span>
+<span class="lineNum">     696 </span><span class="lineNoCov">          0 :             return 0.5;</span>
+<span class="lineNum">     697 </span>            : 
+<span class="lineNum">     698 </span>            :         /* Calculate relative position using subdiff function. */
+<span class="lineNum">     699 </span><span class="lineNoCov">          0 :         bin_width = DatumGetFloat8(FunctionCall2Coll(</span>
+<span class="lineNum">     700 </span>            :                                                      &amp;typcache-&gt;rng_subdiff_finfo,
+<span class="lineNum">     701 </span>            :                                                      typcache-&gt;rng_collation,
+<span class="lineNum">     702 </span>            :                                                      hist2-&gt;val,
+<span class="lineNum">     703 </span>            :                                                      hist1-&gt;val));
+<span class="lineNum">     704 </span><span class="lineNoCov">          0 :         if (bin_width &lt;= 0.0)</span>
+<span class="lineNum">     705 </span><span class="lineNoCov">          0 :             return 0.5;         /* zero width bin */</span>
+<span class="lineNum">     706 </span>            : 
+<span class="lineNum">     707 </span><span class="lineNoCov">          0 :         position = DatumGetFloat8(FunctionCall2Coll(</span>
+<span class="lineNum">     708 </span>            :                                                     &amp;typcache-&gt;rng_subdiff_finfo,
+<span class="lineNum">     709 </span>            :                                                     typcache-&gt;rng_collation,
+<span class="lineNum">     710 </span>            :                                                     value-&gt;val,
+<span class="lineNum">     711 </span>            :                                                     hist1-&gt;val))
+<span class="lineNum">     712 </span>            :             / bin_width;
+<span class="lineNum">     713 </span>            : 
+<span class="lineNum">     714 </span>            :         /* Relative position must be in [0,1] range */
+<span class="lineNum">     715 </span><span class="lineNoCov">          0 :         position = Max(position, 0.0);</span>
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :         position = Min(position, 1.0);</span>
+<span class="lineNum">     717 </span><span class="lineNoCov">          0 :         return position;</span>
+<span class="lineNum">     718 </span>            :     }
+<span class="lineNum">     719 </span><span class="lineNoCov">          0 :     else if (hist1-&gt;infinite &amp;&amp; !hist2-&gt;infinite)</span>
+<span class="lineNum">     720 </span>            :     {
+<span class="lineNum">     721 </span>            :         /*
+<span class="lineNum">     722 </span>            :          * Lower bin boundary is -infinite, upper is finite. If the value is
+<span class="lineNum">     723 </span>            :          * -infinite, return 0.0 to indicate it's equal to the lower bound.
+<span class="lineNum">     724 </span>            :          * Otherwise return 1.0 to indicate it's infinitely far from the lower
+<span class="lineNum">     725 </span>            :          * bound.
+<span class="lineNum">     726 </span>            :          */
+<span class="lineNum">     727 </span><span class="lineNoCov">          0 :         return ((value-&gt;infinite &amp;&amp; value-&gt;lower) ? 0.0 : 1.0);</span>
+<span class="lineNum">     728 </span>            :     }
+<span class="lineNum">     729 </span><span class="lineNoCov">          0 :     else if (!hist1-&gt;infinite &amp;&amp; hist2-&gt;infinite)</span>
+<span class="lineNum">     730 </span>            :     {
+<span class="lineNum">     731 </span>            :         /* same as above, but in reverse */
+<span class="lineNum">     732 </span><span class="lineNoCov">          0 :         return ((value-&gt;infinite &amp;&amp; !value-&gt;lower) ? 1.0 : 0.0);</span>
+<span class="lineNum">     733 </span>            :     }
+<span class="lineNum">     734 </span>            :     else
+<span class="lineNum">     735 </span>            :     {
+<span class="lineNum">     736 </span>            :         /*
+<span class="lineNum">     737 </span>            :          * If both bin boundaries are infinite, they should be equal to each
+<span class="lineNum">     738 </span>            :          * other, and the value should also be infinite and equal to both
+<span class="lineNum">     739 </span>            :          * bounds. (But don't Assert that, to avoid crashing if a user creates
+<span class="lineNum">     740 </span>            :          * a datatype with a broken comparison function).
+<span class="lineNum">     741 </span>            :          *
+<span class="lineNum">     742 </span>            :          * Assume the value to lie in the middle of the infinite bounds.
+<span class="lineNum">     743 </span>            :          */
+<span class="lineNum">     744 </span><span class="lineNoCov">          0 :         return 0.5;</span>
+<span class="lineNum">     745 </span>            :     }
+<span class="lineNum">     746 </span>            : }
+<span class="lineNum">     747 </span>            : 
+<span class="lineNum">     748 </span>            : 
+<span class="lineNum">     749 </span>            : /*
+<span class="lineNum">     750 </span>            :  * Get relative position of value in a length histogram bin in [0,1] range.
+<a name="751"><span class="lineNum">     751 </span>            :  */</a>
+<span class="lineNum">     752 </span>            : static double
+<span class="lineNum">     753 </span><span class="lineNoCov">          0 : get_len_position(double value, double hist1, double hist2)</span>
+<span class="lineNum">     754 </span>            : {
+<span class="lineNum">     755 </span><span class="lineNoCov">          0 :     if (!isinf(hist1) &amp;&amp; !isinf(hist2))</span>
+<span class="lineNum">     756 </span>            :     {
+<span class="lineNum">     757 </span>            :         /*
+<span class="lineNum">     758 </span>            :          * Both bounds are finite. The value should be finite too, because it
+<span class="lineNum">     759 </span>            :          * lies somewhere between the bounds. If it doesn't, just return
+<span class="lineNum">     760 </span>            :          * something.
+<span class="lineNum">     761 </span>            :          */
+<span class="lineNum">     762 </span><span class="lineNoCov">          0 :         if (isinf(value))</span>
+<span class="lineNum">     763 </span><span class="lineNoCov">          0 :             return 0.5;</span>
+<span class="lineNum">     764 </span>            : 
+<span class="lineNum">     765 </span><span class="lineNoCov">          0 :         return 1.0 - (hist2 - value) / (hist2 - hist1);</span>
+<span class="lineNum">     766 </span>            :     }
+<span class="lineNum">     767 </span><span class="lineNoCov">          0 :     else if (isinf(hist1) &amp;&amp; !isinf(hist2))</span>
+<span class="lineNum">     768 </span>            :     {
+<span class="lineNum">     769 </span>            :         /*
+<span class="lineNum">     770 </span>            :          * Lower bin boundary is -infinite, upper is finite. Return 1.0 to
+<span class="lineNum">     771 </span>            :          * indicate the value is infinitely far from the lower bound.
+<span class="lineNum">     772 </span>            :          */
+<span class="lineNum">     773 </span><span class="lineNoCov">          0 :         return 1.0;</span>
+<span class="lineNum">     774 </span>            :     }
+<span class="lineNum">     775 </span><span class="lineNoCov">          0 :     else if (isinf(hist1) &amp;&amp; isinf(hist2))</span>
+<span class="lineNum">     776 </span>            :     {
+<span class="lineNum">     777 </span>            :         /* same as above, but in reverse */
+<span class="lineNum">     778 </span><span class="lineNoCov">          0 :         return 0.0;</span>
+<span class="lineNum">     779 </span>            :     }
+<span class="lineNum">     780 </span>            :     else
+<span class="lineNum">     781 </span>            :     {
+<span class="lineNum">     782 </span>            :         /*
+<span class="lineNum">     783 </span>            :          * If both bin boundaries are infinite, they should be equal to each
+<span class="lineNum">     784 </span>            :          * other, and the value should also be infinite and equal to both
+<span class="lineNum">     785 </span>            :          * bounds. (But don't Assert that, to avoid crashing unnecessarily if
+<span class="lineNum">     786 </span>            :          * the caller messes up)
+<span class="lineNum">     787 </span>            :          *
+<span class="lineNum">     788 </span>            :          * Assume the value to lie in the middle of the infinite bounds.
+<span class="lineNum">     789 </span>            :          */
+<span class="lineNum">     790 </span><span class="lineNoCov">          0 :         return 0.5;</span>
+<span class="lineNum">     791 </span>            :     }
+<span class="lineNum">     792 </span>            : }
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span>            : /*
+<span class="lineNum">     795 </span>            :  * Measure distance between two range bounds.
+<a name="796"><span class="lineNum">     796 </span>            :  */</a>
+<span class="lineNum">     797 </span>            : static float8
+<span class="lineNum">     798 </span><span class="lineNoCov">          0 : get_distance(TypeCacheEntry *typcache, const RangeBound *bound1, const RangeBound *bound2)</span>
+<span class="lineNum">     799 </span>            : {
+<span class="lineNum">     800 </span><span class="lineNoCov">          0 :     bool        has_subdiff = OidIsValid(typcache-&gt;rng_subdiff_finfo.fn_oid);</span>
+<span class="lineNum">     801 </span>            : 
+<span class="lineNum">     802 </span><span class="lineNoCov">          0 :     if (!bound1-&gt;infinite &amp;&amp; !bound2-&gt;infinite)</span>
+<span class="lineNum">     803 </span>            :     {
+<span class="lineNum">     804 </span>            :         /*
+<span class="lineNum">     805 </span>            :          * No bounds are infinite, use subdiff function or return default
+<span class="lineNum">     806 </span>            :          * value of 1.0 if no subdiff is available.
+<span class="lineNum">     807 </span>            :          */
+<span class="lineNum">     808 </span><span class="lineNoCov">          0 :         if (has_subdiff)</span>
+<span class="lineNum">     809 </span><span class="lineNoCov">          0 :             return</span>
+<span class="lineNum">     810 </span><span class="lineNoCov">          0 :                 DatumGetFloat8(FunctionCall2Coll(&amp;typcache-&gt;rng_subdiff_finfo,</span>
+<span class="lineNum">     811 </span>            :                                                  typcache-&gt;rng_collation,
+<span class="lineNum">     812 </span>            :                                                  bound2-&gt;val,
+<span class="lineNum">     813 </span>            :                                                  bound1-&gt;val));
+<span class="lineNum">     814 </span>            :         else
+<span class="lineNum">     815 </span><span class="lineNoCov">          0 :             return 1.0;</span>
+<span class="lineNum">     816 </span>            :     }
+<span class="lineNum">     817 </span><span class="lineNoCov">          0 :     else if (bound1-&gt;infinite &amp;&amp; bound2-&gt;infinite)</span>
+<span class="lineNum">     818 </span>            :     {
+<span class="lineNum">     819 </span>            :         /* Both bounds are infinite */
+<span class="lineNum">     820 </span><span class="lineNoCov">          0 :         if (bound1-&gt;lower == bound2-&gt;lower)</span>
+<span class="lineNum">     821 </span><span class="lineNoCov">          0 :             return 0.0;</span>
+<span class="lineNum">     822 </span>            :         else
+<span class="lineNum">     823 </span><span class="lineNoCov">          0 :             return get_float8_infinity();</span>
+<span class="lineNum">     824 </span>            :     }
+<span class="lineNum">     825 </span>            :     else
+<span class="lineNum">     826 </span>            :     {
+<span class="lineNum">     827 </span>            :         /* One bound is infinite, another is not */
+<span class="lineNum">     828 </span><span class="lineNoCov">          0 :         return get_float8_infinity();</span>
+<span class="lineNum">     829 </span>            :     }
+<span class="lineNum">     830 </span>            : }
+<span class="lineNum">     831 </span>            : 
+<span class="lineNum">     832 </span>            : /*
+<span class="lineNum">     833 </span>            :  * Calculate the average of function P(x), in the interval [length1, length2],
+<span class="lineNum">     834 </span>            :  * where P(x) is the fraction of tuples with length &lt; x (or length &lt;= x if
+<span class="lineNum">     835 </span>            :  * 'equal' is true).
+<a name="836"><span class="lineNum">     836 </span>            :  */</a>
+<span class="lineNum">     837 </span>            : static double
+<span class="lineNum">     838 </span><span class="lineNoCov">          0 : calc_length_hist_frac(Datum *length_hist_values, int length_hist_nvalues,</span>
+<span class="lineNum">     839 </span>            :                       double length1, double length2, bool equal)
+<span class="lineNum">     840 </span>            : {
+<span class="lineNum">     841 </span>            :     double      frac;
+<span class="lineNum">     842 </span>            :     double      A,
+<span class="lineNum">     843 </span>            :                 B,
+<span class="lineNum">     844 </span>            :                 PA,
+<span class="lineNum">     845 </span>            :                 PB;
+<span class="lineNum">     846 </span>            :     double      pos;
+<span class="lineNum">     847 </span>            :     int         i;
+<span class="lineNum">     848 </span>            :     double      area;
+<span class="lineNum">     849 </span>            : 
+<span class="lineNum">     850 </span><span class="lineNoCov">          0 :     Assert(length2 &gt;= length1);</span>
+<span class="lineNum">     851 </span>            : 
+<span class="lineNum">     852 </span><span class="lineNoCov">          0 :     if (length2 &lt; 0.0)</span>
+<span class="lineNum">     853 </span><span class="lineNoCov">          0 :         return 0.0;             /* shouldn't happen, but doesn't hurt to check */</span>
+<span class="lineNum">     854 </span>            : 
+<span class="lineNum">     855 </span>            :     /* All lengths in the table are &lt;= infinite. */
+<span class="lineNum">     856 </span><span class="lineNoCov">          0 :     if (isinf(length2) &amp;&amp; equal)</span>
+<span class="lineNum">     857 </span><span class="lineNoCov">          0 :         return 1.0;</span>
+<span class="lineNum">     858 </span>            : 
+<span class="lineNum">     859 </span>            :     /*----------
+<span class="lineNum">     860 </span>            :      * The average of a function between A and B can be calculated by the
+<span class="lineNum">     861 </span>            :      * formula:
+<span class="lineNum">     862 </span>            :      *
+<span class="lineNum">     863 </span>            :      *          B
+<span class="lineNum">     864 </span>            :      *    1     /
+<span class="lineNum">     865 </span>            :      * -------  | P(x)dx
+<span class="lineNum">     866 </span>            :      *  B - A   /
+<span class="lineNum">     867 </span>            :      *          A
+<span class="lineNum">     868 </span>            :      *
+<span class="lineNum">     869 </span>            :      * The geometrical interpretation of the integral is the area under the
+<span class="lineNum">     870 </span>            :      * graph of P(x). P(x) is defined by the length histogram. We calculate
+<span class="lineNum">     871 </span>            :      * the area in a piecewise fashion, iterating through the length histogram
+<span class="lineNum">     872 </span>            :      * bins. Each bin is a trapezoid:
+<span class="lineNum">     873 </span>            :      *
+<span class="lineNum">     874 </span>            :      *       P(x2)
+<span class="lineNum">     875 </span>            :      *        /|
+<span class="lineNum">     876 </span>            :      *       / |
+<span class="lineNum">     877 </span>            :      * P(x1)/  |
+<span class="lineNum">     878 </span>            :      *     |   |
+<span class="lineNum">     879 </span>            :      *     |   |
+<span class="lineNum">     880 </span>            :      *  ---+---+--
+<span class="lineNum">     881 </span>            :      *     x1  x2
+<span class="lineNum">     882 </span>            :      *
+<span class="lineNum">     883 </span>            :      * where x1 and x2 are the boundaries of the current histogram, and P(x1)
+<span class="lineNum">     884 </span>            :      * and P(x1) are the cumulative fraction of tuples at the boundaries.
+<span class="lineNum">     885 </span>            :      *
+<span class="lineNum">     886 </span>            :      * The area of each trapezoid is 1/2 * (P(x2) + P(x1)) * (x2 - x1)
+<span class="lineNum">     887 </span>            :      *
+<span class="lineNum">     888 </span>            :      * The first bin contains the lower bound passed by the caller, so we
+<span class="lineNum">     889 </span>            :      * use linear interpolation between the previous and next histogram bin
+<span class="lineNum">     890 </span>            :      * boundary to calculate P(x1). Likewise for the last bin: we use linear
+<span class="lineNum">     891 </span>            :      * interpolation to calculate P(x2). For the bins in between, x1 and x2
+<span class="lineNum">     892 </span>            :      * lie on histogram bin boundaries, so P(x1) and P(x2) are simply:
+<span class="lineNum">     893 </span>            :      * P(x1) =    (bin index) / (number of bins)
+<span class="lineNum">     894 </span>            :      * P(x2) = (bin index + 1 / (number of bins)
+<span class="lineNum">     895 </span>            :      */
+<span class="lineNum">     896 </span>            : 
+<span class="lineNum">     897 </span>            :     /* First bin, the one that contains lower bound */
+<span class="lineNum">     898 </span><span class="lineNoCov">          0 :     i = length_hist_bsearch(length_hist_values, length_hist_nvalues, length1, equal);</span>
+<span class="lineNum">     899 </span><span class="lineNoCov">          0 :     if (i &gt;= length_hist_nvalues - 1)</span>
+<span class="lineNum">     900 </span><span class="lineNoCov">          0 :         return 1.0;</span>
+<span class="lineNum">     901 </span>            : 
+<span class="lineNum">     902 </span><span class="lineNoCov">          0 :     if (i &lt; 0)</span>
+<span class="lineNum">     903 </span>            :     {
+<span class="lineNum">     904 </span><span class="lineNoCov">          0 :         i = 0;</span>
+<span class="lineNum">     905 </span><span class="lineNoCov">          0 :         pos = 0.0;</span>
+<span class="lineNum">     906 </span>            :     }
+<span class="lineNum">     907 </span>            :     else
+<span class="lineNum">     908 </span>            :     {
+<span class="lineNum">     909 </span>            :         /* interpolate length1's position in the bin */
+<span class="lineNum">     910 </span><span class="lineNoCov">          0 :         pos = get_len_position(length1,</span>
+<span class="lineNum">     911 </span><span class="lineNoCov">          0 :                                DatumGetFloat8(length_hist_values[i]),</span>
+<span class="lineNum">     912 </span><span class="lineNoCov">          0 :                                DatumGetFloat8(length_hist_values[i + 1]));</span>
+<span class="lineNum">     913 </span>            :     }
+<span class="lineNum">     914 </span><span class="lineNoCov">          0 :     PB = (((double) i) + pos) / (double) (length_hist_nvalues - 1);</span>
+<span class="lineNum">     915 </span><span class="lineNoCov">          0 :     B = length1;</span>
+<span class="lineNum">     916 </span>            : 
+<span class="lineNum">     917 </span>            :     /*
+<span class="lineNum">     918 </span>            :      * In the degenerate case that length1 == length2, simply return
+<span class="lineNum">     919 </span>            :      * P(length1). This is not merely an optimization: if length1 == length2,
+<span class="lineNum">     920 </span>            :      * we'd divide by zero later on.
+<span class="lineNum">     921 </span>            :      */
+<span class="lineNum">     922 </span><span class="lineNoCov">          0 :     if (length2 == length1)</span>
+<span class="lineNum">     923 </span><span class="lineNoCov">          0 :         return PB;</span>
+<span class="lineNum">     924 </span>            : 
+<span class="lineNum">     925 </span>            :     /*
+<span class="lineNum">     926 </span>            :      * Loop through all the bins, until we hit the last bin, the one that
+<span class="lineNum">     927 </span>            :      * contains the upper bound. (if lower and upper bounds are in the same
+<span class="lineNum">     928 </span>            :      * bin, this falls out immediately)
+<span class="lineNum">     929 </span>            :      */
+<span class="lineNum">     930 </span><span class="lineNoCov">          0 :     area = 0.0;</span>
+<span class="lineNum">     931 </span><span class="lineNoCov">          0 :     for (; i &lt; length_hist_nvalues - 1; i++)</span>
+<span class="lineNum">     932 </span>            :     {
+<span class="lineNum">     933 </span><span class="lineNoCov">          0 :         double      bin_upper = DatumGetFloat8(length_hist_values[i + 1]);</span>
+<span class="lineNum">     934 </span>            : 
+<span class="lineNum">     935 </span>            :         /* check if we've reached the last bin */
+<span class="lineNum">     936 </span><span class="lineNoCov">          0 :         if (!(bin_upper &lt; length2 || (equal &amp;&amp; bin_upper &lt;= length2)))</span>
+<span class="lineNum">     937 </span>            :             break;
+<span class="lineNum">     938 </span>            : 
+<span class="lineNum">     939 </span>            :         /* the upper bound of previous bin is the lower bound of this bin */
+<span class="lineNum">     940 </span><span class="lineNoCov">          0 :         A = B;</span>
+<span class="lineNum">     941 </span><span class="lineNoCov">          0 :         PA = PB;</span>
+<span class="lineNum">     942 </span>            : 
+<span class="lineNum">     943 </span><span class="lineNoCov">          0 :         B = bin_upper;</span>
+<span class="lineNum">     944 </span><span class="lineNoCov">          0 :         PB = (double) i / (double) (length_hist_nvalues - 1);</span>
+<span class="lineNum">     945 </span>            : 
+<span class="lineNum">     946 </span>            :         /*
+<span class="lineNum">     947 </span>            :          * Add the area of this trapezoid to the total. The point of the
+<span class="lineNum">     948 </span>            :          * if-check is to avoid NaN, in the corner case that PA == PB == 0,
+<span class="lineNum">     949 </span>            :          * and B - A == Inf. The area of a zero-height trapezoid (PA == PB ==
+<span class="lineNum">     950 </span>            :          * 0) is zero, regardless of the width (B - A).
+<span class="lineNum">     951 </span>            :          */
+<span class="lineNum">     952 </span><span class="lineNoCov">          0 :         if (PA &gt; 0 || PB &gt; 0)</span>
+<span class="lineNum">     953 </span><span class="lineNoCov">          0 :             area += 0.5 * (PB + PA) * (B - A);</span>
+<span class="lineNum">     954 </span>            :     }
+<span class="lineNum">     955 </span>            : 
+<span class="lineNum">     956 </span>            :     /* Last bin */
+<span class="lineNum">     957 </span><span class="lineNoCov">          0 :     A = B;</span>
+<span class="lineNum">     958 </span><span class="lineNoCov">          0 :     PA = PB;</span>
+<span class="lineNum">     959 </span>            : 
+<span class="lineNum">     960 </span><span class="lineNoCov">          0 :     B = length2;                /* last bin ends at the query upper bound */</span>
+<span class="lineNum">     961 </span><span class="lineNoCov">          0 :     if (i &gt;= length_hist_nvalues - 1)</span>
+<span class="lineNum">     962 </span><span class="lineNoCov">          0 :         pos = 0.0;</span>
+<span class="lineNum">     963 </span>            :     else
+<span class="lineNum">     964 </span>            :     {
+<span class="lineNum">     965 </span><span class="lineNoCov">          0 :         if (DatumGetFloat8(length_hist_values[i]) == DatumGetFloat8(length_hist_values[i + 1]))</span>
+<span class="lineNum">     966 </span><span class="lineNoCov">          0 :             pos = 0.0;</span>
+<span class="lineNum">     967 </span>            :         else
+<span class="lineNum">     968 </span><span class="lineNoCov">          0 :             pos = get_len_position(length2, DatumGetFloat8(length_hist_values[i]), DatumGetFloat8(length_hist_values[i + 1]));</span>
+<span class="lineNum">     969 </span>            :     }
+<span class="lineNum">     970 </span><span class="lineNoCov">          0 :     PB = (((double) i) + pos) / (double) (length_hist_nvalues - 1);</span>
+<span class="lineNum">     971 </span>            : 
+<span class="lineNum">     972 </span><span class="lineNoCov">          0 :     if (PA &gt; 0 || PB &gt; 0)</span>
+<span class="lineNum">     973 </span><span class="lineNoCov">          0 :         area += 0.5 * (PB + PA) * (B - A);</span>
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span>            :     /*
+<span class="lineNum">     976 </span>            :      * Ok, we have calculated the area, ie. the integral. Divide by width to
+<span class="lineNum">     977 </span>            :      * get the requested average.
+<span class="lineNum">     978 </span>            :      *
+<span class="lineNum">     979 </span>            :      * Avoid NaN arising from infinite / infinite. This happens at least if
+<span class="lineNum">     980 </span>            :      * length2 is infinite. It's not clear what the correct value would be in
+<span class="lineNum">     981 </span>            :      * that case, so 0.5 seems as good as any value.
+<span class="lineNum">     982 </span>            :      */
+<span class="lineNum">     983 </span><span class="lineNoCov">          0 :     if (isinf(area) &amp;&amp; isinf(length2))</span>
+<span class="lineNum">     984 </span><span class="lineNoCov">          0 :         frac = 0.5;</span>
+<span class="lineNum">     985 </span>            :     else
+<span class="lineNum">     986 </span><span class="lineNoCov">          0 :         frac = area / (length2 - length1);</span>
+<span class="lineNum">     987 </span>            : 
+<span class="lineNum">     988 </span><span class="lineNoCov">          0 :     return frac;</span>
+<span class="lineNum">     989 </span>            : }
+<span class="lineNum">     990 </span>            : 
+<span class="lineNum">     991 </span>            : /*
+<span class="lineNum">     992 </span>            :  * Calculate selectivity of &quot;var &lt;@ const&quot; operator, ie. estimate the fraction
+<span class="lineNum">     993 </span>            :  * of ranges that fall within the constant lower and upper bounds. This uses
+<span class="lineNum">     994 </span>            :  * the histograms of range lower bounds and range lengths, on the assumption
+<span class="lineNum">     995 </span>            :  * that the range lengths are independent of the lower bounds.
+<span class="lineNum">     996 </span>            :  *
+<span class="lineNum">     997 </span>            :  * The caller has already checked that constant lower and upper bounds are
+<span class="lineNum">     998 </span>            :  * finite.
+<a name="999"><span class="lineNum">     999 </span>            :  */</a>
+<span class="lineNum">    1000 </span>            : static double
+<span class="lineNum">    1001 </span><span class="lineNoCov">          0 : calc_hist_selectivity_contained(TypeCacheEntry *typcache,</span>
+<span class="lineNum">    1002 </span>            :                                 const RangeBound *lower, RangeBound *upper,
+<span class="lineNum">    1003 </span>            :                                 const RangeBound *hist_lower, int hist_nvalues,
+<span class="lineNum">    1004 </span>            :                                 Datum *length_hist_values, int length_hist_nvalues)
+<span class="lineNum">    1005 </span>            : {
+<span class="lineNum">    1006 </span>            :     int         i,
+<span class="lineNum">    1007 </span>            :                 upper_index;
+<span class="lineNum">    1008 </span>            :     float8      prev_dist;
+<span class="lineNum">    1009 </span>            :     double      bin_width;
+<span class="lineNum">    1010 </span>            :     double      upper_bin_width;
+<span class="lineNum">    1011 </span>            :     double      sum_frac;
+<span class="lineNum">    1012 </span>            : 
+<span class="lineNum">    1013 </span>            :     /*
+<span class="lineNum">    1014 </span>            :      * Begin by finding the bin containing the upper bound, in the lower bound
+<span class="lineNum">    1015 </span>            :      * histogram. Any range with a lower bound &gt; constant upper bound can't
+<span class="lineNum">    1016 </span>            :      * match, ie. there are no matches in bins greater than upper_index.
+<span class="lineNum">    1017 </span>            :      */
+<span class="lineNum">    1018 </span><span class="lineNoCov">          0 :     upper-&gt;inclusive = !upper-&gt;inclusive;</span>
+<span class="lineNum">    1019 </span><span class="lineNoCov">          0 :     upper-&gt;lower = true;</span>
+<span class="lineNum">    1020 </span><span class="lineNoCov">          0 :     upper_index = rbound_bsearch(typcache, upper, hist_lower, hist_nvalues,</span>
+<span class="lineNum">    1021 </span>            :                                  false);
+<span class="lineNum">    1022 </span>            : 
+<span class="lineNum">    1023 </span>            :     /*
+<span class="lineNum">    1024 </span>            :      * Calculate upper_bin_width, ie. the fraction of the (upper_index,
+<span class="lineNum">    1025 </span>            :      * upper_index + 1) bin which is greater than upper bound of query range
+<span class="lineNum">    1026 </span>            :      * using linear interpolation of subdiff function.
+<span class="lineNum">    1027 </span>            :      */
+<span class="lineNum">    1028 </span><span class="lineNoCov">          0 :     if (upper_index &gt;= 0 &amp;&amp; upper_index &lt; hist_nvalues - 1)</span>
+<span class="lineNum">    1029 </span><span class="lineNoCov">          0 :         upper_bin_width = get_position(typcache, upper,</span>
+<span class="lineNum">    1030 </span><span class="lineNoCov">          0 :                                        &amp;hist_lower[upper_index],</span>
+<span class="lineNum">    1031 </span><span class="lineNoCov">          0 :                                        &amp;hist_lower[upper_index + 1]);</span>
+<span class="lineNum">    1032 </span>            :     else
+<span class="lineNum">    1033 </span><span class="lineNoCov">          0 :         upper_bin_width = 0.0;</span>
+<span class="lineNum">    1034 </span>            : 
+<span class="lineNum">    1035 </span>            :     /*
+<span class="lineNum">    1036 </span>            :      * In the loop, dist and prev_dist are the distance of the &quot;current&quot; bin's
+<span class="lineNum">    1037 </span>            :      * lower and upper bounds from the constant upper bound.
+<span class="lineNum">    1038 </span>            :      *
+<span class="lineNum">    1039 </span>            :      * bin_width represents the width of the current bin. Normally it is 1.0,
+<span class="lineNum">    1040 </span>            :      * meaning a full width bin, but can be less in the corner cases: start
+<span class="lineNum">    1041 </span>            :      * and end of the loop. We start with bin_width = upper_bin_width, because
+<span class="lineNum">    1042 </span>            :      * we begin at the bin containing the upper bound.
+<span class="lineNum">    1043 </span>            :      */
+<span class="lineNum">    1044 </span><span class="lineNoCov">          0 :     prev_dist = 0.0;</span>
+<span class="lineNum">    1045 </span><span class="lineNoCov">          0 :     bin_width = upper_bin_width;</span>
+<span class="lineNum">    1046 </span>            : 
+<span class="lineNum">    1047 </span><span class="lineNoCov">          0 :     sum_frac = 0.0;</span>
+<span class="lineNum">    1048 </span><span class="lineNoCov">          0 :     for (i = upper_index; i &gt;= 0; i--)</span>
+<span class="lineNum">    1049 </span>            :     {
+<span class="lineNum">    1050 </span>            :         double      dist;
+<span class="lineNum">    1051 </span>            :         double      length_hist_frac;
+<span class="lineNum">    1052 </span><span class="lineNoCov">          0 :         bool        final_bin = false;</span>
+<span class="lineNum">    1053 </span>            : 
+<span class="lineNum">    1054 </span>            :         /*
+<span class="lineNum">    1055 </span>            :          * dist -- distance from upper bound of query range to lower bound of
+<span class="lineNum">    1056 </span>            :          * the current bin in the lower bound histogram. Or to the lower bound
+<span class="lineNum">    1057 </span>            :          * of the constant range, if this is the final bin, containing the
+<span class="lineNum">    1058 </span>            :          * constant lower bound.
+<span class="lineNum">    1059 </span>            :          */
+<span class="lineNum">    1060 </span><span class="lineNoCov">          0 :         if (range_cmp_bounds(typcache, &amp;hist_lower[i], lower) &lt; 0)</span>
+<span class="lineNum">    1061 </span>            :         {
+<span class="lineNum">    1062 </span><span class="lineNoCov">          0 :             dist = get_distance(typcache, lower, upper);</span>
+<span class="lineNum">    1063 </span>            : 
+<span class="lineNum">    1064 </span>            :             /*
+<span class="lineNum">    1065 </span>            :              * Subtract from bin_width the portion of this bin that we want to
+<span class="lineNum">    1066 </span>            :              * ignore.
+<span class="lineNum">    1067 </span>            :              */
+<span class="lineNum">    1068 </span><span class="lineNoCov">          0 :             bin_width -= get_position(typcache, lower, &amp;hist_lower[i],</span>
+<span class="lineNum">    1069 </span><span class="lineNoCov">          0 :                                       &amp;hist_lower[i + 1]);</span>
+<span class="lineNum">    1070 </span><span class="lineNoCov">          0 :             if (bin_width &lt; 0.0)</span>
+<span class="lineNum">    1071 </span><span class="lineNoCov">          0 :                 bin_width = 0.0;</span>
+<span class="lineNum">    1072 </span><span class="lineNoCov">          0 :             final_bin = true;</span>
+<span class="lineNum">    1073 </span>            :         }
+<span class="lineNum">    1074 </span>            :         else
+<span class="lineNum">    1075 </span><span class="lineNoCov">          0 :             dist = get_distance(typcache, &amp;hist_lower[i], upper);</span>
+<span class="lineNum">    1076 </span>            : 
+<span class="lineNum">    1077 </span>            :         /*
+<span class="lineNum">    1078 </span>            :          * Estimate the fraction of tuples in this bin that are narrow enough
+<span class="lineNum">    1079 </span>            :          * to not exceed the distance to the upper bound of the query range.
+<span class="lineNum">    1080 </span>            :          */
+<span class="lineNum">    1081 </span><span class="lineNoCov">          0 :         length_hist_frac = calc_length_hist_frac(length_hist_values,</span>
+<span class="lineNum">    1082 </span>            :                                                  length_hist_nvalues,
+<span class="lineNum">    1083 </span>            :                                                  prev_dist, dist, true);
+<span class="lineNum">    1084 </span>            : 
+<span class="lineNum">    1085 </span>            :         /*
+<span class="lineNum">    1086 </span>            :          * Add the fraction of tuples in this bin, with a suitable length, to
+<span class="lineNum">    1087 </span>            :          * the total.
+<span class="lineNum">    1088 </span>            :          */
+<span class="lineNum">    1089 </span><span class="lineNoCov">          0 :         sum_frac += length_hist_frac * bin_width / (double) (hist_nvalues - 1);</span>
+<span class="lineNum">    1090 </span>            : 
+<span class="lineNum">    1091 </span><span class="lineNoCov">          0 :         if (final_bin)</span>
+<span class="lineNum">    1092 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">    1093 </span>            : 
+<span class="lineNum">    1094 </span><span class="lineNoCov">          0 :         bin_width = 1.0;</span>
+<span class="lineNum">    1095 </span><span class="lineNoCov">          0 :         prev_dist = dist;</span>
+<span class="lineNum">    1096 </span>            :     }
+<span class="lineNum">    1097 </span>            : 
+<span class="lineNum">    1098 </span><span class="lineNoCov">          0 :     return sum_frac;</span>
+<span class="lineNum">    1099 </span>            : }
+<span class="lineNum">    1100 </span>            : 
+<span class="lineNum">    1101 </span>            : /*
+<span class="lineNum">    1102 </span>            :  * Calculate selectivity of &quot;var @&gt; const&quot; operator, ie. estimate the fraction
+<span class="lineNum">    1103 </span>            :  * of ranges that contain the constant lower and upper bounds. This uses
+<span class="lineNum">    1104 </span>            :  * the histograms of range lower bounds and range lengths, on the assumption
+<span class="lineNum">    1105 </span>            :  * that the range lengths are independent of the lower bounds.
+<span class="lineNum">    1106 </span>            :  *
+<span class="lineNum">    1107 </span>            :  * Note, this is &quot;var @&gt; const&quot;, ie. estimate the fraction of ranges that
+<span class="lineNum">    1108 </span>            :  * contain the constant lower and upper bounds.
+<a name="1109"><span class="lineNum">    1109 </span>            :  */</a>
+<span class="lineNum">    1110 </span>            : static double
+<span class="lineNum">    1111 </span><span class="lineNoCov">          0 : calc_hist_selectivity_contains(TypeCacheEntry *typcache,</span>
+<span class="lineNum">    1112 </span>            :                                const RangeBound *lower, const RangeBound *upper,
+<span class="lineNum">    1113 </span>            :                                const RangeBound *hist_lower, int hist_nvalues,
+<span class="lineNum">    1114 </span>            :                                Datum *length_hist_values, int length_hist_nvalues)
+<span class="lineNum">    1115 </span>            : {
+<span class="lineNum">    1116 </span>            :     int         i,
+<span class="lineNum">    1117 </span>            :                 lower_index;
+<span class="lineNum">    1118 </span>            :     double      bin_width,
+<span class="lineNum">    1119 </span>            :                 lower_bin_width;
+<span class="lineNum">    1120 </span>            :     double      sum_frac;
+<span class="lineNum">    1121 </span>            :     float8      prev_dist;
+<span class="lineNum">    1122 </span>            : 
+<span class="lineNum">    1123 </span>            :     /* Find the bin containing the lower bound of query range. */
+<span class="lineNum">    1124 </span><span class="lineNoCov">          0 :     lower_index = rbound_bsearch(typcache, lower, hist_lower, hist_nvalues,</span>
+<span class="lineNum">    1125 </span>            :                                  true);
+<span class="lineNum">    1126 </span>            : 
+<span class="lineNum">    1127 </span>            :     /*
+<span class="lineNum">    1128 </span>            :      * Calculate lower_bin_width, ie. the fraction of the of (lower_index,
+<span class="lineNum">    1129 </span>            :      * lower_index + 1) bin which is greater than lower bound of query range
+<span class="lineNum">    1130 </span>            :      * using linear interpolation of subdiff function.
+<span class="lineNum">    1131 </span>            :      */
+<span class="lineNum">    1132 </span><span class="lineNoCov">          0 :     if (lower_index &gt;= 0 &amp;&amp; lower_index &lt; hist_nvalues - 1)</span>
+<span class="lineNum">    1133 </span><span class="lineNoCov">          0 :         lower_bin_width = get_position(typcache, lower, &amp;hist_lower[lower_index],</span>
+<span class="lineNum">    1134 </span><span class="lineNoCov">          0 :                                        &amp;hist_lower[lower_index + 1]);</span>
+<span class="lineNum">    1135 </span>            :     else
+<span class="lineNum">    1136 </span><span class="lineNoCov">          0 :         lower_bin_width = 0.0;</span>
+<span class="lineNum">    1137 </span>            : 
+<span class="lineNum">    1138 </span>            :     /*
+<span class="lineNum">    1139 </span>            :      * Loop through all the lower bound bins, smaller than the query lower
+<span class="lineNum">    1140 </span>            :      * bound. In the loop, dist and prev_dist are the distance of the
+<span class="lineNum">    1141 </span>            :      * &quot;current&quot; bin's lower and upper bounds from the constant upper bound.
+<span class="lineNum">    1142 </span>            :      * We begin from query lower bound, and walk backwards, so the first bin's
+<span class="lineNum">    1143 </span>            :      * upper bound is the query lower bound, and its distance to the query
+<span class="lineNum">    1144 </span>            :      * upper bound is the length of the query range.
+<span class="lineNum">    1145 </span>            :      *
+<span class="lineNum">    1146 </span>            :      * bin_width represents the width of the current bin. Normally it is 1.0,
+<span class="lineNum">    1147 </span>            :      * meaning a full width bin, except for the first bin, which is only
+<span class="lineNum">    1148 </span>            :      * counted up to the constant lower bound.
+<span class="lineNum">    1149 </span>            :      */
+<span class="lineNum">    1150 </span><span class="lineNoCov">          0 :     prev_dist = get_distance(typcache, lower, upper);</span>
+<span class="lineNum">    1151 </span><span class="lineNoCov">          0 :     sum_frac = 0.0;</span>
+<span class="lineNum">    1152 </span><span class="lineNoCov">          0 :     bin_width = lower_bin_width;</span>
+<span class="lineNum">    1153 </span><span class="lineNoCov">          0 :     for (i = lower_index; i &gt;= 0; i--)</span>
+<span class="lineNum">    1154 </span>            :     {
+<span class="lineNum">    1155 </span>            :         float8      dist;
+<span class="lineNum">    1156 </span>            :         double      length_hist_frac;
+<span class="lineNum">    1157 </span>            : 
+<span class="lineNum">    1158 </span>            :         /*
+<span class="lineNum">    1159 </span>            :          * dist -- distance from upper bound of query range to current value
+<span class="lineNum">    1160 </span>            :          * of lower bound histogram or lower bound of query range (if we've
+<span class="lineNum">    1161 </span>            :          * reach it).
+<span class="lineNum">    1162 </span>            :          */
+<span class="lineNum">    1163 </span><span class="lineNoCov">          0 :         dist = get_distance(typcache, &amp;hist_lower[i], upper);</span>
+<span class="lineNum">    1164 </span>            : 
+<span class="lineNum">    1165 </span>            :         /*
+<span class="lineNum">    1166 </span>            :          * Get average fraction of length histogram which covers intervals
+<span class="lineNum">    1167 </span>            :          * longer than (or equal to) distance to upper bound of query range.
+<span class="lineNum">    1168 </span>            :          */
+<span class="lineNum">    1169 </span><span class="lineNoCov">          0 :         length_hist_frac =</span>
+<span class="lineNum">    1170 </span><span class="lineNoCov">          0 :             1.0 - calc_length_hist_frac(length_hist_values,</span>
+<span class="lineNum">    1171 </span>            :                                         length_hist_nvalues,
+<span class="lineNum">    1172 </span>            :                                         prev_dist, dist, false);
+<span class="lineNum">    1173 </span>            : 
+<span class="lineNum">    1174 </span><span class="lineNoCov">          0 :         sum_frac += length_hist_frac * bin_width / (double) (hist_nvalues - 1);</span>
+<span class="lineNum">    1175 </span>            : 
+<span class="lineNum">    1176 </span><span class="lineNoCov">          0 :         bin_width = 1.0;</span>
+<span class="lineNum">    1177 </span><span class="lineNoCov">          0 :         prev_dist = dist;</span>
+<span class="lineNum">    1178 </span>            :     }
+<span class="lineNum">    1179 </span>            : 
+<span class="lineNum">    1180 </span><span class="lineNoCov">          0 :     return sum_frac;</span>
+<span class="lineNum">    1181 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

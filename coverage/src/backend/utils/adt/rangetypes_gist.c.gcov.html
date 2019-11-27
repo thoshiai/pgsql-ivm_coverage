@@ -1,0 +1,1615 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/utils/adt/rangetypes_gist.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/utils/adt</a> - rangetypes_gist.c<span style="font-size: 80%;"> (source / <a href="rangetypes_gist.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">370</td>
+            <td class="headerCovTableEntry">463</td>
+            <td class="headerCovTableEntryMed">79.9 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">17</td>
+            <td class="headerCovTableEntry">19</td>
+            <td class="headerCovTableEntryMed">89.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * rangetypes_gist.c
+<span class="lineNum">       4 </span>            :  *    GiST support for range types.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/utils/adt/rangetypes_gist.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;access/gist.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;access/stratnum.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;utils/datum.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;utils/float.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;utils/fmgrprotos.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;utils/rangetypes.h&quot;
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : /*
+<span class="lineNum">      25 </span>            :  * Range class properties used to segregate different classes of ranges in
+<span class="lineNum">      26 </span>            :  * GiST.  Each unique combination of properties is a class.  CLS_EMPTY cannot
+<span class="lineNum">      27 </span>            :  * be combined with anything else.
+<span class="lineNum">      28 </span>            :  */
+<span class="lineNum">      29 </span>            : #define CLS_NORMAL          0   /* Ordinary finite range (no bits set) */
+<span class="lineNum">      30 </span>            : #define CLS_LOWER_INF       1   /* Lower bound is infinity */
+<span class="lineNum">      31 </span>            : #define CLS_UPPER_INF       2   /* Upper bound is infinity */
+<span class="lineNum">      32 </span>            : #define CLS_CONTAIN_EMPTY   4   /* Contains underlying empty ranges */
+<span class="lineNum">      33 </span>            : #define CLS_EMPTY           8   /* Special class for empty ranges */
+<span class="lineNum">      34 </span>            : 
+<span class="lineNum">      35 </span>            : #define CLS_COUNT           9   /* # of classes; includes all combinations of
+<span class="lineNum">      36 </span>            :                                  * properties. CLS_EMPTY doesn't combine with
+<span class="lineNum">      37 </span>            :                                  * anything else, so it's only 2^3 + 1. */
+<span class="lineNum">      38 </span>            : 
+<span class="lineNum">      39 </span>            : /*
+<span class="lineNum">      40 </span>            :  * Minimum accepted ratio of split for items of the same class.  If the items
+<span class="lineNum">      41 </span>            :  * are of different classes, we will separate along those lines regardless of
+<span class="lineNum">      42 </span>            :  * the ratio.
+<span class="lineNum">      43 </span>            :  */
+<span class="lineNum">      44 </span>            : #define LIMIT_RATIO  0.3
+<span class="lineNum">      45 </span>            : 
+<span class="lineNum">      46 </span>            : /* Constants for fixed penalty values */
+<span class="lineNum">      47 </span>            : #define INFINITE_BOUND_PENALTY  2.0
+<span class="lineNum">      48 </span>            : #define CONTAIN_EMPTY_PENALTY  1.0
+<span class="lineNum">      49 </span>            : #define DEFAULT_SUBTYPE_DIFF_PENALTY  1.0
+<span class="lineNum">      50 </span>            : 
+<span class="lineNum">      51 </span>            : /*
+<span class="lineNum">      52 </span>            :  * Per-item data for range_gist_single_sorting_split.
+<span class="lineNum">      53 </span>            :  */
+<span class="lineNum">      54 </span>            : typedef struct
+<span class="lineNum">      55 </span>            : {
+<span class="lineNum">      56 </span>            :     int         index;
+<span class="lineNum">      57 </span>            :     RangeBound  bound;
+<span class="lineNum">      58 </span>            : } SingleBoundSortItem;
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            : /* place on left or right side of split? */
+<span class="lineNum">      61 </span>            : typedef enum
+<span class="lineNum">      62 </span>            : {
+<span class="lineNum">      63 </span>            :     SPLIT_LEFT = 0,             /* makes initialization to SPLIT_LEFT easier */
+<span class="lineNum">      64 </span>            :     SPLIT_RIGHT
+<span class="lineNum">      65 </span>            : } SplitLR;
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : /*
+<span class="lineNum">      68 </span>            :  * Context for range_gist_consider_split.
+<span class="lineNum">      69 </span>            :  */
+<span class="lineNum">      70 </span>            : typedef struct
+<span class="lineNum">      71 </span>            : {
+<span class="lineNum">      72 </span>            :     TypeCacheEntry *typcache;   /* typcache for range type */
+<span class="lineNum">      73 </span>            :     bool        has_subtype_diff;   /* does it have subtype_diff? */
+<span class="lineNum">      74 </span>            :     int         entries_count;  /* total number of entries being split */
+<span class="lineNum">      75 </span>            : 
+<span class="lineNum">      76 </span>            :     /* Information about currently selected split follows */
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span>            :     bool        first;          /* true if no split was selected yet */
+<span class="lineNum">      79 </span>            : 
+<span class="lineNum">      80 </span>            :     RangeBound *left_upper;     /* upper bound of left interval */
+<span class="lineNum">      81 </span>            :     RangeBound *right_lower;    /* lower bound of right interval */
+<span class="lineNum">      82 </span>            : 
+<span class="lineNum">      83 </span>            :     float4      ratio;          /* split ratio */
+<span class="lineNum">      84 </span>            :     float4      overlap;        /* overlap between left and right predicate */
+<span class="lineNum">      85 </span>            :     int         common_left;    /* # common entries destined for each side */
+<span class="lineNum">      86 </span>            :     int         common_right;
+<span class="lineNum">      87 </span>            : } ConsiderSplitContext;
+<span class="lineNum">      88 </span>            : 
+<span class="lineNum">      89 </span>            : /*
+<span class="lineNum">      90 </span>            :  * Bounds extracted from a non-empty range, for use in
+<span class="lineNum">      91 </span>            :  * range_gist_double_sorting_split.
+<span class="lineNum">      92 </span>            :  */
+<span class="lineNum">      93 </span>            : typedef struct
+<span class="lineNum">      94 </span>            : {
+<span class="lineNum">      95 </span>            :     RangeBound  lower;
+<span class="lineNum">      96 </span>            :     RangeBound  upper;
+<span class="lineNum">      97 </span>            : } NonEmptyRange;
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            : /*
+<span class="lineNum">     100 </span>            :  * Represents information about an entry that can be placed in either group
+<span class="lineNum">     101 </span>            :  * without affecting overlap over selected axis (&quot;common entry&quot;).
+<span class="lineNum">     102 </span>            :  */
+<span class="lineNum">     103 </span>            : typedef struct
+<span class="lineNum">     104 </span>            : {
+<span class="lineNum">     105 </span>            :     /* Index of entry in the initial array */
+<span class="lineNum">     106 </span>            :     int         index;
+<span class="lineNum">     107 </span>            :     /* Delta between closeness of range to each of the two groups */
+<span class="lineNum">     108 </span>            :     double      delta;
+<span class="lineNum">     109 </span>            : } CommonEntry;
+<span class="lineNum">     110 </span>            : 
+<span class="lineNum">     111 </span>            : /* Helper macros to place an entry in the left or right group during split */
+<span class="lineNum">     112 </span>            : /* Note direct access to variables v, typcache, left_range, right_range */
+<span class="lineNum">     113 </span>            : #define PLACE_LEFT(range, off)                  \
+<span class="lineNum">     114 </span>            :     do {                                        \
+<span class="lineNum">     115 </span>            :         if (v-&gt;spl_nleft &gt; 0)                 \
+<span class="lineNum">     116 </span>            :             left_range = range_super_union(typcache, left_range, range); \
+<span class="lineNum">     117 </span>            :         else                                    \
+<span class="lineNum">     118 </span>            :             left_range = (range);               \
+<span class="lineNum">     119 </span>            :         v-&gt;spl_left[v-&gt;spl_nleft++] = (off);  \
+<span class="lineNum">     120 </span>            :     } while(0)
+<span class="lineNum">     121 </span>            : 
+<span class="lineNum">     122 </span>            : #define PLACE_RIGHT(range, off)                 \
+<span class="lineNum">     123 </span>            :     do {                                        \
+<span class="lineNum">     124 </span>            :         if (v-&gt;spl_nright &gt; 0)                    \
+<span class="lineNum">     125 </span>            :             right_range = range_super_union(typcache, right_range, range); \
+<span class="lineNum">     126 </span>            :         else                                    \
+<span class="lineNum">     127 </span>            :             right_range = (range);              \
+<span class="lineNum">     128 </span>            :         v-&gt;spl_right[v-&gt;spl_nright++] = (off);    \
+<span class="lineNum">     129 </span>            :     } while(0)
+<span class="lineNum">     130 </span>            : 
+<span class="lineNum">     131 </span>            : /* Copy a RangeType datum (hardwires typbyval and typlen for ranges...) */
+<span class="lineNum">     132 </span>            : #define rangeCopy(r) \
+<span class="lineNum">     133 </span>            :     ((RangeType *) DatumGetPointer(datumCopy(PointerGetDatum(r), \
+<span class="lineNum">     134 </span>            :                                              false, -1)))
+<span class="lineNum">     135 </span>            : 
+<span class="lineNum">     136 </span>            : static RangeType *range_super_union(TypeCacheEntry *typcache, RangeType *r1,
+<span class="lineNum">     137 </span>            :                                     RangeType *r2);
+<span class="lineNum">     138 </span>            : static bool range_gist_consistent_int(TypeCacheEntry *typcache,
+<span class="lineNum">     139 </span>            :                                       StrategyNumber strategy, const RangeType *key,
+<span class="lineNum">     140 </span>            :                                       Datum query);
+<span class="lineNum">     141 </span>            : static bool range_gist_consistent_leaf(TypeCacheEntry *typcache,
+<span class="lineNum">     142 </span>            :                                        StrategyNumber strategy, const RangeType *key,
+<span class="lineNum">     143 </span>            :                                        Datum query);
+<span class="lineNum">     144 </span>            : static void range_gist_fallback_split(TypeCacheEntry *typcache,
+<span class="lineNum">     145 </span>            :                                       GistEntryVector *entryvec,
+<span class="lineNum">     146 </span>            :                                       GIST_SPLITVEC *v);
+<span class="lineNum">     147 </span>            : static void range_gist_class_split(TypeCacheEntry *typcache,
+<span class="lineNum">     148 </span>            :                                    GistEntryVector *entryvec,
+<span class="lineNum">     149 </span>            :                                    GIST_SPLITVEC *v,
+<span class="lineNum">     150 </span>            :                                    SplitLR *classes_groups);
+<span class="lineNum">     151 </span>            : static void range_gist_single_sorting_split(TypeCacheEntry *typcache,
+<span class="lineNum">     152 </span>            :                                             GistEntryVector *entryvec,
+<span class="lineNum">     153 </span>            :                                             GIST_SPLITVEC *v,
+<span class="lineNum">     154 </span>            :                                             bool use_upper_bound);
+<span class="lineNum">     155 </span>            : static void range_gist_double_sorting_split(TypeCacheEntry *typcache,
+<span class="lineNum">     156 </span>            :                                             GistEntryVector *entryvec,
+<span class="lineNum">     157 </span>            :                                             GIST_SPLITVEC *v);
+<span class="lineNum">     158 </span>            : static void range_gist_consider_split(ConsiderSplitContext *context,
+<span class="lineNum">     159 </span>            :                                       RangeBound *right_lower, int min_left_count,
+<span class="lineNum">     160 </span>            :                                       RangeBound *left_upper, int max_left_count);
+<span class="lineNum">     161 </span>            : static int  get_gist_range_class(RangeType *range);
+<span class="lineNum">     162 </span>            : static int  single_bound_cmp(const void *a, const void *b, void *arg);
+<span class="lineNum">     163 </span>            : static int  interval_cmp_lower(const void *a, const void *b, void *arg);
+<span class="lineNum">     164 </span>            : static int  interval_cmp_upper(const void *a, const void *b, void *arg);
+<span class="lineNum">     165 </span>            : static int  common_entry_cmp(const void *i1, const void *i2);
+<span class="lineNum">     166 </span>            : static float8 call_subtype_diff(TypeCacheEntry *typcache,
+<span class="lineNum">     167 </span>            :                                 Datum val1, Datum val2);
+<span class="lineNum">     168 </span>            : 
+<span class="lineNum">     169 </span>            : 
+<a name="170"><span class="lineNum">     170 </span>            : /* GiST query consistency check */</a>
+<span class="lineNum">     171 </span>            : Datum
+<span class="lineNum">     172 </span><span class="lineCov">     105784 : range_gist_consistent(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     173 </span>            : {
+<span class="lineNum">     174 </span><span class="lineCov">     105784 :     GISTENTRY  *entry = (GISTENTRY *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     175 </span><span class="lineCov">     105784 :     Datum       query = PG_GETARG_DATUM(1);</span>
+<span class="lineNum">     176 </span><span class="lineCov">     105784 :     StrategyNumber strategy = (StrategyNumber) PG_GETARG_UINT16(2);</span>
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span>            :     /* Oid subtype = PG_GETARG_OID(3); */
+<span class="lineNum">     179 </span><span class="lineCov">     105784 :     bool       *recheck = (bool *) PG_GETARG_POINTER(4);</span>
+<span class="lineNum">     180 </span><span class="lineCov">     105784 :     RangeType  *key = DatumGetRangeTypeP(entry-&gt;key);</span>
+<span class="lineNum">     181 </span>            :     TypeCacheEntry *typcache;
+<span class="lineNum">     182 </span>            : 
+<span class="lineNum">     183 </span>            :     /* All operators served by this function are exact */
+<span class="lineNum">     184 </span><span class="lineCov">     105784 :     *recheck = false;</span>
+<span class="lineNum">     185 </span>            : 
+<span class="lineNum">     186 </span><span class="lineCov">     105784 :     typcache = range_get_typcache(fcinfo, RangeTypeGetOid(key));</span>
+<span class="lineNum">     187 </span>            : 
+<span class="lineNum">     188 </span><span class="lineCov">     105784 :     if (GIST_LEAF(entry))</span>
+<span class="lineNum">     189 </span><span class="lineCov">     104332 :         PG_RETURN_BOOL(range_gist_consistent_leaf(typcache, strategy,</span>
+<span class="lineNum">     190 </span>            :                                                   key, query));
+<span class="lineNum">     191 </span>            :     else
+<span class="lineNum">     192 </span><span class="lineCov">       1452 :         PG_RETURN_BOOL(range_gist_consistent_int(typcache, strategy,</span>
+<span class="lineNum">     193 </span>            :                                                  key, query));
+<span class="lineNum">     194 </span>            : }
+<span class="lineNum">     195 </span>            : 
+<a name="196"><span class="lineNum">     196 </span>            : /* form union range */</a>
+<span class="lineNum">     197 </span>            : Datum
+<span class="lineNum">     198 </span><span class="lineCov">      23744 : range_gist_union(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     199 </span>            : {
+<span class="lineNum">     200 </span><span class="lineCov">      23744 :     GistEntryVector *entryvec = (GistEntryVector *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     201 </span><span class="lineCov">      23744 :     GISTENTRY  *ent = entryvec-&gt;vector;</span>
+<span class="lineNum">     202 </span>            :     RangeType  *result_range;
+<span class="lineNum">     203 </span>            :     TypeCacheEntry *typcache;
+<span class="lineNum">     204 </span>            :     int         i;
+<span class="lineNum">     205 </span>            : 
+<span class="lineNum">     206 </span><span class="lineCov">      23744 :     result_range = DatumGetRangeTypeP(ent[0].key);</span>
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span><span class="lineCov">      23744 :     typcache = range_get_typcache(fcinfo, RangeTypeGetOid(result_range));</span>
+<span class="lineNum">     209 </span>            : 
+<span class="lineNum">     210 </span><span class="lineCov">      54676 :     for (i = 1; i &lt; entryvec-&gt;n; i++)</span>
+<span class="lineNum">     211 </span>            :     {
+<span class="lineNum">     212 </span><span class="lineCov">      30932 :         result_range = range_super_union(typcache, result_range,</span>
+<span class="lineNum">     213 </span><span class="lineCov">      30932 :                                          DatumGetRangeTypeP(ent[i].key));</span>
+<span class="lineNum">     214 </span>            :     }
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span><span class="lineCov">      23744 :     PG_RETURN_RANGE_P(result_range);</span>
+<span class="lineNum">     217 </span>            : }
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span>            : /*
+<span class="lineNum">     220 </span>            :  * We store ranges as ranges in GiST indexes, so we do not need
+<span class="lineNum">     221 </span>            :  * compress, decompress, or fetch functions.  Note this implies a limit
+<span class="lineNum">     222 </span>            :  * on the size of range values that can be indexed.
+<span class="lineNum">     223 </span>            :  */
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span>            : /*
+<span class="lineNum">     226 </span>            :  * GiST page split penalty function.
+<span class="lineNum">     227 </span>            :  *
+<span class="lineNum">     228 </span>            :  * The penalty function has the following goals (in order from most to least
+<span class="lineNum">     229 </span>            :  * important):
+<span class="lineNum">     230 </span>            :  * - Keep normal ranges separate
+<span class="lineNum">     231 </span>            :  * - Avoid broadening the class of the original predicate
+<span class="lineNum">     232 </span>            :  * - Avoid broadening (as determined by subtype_diff) the original predicate
+<span class="lineNum">     233 </span>            :  * - Favor adding ranges to narrower original predicates
+<a name="234"><span class="lineNum">     234 </span>            :  */</a>
+<span class="lineNum">     235 </span>            : Datum
+<span class="lineNum">     236 </span><span class="lineCov">     316536 : range_gist_penalty(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     237 </span>            : {
+<span class="lineNum">     238 </span><span class="lineCov">     316536 :     GISTENTRY  *origentry = (GISTENTRY *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     239 </span><span class="lineCov">     316536 :     GISTENTRY  *newentry = (GISTENTRY *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     240 </span><span class="lineCov">     316536 :     float      *penalty = (float *) PG_GETARG_POINTER(2);</span>
+<span class="lineNum">     241 </span><span class="lineCov">     316536 :     RangeType  *orig = DatumGetRangeTypeP(origentry-&gt;key);</span>
+<span class="lineNum">     242 </span><span class="lineCov">     316536 :     RangeType  *new = DatumGetRangeTypeP(newentry-&gt;key);</span>
+<span class="lineNum">     243 </span>            :     TypeCacheEntry *typcache;
+<span class="lineNum">     244 </span>            :     bool        has_subtype_diff;
+<span class="lineNum">     245 </span>            :     RangeBound  orig_lower,
+<span class="lineNum">     246 </span>            :                 new_lower,
+<span class="lineNum">     247 </span>            :                 orig_upper,
+<span class="lineNum">     248 </span>            :                 new_upper;
+<span class="lineNum">     249 </span>            :     bool        orig_empty,
+<span class="lineNum">     250 </span>            :                 new_empty;
+<span class="lineNum">     251 </span>            : 
+<span class="lineNum">     252 </span><span class="lineCov">     316536 :     if (RangeTypeGetOid(orig) != RangeTypeGetOid(new))</span>
+<span class="lineNum">     253 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;range types do not match&quot;);</span>
+<span class="lineNum">     254 </span>            : 
+<span class="lineNum">     255 </span><span class="lineCov">     316536 :     typcache = range_get_typcache(fcinfo, RangeTypeGetOid(orig));</span>
+<span class="lineNum">     256 </span>            : 
+<span class="lineNum">     257 </span><span class="lineCov">     316536 :     has_subtype_diff = OidIsValid(typcache-&gt;rng_subdiff_finfo.fn_oid);</span>
+<span class="lineNum">     258 </span>            : 
+<span class="lineNum">     259 </span><span class="lineCov">     316536 :     range_deserialize(typcache, orig, &amp;orig_lower, &amp;orig_upper, &amp;orig_empty);</span>
+<span class="lineNum">     260 </span><span class="lineCov">     316536 :     range_deserialize(typcache, new, &amp;new_lower, &amp;new_upper, &amp;new_empty);</span>
+<span class="lineNum">     261 </span>            : 
+<span class="lineNum">     262 </span>            :     /*
+<span class="lineNum">     263 </span>            :      * Distinct branches for handling distinct classes of ranges.  Note that
+<span class="lineNum">     264 </span>            :      * penalty values only need to be commensurate within the same class of
+<span class="lineNum">     265 </span>            :      * new range.
+<span class="lineNum">     266 </span>            :      */
+<span class="lineNum">     267 </span><span class="lineCov">     316536 :     if (new_empty)</span>
+<span class="lineNum">     268 </span>            :     {
+<span class="lineNum">     269 </span>            :         /* Handle insertion of empty range */
+<span class="lineNum">     270 </span><span class="lineCov">      69242 :         if (orig_empty)</span>
+<span class="lineNum">     271 </span>            :         {
+<span class="lineNum">     272 </span>            :             /*
+<span class="lineNum">     273 </span>            :              * The best case is to insert it to empty original range.
+<span class="lineNum">     274 </span>            :              * Insertion here means no broadening of original range. Also
+<span class="lineNum">     275 </span>            :              * original range is the most narrow.
+<span class="lineNum">     276 </span>            :              */
+<span class="lineNum">     277 </span><span class="lineCov">       4690 :             *penalty = 0.0;</span>
+<span class="lineNum">     278 </span>            :         }
+<span class="lineNum">     279 </span><span class="lineCov">      64552 :         else if (RangeIsOrContainsEmpty(orig))</span>
+<span class="lineNum">     280 </span>            :         {
+<span class="lineNum">     281 </span>            :             /*
+<span class="lineNum">     282 </span>            :              * The second case is to insert empty range into range which
+<span class="lineNum">     283 </span>            :              * contains at least one underlying empty range.  There is still
+<span class="lineNum">     284 </span>            :              * no broadening of original range, but original range is not as
+<span class="lineNum">     285 </span>            :              * narrow as possible.
+<span class="lineNum">     286 </span>            :              */
+<span class="lineNum">     287 </span><span class="lineCov">        772 :             *penalty = CONTAIN_EMPTY_PENALTY;</span>
+<span class="lineNum">     288 </span>            :         }
+<span class="lineNum">     289 </span><span class="lineCov">      63780 :         else if (orig_lower.infinite &amp;&amp; orig_upper.infinite)</span>
+<span class="lineNum">     290 </span>            :         {
+<span class="lineNum">     291 </span>            :             /*
+<span class="lineNum">     292 </span>            :              * Original range requires broadening.  (-inf; +inf) is most far
+<span class="lineNum">     293 </span>            :              * from normal range in this case.
+<span class="lineNum">     294 </span>            :              */
+<span class="lineNum">     295 </span><span class="lineNoCov">          0 :             *penalty = 2 * CONTAIN_EMPTY_PENALTY;</span>
+<span class="lineNum">     296 </span>            :         }
+<span class="lineNum">     297 </span><span class="lineCov">      63780 :         else if (orig_lower.infinite || orig_upper.infinite)</span>
+<span class="lineNum">     298 </span>            :         {
+<span class="lineNum">     299 </span>            :             /*
+<span class="lineNum">     300 </span>            :              * (-inf, x) or (x, +inf) original ranges are closer to normal
+<span class="lineNum">     301 </span>            :              * ranges, so it's worse to mix it with empty ranges.
+<span class="lineNum">     302 </span>            :              */
+<span class="lineNum">     303 </span><span class="lineNoCov">          0 :             *penalty = 3 * CONTAIN_EMPTY_PENALTY;</span>
+<span class="lineNum">     304 </span>            :         }
+<span class="lineNum">     305 </span>            :         else
+<span class="lineNum">     306 </span>            :         {
+<span class="lineNum">     307 </span>            :             /*
+<span class="lineNum">     308 </span>            :              * The least preferred case is broadening of normal range.
+<span class="lineNum">     309 </span>            :              */
+<span class="lineNum">     310 </span><span class="lineCov">      63780 :             *penalty = 4 * CONTAIN_EMPTY_PENALTY;</span>
+<span class="lineNum">     311 </span>            :         }
+<span class="lineNum">     312 </span>            :     }
+<span class="lineNum">     313 </span><span class="lineCov">     247294 :     else if (new_lower.infinite &amp;&amp; new_upper.infinite)</span>
+<span class="lineNum">     314 </span>            :     {
+<span class="lineNum">     315 </span>            :         /* Handle insertion of (-inf, +inf) range */
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :         if (orig_lower.infinite &amp;&amp; orig_upper.infinite)</span>
+<span class="lineNum">     317 </span>            :         {
+<span class="lineNum">     318 </span>            :             /*
+<span class="lineNum">     319 </span>            :              * Best case is inserting to (-inf, +inf) original range.
+<span class="lineNum">     320 </span>            :              */
+<span class="lineNum">     321 </span><span class="lineNoCov">          0 :             *penalty = 0.0;</span>
+<span class="lineNum">     322 </span>            :         }
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :         else if (orig_lower.infinite || orig_upper.infinite)</span>
+<span class="lineNum">     324 </span>            :         {
+<span class="lineNum">     325 </span>            :             /*
+<span class="lineNum">     326 </span>            :              * When original range is (-inf, x) or (x, +inf) it requires
+<span class="lineNum">     327 </span>            :              * broadening of original range (extension of one bound to
+<span class="lineNum">     328 </span>            :              * infinity).
+<span class="lineNum">     329 </span>            :              */
+<span class="lineNum">     330 </span><span class="lineNoCov">          0 :             *penalty = INFINITE_BOUND_PENALTY;</span>
+<span class="lineNum">     331 </span>            :         }
+<span class="lineNum">     332 </span>            :         else
+<span class="lineNum">     333 </span>            :         {
+<span class="lineNum">     334 </span>            :             /*
+<span class="lineNum">     335 </span>            :              * Insertion to normal original range is least preferred.
+<span class="lineNum">     336 </span>            :              */
+<span class="lineNum">     337 </span><span class="lineNoCov">          0 :             *penalty = 2 * INFINITE_BOUND_PENALTY;</span>
+<span class="lineNum">     338 </span>            :         }
+<span class="lineNum">     339 </span>            : 
+<span class="lineNum">     340 </span><span class="lineNoCov">          0 :         if (RangeIsOrContainsEmpty(orig))</span>
+<span class="lineNum">     341 </span>            :         {
+<span class="lineNum">     342 </span>            :             /*
+<span class="lineNum">     343 </span>            :              * Original range is narrower when it doesn't contain empty
+<span class="lineNum">     344 </span>            :              * ranges. Add additional penalty otherwise.
+<span class="lineNum">     345 </span>            :              */
+<span class="lineNum">     346 </span><span class="lineNoCov">          0 :             *penalty += CONTAIN_EMPTY_PENALTY;</span>
+<span class="lineNum">     347 </span>            :         }
+<span class="lineNum">     348 </span>            :     }
+<span class="lineNum">     349 </span><span class="lineCov">     247294 :     else if (new_lower.infinite)</span>
+<span class="lineNum">     350 </span>            :     {
+<span class="lineNum">     351 </span>            :         /* Handle insertion of (-inf, x) range */
+<span class="lineNum">     352 </span><span class="lineCov">      10044 :         if (!orig_empty &amp;&amp; orig_lower.infinite)</span>
+<span class="lineNum">     353 </span>            :         {
+<span class="lineNum">     354 </span><span class="lineCov">        792 :             if (orig_upper.infinite)</span>
+<span class="lineNum">     355 </span>            :             {
+<span class="lineNum">     356 </span>            :                 /*
+<span class="lineNum">     357 </span>            :                  * (-inf, +inf) range won't be extended by insertion of (-inf,
+<span class="lineNum">     358 </span>            :                  * x) range. It's a less desirable case than insertion to
+<span class="lineNum">     359 </span>            :                  * (-inf, y) original range without extension, because in that
+<span class="lineNum">     360 </span>            :                  * case original range is narrower. But we can't express that
+<span class="lineNum">     361 </span>            :                  * in single float value.
+<span class="lineNum">     362 </span>            :                  */
+<span class="lineNum">     363 </span><span class="lineNoCov">          0 :                 *penalty = 0.0;</span>
+<span class="lineNum">     364 </span>            :             }
+<span class="lineNum">     365 </span>            :             else
+<span class="lineNum">     366 </span>            :             {
+<span class="lineNum">     367 </span><span class="lineCov">        396 :                 if (range_cmp_bounds(typcache, &amp;new_upper, &amp;orig_upper) &gt; 0)</span>
+<span class="lineNum">     368 </span>            :                 {
+<span class="lineNum">     369 </span>            :                     /*
+<span class="lineNum">     370 </span>            :                      * Get extension of original range using subtype_diff. Use
+<span class="lineNum">     371 </span>            :                      * constant if subtype_diff unavailable.
+<span class="lineNum">     372 </span>            :                      */
+<span class="lineNum">     373 </span><span class="lineCov">        342 :                     if (has_subtype_diff)</span>
+<span class="lineNum">     374 </span><span class="lineCov">        342 :                         *penalty = call_subtype_diff(typcache,</span>
+<span class="lineNum">     375 </span>            :                                                      new_upper.val,
+<span class="lineNum">     376 </span>            :                                                      orig_upper.val);
+<span class="lineNum">     377 </span>            :                     else
+<span class="lineNum">     378 </span><span class="lineNoCov">          0 :                         *penalty = DEFAULT_SUBTYPE_DIFF_PENALTY;</span>
+<span class="lineNum">     379 </span>            :                 }
+<span class="lineNum">     380 </span>            :                 else
+<span class="lineNum">     381 </span>            :                 {
+<span class="lineNum">     382 </span>            :                     /* No extension of original range */
+<span class="lineNum">     383 </span><span class="lineCov">         54 :                     *penalty = 0.0;</span>
+<span class="lineNum">     384 </span>            :                 }
+<span class="lineNum">     385 </span>            :             }
+<span class="lineNum">     386 </span>            :         }
+<span class="lineNum">     387 </span>            :         else
+<span class="lineNum">     388 </span>            :         {
+<span class="lineNum">     389 </span>            :             /*
+<span class="lineNum">     390 </span>            :              * If lower bound of original range is not -inf, then extension of
+<span class="lineNum">     391 </span>            :              * it is infinity.
+<span class="lineNum">     392 </span>            :              */
+<span class="lineNum">     393 </span><span class="lineCov">       9648 :             *penalty = get_float4_infinity();</span>
+<span class="lineNum">     394 </span>            :         }
+<span class="lineNum">     395 </span>            :     }
+<span class="lineNum">     396 </span><span class="lineCov">     237250 :     else if (new_upper.infinite)</span>
+<span class="lineNum">     397 </span>            :     {
+<span class="lineNum">     398 </span>            :         /* Handle insertion of (x, +inf) range */
+<span class="lineNum">     399 </span><span class="lineCov">       8968 :         if (!orig_empty &amp;&amp; orig_upper.infinite)</span>
+<span class="lineNum">     400 </span>            :         {
+<span class="lineNum">     401 </span><span class="lineCov">        792 :             if (orig_lower.infinite)</span>
+<span class="lineNum">     402 </span>            :             {
+<span class="lineNum">     403 </span>            :                 /*
+<span class="lineNum">     404 </span>            :                  * (-inf, +inf) range won't be extended by insertion of (x,
+<span class="lineNum">     405 </span>            :                  * +inf) range. It's a less desirable case than insertion to
+<span class="lineNum">     406 </span>            :                  * (y, +inf) original range without extension, because in that
+<span class="lineNum">     407 </span>            :                  * case original range is narrower. But we can't express that
+<span class="lineNum">     408 </span>            :                  * in single float value.
+<span class="lineNum">     409 </span>            :                  */
+<span class="lineNum">     410 </span><span class="lineCov">        396 :                 *penalty = 0.0;</span>
+<span class="lineNum">     411 </span>            :             }
+<span class="lineNum">     412 </span>            :             else
+<span class="lineNum">     413 </span>            :             {
+<span class="lineNum">     414 </span><span class="lineNoCov">          0 :                 if (range_cmp_bounds(typcache, &amp;new_lower, &amp;orig_lower) &lt; 0)</span>
+<span class="lineNum">     415 </span>            :                 {
+<span class="lineNum">     416 </span>            :                     /*
+<span class="lineNum">     417 </span>            :                      * Get extension of original range using subtype_diff. Use
+<span class="lineNum">     418 </span>            :                      * constant if subtype_diff unavailable.
+<span class="lineNum">     419 </span>            :                      */
+<span class="lineNum">     420 </span><span class="lineNoCov">          0 :                     if (has_subtype_diff)</span>
+<span class="lineNum">     421 </span><span class="lineNoCov">          0 :                         *penalty = call_subtype_diff(typcache,</span>
+<span class="lineNum">     422 </span>            :                                                      orig_lower.val,
+<span class="lineNum">     423 </span>            :                                                      new_lower.val);
+<span class="lineNum">     424 </span>            :                     else
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :                         *penalty = DEFAULT_SUBTYPE_DIFF_PENALTY;</span>
+<span class="lineNum">     426 </span>            :                 }
+<span class="lineNum">     427 </span>            :                 else
+<span class="lineNum">     428 </span>            :                 {
+<span class="lineNum">     429 </span>            :                     /* No extension of original range */
+<span class="lineNum">     430 </span><span class="lineNoCov">          0 :                     *penalty = 0.0;</span>
+<span class="lineNum">     431 </span>            :                 }
+<span class="lineNum">     432 </span>            :             }
+<span class="lineNum">     433 </span>            :         }
+<span class="lineNum">     434 </span>            :         else
+<span class="lineNum">     435 </span>            :         {
+<span class="lineNum">     436 </span>            :             /*
+<span class="lineNum">     437 </span>            :              * If upper bound of original range is not +inf, then extension of
+<span class="lineNum">     438 </span>            :              * it is infinity.
+<span class="lineNum">     439 </span>            :              */
+<span class="lineNum">     440 </span><span class="lineCov">       8572 :             *penalty = get_float4_infinity();</span>
+<span class="lineNum">     441 </span>            :         }
+<span class="lineNum">     442 </span>            :     }
+<span class="lineNum">     443 </span>            :     else
+<span class="lineNum">     444 </span>            :     {
+<span class="lineNum">     445 </span>            :         /* Handle insertion of normal (non-empty, non-infinite) range */
+<span class="lineNum">     446 </span><span class="lineCov">     228282 :         if (orig_empty || orig_lower.infinite || orig_upper.infinite)</span>
+<span class="lineNum">     447 </span>            :         {
+<span class="lineNum">     448 </span>            :             /*
+<span class="lineNum">     449 </span>            :              * Avoid mixing normal ranges with infinite and empty ranges.
+<span class="lineNum">     450 </span>            :              */
+<span class="lineNum">     451 </span><span class="lineCov">      10600 :             *penalty = get_float4_infinity();</span>
+<span class="lineNum">     452 </span>            :         }
+<span class="lineNum">     453 </span>            :         else
+<span class="lineNum">     454 </span>            :         {
+<span class="lineNum">     455 </span>            :             /*
+<span class="lineNum">     456 </span>            :              * Calculate extension of original range by calling subtype_diff.
+<span class="lineNum">     457 </span>            :              * Use constant if subtype_diff unavailable.
+<span class="lineNum">     458 </span>            :              */
+<span class="lineNum">     459 </span><span class="lineCov">     217682 :             float8      diff = 0.0;</span>
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span><span class="lineCov">     217682 :             if (range_cmp_bounds(typcache, &amp;new_lower, &amp;orig_lower) &lt; 0)</span>
+<span class="lineNum">     462 </span>            :             {
+<span class="lineNum">     463 </span><span class="lineCov">      72230 :                 if (has_subtype_diff)</span>
+<span class="lineNum">     464 </span><span class="lineCov">      72230 :                     diff += call_subtype_diff(typcache,</span>
+<span class="lineNum">     465 </span>            :                                               orig_lower.val,
+<span class="lineNum">     466 </span>            :                                               new_lower.val);
+<span class="lineNum">     467 </span>            :                 else
+<span class="lineNum">     468 </span><span class="lineNoCov">          0 :                     diff += DEFAULT_SUBTYPE_DIFF_PENALTY;</span>
+<span class="lineNum">     469 </span>            :             }
+<span class="lineNum">     470 </span><span class="lineCov">     217682 :             if (range_cmp_bounds(typcache, &amp;new_upper, &amp;orig_upper) &gt; 0)</span>
+<span class="lineNum">     471 </span>            :             {
+<span class="lineNum">     472 </span><span class="lineCov">     169406 :                 if (has_subtype_diff)</span>
+<span class="lineNum">     473 </span><span class="lineCov">     169406 :                     diff += call_subtype_diff(typcache,</span>
+<span class="lineNum">     474 </span>            :                                               new_upper.val,
+<span class="lineNum">     475 </span>            :                                               orig_upper.val);
+<span class="lineNum">     476 </span>            :                 else
+<span class="lineNum">     477 </span><span class="lineNoCov">          0 :                     diff += DEFAULT_SUBTYPE_DIFF_PENALTY;</span>
+<span class="lineNum">     478 </span>            :             }
+<span class="lineNum">     479 </span><span class="lineCov">     217682 :             *penalty = diff;</span>
+<span class="lineNum">     480 </span>            :         }
+<span class="lineNum">     481 </span>            :     }
+<span class="lineNum">     482 </span>            : 
+<span class="lineNum">     483 </span><span class="lineCov">     316536 :     PG_RETURN_POINTER(penalty);</span>
+<span class="lineNum">     484 </span>            : }
+<span class="lineNum">     485 </span>            : 
+<span class="lineNum">     486 </span>            : /*
+<span class="lineNum">     487 </span>            :  * The GiST PickSplit method for ranges
+<span class="lineNum">     488 </span>            :  *
+<span class="lineNum">     489 </span>            :  * Primarily, we try to segregate ranges of different classes.  If splitting
+<span class="lineNum">     490 </span>            :  * ranges of the same class, use the appropriate split method for that class.
+<a name="491"><span class="lineNum">     491 </span>            :  */</a>
+<span class="lineNum">     492 </span>            : Datum
+<span class="lineNum">     493 </span><span class="lineCov">        128 : range_gist_picksplit(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     494 </span>            : {
+<span class="lineNum">     495 </span><span class="lineCov">        128 :     GistEntryVector *entryvec = (GistEntryVector *) PG_GETARG_POINTER(0);</span>
+<span class="lineNum">     496 </span><span class="lineCov">        128 :     GIST_SPLITVEC *v = (GIST_SPLITVEC *) PG_GETARG_POINTER(1);</span>
+<span class="lineNum">     497 </span>            :     TypeCacheEntry *typcache;
+<span class="lineNum">     498 </span>            :     OffsetNumber i;
+<span class="lineNum">     499 </span>            :     RangeType  *pred_left;
+<span class="lineNum">     500 </span>            :     int         nbytes;
+<span class="lineNum">     501 </span>            :     OffsetNumber maxoff;
+<span class="lineNum">     502 </span>            :     int         count_in_classes[CLS_COUNT];
+<span class="lineNum">     503 </span>            :     int         j;
+<span class="lineNum">     504 </span><span class="lineCov">        128 :     int         non_empty_classes_count = 0;</span>
+<span class="lineNum">     505 </span><span class="lineCov">        128 :     int         biggest_class = -1;</span>
+<span class="lineNum">     506 </span><span class="lineCov">        128 :     int         biggest_class_count = 0;</span>
+<span class="lineNum">     507 </span>            :     int         total_count;
+<span class="lineNum">     508 </span>            : 
+<span class="lineNum">     509 </span>            :     /* use first item to look up range type's info */
+<span class="lineNum">     510 </span><span class="lineCov">        128 :     pred_left = DatumGetRangeTypeP(entryvec-&gt;vector[FirstOffsetNumber].key);</span>
+<span class="lineNum">     511 </span><span class="lineCov">        128 :     typcache = range_get_typcache(fcinfo, RangeTypeGetOid(pred_left));</span>
+<span class="lineNum">     512 </span>            : 
+<span class="lineNum">     513 </span><span class="lineCov">        128 :     maxoff = entryvec-&gt;n - 1;</span>
+<span class="lineNum">     514 </span><span class="lineCov">        128 :     nbytes = (maxoff + 1) * sizeof(OffsetNumber);</span>
+<span class="lineNum">     515 </span><span class="lineCov">        128 :     v-&gt;spl_left = (OffsetNumber *) palloc(nbytes);</span>
+<span class="lineNum">     516 </span><span class="lineCov">        128 :     v-&gt;spl_right = (OffsetNumber *) palloc(nbytes);</span>
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span>            :     /*
+<span class="lineNum">     519 </span>            :      * Get count distribution of range classes.
+<span class="lineNum">     520 </span>            :      */
+<span class="lineNum">     521 </span><span class="lineCov">        128 :     memset(count_in_classes, 0, sizeof(count_in_classes));</span>
+<span class="lineNum">     522 </span><span class="lineCov">      37072 :     for (i = FirstOffsetNumber; i &lt;= maxoff; i = OffsetNumberNext(i))</span>
+<span class="lineNum">     523 </span>            :     {
+<span class="lineNum">     524 </span><span class="lineCov">      36944 :         RangeType  *range = DatumGetRangeTypeP(entryvec-&gt;vector[i].key);</span>
+<span class="lineNum">     525 </span>            : 
+<span class="lineNum">     526 </span><span class="lineCov">      36944 :         count_in_classes[get_gist_range_class(range)]++;</span>
+<span class="lineNum">     527 </span>            :     }
+<span class="lineNum">     528 </span>            : 
+<span class="lineNum">     529 </span>            :     /*
+<span class="lineNum">     530 </span>            :      * Count non-empty classes and find biggest class.
+<span class="lineNum">     531 </span>            :      */
+<span class="lineNum">     532 </span><span class="lineCov">        128 :     total_count = maxoff;</span>
+<span class="lineNum">     533 </span><span class="lineCov">       1280 :     for (j = 0; j &lt; CLS_COUNT; j++)</span>
+<span class="lineNum">     534 </span>            :     {
+<span class="lineNum">     535 </span><span class="lineCov">       1152 :         if (count_in_classes[j] &gt; 0)</span>
+<span class="lineNum">     536 </span>            :         {
+<span class="lineNum">     537 </span><span class="lineCov">        140 :             if (count_in_classes[j] &gt; biggest_class_count)</span>
+<span class="lineNum">     538 </span>            :             {
+<span class="lineNum">     539 </span><span class="lineCov">        132 :                 biggest_class_count = count_in_classes[j];</span>
+<span class="lineNum">     540 </span><span class="lineCov">        132 :                 biggest_class = j;</span>
+<span class="lineNum">     541 </span>            :             }
+<span class="lineNum">     542 </span><span class="lineCov">        140 :             non_empty_classes_count++;</span>
+<span class="lineNum">     543 </span>            :         }
+<span class="lineNum">     544 </span>            :     }
+<span class="lineNum">     545 </span>            : 
+<span class="lineNum">     546 </span><span class="lineCov">        128 :     Assert(non_empty_classes_count &gt; 0);</span>
+<span class="lineNum">     547 </span>            : 
+<span class="lineNum">     548 </span><span class="lineCov">        128 :     if (non_empty_classes_count == 1)</span>
+<span class="lineNum">     549 </span>            :     {
+<span class="lineNum">     550 </span>            :         /* One non-empty class, so split inside class */
+<span class="lineNum">     551 </span><span class="lineCov">        120 :         if ((biggest_class &amp; ~CLS_CONTAIN_EMPTY) == CLS_NORMAL)</span>
+<span class="lineNum">     552 </span>            :         {
+<span class="lineNum">     553 </span>            :             /* double sorting split for normal ranges */
+<span class="lineNum">     554 </span><span class="lineCov">        108 :             range_gist_double_sorting_split(typcache, entryvec, v);</span>
+<span class="lineNum">     555 </span>            :         }
+<span class="lineNum">     556 </span><span class="lineCov">         12 :         else if ((biggest_class &amp; ~CLS_CONTAIN_EMPTY) == CLS_LOWER_INF)</span>
+<span class="lineNum">     557 </span>            :         {
+<span class="lineNum">     558 </span>            :             /* upper bound sorting split for (-inf, x) ranges */
+<span class="lineNum">     559 </span><span class="lineNoCov">          0 :             range_gist_single_sorting_split(typcache, entryvec, v, true);</span>
+<span class="lineNum">     560 </span>            :         }
+<span class="lineNum">     561 </span><span class="lineCov">         12 :         else if ((biggest_class &amp; ~CLS_CONTAIN_EMPTY) == CLS_UPPER_INF)</span>
+<span class="lineNum">     562 </span>            :         {
+<span class="lineNum">     563 </span>            :             /* lower bound sorting split for (x, +inf) ranges */
+<span class="lineNum">     564 </span><span class="lineNoCov">          0 :             range_gist_single_sorting_split(typcache, entryvec, v, false);</span>
+<span class="lineNum">     565 </span>            :         }
+<span class="lineNum">     566 </span>            :         else
+<span class="lineNum">     567 </span>            :         {
+<span class="lineNum">     568 </span>            :             /* trivial split for all (-inf, +inf) or all empty ranges */
+<span class="lineNum">     569 </span><span class="lineCov">         12 :             range_gist_fallback_split(typcache, entryvec, v);</span>
+<span class="lineNum">     570 </span>            :         }
+<span class="lineNum">     571 </span>            :     }
+<span class="lineNum">     572 </span>            :     else
+<span class="lineNum">     573 </span>            :     {
+<span class="lineNum">     574 </span>            :         /*
+<span class="lineNum">     575 </span>            :          * Class based split.
+<span class="lineNum">     576 </span>            :          *
+<span class="lineNum">     577 </span>            :          * To which side of the split should each class go?  Initialize them
+<span class="lineNum">     578 </span>            :          * all to go to the left side.
+<span class="lineNum">     579 </span>            :          */
+<span class="lineNum">     580 </span>            :         SplitLR     classes_groups[CLS_COUNT];
+<span class="lineNum">     581 </span>            : 
+<span class="lineNum">     582 </span><span class="lineCov">          8 :         memset(classes_groups, 0, sizeof(classes_groups));</span>
+<span class="lineNum">     583 </span>            : 
+<span class="lineNum">     584 </span><span class="lineCov">          8 :         if (count_in_classes[CLS_NORMAL] &gt; 0)</span>
+<span class="lineNum">     585 </span>            :         {
+<span class="lineNum">     586 </span>            :             /* separate normal ranges if any */
+<span class="lineNum">     587 </span><span class="lineCov">          8 :             classes_groups[CLS_NORMAL] = SPLIT_RIGHT;</span>
+<span class="lineNum">     588 </span>            :         }
+<span class="lineNum">     589 </span>            :         else
+<span class="lineNum">     590 </span>            :         {
+<span class="lineNum">     591 </span>            :             /*----------
+<span class="lineNum">     592 </span>            :              * Try to split classes in one of two ways:
+<span class="lineNum">     593 </span>            :              *  1) containing infinities - not containing infinities
+<span class="lineNum">     594 </span>            :              *  2) containing empty - not containing empty
+<span class="lineNum">     595 </span>            :              *
+<span class="lineNum">     596 </span>            :              * Select the way which balances the ranges between left and right
+<span class="lineNum">     597 </span>            :              * the best. If split in these ways is not possible, there are at
+<span class="lineNum">     598 </span>            :              * most 3 classes, so just separate biggest class.
+<span class="lineNum">     599 </span>            :              *----------
+<span class="lineNum">     600 </span>            :              */
+<span class="lineNum">     601 </span>            :             int         infCount,
+<span class="lineNum">     602 </span>            :                         nonInfCount;
+<span class="lineNum">     603 </span>            :             int         emptyCount,
+<span class="lineNum">     604 </span>            :                         nonEmptyCount;
+<span class="lineNum">     605 </span>            : 
+<span class="lineNum">     606 </span><span class="lineNoCov">          0 :             nonInfCount =</span>
+<span class="lineNum">     607 </span><span class="lineNoCov">          0 :                 count_in_classes[CLS_NORMAL] +</span>
+<span class="lineNum">     608 </span><span class="lineNoCov">          0 :                 count_in_classes[CLS_CONTAIN_EMPTY] +</span>
+<span class="lineNum">     609 </span><span class="lineNoCov">          0 :                 count_in_classes[CLS_EMPTY];</span>
+<span class="lineNum">     610 </span><span class="lineNoCov">          0 :             infCount = total_count - nonInfCount;</span>
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :             nonEmptyCount =</span>
+<span class="lineNum">     613 </span><span class="lineNoCov">          0 :                 count_in_classes[CLS_NORMAL] +</span>
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :                 count_in_classes[CLS_LOWER_INF] +</span>
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :                 count_in_classes[CLS_UPPER_INF] +</span>
+<span class="lineNum">     616 </span><span class="lineNoCov">          0 :                 count_in_classes[CLS_LOWER_INF | CLS_UPPER_INF];</span>
+<span class="lineNum">     617 </span><span class="lineNoCov">          0 :             emptyCount = total_count - nonEmptyCount;</span>
+<span class="lineNum">     618 </span>            : 
+<span class="lineNum">     619 </span><span class="lineNoCov">          0 :             if (infCount &gt; 0 &amp;&amp; nonInfCount &gt; 0 &amp;&amp;</span>
+<span class="lineNum">     620 </span><span class="lineNoCov">          0 :                 (Abs(infCount - nonInfCount) &lt;=</span>
+<span class="lineNum">     621 </span><span class="lineNoCov">          0 :                  Abs(emptyCount - nonEmptyCount)))</span>
+<span class="lineNum">     622 </span>            :             {
+<span class="lineNum">     623 </span><span class="lineNoCov">          0 :                 classes_groups[CLS_NORMAL] = SPLIT_RIGHT;</span>
+<span class="lineNum">     624 </span><span class="lineNoCov">          0 :                 classes_groups[CLS_CONTAIN_EMPTY] = SPLIT_RIGHT;</span>
+<span class="lineNum">     625 </span><span class="lineNoCov">          0 :                 classes_groups[CLS_EMPTY] = SPLIT_RIGHT;</span>
+<span class="lineNum">     626 </span>            :             }
+<span class="lineNum">     627 </span><span class="lineNoCov">          0 :             else if (emptyCount &gt; 0 &amp;&amp; nonEmptyCount &gt; 0)</span>
+<span class="lineNum">     628 </span>            :             {
+<span class="lineNum">     629 </span><span class="lineNoCov">          0 :                 classes_groups[CLS_NORMAL] = SPLIT_RIGHT;</span>
+<span class="lineNum">     630 </span><span class="lineNoCov">          0 :                 classes_groups[CLS_LOWER_INF] = SPLIT_RIGHT;</span>
+<span class="lineNum">     631 </span><span class="lineNoCov">          0 :                 classes_groups[CLS_UPPER_INF] = SPLIT_RIGHT;</span>
+<span class="lineNum">     632 </span><span class="lineNoCov">          0 :                 classes_groups[CLS_LOWER_INF | CLS_UPPER_INF] = SPLIT_RIGHT;</span>
+<span class="lineNum">     633 </span>            :             }
+<span class="lineNum">     634 </span>            :             else
+<span class="lineNum">     635 </span>            :             {
+<span class="lineNum">     636 </span>            :                 /*
+<span class="lineNum">     637 </span>            :                  * Either total_count == emptyCount or total_count ==
+<span class="lineNum">     638 </span>            :                  * infCount.
+<span class="lineNum">     639 </span>            :                  */
+<span class="lineNum">     640 </span><span class="lineNoCov">          0 :                 classes_groups[biggest_class] = SPLIT_RIGHT;</span>
+<span class="lineNum">     641 </span>            :             }
+<span class="lineNum">     642 </span>            :         }
+<span class="lineNum">     643 </span>            : 
+<span class="lineNum">     644 </span><span class="lineCov">          8 :         range_gist_class_split(typcache, entryvec, v, classes_groups);</span>
+<span class="lineNum">     645 </span>            :     }
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span><span class="lineCov">        128 :     PG_RETURN_POINTER(v);</span>
+<span class="lineNum">     648 </span>            : }
+<span class="lineNum">     649 </span>            : 
+<a name="650"><span class="lineNum">     650 </span>            : /* equality comparator for GiST */</a>
+<span class="lineNum">     651 </span>            : Datum
+<span class="lineNum">     652 </span><span class="lineCov">      23692 : range_gist_same(PG_FUNCTION_ARGS)</span>
+<span class="lineNum">     653 </span>            : {
+<span class="lineNum">     654 </span><span class="lineCov">      23692 :     RangeType  *r1 = PG_GETARG_RANGE_P(0);</span>
+<span class="lineNum">     655 </span><span class="lineCov">      23692 :     RangeType  *r2 = PG_GETARG_RANGE_P(1);</span>
+<span class="lineNum">     656 </span><span class="lineCov">      23692 :     bool       *result = (bool *) PG_GETARG_POINTER(2);</span>
+<span class="lineNum">     657 </span>            : 
+<span class="lineNum">     658 </span>            :     /*
+<span class="lineNum">     659 </span>            :      * range_eq will ignore the RANGE_CONTAIN_EMPTY flag, so we have to check
+<span class="lineNum">     660 </span>            :      * that for ourselves.  More generally, if the entries have been properly
+<span class="lineNum">     661 </span>            :      * normalized, then unequal flags bytes must mean unequal ranges ... so
+<span class="lineNum">     662 </span>            :      * let's just test all the flag bits at once.
+<span class="lineNum">     663 </span>            :      */
+<span class="lineNum">     664 </span><span class="lineCov">      23692 :     if (range_get_flags(r1) != range_get_flags(r2))</span>
+<span class="lineNum">     665 </span><span class="lineCov">         12 :         *result = false;</span>
+<span class="lineNum">     666 </span>            :     else
+<span class="lineNum">     667 </span>            :     {
+<span class="lineNum">     668 </span>            :         TypeCacheEntry *typcache;
+<span class="lineNum">     669 </span>            : 
+<span class="lineNum">     670 </span><span class="lineCov">      23680 :         typcache = range_get_typcache(fcinfo, RangeTypeGetOid(r1));</span>
+<span class="lineNum">     671 </span>            : 
+<span class="lineNum">     672 </span><span class="lineCov">      23680 :         *result = range_eq_internal(typcache, r1, r2);</span>
+<span class="lineNum">     673 </span>            :     }
+<span class="lineNum">     674 </span>            : 
+<span class="lineNum">     675 </span><span class="lineCov">      23692 :     PG_RETURN_POINTER(result);</span>
+<span class="lineNum">     676 </span>            : }
+<span class="lineNum">     677 </span>            : 
+<span class="lineNum">     678 </span>            : /*
+<span class="lineNum">     679 </span>            :  *----------------------------------------------------------
+<span class="lineNum">     680 </span>            :  * STATIC FUNCTIONS
+<span class="lineNum">     681 </span>            :  *----------------------------------------------------------
+<span class="lineNum">     682 </span>            :  */
+<span class="lineNum">     683 </span>            : 
+<span class="lineNum">     684 </span>            : /*
+<span class="lineNum">     685 </span>            :  * Return the smallest range that contains r1 and r2
+<span class="lineNum">     686 </span>            :  *
+<span class="lineNum">     687 </span>            :  * This differs from regular range_union in two critical ways:
+<span class="lineNum">     688 </span>            :  * 1. It won't throw an error for non-adjacent r1 and r2, but just absorb
+<span class="lineNum">     689 </span>            :  * the intervening values into the result range.
+<span class="lineNum">     690 </span>            :  * 2. We track whether any empty range has been union'd into the result,
+<span class="lineNum">     691 </span>            :  * so that contained_by searches can be indexed.  Note that this means
+<span class="lineNum">     692 </span>            :  * that *all* unions formed within the GiST index must go through here.
+<a name="693"><span class="lineNum">     693 </span>            :  */</a>
+<span class="lineNum">     694 </span>            : static RangeType *
+<span class="lineNum">     695 </span><span class="lineCov">      67646 : range_super_union(TypeCacheEntry *typcache, RangeType *r1, RangeType *r2)</span>
+<span class="lineNum">     696 </span>            : {
+<span class="lineNum">     697 </span>            :     RangeType  *result;
+<span class="lineNum">     698 </span>            :     RangeBound  lower1,
+<span class="lineNum">     699 </span>            :                 lower2;
+<span class="lineNum">     700 </span>            :     RangeBound  upper1,
+<span class="lineNum">     701 </span>            :                 upper2;
+<span class="lineNum">     702 </span>            :     bool        empty1,
+<span class="lineNum">     703 </span>            :                 empty2;
+<span class="lineNum">     704 </span>            :     char        flags1,
+<span class="lineNum">     705 </span>            :                 flags2;
+<span class="lineNum">     706 </span>            :     RangeBound *result_lower;
+<span class="lineNum">     707 </span>            :     RangeBound *result_upper;
+<span class="lineNum">     708 </span>            : 
+<span class="lineNum">     709 </span><span class="lineCov">      67646 :     range_deserialize(typcache, r1, &amp;lower1, &amp;upper1, &amp;empty1);</span>
+<span class="lineNum">     710 </span><span class="lineCov">      67646 :     range_deserialize(typcache, r2, &amp;lower2, &amp;upper2, &amp;empty2);</span>
+<span class="lineNum">     711 </span><span class="lineCov">      67646 :     flags1 = range_get_flags(r1);</span>
+<span class="lineNum">     712 </span><span class="lineCov">      67646 :     flags2 = range_get_flags(r2);</span>
+<span class="lineNum">     713 </span>            : 
+<span class="lineNum">     714 </span><span class="lineCov">      67646 :     if (empty1)</span>
+<span class="lineNum">     715 </span>            :     {
+<span class="lineNum">     716 </span>            :         /* We can return r2 as-is if it already is or contains empty */
+<span class="lineNum">     717 </span><span class="lineCov">       8622 :         if (flags2 &amp; (RANGE_EMPTY | RANGE_CONTAIN_EMPTY))</span>
+<span class="lineNum">     718 </span><span class="lineCov">       8622 :             return r2;</span>
+<span class="lineNum">     719 </span>            :         /* Else we'd better copy it (modify-in-place isn't safe) */
+<span class="lineNum">     720 </span><span class="lineNoCov">          0 :         r2 = rangeCopy(r2);</span>
+<span class="lineNum">     721 </span><span class="lineNoCov">          0 :         range_set_contain_empty(r2);</span>
+<span class="lineNum">     722 </span><span class="lineNoCov">          0 :         return r2;</span>
+<span class="lineNum">     723 </span>            :     }
+<span class="lineNum">     724 </span><span class="lineCov">      59024 :     if (empty2)</span>
+<span class="lineNum">     725 </span>            :     {
+<span class="lineNum">     726 </span>            :         /* We can return r1 as-is if it already is or contains empty */
+<span class="lineNum">     727 </span><span class="lineCov">        776 :         if (flags1 &amp; (RANGE_EMPTY | RANGE_CONTAIN_EMPTY))</span>
+<span class="lineNum">     728 </span><span class="lineCov">        772 :             return r1;</span>
+<span class="lineNum">     729 </span>            :         /* Else we'd better copy it (modify-in-place isn't safe) */
+<span class="lineNum">     730 </span><span class="lineCov">          4 :         r1 = rangeCopy(r1);</span>
+<span class="lineNum">     731 </span><span class="lineCov">          4 :         range_set_contain_empty(r1);</span>
+<span class="lineNum">     732 </span><span class="lineCov">          4 :         return r1;</span>
+<span class="lineNum">     733 </span>            :     }
+<span class="lineNum">     734 </span>            : 
+<span class="lineNum">     735 </span><span class="lineCov">      58248 :     if (range_cmp_bounds(typcache, &amp;lower1, &amp;lower2) &lt;= 0)</span>
+<span class="lineNum">     736 </span><span class="lineCov">      58224 :         result_lower = &amp;lower1;</span>
+<span class="lineNum">     737 </span>            :     else
+<span class="lineNum">     738 </span><span class="lineCov">         24 :         result_lower = &amp;lower2;</span>
+<span class="lineNum">     739 </span>            : 
+<span class="lineNum">     740 </span><span class="lineCov">      58248 :     if (range_cmp_bounds(typcache, &amp;upper1, &amp;upper2) &gt;= 0)</span>
+<span class="lineNum">     741 </span><span class="lineCov">      13236 :         result_upper = &amp;upper1;</span>
+<span class="lineNum">     742 </span>            :     else
+<span class="lineNum">     743 </span><span class="lineCov">      45012 :         result_upper = &amp;upper2;</span>
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span>            :     /* optimization to avoid constructing a new range */
+<span class="lineNum">     746 </span><span class="lineCov">      58248 :     if (result_lower == &amp;lower1 &amp;&amp; result_upper == &amp;upper1 &amp;&amp;</span>
+<span class="lineNum">     747 </span><span class="lineCov">      13232 :         ((flags1 &amp; RANGE_CONTAIN_EMPTY) || !(flags2 &amp; RANGE_CONTAIN_EMPTY)))</span>
+<span class="lineNum">     748 </span><span class="lineCov">      13232 :         return r1;</span>
+<span class="lineNum">     749 </span><span class="lineCov">      45016 :     if (result_lower == &amp;lower2 &amp;&amp; result_upper == &amp;upper2 &amp;&amp;</span>
+<span class="lineNum">     750 </span><span class="lineCov">         20 :         ((flags2 &amp; RANGE_CONTAIN_EMPTY) || !(flags1 &amp; RANGE_CONTAIN_EMPTY)))</span>
+<span class="lineNum">     751 </span><span class="lineCov">         20 :         return r2;</span>
+<span class="lineNum">     752 </span>            : 
+<span class="lineNum">     753 </span><span class="lineCov">      44996 :     result = make_range(typcache, result_lower, result_upper, false);</span>
+<span class="lineNum">     754 </span>            : 
+<span class="lineNum">     755 </span><span class="lineCov">      44996 :     if ((flags1 &amp; RANGE_CONTAIN_EMPTY) || (flags2 &amp; RANGE_CONTAIN_EMPTY))</span>
+<span class="lineNum">     756 </span><span class="lineNoCov">          0 :         range_set_contain_empty(result);</span>
+<span class="lineNum">     757 </span>            : 
+<span class="lineNum">     758 </span><span class="lineCov">      44996 :     return result;</span>
+<span class="lineNum">     759 </span>            : }
+<span class="lineNum">     760 </span>            : 
+<span class="lineNum">     761 </span>            : /*
+<span class="lineNum">     762 </span>            :  * GiST consistent test on an index internal page
+<a name="763"><span class="lineNum">     763 </span>            :  */</a>
+<span class="lineNum">     764 </span>            : static bool
+<span class="lineNum">     765 </span><span class="lineCov">       1452 : range_gist_consistent_int(TypeCacheEntry *typcache, StrategyNumber strategy,</span>
+<span class="lineNum">     766 </span>            :                           const RangeType *key, Datum query)
+<span class="lineNum">     767 </span>            : {
+<span class="lineNum">     768 </span><span class="lineCov">       1452 :     switch (strategy)</span>
+<span class="lineNum">     769 </span>            :     {
+<span class="lineNum">     770 </span>            :         case RANGESTRAT_BEFORE:
+<span class="lineNum">     771 </span><span class="lineCov">        132 :             if (RangeIsEmpty(key) || RangeIsEmpty(DatumGetRangeTypeP(query)))</span>
+<span class="lineNum">     772 </span><span class="lineCov">         16 :                 return false;</span>
+<span class="lineNum">     773 </span><span class="lineCov">        232 :             return (!range_overright_internal(typcache, key,</span>
+<span class="lineNum">     774 </span><span class="lineCov">        232 :                                               DatumGetRangeTypeP(query)));</span>
+<span class="lineNum">     775 </span>            :         case RANGESTRAT_OVERLEFT:
+<span class="lineNum">     776 </span><span class="lineCov">        132 :             if (RangeIsEmpty(key) || RangeIsEmpty(DatumGetRangeTypeP(query)))</span>
+<span class="lineNum">     777 </span><span class="lineCov">         16 :                 return false;</span>
+<span class="lineNum">     778 </span><span class="lineCov">        232 :             return (!range_after_internal(typcache, key,</span>
+<span class="lineNum">     779 </span><span class="lineCov">        232 :                                           DatumGetRangeTypeP(query)));</span>
+<span class="lineNum">     780 </span>            :         case RANGESTRAT_OVERLAPS:
+<span class="lineNum">     781 </span><span class="lineCov">        132 :             return range_overlaps_internal(typcache, key,</span>
+<span class="lineNum">     782 </span><span class="lineCov">        132 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     783 </span>            :         case RANGESTRAT_OVERRIGHT:
+<span class="lineNum">     784 </span><span class="lineCov">        132 :             if (RangeIsEmpty(key) || RangeIsEmpty(DatumGetRangeTypeP(query)))</span>
+<span class="lineNum">     785 </span><span class="lineCov">         16 :                 return false;</span>
+<span class="lineNum">     786 </span><span class="lineCov">        232 :             return (!range_before_internal(typcache, key,</span>
+<span class="lineNum">     787 </span><span class="lineCov">        232 :                                            DatumGetRangeTypeP(query)));</span>
+<span class="lineNum">     788 </span>            :         case RANGESTRAT_AFTER:
+<span class="lineNum">     789 </span><span class="lineCov">        132 :             if (RangeIsEmpty(key) || RangeIsEmpty(DatumGetRangeTypeP(query)))</span>
+<span class="lineNum">     790 </span><span class="lineCov">         16 :                 return false;</span>
+<span class="lineNum">     791 </span><span class="lineCov">        232 :             return (!range_overleft_internal(typcache, key,</span>
+<span class="lineNum">     792 </span><span class="lineCov">        232 :                                              DatumGetRangeTypeP(query)));</span>
+<span class="lineNum">     793 </span>            :         case RANGESTRAT_ADJACENT:
+<span class="lineNum">     794 </span><span class="lineCov">        132 :             if (RangeIsEmpty(key) || RangeIsEmpty(DatumGetRangeTypeP(query)))</span>
+<span class="lineNum">     795 </span><span class="lineCov">         16 :                 return false;</span>
+<span class="lineNum">     796 </span><span class="lineCov">        116 :             if (range_adjacent_internal(typcache, key,</span>
+<span class="lineNum">     797 </span><span class="lineCov">        116 :                                         DatumGetRangeTypeP(query)))</span>
+<span class="lineNum">     798 </span><span class="lineNoCov">          0 :                 return true;</span>
+<span class="lineNum">     799 </span><span class="lineCov">        116 :             return range_overlaps_internal(typcache, key,</span>
+<span class="lineNum">     800 </span><span class="lineCov">        116 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     801 </span>            :         case RANGESTRAT_CONTAINS:
+<span class="lineNum">     802 </span><span class="lineCov">        264 :             return range_contains_internal(typcache, key,</span>
+<span class="lineNum">     803 </span><span class="lineCov">        264 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     804 </span>            :         case RANGESTRAT_CONTAINED_BY:
+<span class="lineNum">     805 </span>            : 
+<span class="lineNum">     806 </span>            :             /*
+<span class="lineNum">     807 </span>            :              * Empty ranges are contained by anything, so if key is or
+<span class="lineNum">     808 </span>            :              * contains any empty ranges, we must descend into it.  Otherwise,
+<span class="lineNum">     809 </span>            :              * descend only if key overlaps the query.
+<span class="lineNum">     810 </span>            :              */
+<span class="lineNum">     811 </span><span class="lineCov">        132 :             if (RangeIsOrContainsEmpty(key))</span>
+<span class="lineNum">     812 </span><span class="lineCov">         16 :                 return true;</span>
+<span class="lineNum">     813 </span><span class="lineCov">        116 :             return range_overlaps_internal(typcache, key,</span>
+<span class="lineNum">     814 </span><span class="lineCov">        116 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     815 </span>            :         case RANGESTRAT_CONTAINS_ELEM:
+<span class="lineNum">     816 </span><span class="lineCov">        132 :             return range_contains_elem_internal(typcache, key, query);</span>
+<span class="lineNum">     817 </span>            :         case RANGESTRAT_EQ:
+<span class="lineNum">     818 </span>            : 
+<span class="lineNum">     819 </span>            :             /*
+<span class="lineNum">     820 </span>            :              * If query is empty, descend only if the key is or contains any
+<span class="lineNum">     821 </span>            :              * empty ranges.  Otherwise, descend if key contains query.
+<span class="lineNum">     822 </span>            :              */
+<span class="lineNum">     823 </span><span class="lineCov">        132 :             if (RangeIsEmpty(DatumGetRangeTypeP(query)))</span>
+<span class="lineNum">     824 </span><span class="lineNoCov">          0 :                 return RangeIsOrContainsEmpty(key);</span>
+<span class="lineNum">     825 </span><span class="lineCov">        132 :             return range_contains_internal(typcache, key,</span>
+<span class="lineNum">     826 </span><span class="lineCov">        132 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     827 </span>            :         default:
+<span class="lineNum">     828 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized range strategy: %d&quot;, strategy);</span>
+<span class="lineNum">     829 </span>            :             return false;       /* keep compiler quiet */
+<span class="lineNum">     830 </span>            :     }
+<span class="lineNum">     831 </span>            : }
+<span class="lineNum">     832 </span>            : 
+<span class="lineNum">     833 </span>            : /*
+<span class="lineNum">     834 </span>            :  * GiST consistent test on an index leaf page
+<a name="835"><span class="lineNum">     835 </span>            :  */</a>
+<span class="lineNum">     836 </span>            : static bool
+<span class="lineNum">     837 </span><span class="lineCov">     104332 : range_gist_consistent_leaf(TypeCacheEntry *typcache, StrategyNumber strategy,</span>
+<span class="lineNum">     838 </span>            :                            const RangeType *key, Datum query)
+<span class="lineNum">     839 </span>            : {
+<span class="lineNum">     840 </span><span class="lineCov">     104332 :     switch (strategy)</span>
+<span class="lineNum">     841 </span>            :     {
+<span class="lineNum">     842 </span>            :         case RANGESTRAT_BEFORE:
+<span class="lineNum">     843 </span><span class="lineCov">       3720 :             return range_before_internal(typcache, key,</span>
+<span class="lineNum">     844 </span><span class="lineCov">       3720 :                                          DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     845 </span>            :         case RANGESTRAT_OVERLEFT:
+<span class="lineNum">     846 </span><span class="lineCov">       9700 :             return range_overleft_internal(typcache, key,</span>
+<span class="lineNum">     847 </span><span class="lineCov">       9700 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     848 </span>            :         case RANGESTRAT_OVERLAPS:
+<span class="lineNum">     849 </span><span class="lineCov">       2596 :             return range_overlaps_internal(typcache, key,</span>
+<span class="lineNum">     850 </span><span class="lineCov">       2596 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     851 </span>            :         case RANGESTRAT_OVERRIGHT:
+<span class="lineNum">     852 </span><span class="lineCov">      20800 :             return range_overright_internal(typcache, key,</span>
+<span class="lineNum">     853 </span><span class="lineCov">      20800 :                                             DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     854 </span>            :         case RANGESTRAT_AFTER:
+<span class="lineNum">     855 </span><span class="lineCov">      18078 :             return range_after_internal(typcache, key,</span>
+<span class="lineNum">     856 </span><span class="lineCov">      18078 :                                         DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     857 </span>            :         case RANGESTRAT_ADJACENT:
+<span class="lineNum">     858 </span><span class="lineCov">       9700 :             return range_adjacent_internal(typcache, key,</span>
+<span class="lineNum">     859 </span><span class="lineCov">       9700 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     860 </span>            :         case RANGESTRAT_CONTAINS:
+<span class="lineNum">     861 </span><span class="lineCov">      27364 :             return range_contains_internal(typcache, key,</span>
+<span class="lineNum">     862 </span><span class="lineCov">      27364 :                                            DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     863 </span>            :         case RANGESTRAT_CONTAINED_BY:
+<span class="lineNum">     864 </span><span class="lineCov">       7196 :             return range_contained_by_internal(typcache, key,</span>
+<span class="lineNum">     865 </span><span class="lineCov">       7196 :                                                DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     866 </span>            :         case RANGESTRAT_CONTAINS_ELEM:
+<span class="lineNum">     867 </span><span class="lineCov">       2564 :             return range_contains_elem_internal(typcache, key, query);</span>
+<span class="lineNum">     868 </span>            :         case RANGESTRAT_EQ:
+<span class="lineNum">     869 </span><span class="lineCov">       2614 :             return range_eq_internal(typcache, key, DatumGetRangeTypeP(query));</span>
+<span class="lineNum">     870 </span>            :         default:
+<span class="lineNum">     871 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;unrecognized range strategy: %d&quot;, strategy);</span>
+<span class="lineNum">     872 </span>            :             return false;       /* keep compiler quiet */
+<span class="lineNum">     873 </span>            :     }
+<span class="lineNum">     874 </span>            : }
+<span class="lineNum">     875 </span>            : 
+<span class="lineNum">     876 </span>            : /*
+<span class="lineNum">     877 </span>            :  * Trivial split: half of entries will be placed on one page
+<span class="lineNum">     878 </span>            :  * and the other half on the other page.
+<a name="879"><span class="lineNum">     879 </span>            :  */</a>
+<span class="lineNum">     880 </span>            : static void
+<span class="lineNum">     881 </span><span class="lineCov">         12 : range_gist_fallback_split(TypeCacheEntry *typcache,</span>
+<span class="lineNum">     882 </span>            :                           GistEntryVector *entryvec,
+<span class="lineNum">     883 </span>            :                           GIST_SPLITVEC *v)
+<span class="lineNum">     884 </span>            : {
+<span class="lineNum">     885 </span><span class="lineCov">         12 :     RangeType  *left_range = NULL;</span>
+<span class="lineNum">     886 </span><span class="lineCov">         12 :     RangeType  *right_range = NULL;</span>
+<span class="lineNum">     887 </span>            :     OffsetNumber i,
+<span class="lineNum">     888 </span>            :                 maxoff,
+<span class="lineNum">     889 </span>            :                 split_idx;
+<span class="lineNum">     890 </span>            : 
+<span class="lineNum">     891 </span><span class="lineCov">         12 :     maxoff = entryvec-&gt;n - 1;</span>
+<span class="lineNum">     892 </span>            :     /* Split entries before this to left page, after to right: */
+<span class="lineNum">     893 </span><span class="lineCov">         12 :     split_idx = (maxoff - FirstOffsetNumber) / 2 + FirstOffsetNumber;</span>
+<span class="lineNum">     894 </span>            : 
+<span class="lineNum">     895 </span><span class="lineCov">         12 :     v-&gt;spl_nleft = 0;</span>
+<span class="lineNum">     896 </span><span class="lineCov">         12 :     v-&gt;spl_nright = 0;</span>
+<span class="lineNum">     897 </span><span class="lineCov">       4662 :     for (i = FirstOffsetNumber; i &lt;= maxoff; i++)</span>
+<span class="lineNum">     898 </span>            :     {
+<span class="lineNum">     899 </span><span class="lineCov">       4650 :         RangeType  *range = DatumGetRangeTypeP(entryvec-&gt;vector[i].key);</span>
+<span class="lineNum">     900 </span>            : 
+<span class="lineNum">     901 </span><span class="lineCov">       4650 :         if (i &lt; split_idx)</span>
+<span class="lineNum">     902 </span><span class="lineCov">       2316 :             PLACE_LEFT(range, i);</span>
+<span class="lineNum">     903 </span>            :         else
+<span class="lineNum">     904 </span><span class="lineCov">       2334 :             PLACE_RIGHT(range, i);</span>
+<span class="lineNum">     905 </span>            :     }
+<span class="lineNum">     906 </span>            : 
+<span class="lineNum">     907 </span><span class="lineCov">         12 :     v-&gt;spl_ldatum = RangeTypePGetDatum(left_range);</span>
+<span class="lineNum">     908 </span><span class="lineCov">         12 :     v-&gt;spl_rdatum = RangeTypePGetDatum(right_range);</span>
+<span class="lineNum">     909 </span><span class="lineCov">         12 : }</span>
+<span class="lineNum">     910 </span>            : 
+<span class="lineNum">     911 </span>            : /*
+<span class="lineNum">     912 </span>            :  * Split based on classes of ranges.
+<span class="lineNum">     913 </span>            :  *
+<span class="lineNum">     914 </span>            :  * See get_gist_range_class for class definitions.
+<span class="lineNum">     915 </span>            :  * classes_groups is an array of length CLS_COUNT indicating the side of the
+<span class="lineNum">     916 </span>            :  * split to which each class should go.
+<a name="917"><span class="lineNum">     917 </span>            :  */</a>
+<span class="lineNum">     918 </span>            : static void
+<span class="lineNum">     919 </span><span class="lineCov">          8 : range_gist_class_split(TypeCacheEntry *typcache,</span>
+<span class="lineNum">     920 </span>            :                        GistEntryVector *entryvec,
+<span class="lineNum">     921 </span>            :                        GIST_SPLITVEC *v,
+<span class="lineNum">     922 </span>            :                        SplitLR *classes_groups)
+<span class="lineNum">     923 </span>            : {
+<span class="lineNum">     924 </span><span class="lineCov">          8 :     RangeType  *left_range = NULL;</span>
+<span class="lineNum">     925 </span><span class="lineCov">          8 :     RangeType  *right_range = NULL;</span>
+<span class="lineNum">     926 </span>            :     OffsetNumber i,
+<span class="lineNum">     927 </span>            :                 maxoff;
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineCov">          8 :     maxoff = entryvec-&gt;n - 1;</span>
+<span class="lineNum">     930 </span>            : 
+<span class="lineNum">     931 </span><span class="lineCov">          8 :     v-&gt;spl_nleft = 0;</span>
+<span class="lineNum">     932 </span><span class="lineCov">          8 :     v-&gt;spl_nright = 0;</span>
+<span class="lineNum">     933 </span><span class="lineCov">       2446 :     for (i = FirstOffsetNumber; i &lt;= maxoff; i = OffsetNumberNext(i))</span>
+<span class="lineNum">     934 </span>            :     {
+<span class="lineNum">     935 </span><span class="lineCov">       2438 :         RangeType  *range = DatumGetRangeTypeP(entryvec-&gt;vector[i].key);</span>
+<span class="lineNum">     936 </span>            :         int         class;
+<span class="lineNum">     937 </span>            : 
+<span class="lineNum">     938 </span>            :         /* Get class of range */
+<span class="lineNum">     939 </span><span class="lineCov">       2438 :         class = get_gist_range_class(range);</span>
+<span class="lineNum">     940 </span>            : 
+<span class="lineNum">     941 </span>            :         /* Place range to appropriate page */
+<span class="lineNum">     942 </span><span class="lineCov">       2438 :         if (classes_groups[class] == SPLIT_LEFT)</span>
+<span class="lineNum">     943 </span><span class="lineCov">       1330 :             PLACE_LEFT(range, i);</span>
+<span class="lineNum">     944 </span>            :         else
+<span class="lineNum">     945 </span>            :         {
+<span class="lineNum">     946 </span><span class="lineCov">       1108 :             Assert(classes_groups[class] == SPLIT_RIGHT);</span>
+<span class="lineNum">     947 </span><span class="lineCov">       1108 :             PLACE_RIGHT(range, i);</span>
+<span class="lineNum">     948 </span>            :         }
+<span class="lineNum">     949 </span>            :     }
+<span class="lineNum">     950 </span>            : 
+<span class="lineNum">     951 </span><span class="lineCov">          8 :     v-&gt;spl_ldatum = RangeTypePGetDatum(left_range);</span>
+<span class="lineNum">     952 </span><span class="lineCov">          8 :     v-&gt;spl_rdatum = RangeTypePGetDatum(right_range);</span>
+<span class="lineNum">     953 </span><span class="lineCov">          8 : }</span>
+<span class="lineNum">     954 </span>            : 
+<span class="lineNum">     955 </span>            : /*
+<span class="lineNum">     956 </span>            :  * Sorting based split. First half of entries according to the sort will be
+<span class="lineNum">     957 </span>            :  * placed to one page, and second half of entries will be placed to other
+<span class="lineNum">     958 </span>            :  * page. use_upper_bound parameter indicates whether to use upper or lower
+<span class="lineNum">     959 </span>            :  * bound for sorting.
+<a name="960"><span class="lineNum">     960 </span>            :  */</a>
+<span class="lineNum">     961 </span>            : static void
+<span class="lineNum">     962 </span><span class="lineNoCov">          0 : range_gist_single_sorting_split(TypeCacheEntry *typcache,</span>
+<span class="lineNum">     963 </span>            :                                 GistEntryVector *entryvec,
+<span class="lineNum">     964 </span>            :                                 GIST_SPLITVEC *v,
+<span class="lineNum">     965 </span>            :                                 bool use_upper_bound)
+<span class="lineNum">     966 </span>            : {
+<span class="lineNum">     967 </span>            :     SingleBoundSortItem *sortItems;
+<span class="lineNum">     968 </span><span class="lineNoCov">          0 :     RangeType  *left_range = NULL;</span>
+<span class="lineNum">     969 </span><span class="lineNoCov">          0 :     RangeType  *right_range = NULL;</span>
+<span class="lineNum">     970 </span>            :     OffsetNumber i,
+<span class="lineNum">     971 </span>            :                 maxoff,
+<span class="lineNum">     972 </span>            :                 split_idx;
+<span class="lineNum">     973 </span>            : 
+<span class="lineNum">     974 </span><span class="lineNoCov">          0 :     maxoff = entryvec-&gt;n - 1;</span>
+<span class="lineNum">     975 </span>            : 
+<span class="lineNum">     976 </span><span class="lineNoCov">          0 :     sortItems = (SingleBoundSortItem *)</span>
+<span class="lineNum">     977 </span><span class="lineNoCov">          0 :         palloc(maxoff * sizeof(SingleBoundSortItem));</span>
+<span class="lineNum">     978 </span>            : 
+<span class="lineNum">     979 </span>            :     /*
+<span class="lineNum">     980 </span>            :      * Prepare auxiliary array and sort the values.
+<span class="lineNum">     981 </span>            :      */
+<span class="lineNum">     982 </span><span class="lineNoCov">          0 :     for (i = FirstOffsetNumber; i &lt;= maxoff; i = OffsetNumberNext(i))</span>
+<span class="lineNum">     983 </span>            :     {
+<span class="lineNum">     984 </span><span class="lineNoCov">          0 :         RangeType  *range = DatumGetRangeTypeP(entryvec-&gt;vector[i].key);</span>
+<span class="lineNum">     985 </span>            :         RangeBound  bound2;
+<span class="lineNum">     986 </span>            :         bool        empty;
+<span class="lineNum">     987 </span>            : 
+<span class="lineNum">     988 </span><span class="lineNoCov">          0 :         sortItems[i - 1].index = i;</span>
+<span class="lineNum">     989 </span>            :         /* Put appropriate bound into array */
+<span class="lineNum">     990 </span><span class="lineNoCov">          0 :         if (use_upper_bound)</span>
+<span class="lineNum">     991 </span><span class="lineNoCov">          0 :             range_deserialize(typcache, range, &amp;bound2,</span>
+<span class="lineNum">     992 </span><span class="lineNoCov">          0 :                               &amp;sortItems[i - 1].bound, &amp;empty);</span>
+<span class="lineNum">     993 </span>            :         else
+<span class="lineNum">     994 </span><span class="lineNoCov">          0 :             range_deserialize(typcache, range, &amp;sortItems[i - 1].bound,</span>
+<span class="lineNum">     995 </span>            :                               &amp;bound2, &amp;empty);
+<span class="lineNum">     996 </span><span class="lineNoCov">          0 :         Assert(!empty);</span>
+<span class="lineNum">     997 </span>            :     }
+<span class="lineNum">     998 </span>            : 
+<span class="lineNum">     999 </span><span class="lineNoCov">          0 :     qsort_arg(sortItems, maxoff, sizeof(SingleBoundSortItem),</span>
+<span class="lineNum">    1000 </span>            :               single_bound_cmp, typcache);
+<span class="lineNum">    1001 </span>            : 
+<span class="lineNum">    1002 </span><span class="lineNoCov">          0 :     split_idx = maxoff / 2;</span>
+<span class="lineNum">    1003 </span>            : 
+<span class="lineNum">    1004 </span><span class="lineNoCov">          0 :     v-&gt;spl_nleft = 0;</span>
+<span class="lineNum">    1005 </span><span class="lineNoCov">          0 :     v-&gt;spl_nright = 0;</span>
+<span class="lineNum">    1006 </span>            : 
+<span class="lineNum">    1007 </span><span class="lineNoCov">          0 :     for (i = 0; i &lt; maxoff; i++)</span>
+<span class="lineNum">    1008 </span>            :     {
+<span class="lineNum">    1009 </span><span class="lineNoCov">          0 :         int         idx = sortItems[i].index;</span>
+<span class="lineNum">    1010 </span><span class="lineNoCov">          0 :         RangeType  *range = DatumGetRangeTypeP(entryvec-&gt;vector[idx].key);</span>
+<span class="lineNum">    1011 </span>            : 
+<span class="lineNum">    1012 </span><span class="lineNoCov">          0 :         if (i &lt; split_idx)</span>
+<span class="lineNum">    1013 </span><span class="lineNoCov">          0 :             PLACE_LEFT(range, idx);</span>
+<span class="lineNum">    1014 </span>            :         else
+<span class="lineNum">    1015 </span><span class="lineNoCov">          0 :             PLACE_RIGHT(range, idx);</span>
+<span class="lineNum">    1016 </span>            :     }
+<span class="lineNum">    1017 </span>            : 
+<span class="lineNum">    1018 </span><span class="lineNoCov">          0 :     v-&gt;spl_ldatum = RangeTypePGetDatum(left_range);</span>
+<span class="lineNum">    1019 </span><span class="lineNoCov">          0 :     v-&gt;spl_rdatum = RangeTypePGetDatum(right_range);</span>
+<span class="lineNum">    1020 </span><span class="lineNoCov">          0 : }</span>
+<span class="lineNum">    1021 </span>            : 
+<span class="lineNum">    1022 </span>            : /*
+<span class="lineNum">    1023 </span>            :  * Double sorting split algorithm.
+<span class="lineNum">    1024 </span>            :  *
+<span class="lineNum">    1025 </span>            :  * The algorithm considers dividing ranges into two groups. The first (left)
+<span class="lineNum">    1026 </span>            :  * group contains general left bound. The second (right) group contains
+<span class="lineNum">    1027 </span>            :  * general right bound. The challenge is to find upper bound of left group
+<span class="lineNum">    1028 </span>            :  * and lower bound of right group so that overlap of groups is minimal and
+<span class="lineNum">    1029 </span>            :  * ratio of distribution is acceptable. Algorithm finds for each lower bound of
+<span class="lineNum">    1030 </span>            :  * right group minimal upper bound of left group, and for each upper bound of
+<span class="lineNum">    1031 </span>            :  * left group maximal lower bound of right group. For each found pair
+<span class="lineNum">    1032 </span>            :  * range_gist_consider_split considers replacement of currently selected
+<span class="lineNum">    1033 </span>            :  * split with the new one.
+<span class="lineNum">    1034 </span>            :  *
+<span class="lineNum">    1035 </span>            :  * After that, all the entries are divided into three groups:
+<span class="lineNum">    1036 </span>            :  * 1) Entries which should be placed to the left group
+<span class="lineNum">    1037 </span>            :  * 2) Entries which should be placed to the right group
+<span class="lineNum">    1038 </span>            :  * 3) &quot;Common entries&quot; which can be placed to either group without affecting
+<span class="lineNum">    1039 </span>            :  *    amount of overlap.
+<span class="lineNum">    1040 </span>            :  *
+<span class="lineNum">    1041 </span>            :  * The common ranges are distributed by difference of distance from lower
+<span class="lineNum">    1042 </span>            :  * bound of common range to lower bound of right group and distance from upper
+<span class="lineNum">    1043 </span>            :  * bound of common range to upper bound of left group.
+<span class="lineNum">    1044 </span>            :  *
+<span class="lineNum">    1045 </span>            :  * For details see:
+<span class="lineNum">    1046 </span>            :  * &quot;A new double sorting-based node splitting algorithm for R-tree&quot;,
+<span class="lineNum">    1047 </span>            :  * A. Korotkov
+<span class="lineNum">    1048 </span>            :  * http://syrcose.ispras.ru/2011/files/SYRCoSE2011_Proceedings.pdf#page=36
+<a name="1049"><span class="lineNum">    1049 </span>            :  */</a>
+<span class="lineNum">    1050 </span>            : static void
+<span class="lineNum">    1051 </span><span class="lineCov">        108 : range_gist_double_sorting_split(TypeCacheEntry *typcache,</span>
+<span class="lineNum">    1052 </span>            :                                 GistEntryVector *entryvec,
+<span class="lineNum">    1053 </span>            :                                 GIST_SPLITVEC *v)
+<span class="lineNum">    1054 </span>            : {
+<span class="lineNum">    1055 </span>            :     ConsiderSplitContext context;
+<span class="lineNum">    1056 </span>            :     OffsetNumber i,
+<span class="lineNum">    1057 </span>            :                 maxoff;
+<span class="lineNum">    1058 </span>            :     RangeType  *range,
+<span class="lineNum">    1059 </span><span class="lineCov">        108 :                *left_range = NULL,</span>
+<span class="lineNum">    1060 </span><span class="lineCov">        108 :                *right_range = NULL;</span>
+<span class="lineNum">    1061 </span>            :     int         common_entries_count;
+<span class="lineNum">    1062 </span>            :     NonEmptyRange *by_lower,
+<span class="lineNum">    1063 </span>            :                *by_upper;
+<span class="lineNum">    1064 </span>            :     CommonEntry *common_entries;
+<span class="lineNum">    1065 </span>            :     int         nentries,
+<span class="lineNum">    1066 </span>            :                 i1,
+<span class="lineNum">    1067 </span>            :                 i2;
+<span class="lineNum">    1068 </span>            :     RangeBound *right_lower,
+<span class="lineNum">    1069 </span>            :                *left_upper;
+<span class="lineNum">    1070 </span>            : 
+<span class="lineNum">    1071 </span><span class="lineCov">        108 :     memset(&amp;context, 0, sizeof(ConsiderSplitContext));</span>
+<span class="lineNum">    1072 </span><span class="lineCov">        108 :     context.typcache = typcache;</span>
+<span class="lineNum">    1073 </span><span class="lineCov">        108 :     context.has_subtype_diff = OidIsValid(typcache-&gt;rng_subdiff_finfo.fn_oid);</span>
+<span class="lineNum">    1074 </span>            : 
+<span class="lineNum">    1075 </span><span class="lineCov">        108 :     maxoff = entryvec-&gt;n - 1;</span>
+<span class="lineNum">    1076 </span><span class="lineCov">        108 :     nentries = context.entries_count = maxoff - FirstOffsetNumber + 1;</span>
+<span class="lineNum">    1077 </span><span class="lineCov">        108 :     context.first = true;</span>
+<span class="lineNum">    1078 </span>            : 
+<span class="lineNum">    1079 </span>            :     /* Allocate arrays for sorted range bounds */
+<span class="lineNum">    1080 </span><span class="lineCov">        108 :     by_lower = (NonEmptyRange *) palloc(nentries * sizeof(NonEmptyRange));</span>
+<span class="lineNum">    1081 </span><span class="lineCov">        108 :     by_upper = (NonEmptyRange *) palloc(nentries * sizeof(NonEmptyRange));</span>
+<span class="lineNum">    1082 </span>            : 
+<span class="lineNum">    1083 </span>            :     /* Fill arrays of bounds */
+<span class="lineNum">    1084 </span><span class="lineCov">      29964 :     for (i = FirstOffsetNumber; i &lt;= maxoff; i = OffsetNumberNext(i))</span>
+<span class="lineNum">    1085 </span>            :     {
+<span class="lineNum">    1086 </span><span class="lineCov">      29856 :         RangeType  *range = DatumGetRangeTypeP(entryvec-&gt;vector[i].key);</span>
+<span class="lineNum">    1087 </span>            :         bool        empty;
+<span class="lineNum">    1088 </span>            : 
+<span class="lineNum">    1089 </span><span class="lineCov">      59712 :         range_deserialize(typcache, range,</span>
+<span class="lineNum">    1090 </span><span class="lineCov">      29856 :                           &amp;by_lower[i - FirstOffsetNumber].lower,</span>
+<span class="lineNum">    1091 </span><span class="lineCov">      29856 :                           &amp;by_lower[i - FirstOffsetNumber].upper,</span>
+<span class="lineNum">    1092 </span>            :                           &amp;empty);
+<span class="lineNum">    1093 </span><span class="lineCov">      29856 :         Assert(!empty);</span>
+<span class="lineNum">    1094 </span>            :     }
+<span class="lineNum">    1095 </span>            : 
+<span class="lineNum">    1096 </span>            :     /*
+<span class="lineNum">    1097 </span>            :      * Make two arrays of range bounds: one sorted by lower bound and another
+<span class="lineNum">    1098 </span>            :      * sorted by upper bound.
+<span class="lineNum">    1099 </span>            :      */
+<span class="lineNum">    1100 </span><span class="lineCov">        108 :     memcpy(by_upper, by_lower, nentries * sizeof(NonEmptyRange));</span>
+<span class="lineNum">    1101 </span><span class="lineCov">        108 :     qsort_arg(by_lower, nentries, sizeof(NonEmptyRange),</span>
+<span class="lineNum">    1102 </span>            :               interval_cmp_lower, typcache);
+<span class="lineNum">    1103 </span><span class="lineCov">        108 :     qsort_arg(by_upper, nentries, sizeof(NonEmptyRange),</span>
+<span class="lineNum">    1104 </span>            :               interval_cmp_upper, typcache);
+<span class="lineNum">    1105 </span>            : 
+<span class="lineNum">    1106 </span>            :     /*----------
+<span class="lineNum">    1107 </span>            :      * The goal is to form a left and right range, so that every entry
+<span class="lineNum">    1108 </span>            :      * range is contained by either left or right interval (or both).
+<span class="lineNum">    1109 </span>            :      *
+<span class="lineNum">    1110 </span>            :      * For example, with the ranges (0,1), (1,3), (2,3), (2,4):
+<span class="lineNum">    1111 </span>            :      *
+<span class="lineNum">    1112 </span>            :      * 0 1 2 3 4
+<span class="lineNum">    1113 </span>            :      * +-+
+<span class="lineNum">    1114 </span>            :      *   +---+
+<span class="lineNum">    1115 </span>            :      *     +-+
+<span class="lineNum">    1116 </span>            :      *     +---+
+<span class="lineNum">    1117 </span>            :      *
+<span class="lineNum">    1118 </span>            :      * The left and right ranges are of the form (0,a) and (b,4).
+<span class="lineNum">    1119 </span>            :      * We first consider splits where b is the lower bound of an entry.
+<span class="lineNum">    1120 </span>            :      * We iterate through all entries, and for each b, calculate the
+<span class="lineNum">    1121 </span>            :      * smallest possible a. Then we consider splits where a is the
+<span class="lineNum">    1122 </span>            :      * upper bound of an entry, and for each a, calculate the greatest
+<span class="lineNum">    1123 </span>            :      * possible b.
+<span class="lineNum">    1124 </span>            :      *
+<span class="lineNum">    1125 </span>            :      * In the above example, the first loop would consider splits:
+<span class="lineNum">    1126 </span>            :      * b=0: (0,1)-(0,4)
+<span class="lineNum">    1127 </span>            :      * b=1: (0,1)-(1,4)
+<span class="lineNum">    1128 </span>            :      * b=2: (0,3)-(2,4)
+<span class="lineNum">    1129 </span>            :      *
+<span class="lineNum">    1130 </span>            :      * And the second loop:
+<span class="lineNum">    1131 </span>            :      * a=1: (0,1)-(1,4)
+<span class="lineNum">    1132 </span>            :      * a=3: (0,3)-(2,4)
+<span class="lineNum">    1133 </span>            :      * a=4: (0,4)-(2,4)
+<span class="lineNum">    1134 </span>            :      *----------
+<span class="lineNum">    1135 </span>            :      */
+<span class="lineNum">    1136 </span>            : 
+<span class="lineNum">    1137 </span>            :     /*
+<span class="lineNum">    1138 </span>            :      * Iterate over lower bound of right group, finding smallest possible
+<span class="lineNum">    1139 </span>            :      * upper bound of left group.
+<span class="lineNum">    1140 </span>            :      */
+<span class="lineNum">    1141 </span><span class="lineCov">        108 :     i1 = 0;</span>
+<span class="lineNum">    1142 </span><span class="lineCov">        108 :     i2 = 0;</span>
+<span class="lineNum">    1143 </span><span class="lineCov">        108 :     right_lower = &amp;by_lower[i1].lower;</span>
+<span class="lineNum">    1144 </span><span class="lineCov">        108 :     left_upper = &amp;by_upper[i2].lower;</span>
+<span class="lineNum">    1145 </span>            :     while (true)
+<span class="lineNum">    1146 </span>            :     {
+<span class="lineNum">    1147 </span>            :         /*
+<span class="lineNum">    1148 </span>            :          * Find next lower bound of right group.
+<span class="lineNum">    1149 </span>            :          */
+<span class="lineNum">    1150 </span><span class="lineCov">     148050 :         while (i1 &lt; nentries &amp;&amp;</span>
+<span class="lineNum">    1151 </span><span class="lineCov">      59230 :                range_cmp_bounds(typcache, right_lower,</span>
+<span class="lineNum">    1152 </span><span class="lineCov">      59230 :                                 &amp;by_lower[i1].lower) == 0)</span>
+<span class="lineNum">    1153 </span>            :         {
+<span class="lineNum">    1154 </span><span class="lineCov">      29856 :             if (range_cmp_bounds(typcache, &amp;by_lower[i1].upper,</span>
+<span class="lineNum">    1155 </span>            :                                  left_upper) &gt; 0)
+<span class="lineNum">    1156 </span><span class="lineCov">      24782 :                 left_upper = &amp;by_lower[i1].upper;</span>
+<span class="lineNum">    1157 </span><span class="lineCov">      29856 :             i1++;</span>
+<span class="lineNum">    1158 </span>            :         }
+<span class="lineNum">    1159 </span><span class="lineCov">      29482 :         if (i1 &gt;= nentries)</span>
+<span class="lineNum">    1160 </span><span class="lineCov">        108 :             break;</span>
+<span class="lineNum">    1161 </span><span class="lineCov">      29374 :         right_lower = &amp;by_lower[i1].lower;</span>
+<span class="lineNum">    1162 </span>            : 
+<span class="lineNum">    1163 </span>            :         /*
+<span class="lineNum">    1164 </span>            :          * Find count of ranges which anyway should be placed to the left
+<span class="lineNum">    1165 </span>            :          * group.
+<span class="lineNum">    1166 </span>            :          */
+<span class="lineNum">    1167 </span><span class="lineCov">     143006 :         while (i2 &lt; nentries &amp;&amp;</span>
+<span class="lineNum">    1168 </span><span class="lineCov">      54464 :                range_cmp_bounds(typcache, &amp;by_upper[i2].upper,</span>
+<span class="lineNum">    1169 </span>            :                                 left_upper) &lt;= 0)
+<span class="lineNum">    1170 </span><span class="lineCov">      29794 :             i2++;</span>
+<span class="lineNum">    1171 </span>            : 
+<span class="lineNum">    1172 </span>            :         /*
+<span class="lineNum">    1173 </span>            :          * Consider found split to see if it's better than what we had.
+<span class="lineNum">    1174 </span>            :          */
+<span class="lineNum">    1175 </span><span class="lineCov">      29374 :         range_gist_consider_split(&amp;context, right_lower, i1, left_upper, i2);</span>
+<span class="lineNum">    1176 </span><span class="lineCov">      29374 :     }</span>
+<span class="lineNum">    1177 </span>            : 
+<span class="lineNum">    1178 </span>            :     /*
+<span class="lineNum">    1179 </span>            :      * Iterate over upper bound of left group finding greatest possible lower
+<span class="lineNum">    1180 </span>            :      * bound of right group.
+<span class="lineNum">    1181 </span>            :      */
+<span class="lineNum">    1182 </span><span class="lineCov">        108 :     i1 = nentries - 1;</span>
+<span class="lineNum">    1183 </span><span class="lineCov">        108 :     i2 = nentries - 1;</span>
+<span class="lineNum">    1184 </span><span class="lineCov">        108 :     right_lower = &amp;by_lower[i1].upper;</span>
+<span class="lineNum">    1185 </span><span class="lineCov">        108 :     left_upper = &amp;by_upper[i2].upper;</span>
+<span class="lineNum">    1186 </span>            :     while (true)
+<span class="lineNum">    1187 </span>            :     {
+<span class="lineNum">    1188 </span>            :         /*
+<span class="lineNum">    1189 </span>            :          * Find next upper bound of left group.
+<span class="lineNum">    1190 </span>            :          */
+<span class="lineNum">    1191 </span><span class="lineCov">     149172 :         while (i2 &gt;= 0 &amp;&amp;</span>
+<span class="lineNum">    1192 </span><span class="lineCov">      59604 :                range_cmp_bounds(typcache, left_upper,</span>
+<span class="lineNum">    1193 </span><span class="lineCov">      59604 :                                 &amp;by_upper[i2].upper) == 0)</span>
+<span class="lineNum">    1194 </span>            :         {
+<span class="lineNum">    1195 </span><span class="lineCov">      29856 :             if (range_cmp_bounds(typcache, &amp;by_upper[i2].lower,</span>
+<span class="lineNum">    1196 </span>            :                                  right_lower) &lt; 0)
+<span class="lineNum">    1197 </span><span class="lineCov">      24778 :                 right_lower = &amp;by_upper[i2].lower;</span>
+<span class="lineNum">    1198 </span><span class="lineCov">      29856 :             i2--;</span>
+<span class="lineNum">    1199 </span>            :         }
+<span class="lineNum">    1200 </span><span class="lineCov">      29856 :         if (i2 &lt; 0)</span>
+<span class="lineNum">    1201 </span><span class="lineCov">        108 :             break;</span>
+<span class="lineNum">    1202 </span><span class="lineCov">      29748 :         left_upper = &amp;by_upper[i2].upper;</span>
+<span class="lineNum">    1203 </span>            : 
+<span class="lineNum">    1204 </span>            :         /*
+<span class="lineNum">    1205 </span>            :          * Find count of intervals which anyway should be placed to the right
+<span class="lineNum">    1206 </span>            :          * group.
+<span class="lineNum">    1207 </span>            :          */
+<span class="lineNum">    1208 </span><span class="lineCov">     143754 :         while (i1 &gt;= 0 &amp;&amp;</span>
+<span class="lineNum">    1209 </span><span class="lineCov">      54464 :                range_cmp_bounds(typcache, &amp;by_lower[i1].lower,</span>
+<span class="lineNum">    1210 </span>            :                                 right_lower) &gt;= 0)
+<span class="lineNum">    1211 </span><span class="lineCov">      29794 :             i1--;</span>
+<span class="lineNum">    1212 </span>            : 
+<span class="lineNum">    1213 </span>            :         /*
+<span class="lineNum">    1214 </span>            :          * Consider found split to see if it's better than what we had.
+<span class="lineNum">    1215 </span>            :          */
+<span class="lineNum">    1216 </span><span class="lineCov">      29748 :         range_gist_consider_split(&amp;context, right_lower, i1 + 1,</span>
+<span class="lineNum">    1217 </span>            :                                   left_upper, i2 + 1);
+<span class="lineNum">    1218 </span><span class="lineCov">      29748 :     }</span>
+<span class="lineNum">    1219 </span>            : 
+<span class="lineNum">    1220 </span>            :     /*
+<span class="lineNum">    1221 </span>            :      * If we failed to find any acceptable splits, use trivial split.
+<span class="lineNum">    1222 </span>            :      */
+<span class="lineNum">    1223 </span><span class="lineCov">        108 :     if (context.first)</span>
+<span class="lineNum">    1224 </span>            :     {
+<span class="lineNum">    1225 </span><span class="lineNoCov">          0 :         range_gist_fallback_split(typcache, entryvec, v);</span>
+<span class="lineNum">    1226 </span><span class="lineCov">        108 :         return;</span>
+<span class="lineNum">    1227 </span>            :     }
+<span class="lineNum">    1228 </span>            : 
+<span class="lineNum">    1229 </span>            :     /*
+<span class="lineNum">    1230 </span>            :      * Ok, we have now selected bounds of the groups. Now we have to
+<span class="lineNum">    1231 </span>            :      * distribute entries themselves. At first we distribute entries which can
+<span class="lineNum">    1232 </span>            :      * be placed unambiguously and collect &quot;common entries&quot; to array.
+<span class="lineNum">    1233 </span>            :      */
+<span class="lineNum">    1234 </span>            : 
+<span class="lineNum">    1235 </span>            :     /* Allocate vectors for results */
+<span class="lineNum">    1236 </span><span class="lineCov">        108 :     v-&gt;spl_left = (OffsetNumber *) palloc(nentries * sizeof(OffsetNumber));</span>
+<span class="lineNum">    1237 </span><span class="lineCov">        108 :     v-&gt;spl_right = (OffsetNumber *) palloc(nentries * sizeof(OffsetNumber));</span>
+<span class="lineNum">    1238 </span><span class="lineCov">        108 :     v-&gt;spl_nleft = 0;</span>
+<span class="lineNum">    1239 </span><span class="lineCov">        108 :     v-&gt;spl_nright = 0;</span>
+<span class="lineNum">    1240 </span>            : 
+<span class="lineNum">    1241 </span>            :     /*
+<span class="lineNum">    1242 </span>            :      * Allocate an array for &quot;common entries&quot; - entries which can be placed to
+<span class="lineNum">    1243 </span>            :      * either group without affecting overlap along selected axis.
+<span class="lineNum">    1244 </span>            :      */
+<span class="lineNum">    1245 </span><span class="lineCov">        108 :     common_entries_count = 0;</span>
+<span class="lineNum">    1246 </span><span class="lineCov">        108 :     common_entries = (CommonEntry *) palloc(nentries * sizeof(CommonEntry));</span>
+<span class="lineNum">    1247 </span>            : 
+<span class="lineNum">    1248 </span>            :     /*
+<span class="lineNum">    1249 </span>            :      * Distribute entries which can be distributed unambiguously, and collect
+<span class="lineNum">    1250 </span>            :      * common entries.
+<span class="lineNum">    1251 </span>            :      */
+<span class="lineNum">    1252 </span><span class="lineCov">      29964 :     for (i = FirstOffsetNumber; i &lt;= maxoff; i = OffsetNumberNext(i))</span>
+<span class="lineNum">    1253 </span>            :     {
+<span class="lineNum">    1254 </span>            :         RangeBound  lower,
+<span class="lineNum">    1255 </span>            :                     upper;
+<span class="lineNum">    1256 </span>            :         bool        empty;
+<span class="lineNum">    1257 </span>            : 
+<span class="lineNum">    1258 </span>            :         /*
+<span class="lineNum">    1259 </span>            :          * Get upper and lower bounds along selected axis.
+<span class="lineNum">    1260 </span>            :          */
+<span class="lineNum">    1261 </span><span class="lineCov">      29856 :         range = DatumGetRangeTypeP(entryvec-&gt;vector[i].key);</span>
+<span class="lineNum">    1262 </span>            : 
+<span class="lineNum">    1263 </span><span class="lineCov">      29856 :         range_deserialize(typcache, range, &amp;lower, &amp;upper, &amp;empty);</span>
+<span class="lineNum">    1264 </span>            : 
+<span class="lineNum">    1265 </span><span class="lineCov">      29856 :         if (range_cmp_bounds(typcache, &amp;upper, context.left_upper) &lt;= 0)</span>
+<span class="lineNum">    1266 </span>            :         {
+<span class="lineNum">    1267 </span>            :             /* Fits in the left group */
+<span class="lineNum">    1268 </span><span class="lineCov">      13480 :             if (range_cmp_bounds(typcache, &amp;lower, context.right_lower) &gt;= 0)</span>
+<span class="lineNum">    1269 </span>            :             {
+<span class="lineNum">    1270 </span>            :                 /* Fits also in the right group, so &quot;common entry&quot; */
+<span class="lineNum">    1271 </span><span class="lineCov">       2956 :                 common_entries[common_entries_count].index = i;</span>
+<span class="lineNum">    1272 </span><span class="lineCov">       2956 :                 if (context.has_subtype_diff)</span>
+<span class="lineNum">    1273 </span>            :                 {
+<span class="lineNum">    1274 </span>            :                     /*
+<span class="lineNum">    1275 </span>            :                      * delta = (lower - context.right_lower) -
+<span class="lineNum">    1276 </span>            :                      * (context.left_upper - upper)
+<span class="lineNum">    1277 </span>            :                      */
+<span class="lineNum">    1278 </span><span class="lineCov">       5912 :                     common_entries[common_entries_count].delta =</span>
+<span class="lineNum">    1279 </span><span class="lineCov">       2956 :                         call_subtype_diff(typcache,</span>
+<span class="lineNum">    1280 </span>            :                                           lower.val,
+<span class="lineNum">    1281 </span><span class="lineCov">       5912 :                                           context.right_lower-&gt;val) -</span>
+<span class="lineNum">    1282 </span><span class="lineCov">       5912 :                         call_subtype_diff(typcache,</span>
+<span class="lineNum">    1283 </span><span class="lineCov">       2956 :                                           context.left_upper-&gt;val,</span>
+<span class="lineNum">    1284 </span>            :                                           upper.val);
+<span class="lineNum">    1285 </span>            :                 }
+<span class="lineNum">    1286 </span>            :                 else
+<span class="lineNum">    1287 </span>            :                 {
+<span class="lineNum">    1288 </span>            :                     /* Without subtype_diff, take all deltas as zero */
+<span class="lineNum">    1289 </span><span class="lineNoCov">          0 :                     common_entries[common_entries_count].delta = 0;</span>
+<span class="lineNum">    1290 </span>            :                 }
+<span class="lineNum">    1291 </span><span class="lineCov">       2956 :                 common_entries_count++;</span>
+<span class="lineNum">    1292 </span>            :             }
+<span class="lineNum">    1293 </span>            :             else
+<span class="lineNum">    1294 </span>            :             {
+<span class="lineNum">    1295 </span>            :                 /* Doesn't fit to the right group, so join to the left group */
+<span class="lineNum">    1296 </span><span class="lineCov">      10524 :                 PLACE_LEFT(range, i);</span>
+<span class="lineNum">    1297 </span>            :             }
+<span class="lineNum">    1298 </span>            :         }
+<span class="lineNum">    1299 </span>            :         else
+<span class="lineNum">    1300 </span>            :         {
+<span class="lineNum">    1301 </span>            :             /*
+<span class="lineNum">    1302 </span>            :              * Each entry should fit on either left or right group. Since this
+<span class="lineNum">    1303 </span>            :              * entry didn't fit in the left group, it better fit in the right
+<span class="lineNum">    1304 </span>            :              * group.
+<span class="lineNum">    1305 </span>            :              */
+<span class="lineNum">    1306 </span><span class="lineCov">      16376 :             Assert(range_cmp_bounds(typcache, &amp;lower,</span>
+<span class="lineNum">    1307 </span>            :                                     context.right_lower) &gt;= 0);
+<span class="lineNum">    1308 </span><span class="lineCov">      16376 :             PLACE_RIGHT(range, i);</span>
+<span class="lineNum">    1309 </span>            :         }
+<span class="lineNum">    1310 </span>            :     }
+<span class="lineNum">    1311 </span>            : 
+<span class="lineNum">    1312 </span>            :     /*
+<span class="lineNum">    1313 </span>            :      * Distribute &quot;common entries&quot;, if any.
+<span class="lineNum">    1314 </span>            :      */
+<span class="lineNum">    1315 </span><span class="lineCov">        108 :     if (common_entries_count &gt; 0)</span>
+<span class="lineNum">    1316 </span>            :     {
+<span class="lineNum">    1317 </span>            :         /*
+<span class="lineNum">    1318 </span>            :          * Sort &quot;common entries&quot; by calculated deltas in order to distribute
+<span class="lineNum">    1319 </span>            :          * the most ambiguous entries first.
+<span class="lineNum">    1320 </span>            :          */
+<span class="lineNum">    1321 </span><span class="lineCov">         46 :         qsort(common_entries, common_entries_count, sizeof(CommonEntry),</span>
+<span class="lineNum">    1322 </span>            :               common_entry_cmp);
+<span class="lineNum">    1323 </span>            : 
+<span class="lineNum">    1324 </span>            :         /*
+<span class="lineNum">    1325 </span>            :          * Distribute &quot;common entries&quot; between groups according to sorting.
+<span class="lineNum">    1326 </span>            :          */
+<span class="lineNum">    1327 </span><span class="lineCov">       3002 :         for (i = 0; i &lt; common_entries_count; i++)</span>
+<span class="lineNum">    1328 </span>            :         {
+<span class="lineNum">    1329 </span><span class="lineCov">       2956 :             int         idx = common_entries[i].index;</span>
+<span class="lineNum">    1330 </span>            : 
+<span class="lineNum">    1331 </span><span class="lineCov">       2956 :             range = DatumGetRangeTypeP(entryvec-&gt;vector[idx].key);</span>
+<span class="lineNum">    1332 </span>            : 
+<span class="lineNum">    1333 </span>            :             /*
+<span class="lineNum">    1334 </span>            :              * Check if we have to place this entry in either group to achieve
+<span class="lineNum">    1335 </span>            :              * LIMIT_RATIO.
+<span class="lineNum">    1336 </span>            :              */
+<span class="lineNum">    1337 </span><span class="lineCov">       2956 :             if (i &lt; context.common_left)</span>
+<span class="lineNum">    1338 </span><span class="lineNoCov">          0 :                 PLACE_LEFT(range, idx);</span>
+<span class="lineNum">    1339 </span>            :             else
+<span class="lineNum">    1340 </span><span class="lineCov">       2956 :                 PLACE_RIGHT(range, idx);</span>
+<span class="lineNum">    1341 </span>            :         }
+<span class="lineNum">    1342 </span>            :     }
+<span class="lineNum">    1343 </span>            : 
+<span class="lineNum">    1344 </span><span class="lineCov">        108 :     v-&gt;spl_ldatum = PointerGetDatum(left_range);</span>
+<span class="lineNum">    1345 </span><span class="lineCov">        108 :     v-&gt;spl_rdatum = PointerGetDatum(right_range);</span>
+<span class="lineNum">    1346 </span>            : }
+<span class="lineNum">    1347 </span>            : 
+<span class="lineNum">    1348 </span>            : /*
+<span class="lineNum">    1349 </span>            :  * Consider replacement of currently selected split with a better one
+<span class="lineNum">    1350 </span>            :  * during range_gist_double_sorting_split.
+<a name="1351"><span class="lineNum">    1351 </span>            :  */</a>
+<span class="lineNum">    1352 </span>            : static void
+<span class="lineNum">    1353 </span><span class="lineCov">      59122 : range_gist_consider_split(ConsiderSplitContext *context,</span>
+<span class="lineNum">    1354 </span>            :                           RangeBound *right_lower, int min_left_count,
+<span class="lineNum">    1355 </span>            :                           RangeBound *left_upper, int max_left_count)
+<span class="lineNum">    1356 </span>            : {
+<span class="lineNum">    1357 </span>            :     int         left_count,
+<span class="lineNum">    1358 </span>            :                 right_count;
+<span class="lineNum">    1359 </span>            :     float4      ratio,
+<span class="lineNum">    1360 </span>            :                 overlap;
+<span class="lineNum">    1361 </span>            : 
+<span class="lineNum">    1362 </span>            :     /*
+<span class="lineNum">    1363 </span>            :      * Calculate entries distribution ratio assuming most uniform distribution
+<span class="lineNum">    1364 </span>            :      * of common entries.
+<span class="lineNum">    1365 </span>            :      */
+<span class="lineNum">    1366 </span><span class="lineCov">      59122 :     if (min_left_count &gt;= (context-&gt;entries_count + 1) / 2)</span>
+<span class="lineNum">    1367 </span><span class="lineCov">      25666 :         left_count = min_left_count;</span>
+<span class="lineNum">    1368 </span><span class="lineCov">      33456 :     else if (max_left_count &lt;= context-&gt;entries_count / 2)</span>
+<span class="lineNum">    1369 </span><span class="lineCov">      25412 :         left_count = max_left_count;</span>
+<span class="lineNum">    1370 </span>            :     else
+<span class="lineNum">    1371 </span><span class="lineCov">       8044 :         left_count = context-&gt;entries_count / 2;</span>
+<span class="lineNum">    1372 </span><span class="lineCov">      59122 :     right_count = context-&gt;entries_count - left_count;</span>
+<span class="lineNum">    1373 </span>            : 
+<span class="lineNum">    1374 </span>            :     /*
+<span class="lineNum">    1375 </span>            :      * Ratio of split: quotient between size of smaller group and total
+<span class="lineNum">    1376 </span>            :      * entries count.  This is necessarily 0.5 or less; if it's less than
+<span class="lineNum">    1377 </span>            :      * LIMIT_RATIO then we will never accept the new split.
+<span class="lineNum">    1378 </span>            :      */
+<span class="lineNum">    1379 </span><span class="lineCov">     118244 :     ratio = ((float4) Min(left_count, right_count)) /</span>
+<span class="lineNum">    1380 </span><span class="lineCov">      59122 :         ((float4) context-&gt;entries_count);</span>
+<span class="lineNum">    1381 </span>            : 
+<span class="lineNum">    1382 </span><span class="lineCov">      59122 :     if (ratio &gt; LIMIT_RATIO)</span>
+<span class="lineNum">    1383 </span>            :     {
+<span class="lineNum">    1384 </span><span class="lineCov">      29416 :         bool        selectthis = false;</span>
+<span class="lineNum">    1385 </span>            : 
+<span class="lineNum">    1386 </span>            :         /*
+<span class="lineNum">    1387 </span>            :          * The ratio is acceptable, so compare current split with previously
+<span class="lineNum">    1388 </span>            :          * selected one. We search for minimal overlap (allowing negative
+<span class="lineNum">    1389 </span>            :          * values) and minimal ratio secondarily.  If subtype_diff is
+<span class="lineNum">    1390 </span>            :          * available, it's used for overlap measure.  Without subtype_diff we
+<span class="lineNum">    1391 </span>            :          * use number of &quot;common entries&quot; as an overlap measure.
+<span class="lineNum">    1392 </span>            :          */
+<span class="lineNum">    1393 </span><span class="lineCov">      29416 :         if (context-&gt;has_subtype_diff)</span>
+<span class="lineNum">    1394 </span><span class="lineCov">      29416 :             overlap = call_subtype_diff(context-&gt;typcache,</span>
+<span class="lineNum">    1395 </span>            :                                         left_upper-&gt;val,
+<span class="lineNum">    1396 </span>            :                                         right_lower-&gt;val);
+<span class="lineNum">    1397 </span>            :         else
+<span class="lineNum">    1398 </span><span class="lineNoCov">          0 :             overlap = max_left_count - min_left_count;</span>
+<span class="lineNum">    1399 </span>            : 
+<span class="lineNum">    1400 </span>            :         /* If there is no previous selection, select this split */
+<span class="lineNum">    1401 </span><span class="lineCov">      29416 :         if (context-&gt;first)</span>
+<span class="lineNum">    1402 </span><span class="lineCov">        108 :             selectthis = true;</span>
+<span class="lineNum">    1403 </span>            :         else
+<span class="lineNum">    1404 </span>            :         {
+<span class="lineNum">    1405 </span>            :             /*
+<span class="lineNum">    1406 </span>            :              * Choose the new split if it has a smaller overlap, or same
+<span class="lineNum">    1407 </span>            :              * overlap but better ratio.
+<span class="lineNum">    1408 </span>            :              */
+<span class="lineNum">    1409 </span><span class="lineCov">      54700 :             if (overlap &lt; context-&gt;overlap ||</span>
+<span class="lineNum">    1410 </span><span class="lineCov">      47834 :                 (overlap == context-&gt;overlap &amp;&amp; ratio &gt; context-&gt;ratio))</span>
+<span class="lineNum">    1411 </span><span class="lineCov">       8482 :                 selectthis = true;</span>
+<span class="lineNum">    1412 </span>            :         }
+<span class="lineNum">    1413 </span>            : 
+<span class="lineNum">    1414 </span><span class="lineCov">      29416 :         if (selectthis)</span>
+<span class="lineNum">    1415 </span>            :         {
+<span class="lineNum">    1416 </span>            :             /* save information about selected split */
+<span class="lineNum">    1417 </span><span class="lineCov">       8590 :             context-&gt;first = false;</span>
+<span class="lineNum">    1418 </span><span class="lineCov">       8590 :             context-&gt;ratio = ratio;</span>
+<span class="lineNum">    1419 </span><span class="lineCov">       8590 :             context-&gt;overlap = overlap;</span>
+<span class="lineNum">    1420 </span><span class="lineCov">       8590 :             context-&gt;right_lower = right_lower;</span>
+<span class="lineNum">    1421 </span><span class="lineCov">       8590 :             context-&gt;left_upper = left_upper;</span>
+<span class="lineNum">    1422 </span><span class="lineCov">       8590 :             context-&gt;common_left = max_left_count - left_count;</span>
+<span class="lineNum">    1423 </span><span class="lineCov">       8590 :             context-&gt;common_right = left_count - min_left_count;</span>
+<span class="lineNum">    1424 </span>            :         }
+<span class="lineNum">    1425 </span>            :     }
+<span class="lineNum">    1426 </span><span class="lineCov">      59122 : }</span>
+<span class="lineNum">    1427 </span>            : 
+<span class="lineNum">    1428 </span>            : /*
+<span class="lineNum">    1429 </span>            :  * Find class number for range.
+<span class="lineNum">    1430 </span>            :  *
+<span class="lineNum">    1431 </span>            :  * The class number is a valid combination of the properties of the
+<span class="lineNum">    1432 </span>            :  * range.  Note: the highest possible number is 8, because CLS_EMPTY
+<span class="lineNum">    1433 </span>            :  * can't be combined with anything else.
+<a name="1434"><span class="lineNum">    1434 </span>            :  */</a>
+<span class="lineNum">    1435 </span>            : static int
+<span class="lineNum">    1436 </span><span class="lineCov">      39382 : get_gist_range_class(RangeType *range)</span>
+<span class="lineNum">    1437 </span>            : {
+<span class="lineNum">    1438 </span>            :     int         classNumber;
+<span class="lineNum">    1439 </span>            :     char        flags;
+<span class="lineNum">    1440 </span>            : 
+<span class="lineNum">    1441 </span><span class="lineCov">      39382 :     flags = range_get_flags(range);</span>
+<span class="lineNum">    1442 </span><span class="lineCov">      39382 :     if (flags &amp; RANGE_EMPTY)</span>
+<span class="lineNum">    1443 </span>            :     {
+<span class="lineNum">    1444 </span><span class="lineCov">       6202 :         classNumber = CLS_EMPTY;</span>
+<span class="lineNum">    1445 </span>            :     }
+<span class="lineNum">    1446 </span>            :     else
+<span class="lineNum">    1447 </span>            :     {
+<span class="lineNum">    1448 </span><span class="lineCov">      33180 :         classNumber = 0;</span>
+<span class="lineNum">    1449 </span><span class="lineCov">      33180 :         if (flags &amp; RANGE_LB_INF)</span>
+<span class="lineNum">    1450 </span><span class="lineCov">        800 :             classNumber |= CLS_LOWER_INF;</span>
+<span class="lineNum">    1451 </span><span class="lineCov">      33180 :         if (flags &amp; RANGE_UB_INF)</span>
+<span class="lineNum">    1452 </span><span class="lineCov">        308 :             classNumber |= CLS_UPPER_INF;</span>
+<span class="lineNum">    1453 </span><span class="lineCov">      33180 :         if (flags &amp; RANGE_CONTAIN_EMPTY)</span>
+<span class="lineNum">    1454 </span><span class="lineNoCov">          0 :             classNumber |= CLS_CONTAIN_EMPTY;</span>
+<span class="lineNum">    1455 </span>            :     }
+<span class="lineNum">    1456 </span><span class="lineCov">      39382 :     return classNumber;</span>
+<span class="lineNum">    1457 </span>            : }
+<span class="lineNum">    1458 </span>            : 
+<span class="lineNum">    1459 </span>            : /*
+<span class="lineNum">    1460 </span>            :  * Comparison function for range_gist_single_sorting_split.
+<a name="1461"><span class="lineNum">    1461 </span>            :  */</a>
+<span class="lineNum">    1462 </span>            : static int
+<span class="lineNum">    1463 </span><span class="lineNoCov">          0 : single_bound_cmp(const void *a, const void *b, void *arg)</span>
+<span class="lineNum">    1464 </span>            : {
+<span class="lineNum">    1465 </span><span class="lineNoCov">          0 :     SingleBoundSortItem *i1 = (SingleBoundSortItem *) a;</span>
+<span class="lineNum">    1466 </span><span class="lineNoCov">          0 :     SingleBoundSortItem *i2 = (SingleBoundSortItem *) b;</span>
+<span class="lineNum">    1467 </span><span class="lineNoCov">          0 :     TypeCacheEntry *typcache = (TypeCacheEntry *) arg;</span>
+<span class="lineNum">    1468 </span>            : 
+<span class="lineNum">    1469 </span><span class="lineNoCov">          0 :     return range_cmp_bounds(typcache, &amp;i1-&gt;bound, &amp;i2-&gt;bound);</span>
+<span class="lineNum">    1470 </span>            : }
+<span class="lineNum">    1471 </span>            : 
+<span class="lineNum">    1472 </span>            : /*
+<span class="lineNum">    1473 </span>            :  * Compare NonEmptyRanges by lower bound.
+<a name="1474"><span class="lineNum">    1474 </span>            :  */</a>
+<span class="lineNum">    1475 </span>            : static int
+<span class="lineNum">    1476 </span><span class="lineCov">     121346 : interval_cmp_lower(const void *a, const void *b, void *arg)</span>
+<span class="lineNum">    1477 </span>            : {
+<span class="lineNum">    1478 </span><span class="lineCov">     121346 :     NonEmptyRange *i1 = (NonEmptyRange *) a;</span>
+<span class="lineNum">    1479 </span><span class="lineCov">     121346 :     NonEmptyRange *i2 = (NonEmptyRange *) b;</span>
+<span class="lineNum">    1480 </span><span class="lineCov">     121346 :     TypeCacheEntry *typcache = (TypeCacheEntry *) arg;</span>
+<span class="lineNum">    1481 </span>            : 
+<span class="lineNum">    1482 </span><span class="lineCov">     121346 :     return range_cmp_bounds(typcache, &amp;i1-&gt;lower, &amp;i2-&gt;lower);</span>
+<span class="lineNum">    1483 </span>            : }
+<span class="lineNum">    1484 </span>            : 
+<span class="lineNum">    1485 </span>            : /*
+<span class="lineNum">    1486 </span>            :  * Compare NonEmptyRanges by upper bound.
+<a name="1487"><span class="lineNum">    1487 </span>            :  */</a>
+<span class="lineNum">    1488 </span>            : static int
+<span class="lineNum">    1489 </span><span class="lineCov">     111334 : interval_cmp_upper(const void *a, const void *b, void *arg)</span>
+<span class="lineNum">    1490 </span>            : {
+<span class="lineNum">    1491 </span><span class="lineCov">     111334 :     NonEmptyRange *i1 = (NonEmptyRange *) a;</span>
+<span class="lineNum">    1492 </span><span class="lineCov">     111334 :     NonEmptyRange *i2 = (NonEmptyRange *) b;</span>
+<span class="lineNum">    1493 </span><span class="lineCov">     111334 :     TypeCacheEntry *typcache = (TypeCacheEntry *) arg;</span>
+<span class="lineNum">    1494 </span>            : 
+<span class="lineNum">    1495 </span><span class="lineCov">     111334 :     return range_cmp_bounds(typcache, &amp;i1-&gt;upper, &amp;i2-&gt;upper);</span>
+<span class="lineNum">    1496 </span>            : }
+<span class="lineNum">    1497 </span>            : 
+<span class="lineNum">    1498 </span>            : /*
+<span class="lineNum">    1499 </span>            :  * Compare CommonEntrys by their deltas.
+<a name="1500"><span class="lineNum">    1500 </span>            :  */</a>
+<span class="lineNum">    1501 </span>            : static int
+<span class="lineNum">    1502 </span><span class="lineCov">       2910 : common_entry_cmp(const void *i1, const void *i2)</span>
+<span class="lineNum">    1503 </span>            : {
+<span class="lineNum">    1504 </span><span class="lineCov">       2910 :     double      delta1 = ((CommonEntry *) i1)-&gt;delta;</span>
+<span class="lineNum">    1505 </span><span class="lineCov">       2910 :     double      delta2 = ((CommonEntry *) i2)-&gt;delta;</span>
+<span class="lineNum">    1506 </span>            : 
+<span class="lineNum">    1507 </span><span class="lineCov">       2910 :     if (delta1 &lt; delta2)</span>
+<span class="lineNum">    1508 </span><span class="lineCov">       2910 :         return -1;</span>
+<span class="lineNum">    1509 </span><span class="lineNoCov">          0 :     else if (delta1 &gt; delta2)</span>
+<span class="lineNum">    1510 </span><span class="lineNoCov">          0 :         return 1;</span>
+<span class="lineNum">    1511 </span>            :     else
+<span class="lineNum">    1512 </span><span class="lineNoCov">          0 :         return 0;</span>
+<span class="lineNum">    1513 </span>            : }
+<span class="lineNum">    1514 </span>            : 
+<span class="lineNum">    1515 </span>            : /*
+<span class="lineNum">    1516 </span>            :  * Convenience function to invoke type-specific subtype_diff function.
+<span class="lineNum">    1517 </span>            :  * Caller must have already checked that there is one for the range type.
+<a name="1518"><span class="lineNum">    1518 </span>            :  */</a>
+<span class="lineNum">    1519 </span>            : static float8
+<span class="lineNum">    1520 </span><span class="lineCov">     277306 : call_subtype_diff(TypeCacheEntry *typcache, Datum val1, Datum val2)</span>
+<span class="lineNum">    1521 </span>            : {
+<span class="lineNum">    1522 </span>            :     float8      value;
+<span class="lineNum">    1523 </span>            : 
+<span class="lineNum">    1524 </span><span class="lineCov">     277306 :     value = DatumGetFloat8(FunctionCall2Coll(&amp;typcache-&gt;rng_subdiff_finfo,</span>
+<span class="lineNum">    1525 </span>            :                                              typcache-&gt;rng_collation,
+<span class="lineNum">    1526 </span>            :                                              val1, val2));
+<span class="lineNum">    1527 </span>            :     /* Cope with buggy subtype_diff function by returning zero */
+<span class="lineNum">    1528 </span><span class="lineCov">     277306 :     if (value &gt;= 0.0)</span>
+<span class="lineNum">    1529 </span><span class="lineCov">     277306 :         return value;</span>
+<span class="lineNum">    1530 </span><span class="lineNoCov">          0 :     return 0.0;</span>
+<span class="lineNum">    1531 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

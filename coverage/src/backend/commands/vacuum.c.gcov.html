@@ -1,0 +1,2063 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/commands/vacuum.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../index.html">top level</a> - <a href="index.html">src/backend/commands</a> - vacuum.c<span style="font-size: 80%;"> (source / <a href="vacuum.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">491</td>
+            <td class="headerCovTableEntry">570</td>
+            <td class="headerCovTableEntryMed">86.1 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">16</td>
+            <td class="headerCovTableEntry">16</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * vacuum.c
+<span class="lineNum">       4 </span>            :  *    The postgres vacuum cleaner.
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * This file now includes only control and dispatch code for VACUUM and
+<span class="lineNum">       7 </span>            :  * ANALYZE commands.  Regular VACUUM is implemented in vacuumlazy.c,
+<span class="lineNum">       8 </span>            :  * ANALYZE in analyze.c, and VACUUM FULL is a variant of CLUSTER, handled
+<span class="lineNum">       9 </span>            :  * in cluster.c.
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  *
+<span class="lineNum">      12 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">      13 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">      14 </span>            :  *
+<span class="lineNum">      15 </span>            :  *
+<span class="lineNum">      16 </span>            :  * IDENTIFICATION
+<span class="lineNum">      17 </span>            :  *    src/backend/commands/vacuum.c
+<span class="lineNum">      18 </span>            :  *
+<span class="lineNum">      19 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      20 </span>            :  */
+<span class="lineNum">      21 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : #include &lt;math.h&gt;
+<span class="lineNum">      24 </span>            : 
+<span class="lineNum">      25 </span>            : #include &quot;access/clog.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;access/commit_ts.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;access/genam.h&quot;
+<span class="lineNum">      28 </span>            : #include &quot;access/heapam.h&quot;
+<span class="lineNum">      29 </span>            : #include &quot;access/htup_details.h&quot;
+<span class="lineNum">      30 </span>            : #include &quot;access/multixact.h&quot;
+<span class="lineNum">      31 </span>            : #include &quot;access/tableam.h&quot;
+<span class="lineNum">      32 </span>            : #include &quot;access/transam.h&quot;
+<span class="lineNum">      33 </span>            : #include &quot;access/xact.h&quot;
+<span class="lineNum">      34 </span>            : #include &quot;catalog/namespace.h&quot;
+<span class="lineNum">      35 </span>            : #include &quot;catalog/pg_database.h&quot;
+<span class="lineNum">      36 </span>            : #include &quot;catalog/pg_inherits.h&quot;
+<span class="lineNum">      37 </span>            : #include &quot;catalog/pg_namespace.h&quot;
+<span class="lineNum">      38 </span>            : #include &quot;commands/cluster.h&quot;
+<span class="lineNum">      39 </span>            : #include &quot;commands/defrem.h&quot;
+<span class="lineNum">      40 </span>            : #include &quot;commands/vacuum.h&quot;
+<span class="lineNum">      41 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      42 </span>            : #include &quot;nodes/makefuncs.h&quot;
+<span class="lineNum">      43 </span>            : #include &quot;pgstat.h&quot;
+<span class="lineNum">      44 </span>            : #include &quot;postmaster/autovacuum.h&quot;
+<span class="lineNum">      45 </span>            : #include &quot;storage/bufmgr.h&quot;
+<span class="lineNum">      46 </span>            : #include &quot;storage/lmgr.h&quot;
+<span class="lineNum">      47 </span>            : #include &quot;storage/proc.h&quot;
+<span class="lineNum">      48 </span>            : #include &quot;storage/procarray.h&quot;
+<span class="lineNum">      49 </span>            : #include &quot;utils/acl.h&quot;
+<span class="lineNum">      50 </span>            : #include &quot;utils/fmgroids.h&quot;
+<span class="lineNum">      51 </span>            : #include &quot;utils/guc.h&quot;
+<span class="lineNum">      52 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      53 </span>            : #include &quot;utils/snapmgr.h&quot;
+<span class="lineNum">      54 </span>            : #include &quot;utils/syscache.h&quot;
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : 
+<span class="lineNum">      57 </span>            : /*
+<span class="lineNum">      58 </span>            :  * GUC parameters
+<span class="lineNum">      59 </span>            :  */
+<span class="lineNum">      60 </span>            : int         vacuum_freeze_min_age;
+<span class="lineNum">      61 </span>            : int         vacuum_freeze_table_age;
+<span class="lineNum">      62 </span>            : int         vacuum_multixact_freeze_min_age;
+<span class="lineNum">      63 </span>            : int         vacuum_multixact_freeze_table_age;
+<span class="lineNum">      64 </span>            : 
+<span class="lineNum">      65 </span>            : 
+<span class="lineNum">      66 </span>            : /* A few variables that don't seem worth passing around as parameters */
+<span class="lineNum">      67 </span>            : static MemoryContext vac_context = NULL;
+<span class="lineNum">      68 </span>            : static BufferAccessStrategy vac_strategy;
+<span class="lineNum">      69 </span>            : 
+<span class="lineNum">      70 </span>            : 
+<span class="lineNum">      71 </span>            : /* non-export function prototypes */
+<span class="lineNum">      72 </span>            : static List *expand_vacuum_rel(VacuumRelation *vrel, int options);
+<span class="lineNum">      73 </span>            : static List *get_all_vacuum_rels(int options);
+<span class="lineNum">      74 </span>            : static void vac_truncate_clog(TransactionId frozenXID,
+<span class="lineNum">      75 </span>            :                               MultiXactId minMulti,
+<span class="lineNum">      76 </span>            :                               TransactionId lastSaneFrozenXid,
+<span class="lineNum">      77 </span>            :                               MultiXactId lastSaneMinMulti);
+<span class="lineNum">      78 </span>            : static bool vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params);
+<span class="lineNum">      79 </span>            : static VacOptTernaryValue get_vacopt_ternary_value(DefElem *def);
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span>            : /*
+<span class="lineNum">      82 </span>            :  * Primary entry point for manual VACUUM and ANALYZE commands
+<span class="lineNum">      83 </span>            :  *
+<span class="lineNum">      84 </span>            :  * This is mainly a preparation wrapper for the real operations that will
+<span class="lineNum">      85 </span>            :  * happen in vacuum().
+<a name="86"><span class="lineNum">      86 </span>            :  */</a>
+<span class="lineNum">      87 </span>            : void
+<span class="lineNum">      88 </span><span class="lineCov">       1256 : ExecVacuum(ParseState *pstate, VacuumStmt *vacstmt, bool isTopLevel)</span>
+<span class="lineNum">      89 </span>            : {
+<span class="lineNum">      90 </span>            :     VacuumParams params;
+<span class="lineNum">      91 </span><span class="lineCov">       1256 :     bool        verbose = false;</span>
+<span class="lineNum">      92 </span><span class="lineCov">       1256 :     bool        skip_locked = false;</span>
+<span class="lineNum">      93 </span><span class="lineCov">       1256 :     bool        analyze = false;</span>
+<span class="lineNum">      94 </span><span class="lineCov">       1256 :     bool        freeze = false;</span>
+<span class="lineNum">      95 </span><span class="lineCov">       1256 :     bool        full = false;</span>
+<span class="lineNum">      96 </span><span class="lineCov">       1256 :     bool        disable_page_skipping = false;</span>
+<span class="lineNum">      97 </span>            :     ListCell   *lc;
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            :     /* Set default value */
+<span class="lineNum">     100 </span><span class="lineCov">       1256 :     params.index_cleanup = VACOPT_TERNARY_DEFAULT;</span>
+<span class="lineNum">     101 </span><span class="lineCov">       1256 :     params.truncate = VACOPT_TERNARY_DEFAULT;</span>
+<span class="lineNum">     102 </span>            : 
+<span class="lineNum">     103 </span>            :     /* Parse options list */
+<span class="lineNum">     104 </span><span class="lineCov">       1408 :     foreach(lc, vacstmt-&gt;options)</span>
+<span class="lineNum">     105 </span>            :     {
+<span class="lineNum">     106 </span><span class="lineCov">        154 :         DefElem    *opt = (DefElem *) lfirst(lc);</span>
+<span class="lineNum">     107 </span>            : 
+<span class="lineNum">     108 </span>            :         /* Parse common options for VACUUM and ANALYZE */
+<span class="lineNum">     109 </span><span class="lineCov">        154 :         if (strcmp(opt-&gt;defname, &quot;verbose&quot;) == 0)</span>
+<span class="lineNum">     110 </span><span class="lineCov">          6 :             verbose = defGetBoolean(opt);</span>
+<span class="lineNum">     111 </span><span class="lineCov">        148 :         else if (strcmp(opt-&gt;defname, &quot;skip_locked&quot;) == 0)</span>
+<span class="lineNum">     112 </span><span class="lineCov">         10 :             skip_locked = defGetBoolean(opt);</span>
+<span class="lineNum">     113 </span><span class="lineCov">        138 :         else if (!vacstmt-&gt;is_vacuumcmd)</span>
+<span class="lineNum">     114 </span><span class="lineCov">          2 :             ereport(ERROR,</span>
+<span class="lineNum">     115 </span>            :                     (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     116 </span>            :                      errmsg(&quot;unrecognized ANALYZE option \&quot;%s\&quot;&quot;, opt-&gt;defname),
+<span class="lineNum">     117 </span>            :                      parser_errposition(pstate, opt-&gt;location)));
+<span class="lineNum">     118 </span>            : 
+<span class="lineNum">     119 </span>            :         /* Parse options available on VACUUM */
+<span class="lineNum">     120 </span><span class="lineCov">        136 :         else if (strcmp(opt-&gt;defname, &quot;analyze&quot;) == 0)</span>
+<span class="lineNum">     121 </span><span class="lineCov">         70 :             analyze = defGetBoolean(opt);</span>
+<span class="lineNum">     122 </span><span class="lineCov">         66 :         else if (strcmp(opt-&gt;defname, &quot;freeze&quot;) == 0)</span>
+<span class="lineNum">     123 </span><span class="lineCov">         16 :             freeze = defGetBoolean(opt);</span>
+<span class="lineNum">     124 </span><span class="lineCov">         50 :         else if (strcmp(opt-&gt;defname, &quot;full&quot;) == 0)</span>
+<span class="lineNum">     125 </span><span class="lineCov">         36 :             full = defGetBoolean(opt);</span>
+<span class="lineNum">     126 </span><span class="lineCov">         14 :         else if (strcmp(opt-&gt;defname, &quot;disable_page_skipping&quot;) == 0)</span>
+<span class="lineNum">     127 </span><span class="lineCov">          2 :             disable_page_skipping = defGetBoolean(opt);</span>
+<span class="lineNum">     128 </span><span class="lineCov">         12 :         else if (strcmp(opt-&gt;defname, &quot;index_cleanup&quot;) == 0)</span>
+<span class="lineNum">     129 </span><span class="lineCov">          8 :             params.index_cleanup = get_vacopt_ternary_value(opt);</span>
+<span class="lineNum">     130 </span><span class="lineCov">          4 :         else if (strcmp(opt-&gt;defname, &quot;truncate&quot;) == 0)</span>
+<span class="lineNum">     131 </span><span class="lineCov">          4 :             params.truncate = get_vacopt_ternary_value(opt);</span>
+<span class="lineNum">     132 </span>            :         else
+<span class="lineNum">     133 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     134 </span>            :                     (errcode(ERRCODE_SYNTAX_ERROR),
+<span class="lineNum">     135 </span>            :                      errmsg(&quot;unrecognized VACUUM option \&quot;%s\&quot;&quot;, opt-&gt;defname),
+<span class="lineNum">     136 </span>            :                      parser_errposition(pstate, opt-&gt;location)));
+<span class="lineNum">     137 </span>            :     }
+<span class="lineNum">     138 </span>            : 
+<span class="lineNum">     139 </span>            :     /* Set vacuum options */
+<span class="lineNum">     140 </span><span class="lineCov">       1254 :     params.options =</span>
+<span class="lineNum">     141 </span><span class="lineCov">       2508 :         (vacstmt-&gt;is_vacuumcmd ? VACOPT_VACUUM : VACOPT_ANALYZE) |</span>
+<span class="lineNum">     142 </span><span class="lineCov">       2508 :         (verbose ? VACOPT_VERBOSE : 0) |</span>
+<span class="lineNum">     143 </span><span class="lineCov">       2508 :         (skip_locked ? VACOPT_SKIP_LOCKED : 0) |</span>
+<span class="lineNum">     144 </span><span class="lineCov">       2508 :         (analyze ? VACOPT_ANALYZE : 0) |</span>
+<span class="lineNum">     145 </span><span class="lineCov">       2508 :         (freeze ? VACOPT_FREEZE : 0) |</span>
+<span class="lineNum">     146 </span><span class="lineCov">       2508 :         (full ? VACOPT_FULL : 0) |</span>
+<span class="lineNum">     147 </span><span class="lineCov">       1254 :         (disable_page_skipping ? VACOPT_DISABLE_PAGE_SKIPPING : 0);</span>
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span>            :     /* sanity checks on options */
+<span class="lineNum">     150 </span><span class="lineCov">       1254 :     Assert(params.options &amp; (VACOPT_VACUUM | VACOPT_ANALYZE));</span>
+<span class="lineNum">     151 </span><span class="lineCov">       1254 :     Assert((params.options &amp; VACOPT_VACUUM) ||</span>
+<span class="lineNum">     152 </span>            :            !(params.options &amp; (VACOPT_FULL | VACOPT_FREEZE)));
+<span class="lineNum">     153 </span><span class="lineCov">       1254 :     Assert(!(params.options &amp; VACOPT_SKIPTOAST));</span>
+<span class="lineNum">     154 </span>            : 
+<span class="lineNum">     155 </span>            :     /*
+<span class="lineNum">     156 </span>            :      * Make sure VACOPT_ANALYZE is specified if any column lists are present.
+<span class="lineNum">     157 </span>            :      */
+<span class="lineNum">     158 </span><span class="lineCov">       1254 :     if (!(params.options &amp; VACOPT_ANALYZE))</span>
+<span class="lineNum">     159 </span>            :     {
+<span class="lineNum">     160 </span>            :         ListCell   *lc;
+<span class="lineNum">     161 </span>            : 
+<span class="lineNum">     162 </span><span class="lineCov">        280 :         foreach(lc, vacstmt-&gt;rels)</span>
+<span class="lineNum">     163 </span>            :         {
+<span class="lineNum">     164 </span><span class="lineCov">        144 :             VacuumRelation *vrel = lfirst_node(VacuumRelation, lc);</span>
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span><span class="lineCov">        144 :             if (vrel-&gt;va_cols != NIL)</span>
+<span class="lineNum">     167 </span><span class="lineCov">          2 :                 ereport(ERROR,</span>
+<span class="lineNum">     168 </span>            :                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     169 </span>            :                          errmsg(&quot;ANALYZE option must be specified when a column list is provided&quot;)));
+<span class="lineNum">     170 </span>            :         }
+<span class="lineNum">     171 </span>            :     }
+<span class="lineNum">     172 </span>            : 
+<span class="lineNum">     173 </span>            :     /*
+<span class="lineNum">     174 </span>            :      * All freeze ages are zero if the FREEZE option is given; otherwise pass
+<span class="lineNum">     175 </span>            :      * them as -1 which means to use the default values.
+<span class="lineNum">     176 </span>            :      */
+<span class="lineNum">     177 </span><span class="lineCov">       1252 :     if (params.options &amp; VACOPT_FREEZE)</span>
+<span class="lineNum">     178 </span>            :     {
+<span class="lineNum">     179 </span><span class="lineCov">         16 :         params.freeze_min_age = 0;</span>
+<span class="lineNum">     180 </span><span class="lineCov">         16 :         params.freeze_table_age = 0;</span>
+<span class="lineNum">     181 </span><span class="lineCov">         16 :         params.multixact_freeze_min_age = 0;</span>
+<span class="lineNum">     182 </span><span class="lineCov">         16 :         params.multixact_freeze_table_age = 0;</span>
+<span class="lineNum">     183 </span>            :     }
+<span class="lineNum">     184 </span>            :     else
+<span class="lineNum">     185 </span>            :     {
+<span class="lineNum">     186 </span><span class="lineCov">       1236 :         params.freeze_min_age = -1;</span>
+<span class="lineNum">     187 </span><span class="lineCov">       1236 :         params.freeze_table_age = -1;</span>
+<span class="lineNum">     188 </span><span class="lineCov">       1236 :         params.multixact_freeze_min_age = -1;</span>
+<span class="lineNum">     189 </span><span class="lineCov">       1236 :         params.multixact_freeze_table_age = -1;</span>
+<span class="lineNum">     190 </span>            :     }
+<span class="lineNum">     191 </span>            : 
+<span class="lineNum">     192 </span>            :     /* user-invoked vacuum is never &quot;for wraparound&quot; */
+<span class="lineNum">     193 </span><span class="lineCov">       1252 :     params.is_wraparound = false;</span>
+<span class="lineNum">     194 </span>            : 
+<span class="lineNum">     195 </span>            :     /* user-invoked vacuum never uses this parameter */
+<span class="lineNum">     196 </span><span class="lineCov">       1252 :     params.log_min_duration = -1;</span>
+<span class="lineNum">     197 </span>            : 
+<span class="lineNum">     198 </span>            :     /* Now go through the common routine */
+<span class="lineNum">     199 </span><span class="lineCov">       1252 :     vacuum(vacstmt-&gt;rels, &amp;params, NULL, isTopLevel);</span>
+<span class="lineNum">     200 </span><span class="lineCov">       1212 : }</span>
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span>            : /*
+<span class="lineNum">     203 </span>            :  * Internal entry point for VACUUM and ANALYZE commands.
+<span class="lineNum">     204 </span>            :  *
+<span class="lineNum">     205 </span>            :  * relations, if not NIL, is a list of VacuumRelation to process; otherwise,
+<span class="lineNum">     206 </span>            :  * we process all relevant tables in the database.  For each VacuumRelation,
+<span class="lineNum">     207 </span>            :  * if a valid OID is supplied, the table with that OID is what to process;
+<span class="lineNum">     208 </span>            :  * otherwise, the VacuumRelation's RangeVar indicates what to process.
+<span class="lineNum">     209 </span>            :  *
+<span class="lineNum">     210 </span>            :  * params contains a set of parameters that can be used to customize the
+<span class="lineNum">     211 </span>            :  * behavior.
+<span class="lineNum">     212 </span>            :  *
+<span class="lineNum">     213 </span>            :  * bstrategy is normally given as NULL, but in autovacuum it can be passed
+<span class="lineNum">     214 </span>            :  * in to use the same buffer strategy object across multiple vacuum() calls.
+<span class="lineNum">     215 </span>            :  *
+<span class="lineNum">     216 </span>            :  * isTopLevel should be passed down from ProcessUtility.
+<span class="lineNum">     217 </span>            :  *
+<span class="lineNum">     218 </span>            :  * It is the caller's responsibility that all parameters are allocated in a
+<span class="lineNum">     219 </span>            :  * memory context that will not disappear at transaction commit.
+<a name="220"><span class="lineNum">     220 </span>            :  */</a>
+<span class="lineNum">     221 </span>            : void
+<span class="lineNum">     222 </span><span class="lineCov">       1376 : vacuum(List *relations, VacuumParams *params,</span>
+<span class="lineNum">     223 </span>            :        BufferAccessStrategy bstrategy, bool isTopLevel)
+<span class="lineNum">     224 </span>            : {
+<span class="lineNum">     225 </span>            :     static bool in_vacuum = false;
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span>            :     const char *stmttype;
+<span class="lineNum">     228 </span>            :     volatile bool in_outer_xact,
+<span class="lineNum">     229 </span>            :                 use_own_xacts;
+<span class="lineNum">     230 </span>            : 
+<span class="lineNum">     231 </span><span class="lineCov">       1376 :     Assert(params != NULL);</span>
+<span class="lineNum">     232 </span>            : 
+<span class="lineNum">     233 </span><span class="lineCov">       1376 :     stmttype = (params-&gt;options &amp; VACOPT_VACUUM) ? &quot;VACUUM&quot; : &quot;ANALYZE&quot;;</span>
+<span class="lineNum">     234 </span>            : 
+<span class="lineNum">     235 </span>            :     /*
+<span class="lineNum">     236 </span>            :      * We cannot run VACUUM inside a user transaction block; if we were inside
+<span class="lineNum">     237 </span>            :      * a transaction, then our commit- and start-transaction-command calls
+<span class="lineNum">     238 </span>            :      * would not have the intended effect!  There are numerous other subtle
+<span class="lineNum">     239 </span>            :      * dependencies on this, too.
+<span class="lineNum">     240 </span>            :      *
+<span class="lineNum">     241 </span>            :      * ANALYZE (without VACUUM) can run either way.
+<span class="lineNum">     242 </span>            :      */
+<span class="lineNum">     243 </span><span class="lineCov">       1376 :     if (params-&gt;options &amp; VACOPT_VACUUM)</span>
+<span class="lineNum">     244 </span>            :     {
+<span class="lineNum">     245 </span><span class="lineCov">        244 :         PreventInTransactionBlock(isTopLevel, stmttype);</span>
+<span class="lineNum">     246 </span><span class="lineCov">        240 :         in_outer_xact = false;</span>
+<span class="lineNum">     247 </span>            :     }
+<span class="lineNum">     248 </span>            :     else
+<span class="lineNum">     249 </span><span class="lineCov">       1132 :         in_outer_xact = IsInTransactionBlock(isTopLevel);</span>
+<span class="lineNum">     250 </span>            : 
+<span class="lineNum">     251 </span>            :     /*
+<span class="lineNum">     252 </span>            :      * Due to static variables vac_context, anl_context and vac_strategy,
+<span class="lineNum">     253 </span>            :      * vacuum() is not reentrant.  This matters when VACUUM FULL or ANALYZE
+<span class="lineNum">     254 </span>            :      * calls a hostile index expression that itself calls ANALYZE.
+<span class="lineNum">     255 </span>            :      */
+<span class="lineNum">     256 </span><span class="lineCov">       1372 :     if (in_vacuum)</span>
+<span class="lineNum">     257 </span><span class="lineCov">          4 :         ereport(ERROR,</span>
+<span class="lineNum">     258 </span>            :                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     259 </span>            :                  errmsg(&quot;%s cannot be executed from VACUUM or ANALYZE&quot;,
+<span class="lineNum">     260 </span>            :                         stmttype)));
+<span class="lineNum">     261 </span>            : 
+<span class="lineNum">     262 </span>            :     /*
+<span class="lineNum">     263 </span>            :      * Sanity check DISABLE_PAGE_SKIPPING option.
+<span class="lineNum">     264 </span>            :      */
+<span class="lineNum">     265 </span><span class="lineCov">       1402 :     if ((params-&gt;options &amp; VACOPT_FULL) != 0 &amp;&amp;</span>
+<span class="lineNum">     266 </span><span class="lineCov">         34 :         (params-&gt;options &amp; VACOPT_DISABLE_PAGE_SKIPPING) != 0)</span>
+<span class="lineNum">     267 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     268 </span>            :                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+<span class="lineNum">     269 </span>            :                  errmsg(&quot;VACUUM option DISABLE_PAGE_SKIPPING cannot be used with FULL&quot;)));
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span>            :     /*
+<span class="lineNum">     272 </span>            :      * Send info about dead objects to the statistics collector, unless we are
+<span class="lineNum">     273 </span>            :      * in autovacuum --- autovacuum.c does this for itself.
+<span class="lineNum">     274 </span>            :      */
+<span class="lineNum">     275 </span><span class="lineCov">       1368 :     if ((params-&gt;options &amp; VACOPT_VACUUM) &amp;&amp; !IsAutoVacuumWorkerProcess())</span>
+<span class="lineNum">     276 </span><span class="lineCov">        202 :         pgstat_vacuum_stat();</span>
+<span class="lineNum">     277 </span>            : 
+<span class="lineNum">     278 </span>            :     /*
+<span class="lineNum">     279 </span>            :      * Create special memory context for cross-transaction storage.
+<span class="lineNum">     280 </span>            :      *
+<span class="lineNum">     281 </span>            :      * Since it is a child of PortalContext, it will go away eventually even
+<span class="lineNum">     282 </span>            :      * if we suffer an error; there's no need for special abort cleanup logic.
+<span class="lineNum">     283 </span>            :      */
+<span class="lineNum">     284 </span><span class="lineCov">       1368 :     vac_context = AllocSetContextCreate(PortalContext,</span>
+<span class="lineNum">     285 </span>            :                                         &quot;Vacuum&quot;,
+<span class="lineNum">     286 </span>            :                                         ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     287 </span>            : 
+<span class="lineNum">     288 </span>            :     /*
+<span class="lineNum">     289 </span>            :      * If caller didn't give us a buffer strategy object, make one in the
+<span class="lineNum">     290 </span>            :      * cross-transaction memory context.
+<span class="lineNum">     291 </span>            :      */
+<span class="lineNum">     292 </span><span class="lineCov">       1368 :     if (bstrategy == NULL)</span>
+<span class="lineNum">     293 </span>            :     {
+<span class="lineNum">     294 </span><span class="lineCov">       1244 :         MemoryContext old_context = MemoryContextSwitchTo(vac_context);</span>
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span><span class="lineCov">       1244 :         bstrategy = GetAccessStrategy(BAS_VACUUM);</span>
+<span class="lineNum">     297 </span><span class="lineCov">       1244 :         MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">     298 </span>            :     }
+<span class="lineNum">     299 </span><span class="lineCov">       1368 :     vac_strategy = bstrategy;</span>
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span>            :     /*
+<span class="lineNum">     302 </span>            :      * Build list of relation(s) to process, putting any new data in
+<span class="lineNum">     303 </span>            :      * vac_context for safekeeping.
+<span class="lineNum">     304 </span>            :      */
+<span class="lineNum">     305 </span><span class="lineCov">       1368 :     if (relations != NIL)</span>
+<span class="lineNum">     306 </span>            :     {
+<span class="lineNum">     307 </span><span class="lineCov">       1362 :         List       *newrels = NIL;</span>
+<span class="lineNum">     308 </span>            :         ListCell   *lc;
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span><span class="lineCov">       2738 :         foreach(lc, relations)</span>
+<span class="lineNum">     311 </span>            :         {
+<span class="lineNum">     312 </span><span class="lineCov">       1388 :             VacuumRelation *vrel = lfirst_node(VacuumRelation, lc);</span>
+<span class="lineNum">     313 </span>            :             List       *sublist;
+<span class="lineNum">     314 </span>            :             MemoryContext old_context;
+<span class="lineNum">     315 </span>            : 
+<span class="lineNum">     316 </span><span class="lineCov">       1388 :             sublist = expand_vacuum_rel(vrel, params-&gt;options);</span>
+<span class="lineNum">     317 </span><span class="lineCov">       1376 :             old_context = MemoryContextSwitchTo(vac_context);</span>
+<span class="lineNum">     318 </span><span class="lineCov">       1376 :             newrels = list_concat(newrels, sublist);</span>
+<span class="lineNum">     319 </span><span class="lineCov">       1376 :             MemoryContextSwitchTo(old_context);</span>
+<span class="lineNum">     320 </span>            :         }
+<span class="lineNum">     321 </span><span class="lineCov">       1350 :         relations = newrels;</span>
+<span class="lineNum">     322 </span>            :     }
+<span class="lineNum">     323 </span>            :     else
+<span class="lineNum">     324 </span><span class="lineCov">          6 :         relations = get_all_vacuum_rels(params-&gt;options);</span>
+<span class="lineNum">     325 </span>            : 
+<span class="lineNum">     326 </span>            :     /*
+<span class="lineNum">     327 </span>            :      * Decide whether we need to start/commit our own transactions.
+<span class="lineNum">     328 </span>            :      *
+<span class="lineNum">     329 </span>            :      * For VACUUM (with or without ANALYZE): always do so, so that we can
+<span class="lineNum">     330 </span>            :      * release locks as soon as possible.  (We could possibly use the outer
+<span class="lineNum">     331 </span>            :      * transaction for a one-table VACUUM, but handling TOAST tables would be
+<span class="lineNum">     332 </span>            :      * problematic.)
+<span class="lineNum">     333 </span>            :      *
+<span class="lineNum">     334 </span>            :      * For ANALYZE (no VACUUM): if inside a transaction block, we cannot
+<span class="lineNum">     335 </span>            :      * start/commit our own transactions.  Also, there's no need to do so if
+<span class="lineNum">     336 </span>            :      * only processing one relation.  For multiple relations when not within a
+<span class="lineNum">     337 </span>            :      * transaction block, and also in an autovacuum worker, use own
+<span class="lineNum">     338 </span>            :      * transactions so we can release locks sooner.
+<span class="lineNum">     339 </span>            :      */
+<span class="lineNum">     340 </span><span class="lineCov">       1356 :     if (params-&gt;options &amp; VACOPT_VACUUM)</span>
+<span class="lineNum">     341 </span><span class="lineCov">        236 :         use_own_xacts = true;</span>
+<span class="lineNum">     342 </span>            :     else
+<span class="lineNum">     343 </span>            :     {
+<span class="lineNum">     344 </span><span class="lineCov">       1120 :         Assert(params-&gt;options &amp; VACOPT_ANALYZE);</span>
+<span class="lineNum">     345 </span><span class="lineCov">       1120 :         if (IsAutoVacuumWorkerProcess())</span>
+<span class="lineNum">     346 </span><span class="lineCov">         86 :             use_own_xacts = true;</span>
+<span class="lineNum">     347 </span><span class="lineCov">       1034 :         else if (in_outer_xact)</span>
+<span class="lineNum">     348 </span><span class="lineCov">        742 :             use_own_xacts = false;</span>
+<span class="lineNum">     349 </span><span class="lineCov">        292 :         else if (list_length(relations) &gt; 1)</span>
+<span class="lineNum">     350 </span><span class="lineCov">         84 :             use_own_xacts = true;</span>
+<span class="lineNum">     351 </span>            :         else
+<span class="lineNum">     352 </span><span class="lineCov">        208 :             use_own_xacts = false;</span>
+<span class="lineNum">     353 </span>            :     }
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span>            :     /*
+<span class="lineNum">     356 </span>            :      * vacuum_rel expects to be entered with no transaction active; it will
+<span class="lineNum">     357 </span>            :      * start and commit its own transaction.  But we are called by an SQL
+<span class="lineNum">     358 </span>            :      * command, and so we are executing inside a transaction already. We
+<span class="lineNum">     359 </span>            :      * commit the transaction started in PostgresMain() here, and start
+<span class="lineNum">     360 </span>            :      * another one before exiting to match the commit waiting for us back in
+<span class="lineNum">     361 </span>            :      * PostgresMain().
+<span class="lineNum">     362 </span>            :      */
+<span class="lineNum">     363 </span><span class="lineCov">       1356 :     if (use_own_xacts)</span>
+<span class="lineNum">     364 </span>            :     {
+<span class="lineNum">     365 </span><span class="lineCov">        406 :         Assert(!in_outer_xact);</span>
+<span class="lineNum">     366 </span>            : 
+<span class="lineNum">     367 </span>            :         /* ActiveSnapshot is not set by autovacuum */
+<span class="lineNum">     368 </span><span class="lineCov">        406 :         if (ActiveSnapshotSet())</span>
+<span class="lineNum">     369 </span><span class="lineCov">        282 :             PopActiveSnapshot();</span>
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span>            :         /* matches the StartTransaction in PostgresMain() */
+<span class="lineNum">     372 </span><span class="lineCov">        406 :         CommitTransactionCommand();</span>
+<span class="lineNum">     373 </span>            :     }
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span>            :     /* Turn vacuum cost accounting on or off, and set/clear in_vacuum */
+<span class="lineNum">     376 </span><span class="lineCov">       1356 :     PG_TRY();</span>
+<span class="lineNum">     377 </span>            :     {
+<span class="lineNum">     378 </span>            :         ListCell   *cur;
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span><span class="lineCov">       1356 :         in_vacuum = true;</span>
+<span class="lineNum">     381 </span><span class="lineCov">       1356 :         VacuumCostActive = (VacuumCostDelay &gt; 0);</span>
+<span class="lineNum">     382 </span><span class="lineCov">       1356 :         VacuumCostBalance = 0;</span>
+<span class="lineNum">     383 </span><span class="lineCov">       1356 :         VacuumPageHit = 0;</span>
+<span class="lineNum">     384 </span><span class="lineCov">       1356 :         VacuumPageMiss = 0;</span>
+<span class="lineNum">     385 </span><span class="lineCov">       1356 :         VacuumPageDirty = 0;</span>
+<span class="lineNum">     386 </span>            : 
+<span class="lineNum">     387 </span>            :         /*
+<span class="lineNum">     388 </span>            :          * Loop to process each selected relation.
+<span class="lineNum">     389 </span>            :          */
+<span class="lineNum">     390 </span><span class="lineCov">       3582 :         foreach(cur, relations)</span>
+<span class="lineNum">     391 </span>            :         {
+<span class="lineNum">     392 </span><span class="lineCov">       2246 :             VacuumRelation *vrel = lfirst_node(VacuumRelation, cur);</span>
+<span class="lineNum">     393 </span>            : 
+<span class="lineNum">     394 </span><span class="lineCov">       2246 :             if (params-&gt;options &amp; VACOPT_VACUUM)</span>
+<span class="lineNum">     395 </span>            :             {
+<span class="lineNum">     396 </span><span class="lineCov">        774 :                 if (!vacuum_rel(vrel-&gt;oid, vrel-&gt;relation, params))</span>
+<span class="lineNum">     397 </span><span class="lineCov">         24 :                     continue;</span>
+<span class="lineNum">     398 </span>            :             }
+<span class="lineNum">     399 </span>            : 
+<span class="lineNum">     400 </span><span class="lineCov">       2220 :             if (params-&gt;options &amp; VACOPT_ANALYZE)</span>
+<span class="lineNum">     401 </span>            :             {
+<span class="lineNum">     402 </span>            :                 /*
+<span class="lineNum">     403 </span>            :                  * If using separate xacts, start one for analyze. Otherwise,
+<span class="lineNum">     404 </span>            :                  * we can use the outer transaction.
+<span class="lineNum">     405 </span>            :                  */
+<span class="lineNum">     406 </span><span class="lineCov">       1566 :                 if (use_own_xacts)</span>
+<span class="lineNum">     407 </span>            :                 {
+<span class="lineNum">     408 </span><span class="lineCov">        632 :                     StartTransactionCommand();</span>
+<span class="lineNum">     409 </span>            :                     /* functions in indexes may want a snapshot set */
+<span class="lineNum">     410 </span><span class="lineCov">        632 :                     PushActiveSnapshot(GetTransactionSnapshot());</span>
+<span class="lineNum">     411 </span>            :                 }
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span><span class="lineCov">       1566 :                 analyze_rel(vrel-&gt;oid, vrel-&gt;relation, params,</span>
+<span class="lineNum">     414 </span>            :                             vrel-&gt;va_cols, in_outer_xact, vac_strategy);
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span><span class="lineCov">       1548 :                 if (use_own_xacts)</span>
+<span class="lineNum">     417 </span>            :                 {
+<span class="lineNum">     418 </span><span class="lineCov">        620 :                     PopActiveSnapshot();</span>
+<span class="lineNum">     419 </span><span class="lineCov">        620 :                     CommitTransactionCommand();</span>
+<span class="lineNum">     420 </span>            :                 }
+<span class="lineNum">     421 </span>            :                 else
+<span class="lineNum">     422 </span>            :                 {
+<span class="lineNum">     423 </span>            :                     /*
+<span class="lineNum">     424 </span>            :                      * If we're not using separate xacts, better separate the
+<span class="lineNum">     425 </span>            :                      * ANALYZE actions with CCIs.  This avoids trouble if user
+<span class="lineNum">     426 </span>            :                      * says &quot;ANALYZE t, t&quot;.
+<span class="lineNum">     427 </span>            :                      */
+<span class="lineNum">     428 </span><span class="lineCov">        928 :                     CommandCounterIncrement();</span>
+<span class="lineNum">     429 </span>            :                 }
+<span class="lineNum">     430 </span>            :             }
+<span class="lineNum">     431 </span>            :         }
+<span class="lineNum">     432 </span>            :     }
+<span class="lineNum">     433 </span><span class="lineCov">         20 :     PG_FINALLY();</span>
+<span class="lineNum">     434 </span>            :     {
+<span class="lineNum">     435 </span><span class="lineCov">       1356 :         in_vacuum = false;</span>
+<span class="lineNum">     436 </span><span class="lineCov">       1356 :         VacuumCostActive = false;</span>
+<span class="lineNum">     437 </span>            :     }
+<span class="lineNum">     438 </span><span class="lineCov">       1356 :     PG_END_TRY();</span>
+<span class="lineNum">     439 </span>            : 
+<span class="lineNum">     440 </span>            :     /*
+<span class="lineNum">     441 </span>            :      * Finish up processing.
+<span class="lineNum">     442 </span>            :      */
+<span class="lineNum">     443 </span><span class="lineCov">       1336 :     if (use_own_xacts)</span>
+<span class="lineNum">     444 </span>            :     {
+<span class="lineNum">     445 </span>            :         /* here, we are not in a transaction */
+<span class="lineNum">     446 </span>            : 
+<span class="lineNum">     447 </span>            :         /*
+<span class="lineNum">     448 </span>            :          * This matches the CommitTransaction waiting for us in
+<span class="lineNum">     449 </span>            :          * PostgresMain().
+<span class="lineNum">     450 </span>            :          */
+<span class="lineNum">     451 </span><span class="lineCov">        392 :         StartTransactionCommand();</span>
+<span class="lineNum">     452 </span>            :     }
+<span class="lineNum">     453 </span>            : 
+<span class="lineNum">     454 </span><span class="lineCov">       1336 :     if ((params-&gt;options &amp; VACOPT_VACUUM) &amp;&amp; !IsAutoVacuumWorkerProcess())</span>
+<span class="lineNum">     455 </span>            :     {
+<span class="lineNum">     456 </span>            :         /*
+<span class="lineNum">     457 </span>            :          * Update pg_database.datfrozenxid, and truncate pg_xact if possible.
+<span class="lineNum">     458 </span>            :          * (autovacuum.c does this for itself.)
+<span class="lineNum">     459 </span>            :          */
+<span class="lineNum">     460 </span><span class="lineCov">        188 :         vac_update_datfrozenxid();</span>
+<span class="lineNum">     461 </span>            :     }
+<span class="lineNum">     462 </span>            : 
+<span class="lineNum">     463 </span>            :     /*
+<span class="lineNum">     464 </span>            :      * Clean up working storage --- note we must do this after
+<span class="lineNum">     465 </span>            :      * StartTransactionCommand, else we might be trying to delete the active
+<span class="lineNum">     466 </span>            :      * context!
+<span class="lineNum">     467 </span>            :      */
+<span class="lineNum">     468 </span><span class="lineCov">       1336 :     MemoryContextDelete(vac_context);</span>
+<span class="lineNum">     469 </span><span class="lineCov">       1336 :     vac_context = NULL;</span>
+<span class="lineNum">     470 </span><span class="lineCov">       1336 : }</span>
+<span class="lineNum">     471 </span>            : 
+<span class="lineNum">     472 </span>            : /*
+<span class="lineNum">     473 </span>            :  * Check if a given relation can be safely vacuumed or analyzed.  If the
+<span class="lineNum">     474 </span>            :  * user is not the relation owner, issue a WARNING log message and return
+<span class="lineNum">     475 </span>            :  * false to let the caller decide what to do with this relation.  This
+<span class="lineNum">     476 </span>            :  * routine is used to decide if a relation can be processed for VACUUM or
+<span class="lineNum">     477 </span>            :  * ANALYZE.
+<a name="478"><span class="lineNum">     478 </span>            :  */</a>
+<span class="lineNum">     479 </span>            : bool
+<span class="lineNum">     480 </span><span class="lineCov">       6846 : vacuum_is_relation_owner(Oid relid, Form_pg_class reltuple, int options)</span>
+<span class="lineNum">     481 </span>            : {
+<span class="lineNum">     482 </span>            :     char       *relname;
+<span class="lineNum">     483 </span>            : 
+<span class="lineNum">     484 </span><span class="lineCov">       6846 :     Assert((options &amp; (VACOPT_VACUUM | VACOPT_ANALYZE)) != 0);</span>
+<span class="lineNum">     485 </span>            : 
+<span class="lineNum">     486 </span>            :     /*
+<span class="lineNum">     487 </span>            :      * Check permissions.
+<span class="lineNum">     488 </span>            :      *
+<span class="lineNum">     489 </span>            :      * We allow the user to vacuum or analyze a table if he is superuser, the
+<span class="lineNum">     490 </span>            :      * table owner, or the database owner (but in the latter case, only if
+<span class="lineNum">     491 </span>            :      * it's not a shared relation).  pg_class_ownercheck includes the
+<span class="lineNum">     492 </span>            :      * superuser case.
+<span class="lineNum">     493 </span>            :      *
+<span class="lineNum">     494 </span>            :      * Note we choose to treat permissions failure as a WARNING and keep
+<span class="lineNum">     495 </span>            :      * trying to vacuum or analyze the rest of the DB --- is this appropriate?
+<span class="lineNum">     496 </span>            :      */
+<span class="lineNum">     497 </span><span class="lineCov">       6948 :     if (pg_class_ownercheck(relid, GetUserId()) ||</span>
+<span class="lineNum">     498 </span><span class="lineCov">        102 :         (pg_database_ownercheck(MyDatabaseId, GetUserId()) &amp;&amp; !reltuple-&gt;relisshared))</span>
+<span class="lineNum">     499 </span><span class="lineCov">       6744 :         return true;</span>
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span><span class="lineCov">        102 :     relname = NameStr(reltuple-&gt;relname);</span>
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span><span class="lineCov">        102 :     if ((options &amp; VACOPT_VACUUM) != 0)</span>
+<span class="lineNum">     504 </span>            :     {
+<span class="lineNum">     505 </span><span class="lineCov">         68 :         if (reltuple-&gt;relisshared)</span>
+<span class="lineNum">     506 </span><span class="lineCov">          4 :             ereport(WARNING,</span>
+<span class="lineNum">     507 </span>            :                     (errmsg(&quot;skipping \&quot;%s\&quot; --- only superuser can vacuum it&quot;,
+<span class="lineNum">     508 </span>            :                             relname)));
+<span class="lineNum">     509 </span><span class="lineCov">         64 :         else if (reltuple-&gt;relnamespace == PG_CATALOG_NAMESPACE)</span>
+<span class="lineNum">     510 </span><span class="lineCov">          4 :             ereport(WARNING,</span>
+<span class="lineNum">     511 </span>            :                     (errmsg(&quot;skipping \&quot;%s\&quot; --- only superuser or database owner can vacuum it&quot;,
+<span class="lineNum">     512 </span>            :                             relname)));
+<span class="lineNum">     513 </span>            :         else
+<span class="lineNum">     514 </span><span class="lineCov">         60 :             ereport(WARNING,</span>
+<span class="lineNum">     515 </span>            :                     (errmsg(&quot;skipping \&quot;%s\&quot; --- only table or database owner can vacuum it&quot;,
+<span class="lineNum">     516 </span>            :                             relname)));
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span>            :         /*
+<span class="lineNum">     519 </span>            :          * For VACUUM ANALYZE, both logs could show up, but just generate
+<span class="lineNum">     520 </span>            :          * information for VACUUM as that would be the first one to be
+<span class="lineNum">     521 </span>            :          * processed.
+<span class="lineNum">     522 </span>            :          */
+<span class="lineNum">     523 </span><span class="lineCov">         68 :         return false;</span>
+<span class="lineNum">     524 </span>            :     }
+<span class="lineNum">     525 </span>            : 
+<span class="lineNum">     526 </span><span class="lineCov">         34 :     if ((options &amp; VACOPT_ANALYZE) != 0)</span>
+<span class="lineNum">     527 </span>            :     {
+<span class="lineNum">     528 </span><span class="lineCov">         34 :         if (reltuple-&gt;relisshared)</span>
+<span class="lineNum">     529 </span><span class="lineCov">          2 :             ereport(WARNING,</span>
+<span class="lineNum">     530 </span>            :                     (errmsg(&quot;skipping \&quot;%s\&quot; --- only superuser can analyze it&quot;,
+<span class="lineNum">     531 </span>            :                             relname)));
+<span class="lineNum">     532 </span><span class="lineCov">         32 :         else if (reltuple-&gt;relnamespace == PG_CATALOG_NAMESPACE)</span>
+<span class="lineNum">     533 </span><span class="lineCov">          2 :             ereport(WARNING,</span>
+<span class="lineNum">     534 </span>            :                     (errmsg(&quot;skipping \&quot;%s\&quot; --- only superuser or database owner can analyze it&quot;,
+<span class="lineNum">     535 </span>            :                             relname)));
+<span class="lineNum">     536 </span>            :         else
+<span class="lineNum">     537 </span><span class="lineCov">         30 :             ereport(WARNING,</span>
+<span class="lineNum">     538 </span>            :                     (errmsg(&quot;skipping \&quot;%s\&quot; --- only table or database owner can analyze it&quot;,
+<span class="lineNum">     539 </span>            :                             relname)));
+<span class="lineNum">     540 </span>            :     }
+<span class="lineNum">     541 </span>            : 
+<span class="lineNum">     542 </span><span class="lineCov">         34 :     return false;</span>
+<span class="lineNum">     543 </span>            : }
+<span class="lineNum">     544 </span>            : 
+<span class="lineNum">     545 </span>            : 
+<span class="lineNum">     546 </span>            : /*
+<span class="lineNum">     547 </span>            :  * vacuum_open_relation
+<span class="lineNum">     548 </span>            :  *
+<span class="lineNum">     549 </span>            :  * This routine is used for attempting to open and lock a relation which
+<span class="lineNum">     550 </span>            :  * is going to be vacuumed or analyzed.  If the relation cannot be opened
+<span class="lineNum">     551 </span>            :  * or locked, a log is emitted if possible.
+<a name="552"><span class="lineNum">     552 </span>            :  */</a>
+<span class="lineNum">     553 </span>            : Relation
+<span class="lineNum">     554 </span><span class="lineCov">       2640 : vacuum_open_relation(Oid relid, RangeVar *relation, int options,</span>
+<span class="lineNum">     555 </span>            :                      bool verbose, LOCKMODE lmode)
+<span class="lineNum">     556 </span>            : {
+<span class="lineNum">     557 </span>            :     Relation    onerel;
+<span class="lineNum">     558 </span><span class="lineCov">       2640 :     bool        rel_lock = true;</span>
+<span class="lineNum">     559 </span>            :     int         elevel;
+<span class="lineNum">     560 </span>            : 
+<span class="lineNum">     561 </span><span class="lineCov">       2640 :     Assert((options &amp; (VACOPT_VACUUM | VACOPT_ANALYZE)) != 0);</span>
+<span class="lineNum">     562 </span>            : 
+<span class="lineNum">     563 </span>            :     /*
+<span class="lineNum">     564 </span>            :      * Open the relation and get the appropriate lock on it.
+<span class="lineNum">     565 </span>            :      *
+<span class="lineNum">     566 </span>            :      * There's a race condition here: the relation may have gone away since
+<span class="lineNum">     567 </span>            :      * the last time we saw it.  If so, we don't need to vacuum or analyze it.
+<span class="lineNum">     568 </span>            :      *
+<span class="lineNum">     569 </span>            :      * If we've been asked not to wait for the relation lock, acquire it first
+<span class="lineNum">     570 </span>            :      * in non-blocking mode, before calling try_relation_open().
+<span class="lineNum">     571 </span>            :      */
+<span class="lineNum">     572 </span><span class="lineCov">       2640 :     if (!(options &amp; VACOPT_SKIP_LOCKED))</span>
+<span class="lineNum">     573 </span><span class="lineCov">       2474 :         onerel = try_relation_open(relid, lmode);</span>
+<span class="lineNum">     574 </span><span class="lineCov">        166 :     else if (ConditionalLockRelationOid(relid, lmode))</span>
+<span class="lineNum">     575 </span><span class="lineCov">        166 :         onerel = try_relation_open(relid, NoLock);</span>
+<span class="lineNum">     576 </span>            :     else
+<span class="lineNum">     577 </span>            :     {
+<span class="lineNum">     578 </span><span class="lineNoCov">          0 :         onerel = NULL;</span>
+<span class="lineNum">     579 </span><span class="lineNoCov">          0 :         rel_lock = false;</span>
+<span class="lineNum">     580 </span>            :     }
+<span class="lineNum">     581 </span>            : 
+<span class="lineNum">     582 </span>            :     /* if relation is opened, leave */
+<span class="lineNum">     583 </span><span class="lineCov">       2640 :     if (onerel)</span>
+<span class="lineNum">     584 </span><span class="lineCov">       2640 :         return onerel;</span>
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span>            :     /*
+<span class="lineNum">     587 </span>            :      * Relation could not be opened, hence generate if possible a log
+<span class="lineNum">     588 </span>            :      * informing on the situation.
+<span class="lineNum">     589 </span>            :      *
+<span class="lineNum">     590 </span>            :      * If the RangeVar is not defined, we do not have enough information to
+<span class="lineNum">     591 </span>            :      * provide a meaningful log statement.  Chances are that the caller has
+<span class="lineNum">     592 </span>            :      * intentionally not provided this information so that this logging is
+<span class="lineNum">     593 </span>            :      * skipped, anyway.
+<span class="lineNum">     594 </span>            :      */
+<span class="lineNum">     595 </span><span class="lineNoCov">          0 :     if (relation == NULL)</span>
+<span class="lineNum">     596 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span>            :     /*
+<span class="lineNum">     599 </span>            :      * Determine the log level.
+<span class="lineNum">     600 </span>            :      *
+<span class="lineNum">     601 </span>            :      * For manual VACUUM or ANALYZE, we emit a WARNING to match the log
+<span class="lineNum">     602 </span>            :      * statements in the permission checks; otherwise, only log if the caller
+<span class="lineNum">     603 </span>            :      * so requested.
+<span class="lineNum">     604 </span>            :      */
+<span class="lineNum">     605 </span><span class="lineNoCov">          0 :     if (!IsAutoVacuumWorkerProcess())</span>
+<span class="lineNum">     606 </span><span class="lineNoCov">          0 :         elevel = WARNING;</span>
+<span class="lineNum">     607 </span><span class="lineNoCov">          0 :     else if (verbose)</span>
+<span class="lineNum">     608 </span><span class="lineNoCov">          0 :         elevel = LOG;</span>
+<span class="lineNum">     609 </span>            :     else
+<span class="lineNum">     610 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span><span class="lineNoCov">          0 :     if ((options &amp; VACOPT_VACUUM) != 0)</span>
+<span class="lineNum">     613 </span>            :     {
+<span class="lineNum">     614 </span><span class="lineNoCov">          0 :         if (!rel_lock)</span>
+<span class="lineNum">     615 </span><span class="lineNoCov">          0 :             ereport(elevel,</span>
+<span class="lineNum">     616 </span>            :                     (errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+<span class="lineNum">     617 </span>            :                      errmsg(&quot;skipping vacuum of \&quot;%s\&quot; --- lock not available&quot;,
+<span class="lineNum">     618 </span>            :                             relation-&gt;relname)));
+<span class="lineNum">     619 </span>            :         else
+<span class="lineNum">     620 </span><span class="lineNoCov">          0 :             ereport(elevel,</span>
+<span class="lineNum">     621 </span>            :                     (errcode(ERRCODE_UNDEFINED_TABLE),
+<span class="lineNum">     622 </span>            :                      errmsg(&quot;skipping vacuum of \&quot;%s\&quot; --- relation no longer exists&quot;,
+<span class="lineNum">     623 </span>            :                             relation-&gt;relname)));
+<span class="lineNum">     624 </span>            : 
+<span class="lineNum">     625 </span>            :         /*
+<span class="lineNum">     626 </span>            :          * For VACUUM ANALYZE, both logs could show up, but just generate
+<span class="lineNum">     627 </span>            :          * information for VACUUM as that would be the first one to be
+<span class="lineNum">     628 </span>            :          * processed.
+<span class="lineNum">     629 </span>            :          */
+<span class="lineNum">     630 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     631 </span>            :     }
+<span class="lineNum">     632 </span>            : 
+<span class="lineNum">     633 </span><span class="lineNoCov">          0 :     if ((options &amp; VACOPT_ANALYZE) != 0)</span>
+<span class="lineNum">     634 </span>            :     {
+<span class="lineNum">     635 </span><span class="lineNoCov">          0 :         if (!rel_lock)</span>
+<span class="lineNum">     636 </span><span class="lineNoCov">          0 :             ereport(elevel,</span>
+<span class="lineNum">     637 </span>            :                     (errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+<span class="lineNum">     638 </span>            :                      errmsg(&quot;skipping analyze of \&quot;%s\&quot; --- lock not available&quot;,
+<span class="lineNum">     639 </span>            :                             relation-&gt;relname)));
+<span class="lineNum">     640 </span>            :         else
+<span class="lineNum">     641 </span><span class="lineNoCov">          0 :             ereport(elevel,</span>
+<span class="lineNum">     642 </span>            :                     (errcode(ERRCODE_UNDEFINED_TABLE),
+<span class="lineNum">     643 </span>            :                      errmsg(&quot;skipping analyze of \&quot;%s\&quot; --- relation no longer exists&quot;,
+<span class="lineNum">     644 </span>            :                             relation-&gt;relname)));
+<span class="lineNum">     645 </span>            :     }
+<span class="lineNum">     646 </span>            : 
+<span class="lineNum">     647 </span><span class="lineNoCov">          0 :     return NULL;</span>
+<span class="lineNum">     648 </span>            : }
+<span class="lineNum">     649 </span>            : 
+<span class="lineNum">     650 </span>            : 
+<span class="lineNum">     651 </span>            : /*
+<span class="lineNum">     652 </span>            :  * Given a VacuumRelation, fill in the table OID if it wasn't specified,
+<span class="lineNum">     653 </span>            :  * and optionally add VacuumRelations for partitions of the table.
+<span class="lineNum">     654 </span>            :  *
+<span class="lineNum">     655 </span>            :  * If a VacuumRelation does not have an OID supplied and is a partitioned
+<span class="lineNum">     656 </span>            :  * table, an extra entry will be added to the output for each partition.
+<span class="lineNum">     657 </span>            :  * Presently, only autovacuum supplies OIDs when calling vacuum(), and
+<span class="lineNum">     658 </span>            :  * it does not want us to expand partitioned tables.
+<span class="lineNum">     659 </span>            :  *
+<span class="lineNum">     660 </span>            :  * We take care not to modify the input data structure, but instead build
+<span class="lineNum">     661 </span>            :  * new VacuumRelation(s) to return.  (But note that they will reference
+<span class="lineNum">     662 </span>            :  * unmodified parts of the input, eg column lists.)  New data structures
+<span class="lineNum">     663 </span>            :  * are made in vac_context.
+<a name="664"><span class="lineNum">     664 </span>            :  */</a>
+<span class="lineNum">     665 </span>            : static List *
+<span class="lineNum">     666 </span><span class="lineCov">       1388 : expand_vacuum_rel(VacuumRelation *vrel, int options)</span>
+<span class="lineNum">     667 </span>            : {
+<span class="lineNum">     668 </span><span class="lineCov">       1388 :     List       *vacrels = NIL;</span>
+<span class="lineNum">     669 </span>            :     MemoryContext oldcontext;
+<span class="lineNum">     670 </span>            : 
+<span class="lineNum">     671 </span>            :     /* If caller supplied OID, there's nothing we need do here. */
+<span class="lineNum">     672 </span><span class="lineCov">       1388 :     if (OidIsValid(vrel-&gt;oid))</span>
+<span class="lineNum">     673 </span>            :     {
+<span class="lineNum">     674 </span><span class="lineCov">        124 :         oldcontext = MemoryContextSwitchTo(vac_context);</span>
+<span class="lineNum">     675 </span><span class="lineCov">        124 :         vacrels = lappend(vacrels, vrel);</span>
+<span class="lineNum">     676 </span><span class="lineCov">        124 :         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     677 </span>            :     }
+<span class="lineNum">     678 </span>            :     else
+<span class="lineNum">     679 </span>            :     {
+<span class="lineNum">     680 </span>            :         /* Process a specific relation, and possibly partitions thereof */
+<span class="lineNum">     681 </span>            :         Oid         relid;
+<span class="lineNum">     682 </span>            :         HeapTuple   tuple;
+<span class="lineNum">     683 </span>            :         Form_pg_class classForm;
+<span class="lineNum">     684 </span>            :         bool        include_parts;
+<span class="lineNum">     685 </span>            :         int         rvr_opts;
+<span class="lineNum">     686 </span>            : 
+<span class="lineNum">     687 </span>            :         /*
+<span class="lineNum">     688 </span>            :          * Since autovacuum workers supply OIDs when calling vacuum(), no
+<span class="lineNum">     689 </span>            :          * autovacuum worker should reach this code.
+<span class="lineNum">     690 </span>            :          */
+<span class="lineNum">     691 </span><span class="lineCov">       1264 :         Assert(!IsAutoVacuumWorkerProcess());</span>
+<span class="lineNum">     692 </span>            : 
+<span class="lineNum">     693 </span>            :         /*
+<span class="lineNum">     694 </span>            :          * We transiently take AccessShareLock to protect the syscache lookup
+<span class="lineNum">     695 </span>            :          * below, as well as find_all_inheritors's expectation that the caller
+<span class="lineNum">     696 </span>            :          * holds some lock on the starting relation.
+<span class="lineNum">     697 </span>            :          */
+<span class="lineNum">     698 </span><span class="lineCov">       1264 :         rvr_opts = (options &amp; VACOPT_SKIP_LOCKED) ? RVR_SKIP_LOCKED : 0;</span>
+<span class="lineNum">     699 </span><span class="lineCov">       1264 :         relid = RangeVarGetRelidExtended(vrel-&gt;relation,</span>
+<span class="lineNum">     700 </span>            :                                          AccessShareLock,
+<span class="lineNum">     701 </span>            :                                          rvr_opts,
+<span class="lineNum">     702 </span>            :                                          NULL, NULL);
+<span class="lineNum">     703 </span>            : 
+<span class="lineNum">     704 </span>            :         /*
+<span class="lineNum">     705 </span>            :          * If the lock is unavailable, emit the same log statement that
+<span class="lineNum">     706 </span>            :          * vacuum_rel() and analyze_rel() would.
+<span class="lineNum">     707 </span>            :          */
+<span class="lineNum">     708 </span><span class="lineCov">       1252 :         if (!OidIsValid(relid))</span>
+<span class="lineNum">     709 </span>            :         {
+<span class="lineNum">     710 </span><span class="lineNoCov">          0 :             if (options &amp; VACOPT_VACUUM)</span>
+<span class="lineNum">     711 </span><span class="lineNoCov">          0 :                 ereport(WARNING,</span>
+<span class="lineNum">     712 </span>            :                         (errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+<span class="lineNum">     713 </span>            :                          errmsg(&quot;skipping vacuum of \&quot;%s\&quot; --- lock not available&quot;,
+<span class="lineNum">     714 </span>            :                                 vrel-&gt;relation-&gt;relname)));
+<span class="lineNum">     715 </span>            :             else
+<span class="lineNum">     716 </span><span class="lineNoCov">          0 :                 ereport(WARNING,</span>
+<span class="lineNum">     717 </span>            :                         (errcode(ERRCODE_LOCK_NOT_AVAILABLE),
+<span class="lineNum">     718 </span>            :                          errmsg(&quot;skipping analyze of \&quot;%s\&quot; --- lock not available&quot;,
+<span class="lineNum">     719 </span>            :                                 vrel-&gt;relation-&gt;relname)));
+<span class="lineNum">     720 </span><span class="lineNoCov">          0 :             return vacrels;</span>
+<span class="lineNum">     721 </span>            :         }
+<span class="lineNum">     722 </span>            : 
+<span class="lineNum">     723 </span>            :         /*
+<span class="lineNum">     724 </span>            :          * To check whether the relation is a partitioned table and its
+<span class="lineNum">     725 </span>            :          * ownership, fetch its syscache entry.
+<span class="lineNum">     726 </span>            :          */
+<span class="lineNum">     727 </span><span class="lineCov">       1252 :         tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relid));</span>
+<span class="lineNum">     728 </span><span class="lineCov">       1252 :         if (!HeapTupleIsValid(tuple))</span>
+<span class="lineNum">     729 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;cache lookup failed for relation %u&quot;, relid);</span>
+<span class="lineNum">     730 </span><span class="lineCov">       1252 :         classForm = (Form_pg_class) GETSTRUCT(tuple);</span>
+<span class="lineNum">     731 </span>            : 
+<span class="lineNum">     732 </span>            :         /*
+<span class="lineNum">     733 </span>            :          * Make a returnable VacuumRelation for this rel if user is a proper
+<span class="lineNum">     734 </span>            :          * owner.
+<span class="lineNum">     735 </span>            :          */
+<span class="lineNum">     736 </span><span class="lineCov">       1252 :         if (vacuum_is_relation_owner(relid, classForm, options))</span>
+<span class="lineNum">     737 </span>            :         {
+<span class="lineNum">     738 </span><span class="lineCov">       1186 :             oldcontext = MemoryContextSwitchTo(vac_context);</span>
+<span class="lineNum">     739 </span><span class="lineCov">       1186 :             vacrels = lappend(vacrels, makeVacuumRelation(vrel-&gt;relation,</span>
+<span class="lineNum">     740 </span>            :                                                           relid,
+<span class="lineNum">     741 </span>            :                                                           vrel-&gt;va_cols));
+<span class="lineNum">     742 </span><span class="lineCov">       1186 :             MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     743 </span>            :         }
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span>            : 
+<span class="lineNum">     746 </span><span class="lineCov">       1252 :         include_parts = (classForm-&gt;relkind == RELKIND_PARTITIONED_TABLE);</span>
+<span class="lineNum">     747 </span><span class="lineCov">       1252 :         ReleaseSysCache(tuple);</span>
+<span class="lineNum">     748 </span>            : 
+<span class="lineNum">     749 </span>            :         /*
+<span class="lineNum">     750 </span>            :          * If it is, make relation list entries for its partitions.  Note that
+<span class="lineNum">     751 </span>            :          * the list returned by find_all_inheritors() includes the passed-in
+<span class="lineNum">     752 </span>            :          * OID, so we have to skip that.  There's no point in taking locks on
+<span class="lineNum">     753 </span>            :          * the individual partitions yet, and doing so would just add
+<span class="lineNum">     754 </span>            :          * unnecessary deadlock risk.  For this last reason we do not check
+<span class="lineNum">     755 </span>            :          * yet the ownership of the partitions, which get added to the list to
+<span class="lineNum">     756 </span>            :          * process.  Ownership will be checked later on anyway.
+<span class="lineNum">     757 </span>            :          */
+<span class="lineNum">     758 </span><span class="lineCov">       1252 :         if (include_parts)</span>
+<span class="lineNum">     759 </span>            :         {
+<span class="lineNum">     760 </span><span class="lineCov">        114 :             List       *part_oids = find_all_inheritors(relid, NoLock, NULL);</span>
+<span class="lineNum">     761 </span>            :             ListCell   *part_lc;
+<span class="lineNum">     762 </span>            : 
+<span class="lineNum">     763 </span><span class="lineCov">        514 :             foreach(part_lc, part_oids)</span>
+<span class="lineNum">     764 </span>            :             {
+<span class="lineNum">     765 </span><span class="lineCov">        400 :                 Oid         part_oid = lfirst_oid(part_lc);</span>
+<span class="lineNum">     766 </span>            : 
+<span class="lineNum">     767 </span><span class="lineCov">        400 :                 if (part_oid == relid)</span>
+<span class="lineNum">     768 </span><span class="lineCov">        114 :                     continue;   /* ignore original table */</span>
+<span class="lineNum">     769 </span>            : 
+<span class="lineNum">     770 </span>            :                 /*
+<span class="lineNum">     771 </span>            :                  * We omit a RangeVar since it wouldn't be appropriate to
+<span class="lineNum">     772 </span>            :                  * complain about failure to open one of these relations
+<span class="lineNum">     773 </span>            :                  * later.
+<span class="lineNum">     774 </span>            :                  */
+<span class="lineNum">     775 </span><span class="lineCov">        286 :                 oldcontext = MemoryContextSwitchTo(vac_context);</span>
+<span class="lineNum">     776 </span><span class="lineCov">        286 :                 vacrels = lappend(vacrels, makeVacuumRelation(NULL,</span>
+<span class="lineNum">     777 </span>            :                                                               part_oid,
+<span class="lineNum">     778 </span>            :                                                               vrel-&gt;va_cols));
+<span class="lineNum">     779 </span><span class="lineCov">        286 :                 MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     780 </span>            :             }
+<span class="lineNum">     781 </span>            :         }
+<span class="lineNum">     782 </span>            : 
+<span class="lineNum">     783 </span>            :         /*
+<span class="lineNum">     784 </span>            :          * Release lock again.  This means that by the time we actually try to
+<span class="lineNum">     785 </span>            :          * process the table, it might be gone or renamed.  In the former case
+<span class="lineNum">     786 </span>            :          * we'll silently ignore it; in the latter case we'll process it
+<span class="lineNum">     787 </span>            :          * anyway, but we must beware that the RangeVar doesn't necessarily
+<span class="lineNum">     788 </span>            :          * identify it anymore.  This isn't ideal, perhaps, but there's little
+<span class="lineNum">     789 </span>            :          * practical alternative, since we're typically going to commit this
+<span class="lineNum">     790 </span>            :          * transaction and begin a new one between now and then.  Moreover,
+<span class="lineNum">     791 </span>            :          * holding locks on multiple relations would create significant risk
+<span class="lineNum">     792 </span>            :          * of deadlock.
+<span class="lineNum">     793 </span>            :          */
+<span class="lineNum">     794 </span><span class="lineCov">       1252 :         UnlockRelationOid(relid, AccessShareLock);</span>
+<span class="lineNum">     795 </span>            :     }
+<span class="lineNum">     796 </span>            : 
+<span class="lineNum">     797 </span><span class="lineCov">       1376 :     return vacrels;</span>
+<span class="lineNum">     798 </span>            : }
+<span class="lineNum">     799 </span>            : 
+<span class="lineNum">     800 </span>            : /*
+<span class="lineNum">     801 </span>            :  * Construct a list of VacuumRelations for all vacuumable rels in
+<span class="lineNum">     802 </span>            :  * the current database.  The list is built in vac_context.
+<a name="803"><span class="lineNum">     803 </span>            :  */</a>
+<span class="lineNum">     804 </span>            : static List *
+<span class="lineNum">     805 </span><span class="lineCov">          6 : get_all_vacuum_rels(int options)</span>
+<span class="lineNum">     806 </span>            : {
+<span class="lineNum">     807 </span><span class="lineCov">          6 :     List       *vacrels = NIL;</span>
+<span class="lineNum">     808 </span>            :     Relation    pgclass;
+<span class="lineNum">     809 </span>            :     TableScanDesc scan;
+<span class="lineNum">     810 </span>            :     HeapTuple   tuple;
+<span class="lineNum">     811 </span>            : 
+<span class="lineNum">     812 </span><span class="lineCov">          6 :     pgclass = table_open(RelationRelationId, AccessShareLock);</span>
+<span class="lineNum">     813 </span>            : 
+<span class="lineNum">     814 </span><span class="lineCov">          6 :     scan = table_beginscan_catalog(pgclass, 0, NULL);</span>
+<span class="lineNum">     815 </span>            : 
+<span class="lineNum">     816 </span><span class="lineCov">       2966 :     while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)</span>
+<span class="lineNum">     817 </span>            :     {
+<span class="lineNum">     818 </span><span class="lineCov">       2954 :         Form_pg_class classForm = (Form_pg_class) GETSTRUCT(tuple);</span>
+<span class="lineNum">     819 </span>            :         MemoryContext oldcontext;
+<span class="lineNum">     820 </span><span class="lineCov">       2954 :         Oid         relid = classForm-&gt;oid;</span>
+<span class="lineNum">     821 </span>            : 
+<span class="lineNum">     822 </span>            :         /* check permissions of relation */
+<span class="lineNum">     823 </span><span class="lineCov">       2954 :         if (!vacuum_is_relation_owner(relid, classForm, options))</span>
+<span class="lineNum">     824 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     825 </span>            : 
+<span class="lineNum">     826 </span>            :         /*
+<span class="lineNum">     827 </span>            :          * We include partitioned tables here; depending on which operation is
+<span class="lineNum">     828 </span>            :          * to be performed, caller will decide whether to process or ignore
+<span class="lineNum">     829 </span>            :          * them.
+<span class="lineNum">     830 </span>            :          */
+<span class="lineNum">     831 </span><span class="lineCov">       5252 :         if (classForm-&gt;relkind != RELKIND_RELATION &amp;&amp;</span>
+<span class="lineNum">     832 </span><span class="lineCov">       4594 :             classForm-&gt;relkind != RELKIND_MATVIEW &amp;&amp;</span>
+<span class="lineNum">     833 </span><span class="lineCov">       2296 :             classForm-&gt;relkind != RELKIND_PARTITIONED_TABLE)</span>
+<span class="lineNum">     834 </span><span class="lineCov">       2288 :             continue;</span>
+<span class="lineNum">     835 </span>            : 
+<span class="lineNum">     836 </span>            :         /*
+<span class="lineNum">     837 </span>            :          * Build VacuumRelation(s) specifying the table OIDs to be processed.
+<span class="lineNum">     838 </span>            :          * We omit a RangeVar since it wouldn't be appropriate to complain
+<span class="lineNum">     839 </span>            :          * about failure to open one of these relations later.
+<span class="lineNum">     840 </span>            :          */
+<span class="lineNum">     841 </span><span class="lineCov">        666 :         oldcontext = MemoryContextSwitchTo(vac_context);</span>
+<span class="lineNum">     842 </span><span class="lineCov">        666 :         vacrels = lappend(vacrels, makeVacuumRelation(NULL,</span>
+<span class="lineNum">     843 </span>            :                                                       relid,
+<span class="lineNum">     844 </span>            :                                                       NIL));
+<span class="lineNum">     845 </span><span class="lineCov">        666 :         MemoryContextSwitchTo(oldcontext);</span>
+<span class="lineNum">     846 </span>            :     }
+<span class="lineNum">     847 </span>            : 
+<span class="lineNum">     848 </span><span class="lineCov">          6 :     table_endscan(scan);</span>
+<span class="lineNum">     849 </span><span class="lineCov">          6 :     table_close(pgclass, AccessShareLock);</span>
+<span class="lineNum">     850 </span>            : 
+<span class="lineNum">     851 </span><span class="lineCov">          6 :     return vacrels;</span>
+<span class="lineNum">     852 </span>            : }
+<span class="lineNum">     853 </span>            : 
+<span class="lineNum">     854 </span>            : /*
+<span class="lineNum">     855 </span>            :  * vacuum_set_xid_limits() -- compute oldestXmin and freeze cutoff points
+<span class="lineNum">     856 </span>            :  *
+<span class="lineNum">     857 </span>            :  * The output parameters are:
+<span class="lineNum">     858 </span>            :  * - oldestXmin is the cutoff value used to distinguish whether tuples are
+<span class="lineNum">     859 </span>            :  *   DEAD or RECENTLY_DEAD (see HeapTupleSatisfiesVacuum).
+<span class="lineNum">     860 </span>            :  * - freezeLimit is the Xid below which all Xids are replaced by
+<span class="lineNum">     861 </span>            :  *   FrozenTransactionId during vacuum.
+<span class="lineNum">     862 </span>            :  * - xidFullScanLimit (computed from freeze_table_age parameter)
+<span class="lineNum">     863 </span>            :  *   represents a minimum Xid value; a table whose relfrozenxid is older than
+<span class="lineNum">     864 </span>            :  *   this will have a full-table vacuum applied to it, to freeze tuples across
+<span class="lineNum">     865 </span>            :  *   the whole table.  Vacuuming a table younger than this value can use a
+<span class="lineNum">     866 </span>            :  *   partial scan.
+<span class="lineNum">     867 </span>            :  * - multiXactCutoff is the value below which all MultiXactIds are removed from
+<span class="lineNum">     868 </span>            :  *   Xmax.
+<span class="lineNum">     869 </span>            :  * - mxactFullScanLimit is a value against which a table's relminmxid value is
+<span class="lineNum">     870 </span>            :  *   compared to produce a full-table vacuum, as with xidFullScanLimit.
+<span class="lineNum">     871 </span>            :  *
+<span class="lineNum">     872 </span>            :  * xidFullScanLimit and mxactFullScanLimit can be passed as NULL if caller is
+<span class="lineNum">     873 </span>            :  * not interested.
+<a name="874"><span class="lineNum">     874 </span>            :  */</a>
+<span class="lineNum">     875 </span>            : void
+<span class="lineNum">     876 </span><span class="lineCov">       1050 : vacuum_set_xid_limits(Relation rel,</span>
+<span class="lineNum">     877 </span>            :                       int freeze_min_age,
+<span class="lineNum">     878 </span>            :                       int freeze_table_age,
+<span class="lineNum">     879 </span>            :                       int multixact_freeze_min_age,
+<span class="lineNum">     880 </span>            :                       int multixact_freeze_table_age,
+<span class="lineNum">     881 </span>            :                       TransactionId *oldestXmin,
+<span class="lineNum">     882 </span>            :                       TransactionId *freezeLimit,
+<span class="lineNum">     883 </span>            :                       TransactionId *xidFullScanLimit,
+<span class="lineNum">     884 </span>            :                       MultiXactId *multiXactCutoff,
+<span class="lineNum">     885 </span>            :                       MultiXactId *mxactFullScanLimit)
+<span class="lineNum">     886 </span>            : {
+<span class="lineNum">     887 </span>            :     int         freezemin;
+<span class="lineNum">     888 </span>            :     int         mxid_freezemin;
+<span class="lineNum">     889 </span>            :     int         effective_multixact_freeze_max_age;
+<span class="lineNum">     890 </span>            :     TransactionId limit;
+<span class="lineNum">     891 </span>            :     TransactionId safeLimit;
+<span class="lineNum">     892 </span>            :     MultiXactId oldestMxact;
+<span class="lineNum">     893 </span>            :     MultiXactId mxactLimit;
+<span class="lineNum">     894 </span>            :     MultiXactId safeMxactLimit;
+<span class="lineNum">     895 </span>            : 
+<span class="lineNum">     896 </span>            :     /*
+<span class="lineNum">     897 </span>            :      * We can always ignore processes running lazy vacuum.  This is because we
+<span class="lineNum">     898 </span>            :      * use these values only for deciding which tuples we must keep in the
+<span class="lineNum">     899 </span>            :      * tables.  Since lazy vacuum doesn't write its XID anywhere, it's safe to
+<span class="lineNum">     900 </span>            :      * ignore it.  In theory it could be problematic to ignore lazy vacuums in
+<span class="lineNum">     901 </span>            :      * a full vacuum, but keep in mind that only one vacuum process can be
+<span class="lineNum">     902 </span>            :      * working on a particular table at any time, and that each vacuum is
+<span class="lineNum">     903 </span>            :      * always an independent transaction.
+<span class="lineNum">     904 </span>            :      */
+<span class="lineNum">     905 </span><span class="lineCov">       1050 :     *oldestXmin =</span>
+<span class="lineNum">     906 </span><span class="lineCov">       1050 :         TransactionIdLimitedForOldSnapshots(GetOldestXmin(rel, PROCARRAY_FLAGS_VACUUM), rel);</span>
+<span class="lineNum">     907 </span>            : 
+<span class="lineNum">     908 </span><span class="lineCov">       1050 :     Assert(TransactionIdIsNormal(*oldestXmin));</span>
+<span class="lineNum">     909 </span>            : 
+<span class="lineNum">     910 </span>            :     /*
+<span class="lineNum">     911 </span>            :      * Determine the minimum freeze age to use: as specified by the caller, or
+<span class="lineNum">     912 </span>            :      * vacuum_freeze_min_age, but in any case not more than half
+<span class="lineNum">     913 </span>            :      * autovacuum_freeze_max_age, so that autovacuums to prevent XID
+<span class="lineNum">     914 </span>            :      * wraparound won't occur too frequently.
+<span class="lineNum">     915 </span>            :      */
+<span class="lineNum">     916 </span><span class="lineCov">       1050 :     freezemin = freeze_min_age;</span>
+<span class="lineNum">     917 </span><span class="lineCov">       1050 :     if (freezemin &lt; 0)</span>
+<span class="lineNum">     918 </span><span class="lineCov">        716 :         freezemin = vacuum_freeze_min_age;</span>
+<span class="lineNum">     919 </span><span class="lineCov">       1050 :     freezemin = Min(freezemin, autovacuum_freeze_max_age / 2);</span>
+<span class="lineNum">     920 </span><span class="lineCov">       1050 :     Assert(freezemin &gt;= 0);</span>
+<span class="lineNum">     921 </span>            : 
+<span class="lineNum">     922 </span>            :     /*
+<span class="lineNum">     923 </span>            :      * Compute the cutoff XID, being careful not to generate a &quot;permanent&quot; XID
+<span class="lineNum">     924 </span>            :      */
+<span class="lineNum">     925 </span><span class="lineCov">       1050 :     limit = *oldestXmin - freezemin;</span>
+<span class="lineNum">     926 </span><span class="lineCov">       1050 :     if (!TransactionIdIsNormal(limit))</span>
+<span class="lineNum">     927 </span><span class="lineNoCov">          0 :         limit = FirstNormalTransactionId;</span>
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span>            :     /*
+<span class="lineNum">     930 </span>            :      * If oldestXmin is very far back (in practice, more than
+<span class="lineNum">     931 </span>            :      * autovacuum_freeze_max_age / 2 XIDs old), complain and force a minimum
+<span class="lineNum">     932 </span>            :      * freeze age of zero.
+<span class="lineNum">     933 </span>            :      */
+<span class="lineNum">     934 </span><span class="lineCov">       1050 :     safeLimit = ReadNewTransactionId() - autovacuum_freeze_max_age;</span>
+<span class="lineNum">     935 </span><span class="lineCov">       1050 :     if (!TransactionIdIsNormal(safeLimit))</span>
+<span class="lineNum">     936 </span><span class="lineNoCov">          0 :         safeLimit = FirstNormalTransactionId;</span>
+<span class="lineNum">     937 </span>            : 
+<span class="lineNum">     938 </span><span class="lineCov">       1050 :     if (TransactionIdPrecedes(limit, safeLimit))</span>
+<span class="lineNum">     939 </span>            :     {
+<span class="lineNum">     940 </span><span class="lineNoCov">          0 :         ereport(WARNING,</span>
+<span class="lineNum">     941 </span>            :                 (errmsg(&quot;oldest xmin is far in the past&quot;),
+<span class="lineNum">     942 </span>            :                  errhint(&quot;Close open transactions soon to avoid wraparound problems.\n&quot;
+<span class="lineNum">     943 </span>            :                          &quot;You might also need to commit or roll back old prepared transactions, or drop stale replication slots.&quot;)));
+<span class="lineNum">     944 </span><span class="lineNoCov">          0 :         limit = *oldestXmin;</span>
+<span class="lineNum">     945 </span>            :     }
+<span class="lineNum">     946 </span>            : 
+<span class="lineNum">     947 </span><span class="lineCov">       1050 :     *freezeLimit = limit;</span>
+<span class="lineNum">     948 </span>            : 
+<span class="lineNum">     949 </span>            :     /*
+<span class="lineNum">     950 </span>            :      * Compute the multixact age for which freezing is urgent.  This is
+<span class="lineNum">     951 </span>            :      * normally autovacuum_multixact_freeze_max_age, but may be less if we are
+<span class="lineNum">     952 </span>            :      * short of multixact member space.
+<span class="lineNum">     953 </span>            :      */
+<span class="lineNum">     954 </span><span class="lineCov">       1050 :     effective_multixact_freeze_max_age = MultiXactMemberFreezeThreshold();</span>
+<span class="lineNum">     955 </span>            : 
+<span class="lineNum">     956 </span>            :     /*
+<span class="lineNum">     957 </span>            :      * Determine the minimum multixact freeze age to use: as specified by
+<span class="lineNum">     958 </span>            :      * caller, or vacuum_multixact_freeze_min_age, but in any case not more
+<span class="lineNum">     959 </span>            :      * than half effective_multixact_freeze_max_age, so that autovacuums to
+<span class="lineNum">     960 </span>            :      * prevent MultiXact wraparound won't occur too frequently.
+<span class="lineNum">     961 </span>            :      */
+<span class="lineNum">     962 </span><span class="lineCov">       1050 :     mxid_freezemin = multixact_freeze_min_age;</span>
+<span class="lineNum">     963 </span><span class="lineCov">       1050 :     if (mxid_freezemin &lt; 0)</span>
+<span class="lineNum">     964 </span><span class="lineCov">        716 :         mxid_freezemin = vacuum_multixact_freeze_min_age;</span>
+<span class="lineNum">     965 </span><span class="lineCov">       1050 :     mxid_freezemin = Min(mxid_freezemin,</span>
+<span class="lineNum">     966 </span>            :                          effective_multixact_freeze_max_age / 2);
+<span class="lineNum">     967 </span><span class="lineCov">       1050 :     Assert(mxid_freezemin &gt;= 0);</span>
+<span class="lineNum">     968 </span>            : 
+<span class="lineNum">     969 </span>            :     /* compute the cutoff multi, being careful to generate a valid value */
+<span class="lineNum">     970 </span><span class="lineCov">       1050 :     oldestMxact = GetOldestMultiXactId();</span>
+<span class="lineNum">     971 </span><span class="lineCov">       1050 :     mxactLimit = oldestMxact - mxid_freezemin;</span>
+<span class="lineNum">     972 </span><span class="lineCov">       1050 :     if (mxactLimit &lt; FirstMultiXactId)</span>
+<span class="lineNum">     973 </span><span class="lineNoCov">          0 :         mxactLimit = FirstMultiXactId;</span>
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span><span class="lineCov">       1050 :     safeMxactLimit =</span>
+<span class="lineNum">     976 </span><span class="lineCov">       1050 :         ReadNextMultiXactId() - effective_multixact_freeze_max_age;</span>
+<span class="lineNum">     977 </span><span class="lineCov">       1050 :     if (safeMxactLimit &lt; FirstMultiXactId)</span>
+<span class="lineNum">     978 </span><span class="lineNoCov">          0 :         safeMxactLimit = FirstMultiXactId;</span>
+<span class="lineNum">     979 </span>            : 
+<span class="lineNum">     980 </span><span class="lineCov">       1050 :     if (MultiXactIdPrecedes(mxactLimit, safeMxactLimit))</span>
+<span class="lineNum">     981 </span>            :     {
+<span class="lineNum">     982 </span><span class="lineNoCov">          0 :         ereport(WARNING,</span>
+<span class="lineNum">     983 </span>            :                 (errmsg(&quot;oldest multixact is far in the past&quot;),
+<span class="lineNum">     984 </span>            :                  errhint(&quot;Close open transactions with multixacts soon to avoid wraparound problems.&quot;)));
+<span class="lineNum">     985 </span>            :         /* Use the safe limit, unless an older mxact is still running */
+<span class="lineNum">     986 </span><span class="lineNoCov">          0 :         if (MultiXactIdPrecedes(oldestMxact, safeMxactLimit))</span>
+<span class="lineNum">     987 </span><span class="lineNoCov">          0 :             mxactLimit = oldestMxact;</span>
+<span class="lineNum">     988 </span>            :         else
+<span class="lineNum">     989 </span><span class="lineNoCov">          0 :             mxactLimit = safeMxactLimit;</span>
+<span class="lineNum">     990 </span>            :     }
+<span class="lineNum">     991 </span>            : 
+<span class="lineNum">     992 </span><span class="lineCov">       1050 :     *multiXactCutoff = mxactLimit;</span>
+<span class="lineNum">     993 </span>            : 
+<span class="lineNum">     994 </span><span class="lineCov">       1050 :     if (xidFullScanLimit != NULL)</span>
+<span class="lineNum">     995 </span>            :     {
+<span class="lineNum">     996 </span>            :         int         freezetable;
+<span class="lineNum">     997 </span>            : 
+<span class="lineNum">     998 </span><span class="lineCov">        984 :         Assert(mxactFullScanLimit != NULL);</span>
+<span class="lineNum">     999 </span>            : 
+<span class="lineNum">    1000 </span>            :         /*
+<span class="lineNum">    1001 </span>            :          * Determine the table freeze age to use: as specified by the caller,
+<span class="lineNum">    1002 </span>            :          * or vacuum_freeze_table_age, but in any case not more than
+<span class="lineNum">    1003 </span>            :          * autovacuum_freeze_max_age * 0.95, so that if you have e.g nightly
+<span class="lineNum">    1004 </span>            :          * VACUUM schedule, the nightly VACUUM gets a chance to freeze tuples
+<span class="lineNum">    1005 </span>            :          * before anti-wraparound autovacuum is launched.
+<span class="lineNum">    1006 </span>            :          */
+<span class="lineNum">    1007 </span><span class="lineCov">        984 :         freezetable = freeze_table_age;</span>
+<span class="lineNum">    1008 </span><span class="lineCov">        984 :         if (freezetable &lt; 0)</span>
+<span class="lineNum">    1009 </span><span class="lineCov">        716 :             freezetable = vacuum_freeze_table_age;</span>
+<span class="lineNum">    1010 </span><span class="lineCov">        984 :         freezetable = Min(freezetable, autovacuum_freeze_max_age * 0.95);</span>
+<span class="lineNum">    1011 </span><span class="lineCov">        984 :         Assert(freezetable &gt;= 0);</span>
+<span class="lineNum">    1012 </span>            : 
+<span class="lineNum">    1013 </span>            :         /*
+<span class="lineNum">    1014 </span>            :          * Compute XID limit causing a full-table vacuum, being careful not to
+<span class="lineNum">    1015 </span>            :          * generate a &quot;permanent&quot; XID.
+<span class="lineNum">    1016 </span>            :          */
+<span class="lineNum">    1017 </span><span class="lineCov">        984 :         limit = ReadNewTransactionId() - freezetable;</span>
+<span class="lineNum">    1018 </span><span class="lineCov">        984 :         if (!TransactionIdIsNormal(limit))</span>
+<span class="lineNum">    1019 </span><span class="lineNoCov">          0 :             limit = FirstNormalTransactionId;</span>
+<span class="lineNum">    1020 </span>            : 
+<span class="lineNum">    1021 </span><span class="lineCov">        984 :         *xidFullScanLimit = limit;</span>
+<span class="lineNum">    1022 </span>            : 
+<span class="lineNum">    1023 </span>            :         /*
+<span class="lineNum">    1024 </span>            :          * Similar to the above, determine the table freeze age to use for
+<span class="lineNum">    1025 </span>            :          * multixacts: as specified by the caller, or
+<span class="lineNum">    1026 </span>            :          * vacuum_multixact_freeze_table_age, but in any case not more than
+<span class="lineNum">    1027 </span>            :          * autovacuum_multixact_freeze_table_age * 0.95, so that if you have
+<span class="lineNum">    1028 </span>            :          * e.g. nightly VACUUM schedule, the nightly VACUUM gets a chance to
+<span class="lineNum">    1029 </span>            :          * freeze multixacts before anti-wraparound autovacuum is launched.
+<span class="lineNum">    1030 </span>            :          */
+<span class="lineNum">    1031 </span><span class="lineCov">        984 :         freezetable = multixact_freeze_table_age;</span>
+<span class="lineNum">    1032 </span><span class="lineCov">        984 :         if (freezetable &lt; 0)</span>
+<span class="lineNum">    1033 </span><span class="lineCov">        716 :             freezetable = vacuum_multixact_freeze_table_age;</span>
+<span class="lineNum">    1034 </span><span class="lineCov">        984 :         freezetable = Min(freezetable,</span>
+<span class="lineNum">    1035 </span>            :                           effective_multixact_freeze_max_age * 0.95);
+<span class="lineNum">    1036 </span><span class="lineCov">        984 :         Assert(freezetable &gt;= 0);</span>
+<span class="lineNum">    1037 </span>            : 
+<span class="lineNum">    1038 </span>            :         /*
+<span class="lineNum">    1039 </span>            :          * Compute MultiXact limit causing a full-table vacuum, being careful
+<span class="lineNum">    1040 </span>            :          * to generate a valid MultiXact value.
+<span class="lineNum">    1041 </span>            :          */
+<span class="lineNum">    1042 </span><span class="lineCov">        984 :         mxactLimit = ReadNextMultiXactId() - freezetable;</span>
+<span class="lineNum">    1043 </span><span class="lineCov">        984 :         if (mxactLimit &lt; FirstMultiXactId)</span>
+<span class="lineNum">    1044 </span><span class="lineNoCov">          0 :             mxactLimit = FirstMultiXactId;</span>
+<span class="lineNum">    1045 </span>            : 
+<span class="lineNum">    1046 </span><span class="lineCov">        984 :         *mxactFullScanLimit = mxactLimit;</span>
+<span class="lineNum">    1047 </span>            :     }
+<span class="lineNum">    1048 </span>            :     else
+<span class="lineNum">    1049 </span>            :     {
+<span class="lineNum">    1050 </span><span class="lineCov">         66 :         Assert(mxactFullScanLimit == NULL);</span>
+<span class="lineNum">    1051 </span>            :     }
+<span class="lineNum">    1052 </span><span class="lineCov">       1050 : }</span>
+<span class="lineNum">    1053 </span>            : 
+<span class="lineNum">    1054 </span>            : /*
+<span class="lineNum">    1055 </span>            :  * vac_estimate_reltuples() -- estimate the new value for pg_class.reltuples
+<span class="lineNum">    1056 </span>            :  *
+<span class="lineNum">    1057 </span>            :  *      If we scanned the whole relation then we should just use the count of
+<span class="lineNum">    1058 </span>            :  *      live tuples seen; but if we did not, we should not blindly extrapolate
+<span class="lineNum">    1059 </span>            :  *      from that number, since VACUUM may have scanned a quite nonrandom
+<span class="lineNum">    1060 </span>            :  *      subset of the table.  When we have only partial information, we take
+<span class="lineNum">    1061 </span>            :  *      the old value of pg_class.reltuples as a measurement of the
+<span class="lineNum">    1062 </span>            :  *      tuple density in the unscanned pages.
+<span class="lineNum">    1063 </span>            :  *
+<span class="lineNum">    1064 </span>            :  *      Note: scanned_tuples should count only *live* tuples, since
+<span class="lineNum">    1065 </span>            :  *      pg_class.reltuples is defined that way.
+<a name="1066"><span class="lineNum">    1066 </span>            :  */</a>
+<span class="lineNum">    1067 </span>            : double
+<span class="lineNum">    1068 </span><span class="lineCov">        984 : vac_estimate_reltuples(Relation relation,</span>
+<span class="lineNum">    1069 </span>            :                        BlockNumber total_pages,
+<span class="lineNum">    1070 </span>            :                        BlockNumber scanned_pages,
+<span class="lineNum">    1071 </span>            :                        double scanned_tuples)
+<span class="lineNum">    1072 </span>            : {
+<span class="lineNum">    1073 </span><span class="lineCov">        984 :     BlockNumber old_rel_pages = relation-&gt;rd_rel-&gt;relpages;</span>
+<span class="lineNum">    1074 </span><span class="lineCov">        984 :     double      old_rel_tuples = relation-&gt;rd_rel-&gt;reltuples;</span>
+<span class="lineNum">    1075 </span>            :     double      old_density;
+<span class="lineNum">    1076 </span>            :     double      unscanned_pages;
+<span class="lineNum">    1077 </span>            :     double      total_tuples;
+<span class="lineNum">    1078 </span>            : 
+<span class="lineNum">    1079 </span>            :     /* If we did scan the whole table, just use the count as-is */
+<span class="lineNum">    1080 </span><span class="lineCov">        984 :     if (scanned_pages &gt;= total_pages)</span>
+<span class="lineNum">    1081 </span><span class="lineCov">        974 :         return scanned_tuples;</span>
+<span class="lineNum">    1082 </span>            : 
+<span class="lineNum">    1083 </span>            :     /*
+<span class="lineNum">    1084 </span>            :      * If scanned_pages is zero but total_pages isn't, keep the existing value
+<span class="lineNum">    1085 </span>            :      * of reltuples.  (Note: callers should avoid updating the pg_class
+<span class="lineNum">    1086 </span>            :      * statistics in this situation, since no new information has been
+<span class="lineNum">    1087 </span>            :      * provided.)
+<span class="lineNum">    1088 </span>            :      */
+<span class="lineNum">    1089 </span><span class="lineCov">         10 :     if (scanned_pages == 0)</span>
+<span class="lineNum">    1090 </span><span class="lineNoCov">          0 :         return old_rel_tuples;</span>
+<span class="lineNum">    1091 </span>            : 
+<span class="lineNum">    1092 </span>            :     /*
+<span class="lineNum">    1093 </span>            :      * If old value of relpages is zero, old density is indeterminate; we
+<span class="lineNum">    1094 </span>            :      * can't do much except scale up scanned_tuples to match total_pages.
+<span class="lineNum">    1095 </span>            :      */
+<span class="lineNum">    1096 </span><span class="lineCov">         10 :     if (old_rel_pages == 0)</span>
+<span class="lineNum">    1097 </span><span class="lineNoCov">          0 :         return floor((scanned_tuples / scanned_pages) * total_pages + 0.5);</span>
+<span class="lineNum">    1098 </span>            : 
+<span class="lineNum">    1099 </span>            :     /*
+<span class="lineNum">    1100 </span>            :      * Okay, we've covered the corner cases.  The normal calculation is to
+<span class="lineNum">    1101 </span>            :      * convert the old measurement to a density (tuples per page), then
+<span class="lineNum">    1102 </span>            :      * estimate the number of tuples in the unscanned pages using that figure,
+<span class="lineNum">    1103 </span>            :      * and finally add on the number of tuples in the scanned pages.
+<span class="lineNum">    1104 </span>            :      */
+<span class="lineNum">    1105 </span><span class="lineCov">         10 :     old_density = old_rel_tuples / old_rel_pages;</span>
+<span class="lineNum">    1106 </span><span class="lineCov">         10 :     unscanned_pages = (double) total_pages - (double) scanned_pages;</span>
+<span class="lineNum">    1107 </span><span class="lineCov">         10 :     total_tuples = old_density * unscanned_pages + scanned_tuples;</span>
+<span class="lineNum">    1108 </span><span class="lineCov">         10 :     return floor(total_tuples + 0.5);</span>
+<span class="lineNum">    1109 </span>            : }
+<span class="lineNum">    1110 </span>            : 
+<span class="lineNum">    1111 </span>            : 
+<span class="lineNum">    1112 </span>            : /*
+<span class="lineNum">    1113 </span>            :  *  vac_update_relstats() -- update statistics for one relation
+<span class="lineNum">    1114 </span>            :  *
+<span class="lineNum">    1115 </span>            :  *      Update the whole-relation statistics that are kept in its pg_class
+<span class="lineNum">    1116 </span>            :  *      row.  There are additional stats that will be updated if we are
+<span class="lineNum">    1117 </span>            :  *      doing ANALYZE, but we always update these stats.  This routine works
+<span class="lineNum">    1118 </span>            :  *      for both index and heap relation entries in pg_class.
+<span class="lineNum">    1119 </span>            :  *
+<span class="lineNum">    1120 </span>            :  *      We violate transaction semantics here by overwriting the rel's
+<span class="lineNum">    1121 </span>            :  *      existing pg_class tuple with the new values.  This is reasonably
+<span class="lineNum">    1122 </span>            :  *      safe as long as we're sure that the new values are correct whether or
+<span class="lineNum">    1123 </span>            :  *      not this transaction commits.  The reason for doing this is that if
+<span class="lineNum">    1124 </span>            :  *      we updated these tuples in the usual way, vacuuming pg_class itself
+<span class="lineNum">    1125 </span>            :  *      wouldn't work very well --- by the time we got done with a vacuum
+<span class="lineNum">    1126 </span>            :  *      cycle, most of the tuples in pg_class would've been obsoleted.  Of
+<span class="lineNum">    1127 </span>            :  *      course, this only works for fixed-size not-null columns, but these are.
+<span class="lineNum">    1128 </span>            :  *
+<span class="lineNum">    1129 </span>            :  *      Another reason for doing it this way is that when we are in a lazy
+<span class="lineNum">    1130 </span>            :  *      VACUUM and have PROC_IN_VACUUM set, we mustn't do any regular updates.
+<span class="lineNum">    1131 </span>            :  *      Somebody vacuuming pg_class might think they could delete a tuple
+<span class="lineNum">    1132 </span>            :  *      marked with xmin = our xid.
+<span class="lineNum">    1133 </span>            :  *
+<span class="lineNum">    1134 </span>            :  *      In addition to fundamentally nontransactional statistics such as
+<span class="lineNum">    1135 </span>            :  *      relpages and relallvisible, we try to maintain certain lazily-updated
+<span class="lineNum">    1136 </span>            :  *      DDL flags such as relhasindex, by clearing them if no longer correct.
+<span class="lineNum">    1137 </span>            :  *      It's safe to do this in VACUUM, which can't run in parallel with
+<span class="lineNum">    1138 </span>            :  *      CREATE INDEX/RULE/TRIGGER and can't be part of a transaction block.
+<span class="lineNum">    1139 </span>            :  *      However, it's *not* safe to do it in an ANALYZE that's within an
+<span class="lineNum">    1140 </span>            :  *      outer transaction, because for example the current transaction might
+<span class="lineNum">    1141 </span>            :  *      have dropped the last index; then we'd think relhasindex should be
+<span class="lineNum">    1142 </span>            :  *      cleared, but if the transaction later rolls back this would be wrong.
+<span class="lineNum">    1143 </span>            :  *      So we refrain from updating the DDL flags if we're inside an outer
+<span class="lineNum">    1144 </span>            :  *      transaction.  This is OK since postponing the flag maintenance is
+<span class="lineNum">    1145 </span>            :  *      always allowable.
+<span class="lineNum">    1146 </span>            :  *
+<span class="lineNum">    1147 </span>            :  *      Note: num_tuples should count only *live* tuples, since
+<span class="lineNum">    1148 </span>            :  *      pg_class.reltuples is defined that way.
+<span class="lineNum">    1149 </span>            :  *
+<span class="lineNum">    1150 </span>            :  *      This routine is shared by VACUUM and ANALYZE.
+<a name="1151"><span class="lineNum">    1151 </span>            :  */</a>
+<span class="lineNum">    1152 </span>            : void
+<span class="lineNum">    1153 </span><span class="lineCov">       3856 : vac_update_relstats(Relation relation,</span>
+<span class="lineNum">    1154 </span>            :                     BlockNumber num_pages, double num_tuples,
+<span class="lineNum">    1155 </span>            :                     BlockNumber num_all_visible_pages,
+<span class="lineNum">    1156 </span>            :                     bool hasindex, TransactionId frozenxid,
+<span class="lineNum">    1157 </span>            :                     MultiXactId minmulti,
+<span class="lineNum">    1158 </span>            :                     bool in_outer_xact)
+<span class="lineNum">    1159 </span>            : {
+<span class="lineNum">    1160 </span><span class="lineCov">       3856 :     Oid         relid = RelationGetRelid(relation);</span>
+<span class="lineNum">    1161 </span>            :     Relation    rd;
+<span class="lineNum">    1162 </span>            :     HeapTuple   ctup;
+<span class="lineNum">    1163 </span>            :     Form_pg_class pgcform;
+<span class="lineNum">    1164 </span>            :     bool        dirty;
+<span class="lineNum">    1165 </span>            : 
+<span class="lineNum">    1166 </span><span class="lineCov">       3856 :     rd = table_open(RelationRelationId, RowExclusiveLock);</span>
+<span class="lineNum">    1167 </span>            : 
+<span class="lineNum">    1168 </span>            :     /* Fetch a copy of the tuple to scribble on */
+<span class="lineNum">    1169 </span><span class="lineCov">       3856 :     ctup = SearchSysCacheCopy1(RELOID, ObjectIdGetDatum(relid));</span>
+<span class="lineNum">    1170 </span><span class="lineCov">       3856 :     if (!HeapTupleIsValid(ctup))</span>
+<span class="lineNum">    1171 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;pg_class entry for relid %u vanished during vacuuming&quot;,</span>
+<span class="lineNum">    1172 </span>            :              relid);
+<span class="lineNum">    1173 </span><span class="lineCov">       3856 :     pgcform = (Form_pg_class) GETSTRUCT(ctup);</span>
+<span class="lineNum">    1174 </span>            : 
+<span class="lineNum">    1175 </span>            :     /* Apply statistical updates, if any, to copied tuple */
+<span class="lineNum">    1176 </span>            : 
+<span class="lineNum">    1177 </span><span class="lineCov">       3856 :     dirty = false;</span>
+<span class="lineNum">    1178 </span><span class="lineCov">       3856 :     if (pgcform-&gt;relpages != (int32) num_pages)</span>
+<span class="lineNum">    1179 </span>            :     {
+<span class="lineNum">    1180 </span><span class="lineCov">       1348 :         pgcform-&gt;relpages = (int32) num_pages;</span>
+<span class="lineNum">    1181 </span><span class="lineCov">       1348 :         dirty = true;</span>
+<span class="lineNum">    1182 </span>            :     }
+<span class="lineNum">    1183 </span><span class="lineCov">       3856 :     if (pgcform-&gt;reltuples != (float4) num_tuples)</span>
+<span class="lineNum">    1184 </span>            :     {
+<span class="lineNum">    1185 </span><span class="lineCov">       1552 :         pgcform-&gt;reltuples = (float4) num_tuples;</span>
+<span class="lineNum">    1186 </span><span class="lineCov">       1552 :         dirty = true;</span>
+<span class="lineNum">    1187 </span>            :     }
+<span class="lineNum">    1188 </span><span class="lineCov">       3856 :     if (pgcform-&gt;relallvisible != (int32) num_all_visible_pages)</span>
+<span class="lineNum">    1189 </span>            :     {
+<span class="lineNum">    1190 </span><span class="lineCov">        422 :         pgcform-&gt;relallvisible = (int32) num_all_visible_pages;</span>
+<span class="lineNum">    1191 </span><span class="lineCov">        422 :         dirty = true;</span>
+<span class="lineNum">    1192 </span>            :     }
+<span class="lineNum">    1193 </span>            : 
+<span class="lineNum">    1194 </span>            :     /* Apply DDL updates, but not inside an outer transaction (see above) */
+<span class="lineNum">    1195 </span>            : 
+<span class="lineNum">    1196 </span><span class="lineCov">       3856 :     if (!in_outer_xact)</span>
+<span class="lineNum">    1197 </span>            :     {
+<span class="lineNum">    1198 </span>            :         /*
+<span class="lineNum">    1199 </span>            :          * If we didn't find any indexes, reset relhasindex.
+<span class="lineNum">    1200 </span>            :          */
+<span class="lineNum">    1201 </span><span class="lineCov">       3096 :         if (pgcform-&gt;relhasindex &amp;&amp; !hasindex)</span>
+<span class="lineNum">    1202 </span>            :         {
+<span class="lineNum">    1203 </span><span class="lineCov">          4 :             pgcform-&gt;relhasindex = false;</span>
+<span class="lineNum">    1204 </span><span class="lineCov">          4 :             dirty = true;</span>
+<span class="lineNum">    1205 </span>            :         }
+<span class="lineNum">    1206 </span>            : 
+<span class="lineNum">    1207 </span>            :         /* We also clear relhasrules and relhastriggers if needed */
+<span class="lineNum">    1208 </span><span class="lineCov">       3096 :         if (pgcform-&gt;relhasrules &amp;&amp; relation-&gt;rd_rules == NULL)</span>
+<span class="lineNum">    1209 </span>            :         {
+<span class="lineNum">    1210 </span><span class="lineNoCov">          0 :             pgcform-&gt;relhasrules = false;</span>
+<span class="lineNum">    1211 </span><span class="lineNoCov">          0 :             dirty = true;</span>
+<span class="lineNum">    1212 </span>            :         }
+<span class="lineNum">    1213 </span><span class="lineCov">       3096 :         if (pgcform-&gt;relhastriggers &amp;&amp; relation-&gt;trigdesc == NULL)</span>
+<span class="lineNum">    1214 </span>            :         {
+<span class="lineNum">    1215 </span><span class="lineCov">          2 :             pgcform-&gt;relhastriggers = false;</span>
+<span class="lineNum">    1216 </span><span class="lineCov">          2 :             dirty = true;</span>
+<span class="lineNum">    1217 </span>            :         }
+<span class="lineNum">    1218 </span>            :     }
+<span class="lineNum">    1219 </span>            : 
+<span class="lineNum">    1220 </span>            :     /*
+<span class="lineNum">    1221 </span>            :      * Update relfrozenxid, unless caller passed InvalidTransactionId
+<span class="lineNum">    1222 </span>            :      * indicating it has no new data.
+<span class="lineNum">    1223 </span>            :      *
+<span class="lineNum">    1224 </span>            :      * Ordinarily, we don't let relfrozenxid go backwards: if things are
+<span class="lineNum">    1225 </span>            :      * working correctly, the only way the new frozenxid could be older would
+<span class="lineNum">    1226 </span>            :      * be if a previous VACUUM was done with a tighter freeze_min_age, in
+<span class="lineNum">    1227 </span>            :      * which case we don't want to forget the work it already did.  However,
+<span class="lineNum">    1228 </span>            :      * if the stored relfrozenxid is &quot;in the future&quot;, then it must be corrupt
+<span class="lineNum">    1229 </span>            :      * and it seems best to overwrite it with the cutoff we used this time.
+<span class="lineNum">    1230 </span>            :      * This should match vac_update_datfrozenxid() concerning what we consider
+<span class="lineNum">    1231 </span>            :      * to be &quot;in the future&quot;.
+<span class="lineNum">    1232 </span>            :      */
+<span class="lineNum">    1233 </span><span class="lineCov">       4838 :     if (TransactionIdIsNormal(frozenxid) &amp;&amp;</span>
+<span class="lineNum">    1234 </span><span class="lineCov">       1960 :         pgcform-&gt;relfrozenxid != frozenxid &amp;&amp;</span>
+<span class="lineNum">    1235 </span><span class="lineCov">       1730 :         (TransactionIdPrecedes(pgcform-&gt;relfrozenxid, frozenxid) ||</span>
+<span class="lineNum">    1236 </span><span class="lineCov">        752 :          TransactionIdPrecedes(ReadNewTransactionId(),</span>
+<span class="lineNum">    1237 </span>            :                                pgcform-&gt;relfrozenxid)))
+<span class="lineNum">    1238 </span>            :     {
+<span class="lineNum">    1239 </span><span class="lineCov">        226 :         pgcform-&gt;relfrozenxid = frozenxid;</span>
+<span class="lineNum">    1240 </span><span class="lineCov">        226 :         dirty = true;</span>
+<span class="lineNum">    1241 </span>            :     }
+<span class="lineNum">    1242 </span>            : 
+<span class="lineNum">    1243 </span>            :     /* Similarly for relminmxid */
+<span class="lineNum">    1244 </span><span class="lineCov">       4838 :     if (MultiXactIdIsValid(minmulti) &amp;&amp;</span>
+<span class="lineNum">    1245 </span><span class="lineCov">       1738 :         pgcform-&gt;relminmxid != minmulti &amp;&amp;</span>
+<span class="lineNum">    1246 </span><span class="lineCov">       1508 :         (MultiXactIdPrecedes(pgcform-&gt;relminmxid, minmulti) ||</span>
+<span class="lineNum">    1247 </span><span class="lineCov">        752 :          MultiXactIdPrecedes(ReadNextMultiXactId(), pgcform-&gt;relminmxid)))</span>
+<span class="lineNum">    1248 </span>            :     {
+<span class="lineNum">    1249 </span><span class="lineCov">          4 :         pgcform-&gt;relminmxid = minmulti;</span>
+<span class="lineNum">    1250 </span><span class="lineCov">          4 :         dirty = true;</span>
+<span class="lineNum">    1251 </span>            :     }
+<span class="lineNum">    1252 </span>            : 
+<span class="lineNum">    1253 </span>            :     /* If anything changed, write out the tuple. */
+<span class="lineNum">    1254 </span><span class="lineCov">       3856 :     if (dirty)</span>
+<span class="lineNum">    1255 </span><span class="lineCov">       1936 :         heap_inplace_update(rd, ctup);</span>
+<span class="lineNum">    1256 </span>            : 
+<span class="lineNum">    1257 </span><span class="lineCov">       3856 :     table_close(rd, RowExclusiveLock);</span>
+<span class="lineNum">    1258 </span><span class="lineCov">       3856 : }</span>
+<span class="lineNum">    1259 </span>            : 
+<span class="lineNum">    1260 </span>            : 
+<span class="lineNum">    1261 </span>            : /*
+<span class="lineNum">    1262 </span>            :  *  vac_update_datfrozenxid() -- update pg_database.datfrozenxid for our DB
+<span class="lineNum">    1263 </span>            :  *
+<span class="lineNum">    1264 </span>            :  *      Update pg_database's datfrozenxid entry for our database to be the
+<span class="lineNum">    1265 </span>            :  *      minimum of the pg_class.relfrozenxid values.
+<span class="lineNum">    1266 </span>            :  *
+<span class="lineNum">    1267 </span>            :  *      Similarly, update our datminmxid to be the minimum of the
+<span class="lineNum">    1268 </span>            :  *      pg_class.relminmxid values.
+<span class="lineNum">    1269 </span>            :  *
+<span class="lineNum">    1270 </span>            :  *      If we are able to advance either pg_database value, also try to
+<span class="lineNum">    1271 </span>            :  *      truncate pg_xact and pg_multixact.
+<span class="lineNum">    1272 </span>            :  *
+<span class="lineNum">    1273 </span>            :  *      We violate transaction semantics here by overwriting the database's
+<span class="lineNum">    1274 </span>            :  *      existing pg_database tuple with the new values.  This is reasonably
+<span class="lineNum">    1275 </span>            :  *      safe since the new values are correct whether or not this transaction
+<span class="lineNum">    1276 </span>            :  *      commits.  As with vac_update_relstats, this avoids leaving dead tuples
+<span class="lineNum">    1277 </span>            :  *      behind after a VACUUM.
+<a name="1278"><span class="lineNum">    1278 </span>            :  */</a>
+<span class="lineNum">    1279 </span>            : void
+<span class="lineNum">    1280 </span><span class="lineCov">        192 : vac_update_datfrozenxid(void)</span>
+<span class="lineNum">    1281 </span>            : {
+<span class="lineNum">    1282 </span>            :     HeapTuple   tuple;
+<span class="lineNum">    1283 </span>            :     Form_pg_database dbform;
+<span class="lineNum">    1284 </span>            :     Relation    relation;
+<span class="lineNum">    1285 </span>            :     SysScanDesc scan;
+<span class="lineNum">    1286 </span>            :     HeapTuple   classTup;
+<span class="lineNum">    1287 </span>            :     TransactionId newFrozenXid;
+<span class="lineNum">    1288 </span>            :     MultiXactId newMinMulti;
+<span class="lineNum">    1289 </span>            :     TransactionId lastSaneFrozenXid;
+<span class="lineNum">    1290 </span>            :     MultiXactId lastSaneMinMulti;
+<span class="lineNum">    1291 </span><span class="lineCov">        192 :     bool        bogus = false;</span>
+<span class="lineNum">    1292 </span><span class="lineCov">        192 :     bool        dirty = false;</span>
+<span class="lineNum">    1293 </span>            : 
+<span class="lineNum">    1294 </span>            :     /*
+<span class="lineNum">    1295 </span>            :      * Initialize the &quot;min&quot; calculation with GetOldestXmin, which is a
+<span class="lineNum">    1296 </span>            :      * reasonable approximation to the minimum relfrozenxid for not-yet-
+<span class="lineNum">    1297 </span>            :      * committed pg_class entries for new tables; see AddNewRelationTuple().
+<span class="lineNum">    1298 </span>            :      * So we cannot produce a wrong minimum by starting with this.
+<span class="lineNum">    1299 </span>            :      */
+<span class="lineNum">    1300 </span><span class="lineCov">        192 :     newFrozenXid = GetOldestXmin(NULL, PROCARRAY_FLAGS_VACUUM);</span>
+<span class="lineNum">    1301 </span>            : 
+<span class="lineNum">    1302 </span>            :     /*
+<span class="lineNum">    1303 </span>            :      * Similarly, initialize the MultiXact &quot;min&quot; with the value that would be
+<span class="lineNum">    1304 </span>            :      * used on pg_class for new tables.  See AddNewRelationTuple().
+<span class="lineNum">    1305 </span>            :      */
+<span class="lineNum">    1306 </span><span class="lineCov">        192 :     newMinMulti = GetOldestMultiXactId();</span>
+<span class="lineNum">    1307 </span>            : 
+<span class="lineNum">    1308 </span>            :     /*
+<span class="lineNum">    1309 </span>            :      * Identify the latest relfrozenxid and relminmxid values that we could
+<span class="lineNum">    1310 </span>            :      * validly see during the scan.  These are conservative values, but it's
+<span class="lineNum">    1311 </span>            :      * not really worth trying to be more exact.
+<span class="lineNum">    1312 </span>            :      */
+<span class="lineNum">    1313 </span><span class="lineCov">        192 :     lastSaneFrozenXid = ReadNewTransactionId();</span>
+<span class="lineNum">    1314 </span><span class="lineCov">        192 :     lastSaneMinMulti = ReadNextMultiXactId();</span>
+<span class="lineNum">    1315 </span>            : 
+<span class="lineNum">    1316 </span>            :     /*
+<span class="lineNum">    1317 </span>            :      * We must seqscan pg_class to find the minimum Xid, because there is no
+<span class="lineNum">    1318 </span>            :      * index that can help us here.
+<span class="lineNum">    1319 </span>            :      */
+<span class="lineNum">    1320 </span><span class="lineCov">        192 :     relation = table_open(RelationRelationId, AccessShareLock);</span>
+<span class="lineNum">    1321 </span>            : 
+<span class="lineNum">    1322 </span><span class="lineCov">        192 :     scan = systable_beginscan(relation, InvalidOid, false,</span>
+<span class="lineNum">    1323 </span>            :                               NULL, 0, NULL);
+<span class="lineNum">    1324 </span>            : 
+<span class="lineNum">    1325 </span><span class="lineCov">     139782 :     while ((classTup = systable_getnext(scan)) != NULL)</span>
+<span class="lineNum">    1326 </span>            :     {
+<span class="lineNum">    1327 </span><span class="lineCov">     139398 :         Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTup);</span>
+<span class="lineNum">    1328 </span>            : 
+<span class="lineNum">    1329 </span>            :         /*
+<span class="lineNum">    1330 </span>            :          * Only consider relations able to hold unfrozen XIDs (anything else
+<span class="lineNum">    1331 </span>            :          * should have InvalidTransactionId in relfrozenxid anyway).
+<span class="lineNum">    1332 </span>            :          */
+<span class="lineNum">    1333 </span><span class="lineCov">     240058 :         if (classForm-&gt;relkind != RELKIND_RELATION &amp;&amp;</span>
+<span class="lineNum">    1334 </span><span class="lineCov">     200998 :             classForm-&gt;relkind != RELKIND_MATVIEW &amp;&amp;</span>
+<span class="lineNum">    1335 </span><span class="lineCov">     100338 :             classForm-&gt;relkind != RELKIND_TOASTVALUE)</span>
+<span class="lineNum">    1336 </span>            :         {
+<span class="lineNum">    1337 </span><span class="lineCov">      81496 :             Assert(!TransactionIdIsValid(classForm-&gt;relfrozenxid));</span>
+<span class="lineNum">    1338 </span><span class="lineCov">      81496 :             Assert(!MultiXactIdIsValid(classForm-&gt;relminmxid));</span>
+<span class="lineNum">    1339 </span><span class="lineCov">      81496 :             continue;</span>
+<span class="lineNum">    1340 </span>            :         }
+<span class="lineNum">    1341 </span>            : 
+<span class="lineNum">    1342 </span>            :         /*
+<span class="lineNum">    1343 </span>            :          * Some table AMs might not need per-relation xid / multixid horizons.
+<span class="lineNum">    1344 </span>            :          * It therefore seems reasonable to allow relfrozenxid and relminmxid
+<span class="lineNum">    1345 </span>            :          * to not be set (i.e. set to their respective Invalid*Id)
+<span class="lineNum">    1346 </span>            :          * independently. Thus validate and compute horizon for each only if
+<span class="lineNum">    1347 </span>            :          * set.
+<span class="lineNum">    1348 </span>            :          *
+<span class="lineNum">    1349 </span>            :          * If things are working properly, no relation should have a
+<span class="lineNum">    1350 </span>            :          * relfrozenxid or relminmxid that is &quot;in the future&quot;.  However, such
+<span class="lineNum">    1351 </span>            :          * cases have been known to arise due to bugs in pg_upgrade.  If we
+<span class="lineNum">    1352 </span>            :          * see any entries that are &quot;in the future&quot;, chicken out and don't do
+<span class="lineNum">    1353 </span>            :          * anything.  This ensures we won't truncate clog &amp; multixact SLRUs
+<span class="lineNum">    1354 </span>            :          * before those relations have been scanned and cleaned up.
+<span class="lineNum">    1355 </span>            :          */
+<span class="lineNum">    1356 </span>            : 
+<span class="lineNum">    1357 </span><span class="lineCov">      57902 :         if (TransactionIdIsValid(classForm-&gt;relfrozenxid))</span>
+<span class="lineNum">    1358 </span>            :         {
+<span class="lineNum">    1359 </span><span class="lineCov">      57902 :             Assert(TransactionIdIsNormal(classForm-&gt;relfrozenxid));</span>
+<span class="lineNum">    1360 </span>            : 
+<span class="lineNum">    1361 </span>            :             /* check for values in the future */
+<span class="lineNum">    1362 </span><span class="lineCov">      57902 :             if (TransactionIdPrecedes(lastSaneFrozenXid, classForm-&gt;relfrozenxid))</span>
+<span class="lineNum">    1363 </span>            :             {
+<span class="lineNum">    1364 </span><span class="lineNoCov">          0 :                 bogus = true;</span>
+<span class="lineNum">    1365 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1366 </span>            :             }
+<span class="lineNum">    1367 </span>            : 
+<span class="lineNum">    1368 </span>            :             /* determine new horizon */
+<span class="lineNum">    1369 </span><span class="lineCov">      57902 :             if (TransactionIdPrecedes(classForm-&gt;relfrozenxid, newFrozenXid))</span>
+<span class="lineNum">    1370 </span><span class="lineCov">        190 :                 newFrozenXid = classForm-&gt;relfrozenxid;</span>
+<span class="lineNum">    1371 </span>            :         }
+<span class="lineNum">    1372 </span>            : 
+<span class="lineNum">    1373 </span><span class="lineCov">      57902 :         if (MultiXactIdIsValid(classForm-&gt;relminmxid))</span>
+<span class="lineNum">    1374 </span>            :         {
+<span class="lineNum">    1375 </span>            :             /* check for values in the future */
+<span class="lineNum">    1376 </span><span class="lineCov">      57902 :             if (MultiXactIdPrecedes(lastSaneMinMulti, classForm-&gt;relminmxid))</span>
+<span class="lineNum">    1377 </span>            :             {
+<span class="lineNum">    1378 </span><span class="lineNoCov">          0 :                 bogus = true;</span>
+<span class="lineNum">    1379 </span><span class="lineNoCov">          0 :                 break;</span>
+<span class="lineNum">    1380 </span>            :             }
+<span class="lineNum">    1381 </span>            : 
+<span class="lineNum">    1382 </span>            :             /* determine new horizon */
+<span class="lineNum">    1383 </span><span class="lineCov">      57902 :             if (MultiXactIdPrecedes(classForm-&gt;relminmxid, newMinMulti))</span>
+<span class="lineNum">    1384 </span><span class="lineCov">          8 :                 newMinMulti = classForm-&gt;relminmxid;</span>
+<span class="lineNum">    1385 </span>            :         }
+<span class="lineNum">    1386 </span>            :     }
+<span class="lineNum">    1387 </span>            : 
+<span class="lineNum">    1388 </span>            :     /* we're done with pg_class */
+<span class="lineNum">    1389 </span><span class="lineCov">        192 :     systable_endscan(scan);</span>
+<span class="lineNum">    1390 </span><span class="lineCov">        192 :     table_close(relation, AccessShareLock);</span>
+<span class="lineNum">    1391 </span>            : 
+<span class="lineNum">    1392 </span>            :     /* chicken out if bogus data found */
+<span class="lineNum">    1393 </span><span class="lineCov">        192 :     if (bogus)</span>
+<span class="lineNum">    1394 </span><span class="lineCov">        192 :         return;</span>
+<span class="lineNum">    1395 </span>            : 
+<span class="lineNum">    1396 </span><span class="lineCov">        192 :     Assert(TransactionIdIsNormal(newFrozenXid));</span>
+<span class="lineNum">    1397 </span><span class="lineCov">        192 :     Assert(MultiXactIdIsValid(newMinMulti));</span>
+<span class="lineNum">    1398 </span>            : 
+<span class="lineNum">    1399 </span>            :     /* Now fetch the pg_database tuple we need to update. */
+<span class="lineNum">    1400 </span><span class="lineCov">        192 :     relation = table_open(DatabaseRelationId, RowExclusiveLock);</span>
+<span class="lineNum">    1401 </span>            : 
+<span class="lineNum">    1402 </span>            :     /* Fetch a copy of the tuple to scribble on */
+<span class="lineNum">    1403 </span><span class="lineCov">        192 :     tuple = SearchSysCacheCopy1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));</span>
+<span class="lineNum">    1404 </span><span class="lineCov">        192 :     if (!HeapTupleIsValid(tuple))</span>
+<span class="lineNum">    1405 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;could not find tuple for database %u&quot;, MyDatabaseId);</span>
+<span class="lineNum">    1406 </span><span class="lineCov">        192 :     dbform = (Form_pg_database) GETSTRUCT(tuple);</span>
+<span class="lineNum">    1407 </span>            : 
+<span class="lineNum">    1408 </span>            :     /*
+<span class="lineNum">    1409 </span>            :      * As in vac_update_relstats(), we ordinarily don't want to let
+<span class="lineNum">    1410 </span>            :      * datfrozenxid go backward; but if it's &quot;in the future&quot; then it must be
+<span class="lineNum">    1411 </span>            :      * corrupt and it seems best to overwrite it.
+<span class="lineNum">    1412 </span>            :      */
+<span class="lineNum">    1413 </span><span class="lineCov">        196 :     if (dbform-&gt;datfrozenxid != newFrozenXid &amp;&amp;</span>
+<span class="lineNum">    1414 </span><span class="lineCov">          4 :         (TransactionIdPrecedes(dbform-&gt;datfrozenxid, newFrozenXid) ||</span>
+<span class="lineNum">    1415 </span><span class="lineNoCov">          0 :          TransactionIdPrecedes(lastSaneFrozenXid, dbform-&gt;datfrozenxid)))</span>
+<span class="lineNum">    1416 </span>            :     {
+<span class="lineNum">    1417 </span><span class="lineCov">          4 :         dbform-&gt;datfrozenxid = newFrozenXid;</span>
+<span class="lineNum">    1418 </span><span class="lineCov">          4 :         dirty = true;</span>
+<span class="lineNum">    1419 </span>            :     }
+<span class="lineNum">    1420 </span>            :     else
+<span class="lineNum">    1421 </span><span class="lineCov">        188 :         newFrozenXid = dbform-&gt;datfrozenxid;</span>
+<span class="lineNum">    1422 </span>            : 
+<span class="lineNum">    1423 </span>            :     /* Ditto for datminmxid */
+<span class="lineNum">    1424 </span><span class="lineCov">        192 :     if (dbform-&gt;datminmxid != newMinMulti &amp;&amp;</span>
+<span class="lineNum">    1425 </span><span class="lineNoCov">          0 :         (MultiXactIdPrecedes(dbform-&gt;datminmxid, newMinMulti) ||</span>
+<span class="lineNum">    1426 </span><span class="lineNoCov">          0 :          MultiXactIdPrecedes(lastSaneMinMulti, dbform-&gt;datminmxid)))</span>
+<span class="lineNum">    1427 </span>            :     {
+<span class="lineNum">    1428 </span><span class="lineNoCov">          0 :         dbform-&gt;datminmxid = newMinMulti;</span>
+<span class="lineNum">    1429 </span><span class="lineNoCov">          0 :         dirty = true;</span>
+<span class="lineNum">    1430 </span>            :     }
+<span class="lineNum">    1431 </span>            :     else
+<span class="lineNum">    1432 </span><span class="lineCov">        192 :         newMinMulti = dbform-&gt;datminmxid;</span>
+<span class="lineNum">    1433 </span>            : 
+<span class="lineNum">    1434 </span><span class="lineCov">        192 :     if (dirty)</span>
+<span class="lineNum">    1435 </span><span class="lineCov">          4 :         heap_inplace_update(relation, tuple);</span>
+<span class="lineNum">    1436 </span>            : 
+<span class="lineNum">    1437 </span><span class="lineCov">        192 :     heap_freetuple(tuple);</span>
+<span class="lineNum">    1438 </span><span class="lineCov">        192 :     table_close(relation, RowExclusiveLock);</span>
+<span class="lineNum">    1439 </span>            : 
+<span class="lineNum">    1440 </span>            :     /*
+<span class="lineNum">    1441 </span>            :      * If we were able to advance datfrozenxid or datminmxid, see if we can
+<span class="lineNum">    1442 </span>            :      * truncate pg_xact and/or pg_multixact.  Also do it if the shared
+<span class="lineNum">    1443 </span>            :      * XID-wrap-limit info is stale, since this action will update that too.
+<span class="lineNum">    1444 </span>            :      */
+<span class="lineNum">    1445 </span><span class="lineCov">        192 :     if (dirty || ForceTransactionIdLimitUpdate())</span>
+<span class="lineNum">    1446 </span><span class="lineCov">          4 :         vac_truncate_clog(newFrozenXid, newMinMulti,</span>
+<span class="lineNum">    1447 </span>            :                           lastSaneFrozenXid, lastSaneMinMulti);
+<span class="lineNum">    1448 </span>            : }
+<span class="lineNum">    1449 </span>            : 
+<span class="lineNum">    1450 </span>            : 
+<span class="lineNum">    1451 </span>            : /*
+<span class="lineNum">    1452 </span>            :  *  vac_truncate_clog() -- attempt to truncate the commit log
+<span class="lineNum">    1453 </span>            :  *
+<span class="lineNum">    1454 </span>            :  *      Scan pg_database to determine the system-wide oldest datfrozenxid,
+<span class="lineNum">    1455 </span>            :  *      and use it to truncate the transaction commit log (pg_xact).
+<span class="lineNum">    1456 </span>            :  *      Also update the XID wrap limit info maintained by varsup.c.
+<span class="lineNum">    1457 </span>            :  *      Likewise for datminmxid.
+<span class="lineNum">    1458 </span>            :  *
+<span class="lineNum">    1459 </span>            :  *      The passed frozenXID and minMulti are the updated values for my own
+<span class="lineNum">    1460 </span>            :  *      pg_database entry. They're used to initialize the &quot;min&quot; calculations.
+<span class="lineNum">    1461 </span>            :  *      The caller also passes the &quot;last sane&quot; XID and MXID, since it has
+<span class="lineNum">    1462 </span>            :  *      those at hand already.
+<span class="lineNum">    1463 </span>            :  *
+<span class="lineNum">    1464 </span>            :  *      This routine is only invoked when we've managed to change our
+<span class="lineNum">    1465 </span>            :  *      DB's datfrozenxid/datminmxid values, or we found that the shared
+<span class="lineNum">    1466 </span>            :  *      XID-wrap-limit info is stale.
+<a name="1467"><span class="lineNum">    1467 </span>            :  */</a>
+<span class="lineNum">    1468 </span>            : static void
+<span class="lineNum">    1469 </span><span class="lineCov">          4 : vac_truncate_clog(TransactionId frozenXID,</span>
+<span class="lineNum">    1470 </span>            :                   MultiXactId minMulti,
+<span class="lineNum">    1471 </span>            :                   TransactionId lastSaneFrozenXid,
+<span class="lineNum">    1472 </span>            :                   MultiXactId lastSaneMinMulti)
+<span class="lineNum">    1473 </span>            : {
+<span class="lineNum">    1474 </span><span class="lineCov">          4 :     TransactionId nextXID = ReadNewTransactionId();</span>
+<span class="lineNum">    1475 </span>            :     Relation    relation;
+<span class="lineNum">    1476 </span>            :     TableScanDesc scan;
+<span class="lineNum">    1477 </span>            :     HeapTuple   tuple;
+<span class="lineNum">    1478 </span>            :     Oid         oldestxid_datoid;
+<span class="lineNum">    1479 </span>            :     Oid         minmulti_datoid;
+<span class="lineNum">    1480 </span><span class="lineCov">          4 :     bool        bogus = false;</span>
+<span class="lineNum">    1481 </span><span class="lineCov">          4 :     bool        frozenAlreadyWrapped = false;</span>
+<span class="lineNum">    1482 </span>            : 
+<span class="lineNum">    1483 </span>            :     /* init oldest datoids to sync with my frozenXID/minMulti values */
+<span class="lineNum">    1484 </span><span class="lineCov">          4 :     oldestxid_datoid = MyDatabaseId;</span>
+<span class="lineNum">    1485 </span><span class="lineCov">          4 :     minmulti_datoid = MyDatabaseId;</span>
+<span class="lineNum">    1486 </span>            : 
+<span class="lineNum">    1487 </span>            :     /*
+<span class="lineNum">    1488 </span>            :      * Scan pg_database to compute the minimum datfrozenxid/datminmxid
+<span class="lineNum">    1489 </span>            :      *
+<span class="lineNum">    1490 </span>            :      * Since vac_update_datfrozenxid updates datfrozenxid/datminmxid in-place,
+<span class="lineNum">    1491 </span>            :      * the values could change while we look at them.  Fetch each one just
+<span class="lineNum">    1492 </span>            :      * once to ensure sane behavior of the comparison logic.  (Here, as in
+<span class="lineNum">    1493 </span>            :      * many other places, we assume that fetching or updating an XID in shared
+<span class="lineNum">    1494 </span>            :      * storage is atomic.)
+<span class="lineNum">    1495 </span>            :      *
+<span class="lineNum">    1496 </span>            :      * Note: we need not worry about a race condition with new entries being
+<span class="lineNum">    1497 </span>            :      * inserted by CREATE DATABASE.  Any such entry will have a copy of some
+<span class="lineNum">    1498 </span>            :      * existing DB's datfrozenxid, and that source DB cannot be ours because
+<span class="lineNum">    1499 </span>            :      * of the interlock against copying a DB containing an active backend.
+<span class="lineNum">    1500 </span>            :      * Hence the new entry will not reduce the minimum.  Also, if two VACUUMs
+<span class="lineNum">    1501 </span>            :      * concurrently modify the datfrozenxid's of different databases, the
+<span class="lineNum">    1502 </span>            :      * worst possible outcome is that pg_xact is not truncated as aggressively
+<span class="lineNum">    1503 </span>            :      * as it could be.
+<span class="lineNum">    1504 </span>            :      */
+<span class="lineNum">    1505 </span><span class="lineCov">          4 :     relation = table_open(DatabaseRelationId, AccessShareLock);</span>
+<span class="lineNum">    1506 </span>            : 
+<span class="lineNum">    1507 </span><span class="lineCov">          4 :     scan = table_beginscan_catalog(relation, 0, NULL);</span>
+<span class="lineNum">    1508 </span>            : 
+<span class="lineNum">    1509 </span><span class="lineCov">         12 :     while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)</span>
+<span class="lineNum">    1510 </span>            :     {
+<span class="lineNum">    1511 </span><span class="lineCov">          4 :         volatile FormData_pg_database *dbform = (Form_pg_database) GETSTRUCT(tuple);</span>
+<span class="lineNum">    1512 </span><span class="lineCov">          4 :         TransactionId datfrozenxid = dbform-&gt;datfrozenxid;</span>
+<span class="lineNum">    1513 </span><span class="lineCov">          4 :         TransactionId datminmxid = dbform-&gt;datminmxid;</span>
+<span class="lineNum">    1514 </span>            : 
+<span class="lineNum">    1515 </span><span class="lineCov">          4 :         Assert(TransactionIdIsNormal(datfrozenxid));</span>
+<span class="lineNum">    1516 </span><span class="lineCov">          4 :         Assert(MultiXactIdIsValid(datminmxid));</span>
+<span class="lineNum">    1517 </span>            : 
+<span class="lineNum">    1518 </span>            :         /*
+<span class="lineNum">    1519 </span>            :          * If things are working properly, no database should have a
+<span class="lineNum">    1520 </span>            :          * datfrozenxid or datminmxid that is &quot;in the future&quot;.  However, such
+<span class="lineNum">    1521 </span>            :          * cases have been known to arise due to bugs in pg_upgrade.  If we
+<span class="lineNum">    1522 </span>            :          * see any entries that are &quot;in the future&quot;, chicken out and don't do
+<span class="lineNum">    1523 </span>            :          * anything.  This ensures we won't truncate clog before those
+<span class="lineNum">    1524 </span>            :          * databases have been scanned and cleaned up.  (We will issue the
+<span class="lineNum">    1525 </span>            :          * &quot;already wrapped&quot; warning if appropriate, though.)
+<span class="lineNum">    1526 </span>            :          */
+<span class="lineNum">    1527 </span><span class="lineCov">          8 :         if (TransactionIdPrecedes(lastSaneFrozenXid, datfrozenxid) ||</span>
+<span class="lineNum">    1528 </span><span class="lineCov">          4 :             MultiXactIdPrecedes(lastSaneMinMulti, datminmxid))</span>
+<span class="lineNum">    1529 </span><span class="lineNoCov">          0 :             bogus = true;</span>
+<span class="lineNum">    1530 </span>            : 
+<span class="lineNum">    1531 </span><span class="lineCov">          4 :         if (TransactionIdPrecedes(nextXID, datfrozenxid))</span>
+<span class="lineNum">    1532 </span><span class="lineNoCov">          0 :             frozenAlreadyWrapped = true;</span>
+<span class="lineNum">    1533 </span><span class="lineCov">          4 :         else if (TransactionIdPrecedes(datfrozenxid, frozenXID))</span>
+<span class="lineNum">    1534 </span>            :         {
+<span class="lineNum">    1535 </span><span class="lineNoCov">          0 :             frozenXID = datfrozenxid;</span>
+<span class="lineNum">    1536 </span><span class="lineNoCov">          0 :             oldestxid_datoid = dbform-&gt;oid;</span>
+<span class="lineNum">    1537 </span>            :         }
+<span class="lineNum">    1538 </span>            : 
+<span class="lineNum">    1539 </span><span class="lineCov">          4 :         if (MultiXactIdPrecedes(datminmxid, minMulti))</span>
+<span class="lineNum">    1540 </span>            :         {
+<span class="lineNum">    1541 </span><span class="lineNoCov">          0 :             minMulti = datminmxid;</span>
+<span class="lineNum">    1542 </span><span class="lineNoCov">          0 :             minmulti_datoid = dbform-&gt;oid;</span>
+<span class="lineNum">    1543 </span>            :         }
+<span class="lineNum">    1544 </span>            :     }
+<span class="lineNum">    1545 </span>            : 
+<span class="lineNum">    1546 </span><span class="lineCov">          4 :     table_endscan(scan);</span>
+<span class="lineNum">    1547 </span>            : 
+<span class="lineNum">    1548 </span><span class="lineCov">          4 :     table_close(relation, AccessShareLock);</span>
+<span class="lineNum">    1549 </span>            : 
+<span class="lineNum">    1550 </span>            :     /*
+<span class="lineNum">    1551 </span>            :      * Do not truncate CLOG if we seem to have suffered wraparound already;
+<span class="lineNum">    1552 </span>            :      * the computed minimum XID might be bogus.  This case should now be
+<span class="lineNum">    1553 </span>            :      * impossible due to the defenses in GetNewTransactionId, but we keep the
+<span class="lineNum">    1554 </span>            :      * test anyway.
+<span class="lineNum">    1555 </span>            :      */
+<span class="lineNum">    1556 </span><span class="lineCov">          4 :     if (frozenAlreadyWrapped)</span>
+<span class="lineNum">    1557 </span>            :     {
+<span class="lineNum">    1558 </span><span class="lineNoCov">          0 :         ereport(WARNING,</span>
+<span class="lineNum">    1559 </span>            :                 (errmsg(&quot;some databases have not been vacuumed in over 2 billion transactions&quot;),
+<span class="lineNum">    1560 </span>            :                  errdetail(&quot;You might have already suffered transaction-wraparound data loss.&quot;)));
+<span class="lineNum">    1561 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1562 </span>            :     }
+<span class="lineNum">    1563 </span>            : 
+<span class="lineNum">    1564 </span>            :     /* chicken out if data is bogus in any other way */
+<span class="lineNum">    1565 </span><span class="lineCov">          4 :     if (bogus)</span>
+<span class="lineNum">    1566 </span><span class="lineNoCov">          0 :         return;</span>
+<span class="lineNum">    1567 </span>            : 
+<span class="lineNum">    1568 </span>            :     /*
+<span class="lineNum">    1569 </span>            :      * Advance the oldest value for commit timestamps before truncating, so
+<span class="lineNum">    1570 </span>            :      * that if a user requests a timestamp for a transaction we're truncating
+<span class="lineNum">    1571 </span>            :      * away right after this point, they get NULL instead of an ugly &quot;file not
+<span class="lineNum">    1572 </span>            :      * found&quot; error from slru.c.  This doesn't matter for xact/multixact
+<span class="lineNum">    1573 </span>            :      * because they are not subject to arbitrary lookups from users.
+<span class="lineNum">    1574 </span>            :      */
+<span class="lineNum">    1575 </span><span class="lineCov">          4 :     AdvanceOldestCommitTsXid(frozenXID);</span>
+<span class="lineNum">    1576 </span>            : 
+<span class="lineNum">    1577 </span>            :     /*
+<span class="lineNum">    1578 </span>            :      * Truncate CLOG, multixact and CommitTs to the oldest computed value.
+<span class="lineNum">    1579 </span>            :      */
+<span class="lineNum">    1580 </span><span class="lineCov">          4 :     TruncateCLOG(frozenXID, oldestxid_datoid);</span>
+<span class="lineNum">    1581 </span><span class="lineCov">          4 :     TruncateCommitTs(frozenXID);</span>
+<span class="lineNum">    1582 </span><span class="lineCov">          4 :     TruncateMultiXact(minMulti, minmulti_datoid);</span>
+<span class="lineNum">    1583 </span>            : 
+<span class="lineNum">    1584 </span>            :     /*
+<span class="lineNum">    1585 </span>            :      * Update the wrap limit for GetNewTransactionId and creation of new
+<span class="lineNum">    1586 </span>            :      * MultiXactIds.  Note: these functions will also signal the postmaster
+<span class="lineNum">    1587 </span>            :      * for an(other) autovac cycle if needed.   XXX should we avoid possibly
+<span class="lineNum">    1588 </span>            :      * signalling twice?
+<span class="lineNum">    1589 </span>            :      */
+<span class="lineNum">    1590 </span><span class="lineCov">          4 :     SetTransactionIdLimit(frozenXID, oldestxid_datoid);</span>
+<span class="lineNum">    1591 </span><span class="lineCov">          4 :     SetMultiXactIdLimit(minMulti, minmulti_datoid, false);</span>
+<span class="lineNum">    1592 </span>            : }
+<span class="lineNum">    1593 </span>            : 
+<span class="lineNum">    1594 </span>            : 
+<span class="lineNum">    1595 </span>            : /*
+<span class="lineNum">    1596 </span>            :  *  vacuum_rel() -- vacuum one heap relation
+<span class="lineNum">    1597 </span>            :  *
+<span class="lineNum">    1598 </span>            :  *      relid identifies the relation to vacuum.  If relation is supplied,
+<span class="lineNum">    1599 </span>            :  *      use the name therein for reporting any failure to open/lock the rel;
+<span class="lineNum">    1600 </span>            :  *      do not use it once we've successfully opened the rel, since it might
+<span class="lineNum">    1601 </span>            :  *      be stale.
+<span class="lineNum">    1602 </span>            :  *
+<span class="lineNum">    1603 </span>            :  *      Returns true if it's okay to proceed with a requested ANALYZE
+<span class="lineNum">    1604 </span>            :  *      operation on this table.
+<span class="lineNum">    1605 </span>            :  *
+<span class="lineNum">    1606 </span>            :  *      Doing one heap at a time incurs extra overhead, since we need to
+<span class="lineNum">    1607 </span>            :  *      check that the heap exists again just before we vacuum it.  The
+<span class="lineNum">    1608 </span>            :  *      reason that we do this is so that vacuuming can be spread across
+<span class="lineNum">    1609 </span>            :  *      many small transactions.  Otherwise, two-phase locking would require
+<span class="lineNum">    1610 </span>            :  *      us to lock the entire database during one pass of the vacuum cleaner.
+<span class="lineNum">    1611 </span>            :  *
+<span class="lineNum">    1612 </span>            :  *      At entry and exit, we are not inside a transaction.
+<a name="1613"><span class="lineNum">    1613 </span>            :  */</a>
+<span class="lineNum">    1614 </span>            : static bool
+<span class="lineNum">    1615 </span><span class="lineCov">       1074 : vacuum_rel(Oid relid, RangeVar *relation, VacuumParams *params)</span>
+<span class="lineNum">    1616 </span>            : {
+<span class="lineNum">    1617 </span>            :     LOCKMODE    lmode;
+<span class="lineNum">    1618 </span>            :     Relation    onerel;
+<span class="lineNum">    1619 </span>            :     LockRelId   onerelid;
+<span class="lineNum">    1620 </span>            :     Oid         toast_relid;
+<span class="lineNum">    1621 </span>            :     Oid         save_userid;
+<span class="lineNum">    1622 </span>            :     int         save_sec_context;
+<span class="lineNum">    1623 </span>            :     int         save_nestlevel;
+<span class="lineNum">    1624 </span>            : 
+<span class="lineNum">    1625 </span><span class="lineCov">       1074 :     Assert(params != NULL);</span>
+<span class="lineNum">    1626 </span>            : 
+<span class="lineNum">    1627 </span>            :     /* Begin a transaction for vacuuming this relation */
+<span class="lineNum">    1628 </span><span class="lineCov">       1074 :     StartTransactionCommand();</span>
+<span class="lineNum">    1629 </span>            : 
+<span class="lineNum">    1630 </span>            :     /*
+<span class="lineNum">    1631 </span>            :      * Functions in indexes may want a snapshot set.  Also, setting a snapshot
+<span class="lineNum">    1632 </span>            :      * ensures that RecentGlobalXmin is kept truly recent.
+<span class="lineNum">    1633 </span>            :      */
+<span class="lineNum">    1634 </span><span class="lineCov">       1074 :     PushActiveSnapshot(GetTransactionSnapshot());</span>
+<span class="lineNum">    1635 </span>            : 
+<span class="lineNum">    1636 </span><span class="lineCov">       1074 :     if (!(params-&gt;options &amp; VACOPT_FULL))</span>
+<span class="lineNum">    1637 </span>            :     {
+<span class="lineNum">    1638 </span>            :         /*
+<span class="lineNum">    1639 </span>            :          * In lazy vacuum, we can set the PROC_IN_VACUUM flag, which lets
+<span class="lineNum">    1640 </span>            :          * other concurrent VACUUMs know that they can ignore this one while
+<span class="lineNum">    1641 </span>            :          * determining their OldestXmin.  (The reason we don't set it during a
+<span class="lineNum">    1642 </span>            :          * full VACUUM is exactly that we may have to run user-defined
+<span class="lineNum">    1643 </span>            :          * functions for functional indexes, and we want to make sure that if
+<span class="lineNum">    1644 </span>            :          * they use the snapshot set above, any tuples it requires can't get
+<span class="lineNum">    1645 </span>            :          * removed from other tables.  An index function that depends on the
+<span class="lineNum">    1646 </span>            :          * contents of other tables is arguably broken, but we won't break it
+<span class="lineNum">    1647 </span>            :          * here by violating transaction semantics.)
+<span class="lineNum">    1648 </span>            :          *
+<span class="lineNum">    1649 </span>            :          * We also set the VACUUM_FOR_WRAPAROUND flag, which is passed down by
+<span class="lineNum">    1650 </span>            :          * autovacuum; it's used to avoid canceling a vacuum that was invoked
+<span class="lineNum">    1651 </span>            :          * in an emergency.
+<span class="lineNum">    1652 </span>            :          *
+<span class="lineNum">    1653 </span>            :          * Note: these flags remain set until CommitTransaction or
+<span class="lineNum">    1654 </span>            :          * AbortTransaction.  We don't want to clear them until we reset
+<span class="lineNum">    1655 </span>            :          * MyPgXact-&gt;xid/xmin, else OldestXmin might appear to go backwards,
+<span class="lineNum">    1656 </span>            :          * which is probably Not Good.
+<span class="lineNum">    1657 </span>            :          */
+<span class="lineNum">    1658 </span><span class="lineCov">       1034 :         LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);</span>
+<span class="lineNum">    1659 </span><span class="lineCov">       1034 :         MyPgXact-&gt;vacuumFlags |= PROC_IN_VACUUM;</span>
+<span class="lineNum">    1660 </span><span class="lineCov">       1034 :         if (params-&gt;is_wraparound)</span>
+<span class="lineNum">    1661 </span><span class="lineNoCov">          0 :             MyPgXact-&gt;vacuumFlags |= PROC_VACUUM_FOR_WRAPAROUND;</span>
+<span class="lineNum">    1662 </span><span class="lineCov">       1034 :         LWLockRelease(ProcArrayLock);</span>
+<span class="lineNum">    1663 </span>            :     }
+<span class="lineNum">    1664 </span>            : 
+<span class="lineNum">    1665 </span>            :     /*
+<span class="lineNum">    1666 </span>            :      * Check for user-requested abort.  Note we want this to be inside a
+<span class="lineNum">    1667 </span>            :      * transaction, so xact.c doesn't issue useless WARNING.
+<span class="lineNum">    1668 </span>            :      */
+<span class="lineNum">    1669 </span><span class="lineCov">       1074 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1670 </span>            : 
+<span class="lineNum">    1671 </span>            :     /*
+<span class="lineNum">    1672 </span>            :      * Determine the type of lock we want --- hard exclusive lock for a FULL
+<span class="lineNum">    1673 </span>            :      * vacuum, but just ShareUpdateExclusiveLock for concurrent vacuum. Either
+<span class="lineNum">    1674 </span>            :      * way, we can be sure that no other backend is vacuuming the same table.
+<span class="lineNum">    1675 </span>            :      */
+<span class="lineNum">    1676 </span><span class="lineCov">       2148 :     lmode = (params-&gt;options &amp; VACOPT_FULL) ?</span>
+<span class="lineNum">    1677 </span><span class="lineCov">       1074 :         AccessExclusiveLock : ShareUpdateExclusiveLock;</span>
+<span class="lineNum">    1678 </span>            : 
+<span class="lineNum">    1679 </span>            :     /* open the relation and get the appropriate lock on it */
+<span class="lineNum">    1680 </span><span class="lineCov">       1074 :     onerel = vacuum_open_relation(relid, relation, params-&gt;options,</span>
+<span class="lineNum">    1681 </span><span class="lineCov">       1074 :                                   params-&gt;log_min_duration &gt;= 0, lmode);</span>
+<span class="lineNum">    1682 </span>            : 
+<span class="lineNum">    1683 </span>            :     /* leave if relation could not be opened or locked */
+<span class="lineNum">    1684 </span><span class="lineCov">       1074 :     if (!onerel)</span>
+<span class="lineNum">    1685 </span>            :     {
+<span class="lineNum">    1686 </span><span class="lineNoCov">          0 :         PopActiveSnapshot();</span>
+<span class="lineNum">    1687 </span><span class="lineNoCov">          0 :         CommitTransactionCommand();</span>
+<span class="lineNum">    1688 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1689 </span>            :     }
+<span class="lineNum">    1690 </span>            : 
+<span class="lineNum">    1691 </span>            :     /*
+<span class="lineNum">    1692 </span>            :      * Check if relation needs to be skipped based on ownership.  This check
+<span class="lineNum">    1693 </span>            :      * happens also when building the relation list to vacuum for a manual
+<span class="lineNum">    1694 </span>            :      * operation, and needs to be done additionally here as VACUUM could
+<span class="lineNum">    1695 </span>            :      * happen across multiple transactions where relation ownership could have
+<span class="lineNum">    1696 </span>            :      * changed in-between.  Make sure to only generate logs for VACUUM in this
+<span class="lineNum">    1697 </span>            :      * case.
+<span class="lineNum">    1698 </span>            :      */
+<span class="lineNum">    1699 </span><span class="lineCov">       1074 :     if (!vacuum_is_relation_owner(RelationGetRelid(onerel),</span>
+<span class="lineNum">    1700 </span>            :                                   onerel-&gt;rd_rel,
+<span class="lineNum">    1701 </span><span class="lineCov">       1074 :                                   params-&gt;options &amp; VACOPT_VACUUM))</span>
+<span class="lineNum">    1702 </span>            :     {
+<span class="lineNum">    1703 </span><span class="lineCov">         24 :         relation_close(onerel, lmode);</span>
+<span class="lineNum">    1704 </span><span class="lineCov">         24 :         PopActiveSnapshot();</span>
+<span class="lineNum">    1705 </span><span class="lineCov">         24 :         CommitTransactionCommand();</span>
+<span class="lineNum">    1706 </span><span class="lineCov">         24 :         return false;</span>
+<span class="lineNum">    1707 </span>            :     }
+<span class="lineNum">    1708 </span>            : 
+<span class="lineNum">    1709 </span>            :     /*
+<span class="lineNum">    1710 </span>            :      * Check that it's of a vacuumable relkind.
+<span class="lineNum">    1711 </span>            :      */
+<span class="lineNum">    1712 </span><span class="lineCov">       1382 :     if (onerel-&gt;rd_rel-&gt;relkind != RELKIND_RELATION &amp;&amp;</span>
+<span class="lineNum">    1713 </span><span class="lineCov">        662 :         onerel-&gt;rd_rel-&gt;relkind != RELKIND_MATVIEW &amp;&amp;</span>
+<span class="lineNum">    1714 </span><span class="lineCov">        360 :         onerel-&gt;rd_rel-&gt;relkind != RELKIND_TOASTVALUE &amp;&amp;</span>
+<span class="lineNum">    1715 </span><span class="lineCov">         30 :         onerel-&gt;rd_rel-&gt;relkind != RELKIND_PARTITIONED_TABLE)</span>
+<span class="lineNum">    1716 </span>            :     {
+<span class="lineNum">    1717 </span><span class="lineNoCov">          0 :         ereport(WARNING,</span>
+<span class="lineNum">    1718 </span>            :                 (errmsg(&quot;skipping \&quot;%s\&quot; --- cannot vacuum non-tables or special system tables&quot;,
+<span class="lineNum">    1719 </span>            :                         RelationGetRelationName(onerel))));
+<span class="lineNum">    1720 </span><span class="lineNoCov">          0 :         relation_close(onerel, lmode);</span>
+<span class="lineNum">    1721 </span><span class="lineNoCov">          0 :         PopActiveSnapshot();</span>
+<span class="lineNum">    1722 </span><span class="lineNoCov">          0 :         CommitTransactionCommand();</span>
+<span class="lineNum">    1723 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1724 </span>            :     }
+<span class="lineNum">    1725 </span>            : 
+<span class="lineNum">    1726 </span>            :     /*
+<span class="lineNum">    1727 </span>            :      * Silently ignore tables that are temp tables of other backends ---
+<span class="lineNum">    1728 </span>            :      * trying to vacuum these will lead to great unhappiness, since their
+<span class="lineNum">    1729 </span>            :      * contents are probably not up-to-date on disk.  (We don't throw a
+<span class="lineNum">    1730 </span>            :      * warning here; it would just lead to chatter during a database-wide
+<span class="lineNum">    1731 </span>            :      * VACUUM.)
+<span class="lineNum">    1732 </span>            :      */
+<span class="lineNum">    1733 </span><span class="lineCov">       1050 :     if (RELATION_IS_OTHER_TEMP(onerel))</span>
+<span class="lineNum">    1734 </span>            :     {
+<span class="lineNum">    1735 </span><span class="lineNoCov">          0 :         relation_close(onerel, lmode);</span>
+<span class="lineNum">    1736 </span><span class="lineNoCov">          0 :         PopActiveSnapshot();</span>
+<span class="lineNum">    1737 </span><span class="lineNoCov">          0 :         CommitTransactionCommand();</span>
+<span class="lineNum">    1738 </span><span class="lineNoCov">          0 :         return false;</span>
+<span class="lineNum">    1739 </span>            :     }
+<span class="lineNum">    1740 </span>            : 
+<span class="lineNum">    1741 </span>            :     /*
+<span class="lineNum">    1742 </span>            :      * Silently ignore partitioned tables as there is no work to be done.  The
+<span class="lineNum">    1743 </span>            :      * useful work is on their child partitions, which have been queued up for
+<span class="lineNum">    1744 </span>            :      * us separately.
+<span class="lineNum">    1745 </span>            :      */
+<span class="lineNum">    1746 </span><span class="lineCov">       1050 :     if (onerel-&gt;rd_rel-&gt;relkind == RELKIND_PARTITIONED_TABLE)</span>
+<span class="lineNum">    1747 </span>            :     {
+<span class="lineNum">    1748 </span><span class="lineCov">         30 :         relation_close(onerel, lmode);</span>
+<span class="lineNum">    1749 </span><span class="lineCov">         30 :         PopActiveSnapshot();</span>
+<span class="lineNum">    1750 </span><span class="lineCov">         30 :         CommitTransactionCommand();</span>
+<span class="lineNum">    1751 </span>            :         /* It's OK to proceed with ANALYZE on this table */
+<span class="lineNum">    1752 </span><span class="lineCov">         30 :         return true;</span>
+<span class="lineNum">    1753 </span>            :     }
+<span class="lineNum">    1754 </span>            : 
+<span class="lineNum">    1755 </span>            :     /*
+<span class="lineNum">    1756 </span>            :      * Get a session-level lock too. This will protect our access to the
+<span class="lineNum">    1757 </span>            :      * relation across multiple transactions, so that we can vacuum the
+<span class="lineNum">    1758 </span>            :      * relation's TOAST table (if any) secure in the knowledge that no one is
+<span class="lineNum">    1759 </span>            :      * deleting the parent relation.
+<span class="lineNum">    1760 </span>            :      *
+<span class="lineNum">    1761 </span>            :      * NOTE: this cannot block, even if someone else is waiting for access,
+<span class="lineNum">    1762 </span>            :      * because the lock manager knows that both lock requests are from the
+<span class="lineNum">    1763 </span>            :      * same process.
+<span class="lineNum">    1764 </span>            :      */
+<span class="lineNum">    1765 </span><span class="lineCov">       1020 :     onerelid = onerel-&gt;rd_lockInfo.lockRelId;</span>
+<span class="lineNum">    1766 </span><span class="lineCov">       1020 :     LockRelationIdForSession(&amp;onerelid, lmode);</span>
+<span class="lineNum">    1767 </span>            : 
+<span class="lineNum">    1768 </span>            :     /* Set index cleanup option based on reloptions if not yet */
+<span class="lineNum">    1769 </span><span class="lineCov">       1020 :     if (params-&gt;index_cleanup == VACOPT_TERNARY_DEFAULT)</span>
+<span class="lineNum">    1770 </span>            :     {
+<span class="lineNum">    1771 </span><span class="lineCov">        210 :         if (onerel-&gt;rd_options == NULL ||</span>
+<span class="lineNum">    1772 </span><span class="lineCov">         28 :             ((StdRdOptions *) onerel-&gt;rd_options)-&gt;vacuum_index_cleanup)</span>
+<span class="lineNum">    1773 </span><span class="lineCov">        178 :             params-&gt;index_cleanup = VACOPT_TERNARY_ENABLED;</span>
+<span class="lineNum">    1774 </span>            :         else
+<span class="lineNum">    1775 </span><span class="lineCov">          4 :             params-&gt;index_cleanup = VACOPT_TERNARY_DISABLED;</span>
+<span class="lineNum">    1776 </span>            :     }
+<span class="lineNum">    1777 </span>            : 
+<span class="lineNum">    1778 </span>            :     /* Set truncate option based on reloptions if not yet */
+<span class="lineNum">    1779 </span><span class="lineCov">       1020 :     if (params-&gt;truncate == VACOPT_TERNARY_DEFAULT)</span>
+<span class="lineNum">    1780 </span>            :     {
+<span class="lineNum">    1781 </span><span class="lineCov">        210 :         if (onerel-&gt;rd_options == NULL ||</span>
+<span class="lineNum">    1782 </span><span class="lineCov">         24 :             ((StdRdOptions *) onerel-&gt;rd_options)-&gt;vacuum_truncate)</span>
+<span class="lineNum">    1783 </span><span class="lineCov">        184 :             params-&gt;truncate = VACOPT_TERNARY_ENABLED;</span>
+<span class="lineNum">    1784 </span>            :         else
+<span class="lineNum">    1785 </span><span class="lineCov">          2 :             params-&gt;truncate = VACOPT_TERNARY_DISABLED;</span>
+<span class="lineNum">    1786 </span>            :     }
+<span class="lineNum">    1787 </span>            : 
+<span class="lineNum">    1788 </span>            :     /*
+<span class="lineNum">    1789 </span>            :      * Remember the relation's TOAST relation for later, if the caller asked
+<span class="lineNum">    1790 </span>            :      * us to process it.  In VACUUM FULL, though, the toast table is
+<span class="lineNum">    1791 </span>            :      * automatically rebuilt by cluster_rel so we shouldn't recurse to it.
+<span class="lineNum">    1792 </span>            :      */
+<span class="lineNum">    1793 </span><span class="lineCov">       1020 :     if (!(params-&gt;options &amp; VACOPT_SKIPTOAST) &amp;&amp; !(params-&gt;options &amp; VACOPT_FULL))</span>
+<span class="lineNum">    1794 </span><span class="lineCov">        946 :         toast_relid = onerel-&gt;rd_rel-&gt;reltoastrelid;</span>
+<span class="lineNum">    1795 </span>            :     else
+<span class="lineNum">    1796 </span><span class="lineCov">         74 :         toast_relid = InvalidOid;</span>
+<span class="lineNum">    1797 </span>            : 
+<span class="lineNum">    1798 </span>            :     /*
+<span class="lineNum">    1799 </span>            :      * Switch to the table owner's userid, so that any index functions are run
+<span class="lineNum">    1800 </span>            :      * as that user.  Also lock down security-restricted operations and
+<span class="lineNum">    1801 </span>            :      * arrange to make GUC variable changes local to this command. (This is
+<span class="lineNum">    1802 </span>            :      * unnecessary, but harmless, for lazy VACUUM.)
+<span class="lineNum">    1803 </span>            :      */
+<span class="lineNum">    1804 </span><span class="lineCov">       1020 :     GetUserIdAndSecContext(&amp;save_userid, &amp;save_sec_context);</span>
+<span class="lineNum">    1805 </span><span class="lineCov">       1020 :     SetUserIdAndSecContext(onerel-&gt;rd_rel-&gt;relowner,</span>
+<span class="lineNum">    1806 </span>            :                            save_sec_context | SECURITY_RESTRICTED_OPERATION);
+<span class="lineNum">    1807 </span><span class="lineCov">       1020 :     save_nestlevel = NewGUCNestLevel();</span>
+<span class="lineNum">    1808 </span>            : 
+<span class="lineNum">    1809 </span>            :     /*
+<span class="lineNum">    1810 </span>            :      * Do the actual work --- either FULL or &quot;lazy&quot; vacuum
+<span class="lineNum">    1811 </span>            :      */
+<span class="lineNum">    1812 </span><span class="lineCov">       1020 :     if (params-&gt;options &amp; VACOPT_FULL)</span>
+<span class="lineNum">    1813 </span>            :     {
+<span class="lineNum">    1814 </span><span class="lineCov">         36 :         int         cluster_options = 0;</span>
+<span class="lineNum">    1815 </span>            : 
+<span class="lineNum">    1816 </span>            :         /* close relation before vacuuming, but hold lock until commit */
+<span class="lineNum">    1817 </span><span class="lineCov">         36 :         relation_close(onerel, NoLock);</span>
+<span class="lineNum">    1818 </span><span class="lineCov">         36 :         onerel = NULL;</span>
+<span class="lineNum">    1819 </span>            : 
+<span class="lineNum">    1820 </span><span class="lineCov">         36 :         if ((params-&gt;options &amp; VACOPT_VERBOSE) != 0)</span>
+<span class="lineNum">    1821 </span><span class="lineNoCov">          0 :             cluster_options |= CLUOPT_VERBOSE;</span>
+<span class="lineNum">    1822 </span>            : 
+<span class="lineNum">    1823 </span>            :         /* VACUUM FULL is now a variant of CLUSTER; see cluster.c */
+<span class="lineNum">    1824 </span><span class="lineCov">         36 :         cluster_rel(relid, InvalidOid, cluster_options);</span>
+<span class="lineNum">    1825 </span>            :     }
+<span class="lineNum">    1826 </span>            :     else
+<span class="lineNum">    1827 </span><span class="lineCov">        984 :         table_relation_vacuum(onerel, params, vac_strategy);</span>
+<span class="lineNum">    1828 </span>            : 
+<span class="lineNum">    1829 </span>            :     /* Roll back any GUC changes executed by index functions */
+<span class="lineNum">    1830 </span><span class="lineCov">       1018 :     AtEOXact_GUC(false, save_nestlevel);</span>
+<span class="lineNum">    1831 </span>            : 
+<span class="lineNum">    1832 </span>            :     /* Restore userid and security context */
+<span class="lineNum">    1833 </span><span class="lineCov">       1018 :     SetUserIdAndSecContext(save_userid, save_sec_context);</span>
+<span class="lineNum">    1834 </span>            : 
+<span class="lineNum">    1835 </span>            :     /* all done with this class, but hold lock until commit */
+<span class="lineNum">    1836 </span><span class="lineCov">       1018 :     if (onerel)</span>
+<span class="lineNum">    1837 </span><span class="lineCov">        984 :         relation_close(onerel, NoLock);</span>
+<span class="lineNum">    1838 </span>            : 
+<span class="lineNum">    1839 </span>            :     /*
+<span class="lineNum">    1840 </span>            :      * Complete the transaction and free all temporary memory used.
+<span class="lineNum">    1841 </span>            :      */
+<span class="lineNum">    1842 </span><span class="lineCov">       1018 :     PopActiveSnapshot();</span>
+<span class="lineNum">    1843 </span><span class="lineCov">       1018 :     CommitTransactionCommand();</span>
+<span class="lineNum">    1844 </span>            : 
+<span class="lineNum">    1845 </span>            :     /*
+<span class="lineNum">    1846 </span>            :      * If the relation has a secondary toast rel, vacuum that too while we
+<span class="lineNum">    1847 </span>            :      * still hold the session lock on the master table.  Note however that
+<span class="lineNum">    1848 </span>            :      * &quot;analyze&quot; will not get done on the toast table.  This is good, because
+<span class="lineNum">    1849 </span>            :      * the toaster always uses hardcoded index access and statistics are
+<span class="lineNum">    1850 </span>            :      * totally unimportant for toast relations.
+<span class="lineNum">    1851 </span>            :      */
+<span class="lineNum">    1852 </span><span class="lineCov">       1018 :     if (toast_relid != InvalidOid)</span>
+<span class="lineNum">    1853 </span><span class="lineCov">        300 :         vacuum_rel(toast_relid, NULL, params);</span>
+<span class="lineNum">    1854 </span>            : 
+<span class="lineNum">    1855 </span>            :     /*
+<span class="lineNum">    1856 </span>            :      * Now release the session-level lock on the master table.
+<span class="lineNum">    1857 </span>            :      */
+<span class="lineNum">    1858 </span><span class="lineCov">       1018 :     UnlockRelationIdForSession(&amp;onerelid, lmode);</span>
+<span class="lineNum">    1859 </span>            : 
+<span class="lineNum">    1860 </span>            :     /* Report that we really did it. */
+<span class="lineNum">    1861 </span><span class="lineCov">       1018 :     return true;</span>
+<span class="lineNum">    1862 </span>            : }
+<span class="lineNum">    1863 </span>            : 
+<span class="lineNum">    1864 </span>            : 
+<span class="lineNum">    1865 </span>            : /*
+<span class="lineNum">    1866 </span>            :  * Open all the vacuumable indexes of the given relation, obtaining the
+<span class="lineNum">    1867 </span>            :  * specified kind of lock on each.  Return an array of Relation pointers for
+<span class="lineNum">    1868 </span>            :  * the indexes into *Irel, and the number of indexes into *nindexes.
+<span class="lineNum">    1869 </span>            :  *
+<span class="lineNum">    1870 </span>            :  * We consider an index vacuumable if it is marked insertable (indisready).
+<span class="lineNum">    1871 </span>            :  * If it isn't, probably a CREATE INDEX CONCURRENTLY command failed early in
+<span class="lineNum">    1872 </span>            :  * execution, and what we have is too corrupt to be processable.  We will
+<span class="lineNum">    1873 </span>            :  * vacuum even if the index isn't indisvalid; this is important because in a
+<span class="lineNum">    1874 </span>            :  * unique index, uniqueness checks will be performed anyway and had better not
+<span class="lineNum">    1875 </span>            :  * hit dangling index pointers.
+<a name="1876"><span class="lineNum">    1876 </span>            :  */</a>
+<span class="lineNum">    1877 </span>            : void
+<span class="lineNum">    1878 </span><span class="lineCov">       2428 : vac_open_indexes(Relation relation, LOCKMODE lockmode,</span>
+<span class="lineNum">    1879 </span>            :                  int *nindexes, Relation **Irel)
+<span class="lineNum">    1880 </span>            : {
+<span class="lineNum">    1881 </span>            :     List       *indexoidlist;
+<span class="lineNum">    1882 </span>            :     ListCell   *indexoidscan;
+<span class="lineNum">    1883 </span>            :     int         i;
+<span class="lineNum">    1884 </span>            : 
+<span class="lineNum">    1885 </span><span class="lineCov">       2428 :     Assert(lockmode != NoLock);</span>
+<span class="lineNum">    1886 </span>            : 
+<span class="lineNum">    1887 </span><span class="lineCov">       2428 :     indexoidlist = RelationGetIndexList(relation);</span>
+<span class="lineNum">    1888 </span>            : 
+<span class="lineNum">    1889 </span>            :     /* allocate enough memory for all indexes */
+<span class="lineNum">    1890 </span><span class="lineCov">       2428 :     i = list_length(indexoidlist);</span>
+<span class="lineNum">    1891 </span>            : 
+<span class="lineNum">    1892 </span><span class="lineCov">       2428 :     if (i &gt; 0)</span>
+<span class="lineNum">    1893 </span><span class="lineCov">       1094 :         *Irel = (Relation *) palloc(i * sizeof(Relation));</span>
+<span class="lineNum">    1894 </span>            :     else
+<span class="lineNum">    1895 </span><span class="lineCov">       1334 :         *Irel = NULL;</span>
+<span class="lineNum">    1896 </span>            : 
+<span class="lineNum">    1897 </span>            :     /* collect just the ready indexes */
+<span class="lineNum">    1898 </span><span class="lineCov">       2428 :     i = 0;</span>
+<span class="lineNum">    1899 </span><span class="lineCov">       4058 :     foreach(indexoidscan, indexoidlist)</span>
+<span class="lineNum">    1900 </span>            :     {
+<span class="lineNum">    1901 </span><span class="lineCov">       1630 :         Oid         indexoid = lfirst_oid(indexoidscan);</span>
+<span class="lineNum">    1902 </span>            :         Relation    indrel;
+<span class="lineNum">    1903 </span>            : 
+<span class="lineNum">    1904 </span><span class="lineCov">       1630 :         indrel = index_open(indexoid, lockmode);</span>
+<span class="lineNum">    1905 </span><span class="lineCov">       1630 :         if (indrel-&gt;rd_index-&gt;indisready)</span>
+<span class="lineNum">    1906 </span><span class="lineCov">       1630 :             (*Irel)[i++] = indrel;</span>
+<span class="lineNum">    1907 </span>            :         else
+<span class="lineNum">    1908 </span><span class="lineNoCov">          0 :             index_close(indrel, lockmode);</span>
+<span class="lineNum">    1909 </span>            :     }
+<span class="lineNum">    1910 </span>            : 
+<span class="lineNum">    1911 </span><span class="lineCov">       2428 :     *nindexes = i;</span>
+<span class="lineNum">    1912 </span>            : 
+<span class="lineNum">    1913 </span><span class="lineCov">       2428 :     list_free(indexoidlist);</span>
+<span class="lineNum">    1914 </span><span class="lineCov">       2428 : }</span>
+<span class="lineNum">    1915 </span>            : 
+<span class="lineNum">    1916 </span>            : /*
+<span class="lineNum">    1917 </span>            :  * Release the resources acquired by vac_open_indexes.  Optionally release
+<span class="lineNum">    1918 </span>            :  * the locks (say NoLock to keep 'em).
+<a name="1919"><span class="lineNum">    1919 </span>            :  */</a>
+<span class="lineNum">    1920 </span>            : void
+<span class="lineNum">    1921 </span><span class="lineCov">       2538 : vac_close_indexes(int nindexes, Relation *Irel, LOCKMODE lockmode)</span>
+<span class="lineNum">    1922 </span>            : {
+<span class="lineNum">    1923 </span><span class="lineCov">       2538 :     if (Irel == NULL)</span>
+<span class="lineNum">    1924 </span><span class="lineCov">       3984 :         return;</span>
+<span class="lineNum">    1925 </span>            : 
+<span class="lineNum">    1926 </span><span class="lineCov">       3810 :     while (nindexes--)</span>
+<span class="lineNum">    1927 </span>            :     {
+<span class="lineNum">    1928 </span><span class="lineCov">       1626 :         Relation    ind = Irel[nindexes];</span>
+<span class="lineNum">    1929 </span>            : 
+<span class="lineNum">    1930 </span><span class="lineCov">       1626 :         index_close(ind, lockmode);</span>
+<span class="lineNum">    1931 </span>            :     }
+<span class="lineNum">    1932 </span><span class="lineCov">       1092 :     pfree(Irel);</span>
+<span class="lineNum">    1933 </span>            : }
+<span class="lineNum">    1934 </span>            : 
+<span class="lineNum">    1935 </span>            : /*
+<span class="lineNum">    1936 </span>            :  * vacuum_delay_point --- check for interrupts and cost-based delay.
+<span class="lineNum">    1937 </span>            :  *
+<span class="lineNum">    1938 </span>            :  * This should be called in each major loop of VACUUM processing,
+<span class="lineNum">    1939 </span>            :  * typically once per page processed.
+<a name="1940"><span class="lineNum">    1940 </span>            :  */</a>
+<span class="lineNum">    1941 </span>            : void
+<span class="lineNum">    1942 </span><span class="lineCov">    7152204 : vacuum_delay_point(void)</span>
+<span class="lineNum">    1943 </span>            : {
+<span class="lineNum">    1944 </span>            :     /* Always check for interrupts */
+<span class="lineNum">    1945 </span><span class="lineCov">    7152204 :     CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1946 </span>            : 
+<span class="lineNum">    1947 </span>            :     /* Nap if appropriate */
+<span class="lineNum">    1948 </span><span class="lineCov">    9559934 :     if (VacuumCostActive &amp;&amp; !InterruptPending &amp;&amp;</span>
+<span class="lineNum">    1949 </span><span class="lineCov">    2407730 :         VacuumCostBalance &gt;= VacuumCostLimit)</span>
+<span class="lineNum">    1950 </span>            :     {
+<span class="lineNum">    1951 </span>            :         double      msec;
+<span class="lineNum">    1952 </span>            : 
+<span class="lineNum">    1953 </span><span class="lineCov">        120 :         msec = VacuumCostDelay * VacuumCostBalance / VacuumCostLimit;</span>
+<span class="lineNum">    1954 </span><span class="lineCov">        120 :         if (msec &gt; VacuumCostDelay * 4)</span>
+<span class="lineNum">    1955 </span><span class="lineNoCov">          0 :             msec = VacuumCostDelay * 4;</span>
+<span class="lineNum">    1956 </span>            : 
+<span class="lineNum">    1957 </span><span class="lineCov">        120 :         pg_usleep((long) (msec * 1000));</span>
+<span class="lineNum">    1958 </span>            : 
+<span class="lineNum">    1959 </span><span class="lineCov">        120 :         VacuumCostBalance = 0;</span>
+<span class="lineNum">    1960 </span>            : 
+<span class="lineNum">    1961 </span>            :         /* update balance values for workers */
+<span class="lineNum">    1962 </span><span class="lineCov">        120 :         AutoVacuumUpdateDelay();</span>
+<span class="lineNum">    1963 </span>            : 
+<span class="lineNum">    1964 </span>            :         /* Might have gotten an interrupt while sleeping */
+<span class="lineNum">    1965 </span><span class="lineCov">        120 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">    1966 </span>            :     }
+<span class="lineNum">    1967 </span><span class="lineCov">    7152204 : }</span>
+<span class="lineNum">    1968 </span>            : 
+<span class="lineNum">    1969 </span>            : /*
+<span class="lineNum">    1970 </span>            :  * A wrapper function of defGetBoolean().
+<span class="lineNum">    1971 </span>            :  *
+<span class="lineNum">    1972 </span>            :  * This function returns VACOPT_TERNARY_ENABLED and VACOPT_TERNARY_DISABLED
+<span class="lineNum">    1973 </span>            :  * instead of true and false.
+<a name="1974"><span class="lineNum">    1974 </span>            :  */</a>
+<span class="lineNum">    1975 </span>            : static VacOptTernaryValue
+<span class="lineNum">    1976 </span><span class="lineCov">         12 : get_vacopt_ternary_value(DefElem *def)</span>
+<span class="lineNum">    1977 </span>            : {
+<span class="lineNum">    1978 </span><span class="lineCov">         12 :     return defGetBoolean(def) ? VACOPT_TERNARY_ENABLED : VACOPT_TERNARY_DISABLED;</span>
+<span class="lineNum">    1979 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

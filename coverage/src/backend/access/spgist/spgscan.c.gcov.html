@@ -1,0 +1,1111 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/access/spgist/spgscan.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/access/spgist</a> - spgscan.c<span style="font-size: 80%;"> (source / <a href="spgscan.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">394</td>
+            <td class="headerCovTableEntry">426</td>
+            <td class="headerCovTableEntryHi">92.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">23</td>
+            <td class="headerCovTableEntry">23</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * spgscan.c
+<span class="lineNum">       4 </span>            :  *    routines for scanning SP-GiST indexes
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *          src/backend/access/spgist/spgscan.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : 
+<span class="lineNum">      16 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      17 </span>            : 
+<span class="lineNum">      18 </span>            : #include &quot;access/genam.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;access/relscan.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;access/spgist_private.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;miscadmin.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;storage/bufmgr.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;utils/datum.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;utils/float.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;utils/lsyscache.h&quot;
+<span class="lineNum">      26 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      27 </span>            : #include &quot;utils/rel.h&quot;
+<span class="lineNum">      28 </span>            : 
+<span class="lineNum">      29 </span>            : typedef void (*storeRes_func) (SpGistScanOpaque so, ItemPointer heapPtr,
+<span class="lineNum">      30 </span>            :                                Datum leafValue, bool isNull, bool recheck,
+<span class="lineNum">      31 </span>            :                                bool recheckDistances, double *distances);
+<span class="lineNum">      32 </span>            : 
+<span class="lineNum">      33 </span>            : /*
+<span class="lineNum">      34 </span>            :  * Pairing heap comparison function for the SpGistSearchItem queue.
+<span class="lineNum">      35 </span>            :  * KNN-searches currently only support NULLS LAST.  So, preserve this logic
+<span class="lineNum">      36 </span>            :  * here.
+<a name="37"><span class="lineNum">      37 </span>            :  */</a>
+<span class="lineNum">      38 </span>            : static int
+<span class="lineNum">      39 </span><span class="lineCov">    1472490 : pairingheap_SpGistSearchItem_cmp(const pairingheap_node *a,</span>
+<span class="lineNum">      40 </span>            :                                  const pairingheap_node *b, void *arg)
+<span class="lineNum">      41 </span>            : {
+<span class="lineNum">      42 </span><span class="lineCov">    1472490 :     const SpGistSearchItem *sa = (const SpGistSearchItem *) a;</span>
+<span class="lineNum">      43 </span><span class="lineCov">    1472490 :     const SpGistSearchItem *sb = (const SpGistSearchItem *) b;</span>
+<span class="lineNum">      44 </span><span class="lineCov">    1472490 :     SpGistScanOpaque so = (SpGistScanOpaque) arg;</span>
+<span class="lineNum">      45 </span>            :     int         i;
+<span class="lineNum">      46 </span>            : 
+<span class="lineNum">      47 </span><span class="lineCov">    1472490 :     if (sa-&gt;isNull)</span>
+<span class="lineNum">      48 </span>            :     {
+<span class="lineNum">      49 </span><span class="lineCov">        168 :         if (!sb-&gt;isNull)</span>
+<span class="lineNum">      50 </span><span class="lineCov">        154 :             return -1;</span>
+<span class="lineNum">      51 </span>            :     }
+<span class="lineNum">      52 </span><span class="lineCov">    1472322 :     else if (sb-&gt;isNull)</span>
+<span class="lineNum">      53 </span>            :     {
+<span class="lineNum">      54 </span><span class="lineCov">        138 :         return 1;</span>
+<span class="lineNum">      55 </span>            :     }
+<span class="lineNum">      56 </span>            :     else
+<span class="lineNum">      57 </span>            :     {
+<span class="lineNum">      58 </span>            :         /* Order according to distance comparison */
+<span class="lineNum">      59 </span><span class="lineCov">    1552248 :         for (i = 0; i &lt; so-&gt;numberOfNonNullOrderBys; i++)</span>
+<span class="lineNum">      60 </span>            :         {
+<span class="lineNum">      61 </span><span class="lineCov">    1345042 :             if (isnan(sa-&gt;distances[i]) &amp;&amp; isnan(sb-&gt;distances[i]))</span>
+<span class="lineNum">      62 </span><span class="lineNoCov">          0 :                 continue;       /* NaN == NaN */</span>
+<span class="lineNum">      63 </span><span class="lineCov">    1345042 :             if (isnan(sa-&gt;distances[i]))</span>
+<span class="lineNum">      64 </span><span class="lineNoCov">          0 :                 return -1;      /* NaN &gt; number */</span>
+<span class="lineNum">      65 </span><span class="lineCov">    1345042 :             if (isnan(sb-&gt;distances[i]))</span>
+<span class="lineNum">      66 </span><span class="lineNoCov">          0 :                 return 1;       /* number &lt; NaN */</span>
+<span class="lineNum">      67 </span><span class="lineCov">    1345042 :             if (sa-&gt;distances[i] != sb-&gt;distances[i])</span>
+<span class="lineNum">      68 </span><span class="lineCov">    1264978 :                 return (sa-&gt;distances[i] &lt; sb-&gt;distances[i]) ? 1 : -1;</span>
+<span class="lineNum">      69 </span>            :         }
+<span class="lineNum">      70 </span>            :     }
+<span class="lineNum">      71 </span>            : 
+<span class="lineNum">      72 </span>            :     /* Leaf items go before inner pages, to ensure a depth-first search */
+<span class="lineNum">      73 </span><span class="lineCov">     207220 :     if (sa-&gt;isLeaf &amp;&amp; !sb-&gt;isLeaf)</span>
+<span class="lineNum">      74 </span><span class="lineCov">       1426 :         return 1;</span>
+<span class="lineNum">      75 </span><span class="lineCov">     205794 :     if (!sa-&gt;isLeaf &amp;&amp; sb-&gt;isLeaf)</span>
+<span class="lineNum">      76 </span><span class="lineCov">       1604 :         return -1;</span>
+<span class="lineNum">      77 </span>            : 
+<span class="lineNum">      78 </span><span class="lineCov">     204190 :     return 0;</span>
+<span class="lineNum">      79 </span>            : }
+<a name="80"><span class="lineNum">      80 </span>            : </a>
+<span class="lineNum">      81 </span>            : static void
+<span class="lineNum">      82 </span><span class="lineCov">     154534 : spgFreeSearchItem(SpGistScanOpaque so, SpGistSearchItem *item)</span>
+<span class="lineNum">      83 </span>            : {
+<span class="lineNum">      84 </span><span class="lineCov">     309068 :     if (!so-&gt;state.attLeafType.attbyval &amp;&amp;</span>
+<span class="lineNum">      85 </span><span class="lineCov">     154534 :         DatumGetPointer(item-&gt;value) != NULL)</span>
+<span class="lineNum">      86 </span><span class="lineCov">     126578 :         pfree(DatumGetPointer(item-&gt;value));</span>
+<span class="lineNum">      87 </span>            : 
+<span class="lineNum">      88 </span><span class="lineCov">     154534 :     if (item-&gt;traversalValue)</span>
+<span class="lineNum">      89 </span><span class="lineCov">      14772 :         pfree(item-&gt;traversalValue);</span>
+<span class="lineNum">      90 </span>            : 
+<span class="lineNum">      91 </span><span class="lineCov">     154534 :     pfree(item);</span>
+<span class="lineNum">      92 </span><span class="lineCov">     154534 : }</span>
+<span class="lineNum">      93 </span>            : 
+<span class="lineNum">      94 </span>            : /*
+<span class="lineNum">      95 </span>            :  * Add SpGistSearchItem to queue
+<span class="lineNum">      96 </span>            :  *
+<span class="lineNum">      97 </span>            :  * Called in queue context
+<a name="98"><span class="lineNum">      98 </span>            :  */</a>
+<span class="lineNum">      99 </span>            : static void
+<span class="lineNum">     100 </span><span class="lineCov">     155396 : spgAddSearchItemToQueue(SpGistScanOpaque so, SpGistSearchItem *item)</span>
+<span class="lineNum">     101 </span>            : {
+<span class="lineNum">     102 </span><span class="lineCov">     155396 :     pairingheap_add(so-&gt;scanQueue, &amp;item-&gt;phNode);</span>
+<span class="lineNum">     103 </span><span class="lineCov">     155396 : }</span>
+<a name="104"><span class="lineNum">     104 </span>            : </a>
+<span class="lineNum">     105 </span>            : static SpGistSearchItem *
+<span class="lineNum">     106 </span><span class="lineCov">     155396 : spgAllocSearchItem(SpGistScanOpaque so, bool isnull, double *distances)</span>
+<span class="lineNum">     107 </span>            : {
+<span class="lineNum">     108 </span>            :     /* allocate distance array only for non-NULL items */
+<span class="lineNum">     109 </span><span class="lineCov">     155396 :     SpGistSearchItem *item =</span>
+<span class="lineNum">     110 </span><span class="lineCov">     155396 :     palloc(SizeOfSpGistSearchItem(isnull ? 0 : so-&gt;numberOfNonNullOrderBys));</span>
+<span class="lineNum">     111 </span>            : 
+<span class="lineNum">     112 </span><span class="lineCov">     155396 :     item-&gt;isNull = isnull;</span>
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span><span class="lineCov">     155396 :     if (!isnull &amp;&amp; so-&gt;numberOfNonNullOrderBys &gt; 0)</span>
+<span class="lineNum">     115 </span><span class="lineCov">     125878 :         memcpy(item-&gt;distances, distances,</span>
+<span class="lineNum">     116 </span><span class="lineCov">     125878 :                sizeof(item-&gt;distances[0]) * so-&gt;numberOfNonNullOrderBys);</span>
+<span class="lineNum">     117 </span>            : 
+<span class="lineNum">     118 </span><span class="lineCov">     155396 :     return item;</span>
+<span class="lineNum">     119 </span>            : }
+<a name="120"><span class="lineNum">     120 </span>            : </a>
+<span class="lineNum">     121 </span>            : static void
+<span class="lineNum">     122 </span><span class="lineCov">        314 : spgAddStartItem(SpGistScanOpaque so, bool isnull)</span>
+<span class="lineNum">     123 </span>            : {
+<span class="lineNum">     124 </span><span class="lineCov">        314 :     SpGistSearchItem *startEntry =</span>
+<span class="lineNum">     125 </span><span class="lineCov">        314 :     spgAllocSearchItem(so, isnull, so-&gt;zeroDistances);</span>
+<span class="lineNum">     126 </span>            : 
+<span class="lineNum">     127 </span><span class="lineCov">        314 :     ItemPointerSet(&amp;startEntry-&gt;heapPtr,</span>
+<span class="lineNum">     128 </span>            :                    isnull ? SPGIST_NULL_BLKNO : SPGIST_ROOT_BLKNO,
+<span class="lineNum">     129 </span>            :                    FirstOffsetNumber);
+<span class="lineNum">     130 </span><span class="lineCov">        314 :     startEntry-&gt;isLeaf = false;</span>
+<span class="lineNum">     131 </span><span class="lineCov">        314 :     startEntry-&gt;level = 0;</span>
+<span class="lineNum">     132 </span><span class="lineCov">        314 :     startEntry-&gt;value = (Datum) 0;</span>
+<span class="lineNum">     133 </span><span class="lineCov">        314 :     startEntry-&gt;traversalValue = NULL;</span>
+<span class="lineNum">     134 </span><span class="lineCov">        314 :     startEntry-&gt;recheck = false;</span>
+<span class="lineNum">     135 </span><span class="lineCov">        314 :     startEntry-&gt;recheckDistances = false;</span>
+<span class="lineNum">     136 </span>            : 
+<span class="lineNum">     137 </span><span class="lineCov">        314 :     spgAddSearchItemToQueue(so, startEntry);</span>
+<span class="lineNum">     138 </span><span class="lineCov">        314 : }</span>
+<span class="lineNum">     139 </span>            : 
+<span class="lineNum">     140 </span>            : /*
+<span class="lineNum">     141 </span>            :  * Initialize queue to search the root page, resetting
+<span class="lineNum">     142 </span>            :  * any previously active scan
+<a name="143"><span class="lineNum">     143 </span>            :  */</a>
+<span class="lineNum">     144 </span>            : static void
+<span class="lineNum">     145 </span><span class="lineCov">        298 : resetSpGistScanOpaque(SpGistScanOpaque so)</span>
+<span class="lineNum">     146 </span>            : {
+<span class="lineNum">     147 </span>            :     MemoryContext oldCtx;
+<span class="lineNum">     148 </span>            : 
+<span class="lineNum">     149 </span><span class="lineCov">        298 :     MemoryContextReset(so-&gt;traversalCxt);</span>
+<span class="lineNum">     150 </span>            : 
+<span class="lineNum">     151 </span><span class="lineCov">        298 :     oldCtx = MemoryContextSwitchTo(so-&gt;traversalCxt);</span>
+<span class="lineNum">     152 </span>            : 
+<span class="lineNum">     153 </span>            :     /* initialize queue only for distance-ordered scans */
+<span class="lineNum">     154 </span><span class="lineCov">        298 :     so-&gt;scanQueue = pairingheap_allocate(pairingheap_SpGistSearchItem_cmp, so);</span>
+<span class="lineNum">     155 </span>            : 
+<span class="lineNum">     156 </span><span class="lineCov">        298 :     if (so-&gt;searchNulls)</span>
+<span class="lineNum">     157 </span>            :         /* Add a work item to scan the null index entries */
+<span class="lineNum">     158 </span><span class="lineCov">         20 :         spgAddStartItem(so, true);</span>
+<span class="lineNum">     159 </span>            : 
+<span class="lineNum">     160 </span><span class="lineCov">        298 :     if (so-&gt;searchNonNulls)</span>
+<span class="lineNum">     161 </span>            :         /* Add a work item to scan the non-null index entries */
+<span class="lineNum">     162 </span><span class="lineCov">        294 :         spgAddStartItem(so, false);</span>
+<span class="lineNum">     163 </span>            : 
+<span class="lineNum">     164 </span><span class="lineCov">        298 :     MemoryContextSwitchTo(oldCtx);</span>
+<span class="lineNum">     165 </span>            : 
+<span class="lineNum">     166 </span><span class="lineCov">        298 :     if (so-&gt;numberOfOrderBys &gt; 0)</span>
+<span class="lineNum">     167 </span>            :     {
+<span class="lineNum">     168 </span>            :         /* Must pfree distances to avoid memory leak */
+<span class="lineNum">     169 </span>            :         int         i;
+<span class="lineNum">     170 </span>            : 
+<span class="lineNum">     171 </span><span class="lineCov">         28 :         for (i = 0; i &lt; so-&gt;nPtrs; i++)</span>
+<span class="lineNum">     172 </span><span class="lineCov">          4 :             if (so-&gt;distances[i])</span>
+<span class="lineNum">     173 </span><span class="lineCov">          4 :                 pfree(so-&gt;distances[i]);</span>
+<span class="lineNum">     174 </span>            :     }
+<span class="lineNum">     175 </span>            : 
+<span class="lineNum">     176 </span><span class="lineCov">        298 :     if (so-&gt;want_itup)</span>
+<span class="lineNum">     177 </span>            :     {
+<span class="lineNum">     178 </span>            :         /* Must pfree reconstructed tuples to avoid memory leak */
+<span class="lineNum">     179 </span>            :         int         i;
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span><span class="lineCov">         30 :         for (i = 0; i &lt; so-&gt;nPtrs; i++)</span>
+<span class="lineNum">     182 </span><span class="lineCov">         22 :             pfree(so-&gt;reconTups[i]);</span>
+<span class="lineNum">     183 </span>            :     }
+<span class="lineNum">     184 </span><span class="lineCov">        298 :     so-&gt;iPtr = so-&gt;nPtrs = 0;</span>
+<span class="lineNum">     185 </span><span class="lineCov">        298 : }</span>
+<span class="lineNum">     186 </span>            : 
+<span class="lineNum">     187 </span>            : /*
+<span class="lineNum">     188 </span>            :  * Prepare scan keys in SpGistScanOpaque from caller-given scan keys
+<span class="lineNum">     189 </span>            :  *
+<span class="lineNum">     190 </span>            :  * Sets searchNulls, searchNonNulls, numberOfKeys, keyData fields of *so.
+<span class="lineNum">     191 </span>            :  *
+<span class="lineNum">     192 </span>            :  * The point here is to eliminate null-related considerations from what the
+<span class="lineNum">     193 </span>            :  * opclass consistent functions need to deal with.  We assume all SPGiST-
+<span class="lineNum">     194 </span>            :  * indexable operators are strict, so any null RHS value makes the scan
+<span class="lineNum">     195 </span>            :  * condition unsatisfiable.  We also pull out any IS NULL/IS NOT NULL
+<span class="lineNum">     196 </span>            :  * conditions; their effect is reflected into searchNulls/searchNonNulls.
+<a name="197"><span class="lineNum">     197 </span>            :  */</a>
+<span class="lineNum">     198 </span>            : static void
+<span class="lineNum">     199 </span><span class="lineCov">        298 : spgPrepareScanKeys(IndexScanDesc scan)</span>
+<span class="lineNum">     200 </span>            : {
+<span class="lineNum">     201 </span><span class="lineCov">        298 :     SpGistScanOpaque so = (SpGistScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     202 </span>            :     bool        qual_ok;
+<span class="lineNum">     203 </span>            :     bool        haveIsNull;
+<span class="lineNum">     204 </span>            :     bool        haveNotNull;
+<span class="lineNum">     205 </span>            :     int         nkeys;
+<span class="lineNum">     206 </span>            :     int         i;
+<span class="lineNum">     207 </span>            : 
+<span class="lineNum">     208 </span><span class="lineCov">        298 :     so-&gt;numberOfOrderBys = scan-&gt;numberOfOrderBys;</span>
+<span class="lineNum">     209 </span><span class="lineCov">        298 :     so-&gt;orderByData = scan-&gt;orderByData;</span>
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span><span class="lineCov">        298 :     if (so-&gt;numberOfOrderBys &lt;= 0)</span>
+<span class="lineNum">     212 </span><span class="lineCov">        274 :         so-&gt;numberOfNonNullOrderBys = 0;</span>
+<span class="lineNum">     213 </span>            :     else
+<span class="lineNum">     214 </span>            :     {
+<span class="lineNum">     215 </span><span class="lineCov">         24 :         int         j = 0;</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span>            :         /*
+<span class="lineNum">     218 </span>            :          * Remove all NULL keys, but remember their offsets in the original
+<span class="lineNum">     219 </span>            :          * array.
+<span class="lineNum">     220 </span>            :          */
+<span class="lineNum">     221 </span><span class="lineCov">         54 :         for (i = 0; i &lt; scan-&gt;numberOfOrderBys; i++)</span>
+<span class="lineNum">     222 </span>            :         {
+<span class="lineNum">     223 </span><span class="lineCov">         30 :             ScanKey     skey = &amp;so-&gt;orderByData[i];</span>
+<span class="lineNum">     224 </span>            : 
+<span class="lineNum">     225 </span><span class="lineCov">         30 :             if (skey-&gt;sk_flags &amp; SK_ISNULL)</span>
+<span class="lineNum">     226 </span><span class="lineCov">          2 :                 so-&gt;nonNullOrderByOffsets[i] = -1;</span>
+<span class="lineNum">     227 </span>            :             else
+<span class="lineNum">     228 </span>            :             {
+<span class="lineNum">     229 </span><span class="lineCov">         28 :                 if (i != j)</span>
+<span class="lineNum">     230 </span><span class="lineCov">          2 :                     so-&gt;orderByData[j] = *skey;</span>
+<span class="lineNum">     231 </span>            : 
+<span class="lineNum">     232 </span><span class="lineCov">         28 :                 so-&gt;nonNullOrderByOffsets[i] = j++;</span>
+<span class="lineNum">     233 </span>            :             }
+<span class="lineNum">     234 </span>            :         }
+<span class="lineNum">     235 </span>            : 
+<span class="lineNum">     236 </span><span class="lineCov">         24 :         so-&gt;numberOfNonNullOrderBys = j;</span>
+<span class="lineNum">     237 </span>            :     }
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span><span class="lineCov">        298 :     if (scan-&gt;numberOfKeys &lt;= 0)</span>
+<span class="lineNum">     240 </span>            :     {
+<span class="lineNum">     241 </span>            :         /* If no quals, whole-index scan is required */
+<span class="lineNum">     242 </span><span class="lineCov">         16 :         so-&gt;searchNulls = true;</span>
+<span class="lineNum">     243 </span><span class="lineCov">         16 :         so-&gt;searchNonNulls = true;</span>
+<span class="lineNum">     244 </span><span class="lineCov">         16 :         so-&gt;numberOfKeys = 0;</span>
+<span class="lineNum">     245 </span><span class="lineCov">        314 :         return;</span>
+<span class="lineNum">     246 </span>            :     }
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span>            :     /* Examine the given quals */
+<span class="lineNum">     249 </span><span class="lineCov">        282 :     qual_ok = true;</span>
+<span class="lineNum">     250 </span><span class="lineCov">        282 :     haveIsNull = haveNotNull = false;</span>
+<span class="lineNum">     251 </span><span class="lineCov">        282 :     nkeys = 0;</span>
+<span class="lineNum">     252 </span><span class="lineCov">        564 :     for (i = 0; i &lt; scan-&gt;numberOfKeys; i++)</span>
+<span class="lineNum">     253 </span>            :     {
+<span class="lineNum">     254 </span><span class="lineCov">        282 :         ScanKey     skey = &amp;scan-&gt;keyData[i];</span>
+<span class="lineNum">     255 </span>            : 
+<span class="lineNum">     256 </span><span class="lineCov">        282 :         if (skey-&gt;sk_flags &amp; SK_SEARCHNULL)</span>
+<span class="lineNum">     257 </span><span class="lineCov">          4 :             haveIsNull = true;</span>
+<span class="lineNum">     258 </span><span class="lineCov">        278 :         else if (skey-&gt;sk_flags &amp; SK_SEARCHNOTNULL)</span>
+<span class="lineNum">     259 </span><span class="lineCov">          8 :             haveNotNull = true;</span>
+<span class="lineNum">     260 </span><span class="lineCov">        270 :         else if (skey-&gt;sk_flags &amp; SK_ISNULL)</span>
+<span class="lineNum">     261 </span>            :         {
+<span class="lineNum">     262 </span>            :             /* ordinary qual with null argument - unsatisfiable */
+<span class="lineNum">     263 </span><span class="lineNoCov">          0 :             qual_ok = false;</span>
+<span class="lineNum">     264 </span><span class="lineNoCov">          0 :             break;</span>
+<span class="lineNum">     265 </span>            :         }
+<span class="lineNum">     266 </span>            :         else
+<span class="lineNum">     267 </span>            :         {
+<span class="lineNum">     268 </span>            :             /* ordinary qual, propagate into so-&gt;keyData */
+<span class="lineNum">     269 </span><span class="lineCov">        270 :             so-&gt;keyData[nkeys++] = *skey;</span>
+<span class="lineNum">     270 </span>            :             /* this effectively creates a not-null requirement */
+<span class="lineNum">     271 </span><span class="lineCov">        270 :             haveNotNull = true;</span>
+<span class="lineNum">     272 </span>            :         }
+<span class="lineNum">     273 </span>            :     }
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span>            :     /* IS NULL in combination with something else is unsatisfiable */
+<span class="lineNum">     276 </span><span class="lineCov">        282 :     if (haveIsNull &amp;&amp; haveNotNull)</span>
+<span class="lineNum">     277 </span><span class="lineNoCov">          0 :         qual_ok = false;</span>
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span>            :     /* Emit results */
+<span class="lineNum">     280 </span><span class="lineCov">        282 :     if (qual_ok)</span>
+<span class="lineNum">     281 </span>            :     {
+<span class="lineNum">     282 </span><span class="lineCov">        282 :         so-&gt;searchNulls = haveIsNull;</span>
+<span class="lineNum">     283 </span><span class="lineCov">        282 :         so-&gt;searchNonNulls = haveNotNull;</span>
+<span class="lineNum">     284 </span><span class="lineCov">        282 :         so-&gt;numberOfKeys = nkeys;</span>
+<span class="lineNum">     285 </span>            :     }
+<span class="lineNum">     286 </span>            :     else
+<span class="lineNum">     287 </span>            :     {
+<span class="lineNum">     288 </span><span class="lineNoCov">          0 :         so-&gt;searchNulls = false;</span>
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :         so-&gt;searchNonNulls = false;</span>
+<span class="lineNum">     290 </span><span class="lineNoCov">          0 :         so-&gt;numberOfKeys = 0;</span>
+<span class="lineNum">     291 </span>            :     }
+<span class="lineNum">     292 </span>            : }
+<a name="293"><span class="lineNum">     293 </span>            : </a>
+<span class="lineNum">     294 </span>            : IndexScanDesc
+<span class="lineNum">     295 </span><span class="lineCov">        290 : spgbeginscan(Relation rel, int keysz, int orderbysz)</span>
+<span class="lineNum">     296 </span>            : {
+<span class="lineNum">     297 </span>            :     IndexScanDesc scan;
+<span class="lineNum">     298 </span>            :     SpGistScanOpaque so;
+<span class="lineNum">     299 </span>            :     int         i;
+<span class="lineNum">     300 </span>            : 
+<span class="lineNum">     301 </span><span class="lineCov">        290 :     scan = RelationGetIndexScan(rel, keysz, orderbysz);</span>
+<span class="lineNum">     302 </span>            : 
+<span class="lineNum">     303 </span><span class="lineCov">        290 :     so = (SpGistScanOpaque) palloc0(sizeof(SpGistScanOpaqueData));</span>
+<span class="lineNum">     304 </span><span class="lineCov">        290 :     if (keysz &gt; 0)</span>
+<span class="lineNum">     305 </span><span class="lineCov">        278 :         so-&gt;keyData = (ScanKey) palloc(sizeof(ScanKeyData) * keysz);</span>
+<span class="lineNum">     306 </span>            :     else
+<span class="lineNum">     307 </span><span class="lineCov">         12 :         so-&gt;keyData = NULL;</span>
+<span class="lineNum">     308 </span><span class="lineCov">        290 :     initSpGistState(&amp;so-&gt;state, scan-&gt;indexRelation);</span>
+<span class="lineNum">     309 </span>            : 
+<span class="lineNum">     310 </span><span class="lineCov">        290 :     so-&gt;tempCxt = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     311 </span>            :                                         &quot;SP-GiST search temporary context&quot;,
+<span class="lineNum">     312 </span>            :                                         ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     313 </span><span class="lineCov">        290 :     so-&gt;traversalCxt = AllocSetContextCreate(CurrentMemoryContext,</span>
+<span class="lineNum">     314 </span>            :                                              &quot;SP-GiST traversal-value context&quot;,
+<span class="lineNum">     315 </span>            :                                              ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     316 </span>            : 
+<span class="lineNum">     317 </span>            :     /* Set up indexTupDesc and xs_hitupdesc in case it's an index-only scan */
+<span class="lineNum">     318 </span><span class="lineCov">        290 :     so-&gt;indexTupDesc = scan-&gt;xs_hitupdesc = RelationGetDescr(rel);</span>
+<span class="lineNum">     319 </span>            : 
+<span class="lineNum">     320 </span>            :     /* Allocate various arrays needed for order-by scans */
+<span class="lineNum">     321 </span><span class="lineCov">        290 :     if (scan-&gt;numberOfOrderBys &gt; 0)</span>
+<span class="lineNum">     322 </span>            :     {
+<span class="lineNum">     323 </span>            :         /* This will be filled in spgrescan, but allocate the space here */
+<span class="lineNum">     324 </span><span class="lineCov">         20 :         so-&gt;orderByTypes = (Oid *)</span>
+<span class="lineNum">     325 </span><span class="lineCov">         20 :             palloc(sizeof(Oid) * scan-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     326 </span><span class="lineCov">         20 :         so-&gt;nonNullOrderByOffsets = (int *)</span>
+<span class="lineNum">     327 </span><span class="lineCov">         20 :             palloc(sizeof(int) * scan-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     328 </span>            : 
+<span class="lineNum">     329 </span>            :         /* These arrays have constant contents, so we can fill them now */
+<span class="lineNum">     330 </span><span class="lineCov">         20 :         so-&gt;zeroDistances = (double *)</span>
+<span class="lineNum">     331 </span><span class="lineCov">         20 :             palloc(sizeof(double) * scan-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     332 </span><span class="lineCov">         20 :         so-&gt;infDistances = (double *)</span>
+<span class="lineNum">     333 </span><span class="lineCov">         20 :             palloc(sizeof(double) * scan-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     334 </span>            : 
+<span class="lineNum">     335 </span><span class="lineCov">         42 :         for (i = 0; i &lt; scan-&gt;numberOfOrderBys; i++)</span>
+<span class="lineNum">     336 </span>            :         {
+<span class="lineNum">     337 </span><span class="lineCov">         22 :             so-&gt;zeroDistances[i] = 0.0;</span>
+<span class="lineNum">     338 </span><span class="lineCov">         22 :             so-&gt;infDistances[i] = get_float8_infinity();</span>
+<span class="lineNum">     339 </span>            :         }
+<span class="lineNum">     340 </span>            : 
+<span class="lineNum">     341 </span><span class="lineCov">         20 :         scan-&gt;xs_orderbyvals = (Datum *)</span>
+<span class="lineNum">     342 </span><span class="lineCov">         20 :             palloc0(sizeof(Datum) * scan-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     343 </span><span class="lineCov">         20 :         scan-&gt;xs_orderbynulls = (bool *)</span>
+<span class="lineNum">     344 </span><span class="lineCov">         20 :             palloc(sizeof(bool) * scan-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     345 </span><span class="lineCov">         20 :         memset(scan-&gt;xs_orderbynulls, true,</span>
+<span class="lineNum">     346 </span><span class="lineCov">         20 :                sizeof(bool) * scan-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     347 </span>            :     }
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span><span class="lineCov">        290 :     fmgr_info_copy(&amp;so-&gt;innerConsistentFn,</span>
+<span class="lineNum">     350 </span>            :                    index_getprocinfo(rel, 1, SPGIST_INNER_CONSISTENT_PROC),
+<span class="lineNum">     351 </span>            :                    CurrentMemoryContext);
+<span class="lineNum">     352 </span>            : 
+<span class="lineNum">     353 </span><span class="lineCov">        290 :     fmgr_info_copy(&amp;so-&gt;leafConsistentFn,</span>
+<span class="lineNum">     354 </span>            :                    index_getprocinfo(rel, 1, SPGIST_LEAF_CONSISTENT_PROC),
+<span class="lineNum">     355 </span>            :                    CurrentMemoryContext);
+<span class="lineNum">     356 </span>            : 
+<span class="lineNum">     357 </span><span class="lineCov">        290 :     so-&gt;indexCollation = rel-&gt;rd_indcollation[0];</span>
+<span class="lineNum">     358 </span>            : 
+<span class="lineNum">     359 </span><span class="lineCov">        290 :     scan-&gt;opaque = so;</span>
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span><span class="lineCov">        290 :     return scan;</span>
+<span class="lineNum">     362 </span>            : }
+<a name="363"><span class="lineNum">     363 </span>            : </a>
+<span class="lineNum">     364 </span>            : void
+<span class="lineNum">     365 </span><span class="lineCov">        298 : spgrescan(IndexScanDesc scan, ScanKey scankey, int nscankeys,</span>
+<span class="lineNum">     366 </span>            :           ScanKey orderbys, int norderbys)
+<span class="lineNum">     367 </span>            : {
+<span class="lineNum">     368 </span><span class="lineCov">        298 :     SpGistScanOpaque so = (SpGistScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     369 </span>            : 
+<span class="lineNum">     370 </span>            :     /* copy scankeys into local storage */
+<span class="lineNum">     371 </span><span class="lineCov">        298 :     if (scankey &amp;&amp; scan-&gt;numberOfKeys &gt; 0)</span>
+<span class="lineNum">     372 </span><span class="lineCov">        282 :         memmove(scan-&gt;keyData, scankey,</span>
+<span class="lineNum">     373 </span><span class="lineCov">        282 :                 scan-&gt;numberOfKeys * sizeof(ScanKeyData));</span>
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span>            :     /* initialize order-by data if needed */
+<span class="lineNum">     376 </span><span class="lineCov">        298 :     if (orderbys &amp;&amp; scan-&gt;numberOfOrderBys &gt; 0)</span>
+<span class="lineNum">     377 </span>            :     {
+<span class="lineNum">     378 </span>            :         int         i;
+<span class="lineNum">     379 </span>            : 
+<span class="lineNum">     380 </span><span class="lineCov">         24 :         memmove(scan-&gt;orderByData, orderbys,</span>
+<span class="lineNum">     381 </span><span class="lineCov">         24 :                 scan-&gt;numberOfOrderBys * sizeof(ScanKeyData));</span>
+<span class="lineNum">     382 </span>            : 
+<span class="lineNum">     383 </span><span class="lineCov">         54 :         for (i = 0; i &lt; scan-&gt;numberOfOrderBys; i++)</span>
+<span class="lineNum">     384 </span>            :         {
+<span class="lineNum">     385 </span><span class="lineCov">         30 :             ScanKey     skey = &amp;scan-&gt;orderByData[i];</span>
+<span class="lineNum">     386 </span>            : 
+<span class="lineNum">     387 </span>            :             /*
+<span class="lineNum">     388 </span>            :              * Look up the datatype returned by the original ordering
+<span class="lineNum">     389 </span>            :              * operator. SP-GiST always uses a float8 for the distance
+<span class="lineNum">     390 </span>            :              * function, but the ordering operator could be anything else.
+<span class="lineNum">     391 </span>            :              *
+<span class="lineNum">     392 </span>            :              * XXX: The distance function is only allowed to be lossy if the
+<span class="lineNum">     393 </span>            :              * ordering operator's result type is float4 or float8.  Otherwise
+<span class="lineNum">     394 </span>            :              * we don't know how to return the distance to the executor.  But
+<span class="lineNum">     395 </span>            :              * we cannot check that here, as we won't know if the distance
+<span class="lineNum">     396 </span>            :              * function is lossy until it returns *recheck = true for the
+<span class="lineNum">     397 </span>            :              * first time.
+<span class="lineNum">     398 </span>            :              */
+<span class="lineNum">     399 </span><span class="lineCov">         30 :             so-&gt;orderByTypes[i] = get_func_rettype(skey-&gt;sk_func.fn_oid);</span>
+<span class="lineNum">     400 </span>            :         }
+<span class="lineNum">     401 </span>            :     }
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span>            :     /* preprocess scankeys, set up the representation in *so */
+<span class="lineNum">     404 </span><span class="lineCov">        298 :     spgPrepareScanKeys(scan);</span>
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span>            :     /* set up starting queue entries */
+<span class="lineNum">     407 </span><span class="lineCov">        298 :     resetSpGistScanOpaque(so);</span>
+<span class="lineNum">     408 </span><span class="lineCov">        298 : }</span>
+<a name="409"><span class="lineNum">     409 </span>            : </a>
+<span class="lineNum">     410 </span>            : void
+<span class="lineNum">     411 </span><span class="lineCov">        290 : spgendscan(IndexScanDesc scan)</span>
+<span class="lineNum">     412 </span>            : {
+<span class="lineNum">     413 </span><span class="lineCov">        290 :     SpGistScanOpaque so = (SpGistScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     414 </span>            : 
+<span class="lineNum">     415 </span><span class="lineCov">        290 :     MemoryContextDelete(so-&gt;tempCxt);</span>
+<span class="lineNum">     416 </span><span class="lineCov">        290 :     MemoryContextDelete(so-&gt;traversalCxt);</span>
+<span class="lineNum">     417 </span>            : 
+<span class="lineNum">     418 </span><span class="lineCov">        290 :     if (so-&gt;keyData)</span>
+<span class="lineNum">     419 </span><span class="lineCov">        278 :         pfree(so-&gt;keyData);</span>
+<span class="lineNum">     420 </span>            : 
+<span class="lineNum">     421 </span><span class="lineCov">        290 :     if (so-&gt;state.deadTupleStorage)</span>
+<span class="lineNum">     422 </span><span class="lineCov">        290 :         pfree(so-&gt;state.deadTupleStorage);</span>
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineCov">        290 :     if (scan-&gt;numberOfOrderBys &gt; 0)</span>
+<span class="lineNum">     425 </span>            :     {
+<span class="lineNum">     426 </span><span class="lineCov">         20 :         pfree(so-&gt;orderByTypes);</span>
+<span class="lineNum">     427 </span><span class="lineCov">         20 :         pfree(so-&gt;nonNullOrderByOffsets);</span>
+<span class="lineNum">     428 </span><span class="lineCov">         20 :         pfree(so-&gt;zeroDistances);</span>
+<span class="lineNum">     429 </span><span class="lineCov">         20 :         pfree(so-&gt;infDistances);</span>
+<span class="lineNum">     430 </span><span class="lineCov">         20 :         pfree(scan-&gt;xs_orderbyvals);</span>
+<span class="lineNum">     431 </span><span class="lineCov">         20 :         pfree(scan-&gt;xs_orderbynulls);</span>
+<span class="lineNum">     432 </span>            :     }
+<span class="lineNum">     433 </span>            : 
+<span class="lineNum">     434 </span><span class="lineCov">        290 :     pfree(so);</span>
+<span class="lineNum">     435 </span><span class="lineCov">        290 : }</span>
+<span class="lineNum">     436 </span>            : 
+<span class="lineNum">     437 </span>            : /*
+<span class="lineNum">     438 </span>            :  * Leaf SpGistSearchItem constructor, called in queue context
+<a name="439"><span class="lineNum">     439 </span>            :  */</a>
+<span class="lineNum">     440 </span>            : static SpGistSearchItem *
+<span class="lineNum">     441 </span><span class="lineCov">     121902 : spgNewHeapItem(SpGistScanOpaque so, int level, ItemPointer heapPtr,</span>
+<span class="lineNum">     442 </span>            :                Datum leafValue, bool recheck, bool recheckDistances,
+<span class="lineNum">     443 </span>            :                bool isnull, double *distances)
+<span class="lineNum">     444 </span>            : {
+<span class="lineNum">     445 </span><span class="lineCov">     121902 :     SpGistSearchItem *item = spgAllocSearchItem(so, isnull, distances);</span>
+<span class="lineNum">     446 </span>            : 
+<span class="lineNum">     447 </span><span class="lineCov">     121902 :     item-&gt;level = level;</span>
+<span class="lineNum">     448 </span><span class="lineCov">     121902 :     item-&gt;heapPtr = *heapPtr;</span>
+<span class="lineNum">     449 </span>            :     /* copy value to queue cxt out of tmp cxt */
+<span class="lineNum">     450 </span><span class="lineCov">     243788 :     item-&gt;value = isnull ? (Datum) 0 :</span>
+<span class="lineNum">     451 </span><span class="lineCov">     121886 :         datumCopy(leafValue, so-&gt;state.attLeafType.attbyval,</span>
+<span class="lineNum">     452 </span><span class="lineCov">     121886 :                   so-&gt;state.attLeafType.attlen);</span>
+<span class="lineNum">     453 </span><span class="lineCov">     121902 :     item-&gt;traversalValue = NULL;</span>
+<span class="lineNum">     454 </span><span class="lineCov">     121902 :     item-&gt;isLeaf = true;</span>
+<span class="lineNum">     455 </span><span class="lineCov">     121902 :     item-&gt;recheck = recheck;</span>
+<span class="lineNum">     456 </span><span class="lineCov">     121902 :     item-&gt;recheckDistances = recheckDistances;</span>
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span><span class="lineCov">     121902 :     return item;</span>
+<span class="lineNum">     459 </span>            : }
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span>            : /*
+<span class="lineNum">     462 </span>            :  * Test whether a leaf tuple satisfies all the scan keys
+<span class="lineNum">     463 </span>            :  *
+<span class="lineNum">     464 </span>            :  * *reportedSome is set to true if:
+<span class="lineNum">     465 </span>            :  *      the scan is not ordered AND the item satisfies the scankeys
+<a name="466"><span class="lineNum">     466 </span>            :  */</a>
+<span class="lineNum">     467 </span>            : static bool
+<span class="lineNum">     468 </span><span class="lineCov">     878690 : spgLeafTest(SpGistScanOpaque so, SpGistSearchItem *item,</span>
+<span class="lineNum">     469 </span>            :             SpGistLeafTuple leafTuple, bool isnull,
+<span class="lineNum">     470 </span>            :             bool *reportedSome, storeRes_func storeRes)
+<span class="lineNum">     471 </span>            : {
+<span class="lineNum">     472 </span>            :     Datum       leafValue;
+<span class="lineNum">     473 </span>            :     double     *distances;
+<span class="lineNum">     474 </span>            :     bool        result;
+<span class="lineNum">     475 </span>            :     bool        recheck;
+<span class="lineNum">     476 </span>            :     bool        recheckDistances;
+<span class="lineNum">     477 </span>            : 
+<span class="lineNum">     478 </span><span class="lineCov">     878690 :     if (isnull)</span>
+<span class="lineNum">     479 </span>            :     {
+<span class="lineNum">     480 </span>            :         /* Should not have arrived on a nulls page unless nulls are wanted */
+<span class="lineNum">     481 </span><span class="lineCov">         40 :         Assert(so-&gt;searchNulls);</span>
+<span class="lineNum">     482 </span><span class="lineCov">         40 :         leafValue = (Datum) 0;</span>
+<span class="lineNum">     483 </span><span class="lineCov">         40 :         distances = NULL;</span>
+<span class="lineNum">     484 </span><span class="lineCov">         40 :         recheck = false;</span>
+<span class="lineNum">     485 </span><span class="lineCov">         40 :         recheckDistances = false;</span>
+<span class="lineNum">     486 </span><span class="lineCov">         40 :         result = true;</span>
+<span class="lineNum">     487 </span>            :     }
+<span class="lineNum">     488 </span>            :     else
+<span class="lineNum">     489 </span>            :     {
+<span class="lineNum">     490 </span>            :         spgLeafConsistentIn in;
+<span class="lineNum">     491 </span>            :         spgLeafConsistentOut out;
+<span class="lineNum">     492 </span>            : 
+<span class="lineNum">     493 </span>            :         /* use temp context for calling leaf_consistent */
+<span class="lineNum">     494 </span><span class="lineCov">     878650 :         MemoryContext oldCxt = MemoryContextSwitchTo(so-&gt;tempCxt);</span>
+<span class="lineNum">     495 </span>            : 
+<span class="lineNum">     496 </span><span class="lineCov">     878650 :         in.scankeys = so-&gt;keyData;</span>
+<span class="lineNum">     497 </span><span class="lineCov">     878650 :         in.nkeys = so-&gt;numberOfKeys;</span>
+<span class="lineNum">     498 </span><span class="lineCov">     878650 :         in.orderbys = so-&gt;orderByData;</span>
+<span class="lineNum">     499 </span><span class="lineCov">     878650 :         in.norderbys = so-&gt;numberOfNonNullOrderBys;</span>
+<span class="lineNum">     500 </span><span class="lineCov">     878650 :         in.reconstructedValue = item-&gt;value;</span>
+<span class="lineNum">     501 </span><span class="lineCov">     878650 :         in.traversalValue = item-&gt;traversalValue;</span>
+<span class="lineNum">     502 </span><span class="lineCov">     878650 :         in.level = item-&gt;level;</span>
+<span class="lineNum">     503 </span><span class="lineCov">     878650 :         in.returnData = so-&gt;want_itup;</span>
+<span class="lineNum">     504 </span><span class="lineCov">     878650 :         in.leafDatum = SGLTDATUM(leafTuple, &amp;so-&gt;state);</span>
+<span class="lineNum">     505 </span>            : 
+<span class="lineNum">     506 </span><span class="lineCov">     878650 :         out.leafValue = (Datum) 0;</span>
+<span class="lineNum">     507 </span><span class="lineCov">     878650 :         out.recheck = false;</span>
+<span class="lineNum">     508 </span><span class="lineCov">     878650 :         out.distances = NULL;</span>
+<span class="lineNum">     509 </span><span class="lineCov">     878650 :         out.recheckDistances = false;</span>
+<span class="lineNum">     510 </span>            : 
+<span class="lineNum">     511 </span><span class="lineCov">     878650 :         result = DatumGetBool(FunctionCall2Coll(&amp;so-&gt;leafConsistentFn,</span>
+<span class="lineNum">     512 </span>            :                                                 so-&gt;indexCollation,
+<span class="lineNum">     513 </span>            :                                                 PointerGetDatum(&amp;in),
+<span class="lineNum">     514 </span>            :                                                 PointerGetDatum(&amp;out)));
+<span class="lineNum">     515 </span><span class="lineCov">     878650 :         recheck = out.recheck;</span>
+<span class="lineNum">     516 </span><span class="lineCov">     878650 :         recheckDistances = out.recheckDistances;</span>
+<span class="lineNum">     517 </span><span class="lineCov">     878650 :         leafValue = out.leafValue;</span>
+<span class="lineNum">     518 </span><span class="lineCov">     878650 :         distances = out.distances;</span>
+<span class="lineNum">     519 </span>            : 
+<span class="lineNum">     520 </span><span class="lineCov">     878650 :         MemoryContextSwitchTo(oldCxt);</span>
+<span class="lineNum">     521 </span>            :     }
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span><span class="lineCov">     878690 :     if (result)</span>
+<span class="lineNum">     524 </span>            :     {
+<span class="lineNum">     525 </span>            :         /* item passes the scankeys */
+<span class="lineNum">     526 </span><span class="lineCov">     686964 :         if (so-&gt;numberOfNonNullOrderBys &gt; 0)</span>
+<span class="lineNum">     527 </span>            :         {
+<span class="lineNum">     528 </span>            :             /* the scan is ordered -&gt; add the item to the queue */
+<span class="lineNum">     529 </span><span class="lineCov">     121902 :             MemoryContext oldCxt = MemoryContextSwitchTo(so-&gt;traversalCxt);</span>
+<span class="lineNum">     530 </span><span class="lineCov">     121902 :             SpGistSearchItem *heapItem = spgNewHeapItem(so, item-&gt;level,</span>
+<span class="lineNum">     531 </span>            :                                                         &amp;leafTuple-&gt;heapPtr,
+<span class="lineNum">     532 </span>            :                                                         leafValue,
+<span class="lineNum">     533 </span>            :                                                         recheck,
+<span class="lineNum">     534 </span>            :                                                         recheckDistances,
+<span class="lineNum">     535 </span>            :                                                         isnull,
+<span class="lineNum">     536 </span>            :                                                         distances);
+<span class="lineNum">     537 </span>            : 
+<span class="lineNum">     538 </span><span class="lineCov">     121902 :             spgAddSearchItemToQueue(so, heapItem);</span>
+<span class="lineNum">     539 </span>            : 
+<span class="lineNum">     540 </span><span class="lineCov">     121902 :             MemoryContextSwitchTo(oldCxt);</span>
+<span class="lineNum">     541 </span>            :         }
+<span class="lineNum">     542 </span>            :         else
+<span class="lineNum">     543 </span>            :         {
+<span class="lineNum">     544 </span>            :             /* non-ordered scan, so report the item right away */
+<span class="lineNum">     545 </span><span class="lineCov">     565062 :             Assert(!recheckDistances);</span>
+<span class="lineNum">     546 </span><span class="lineCov">     565062 :             storeRes(so, &amp;leafTuple-&gt;heapPtr, leafValue, isnull,</span>
+<span class="lineNum">     547 </span>            :                      recheck, false, NULL);
+<span class="lineNum">     548 </span><span class="lineCov">     565062 :             *reportedSome = true;</span>
+<span class="lineNum">     549 </span>            :         }
+<span class="lineNum">     550 </span>            :     }
+<span class="lineNum">     551 </span>            : 
+<span class="lineNum">     552 </span><span class="lineCov">     878690 :     return result;</span>
+<span class="lineNum">     553 </span>            : }
+<span class="lineNum">     554 </span>            : 
+<a name="555"><span class="lineNum">     555 </span>            : /* A bundle initializer for inner_consistent methods */</a>
+<span class="lineNum">     556 </span>            : static void
+<span class="lineNum">     557 </span><span class="lineCov">       8504 : spgInitInnerConsistentIn(spgInnerConsistentIn *in,</span>
+<span class="lineNum">     558 </span>            :                          SpGistScanOpaque so,
+<span class="lineNum">     559 </span>            :                          SpGistSearchItem *item,
+<span class="lineNum">     560 </span>            :                          SpGistInnerTuple innerTuple)
+<span class="lineNum">     561 </span>            : {
+<span class="lineNum">     562 </span><span class="lineCov">       8504 :     in-&gt;scankeys = so-&gt;keyData;</span>
+<span class="lineNum">     563 </span><span class="lineCov">       8504 :     in-&gt;orderbys = so-&gt;orderByData;</span>
+<span class="lineNum">     564 </span><span class="lineCov">       8504 :     in-&gt;nkeys = so-&gt;numberOfKeys;</span>
+<span class="lineNum">     565 </span><span class="lineCov">       8504 :     in-&gt;norderbys = so-&gt;numberOfNonNullOrderBys;</span>
+<span class="lineNum">     566 </span><span class="lineCov">       8504 :     in-&gt;reconstructedValue = item-&gt;value;</span>
+<span class="lineNum">     567 </span><span class="lineCov">       8504 :     in-&gt;traversalMemoryContext = so-&gt;traversalCxt;</span>
+<span class="lineNum">     568 </span><span class="lineCov">       8504 :     in-&gt;traversalValue = item-&gt;traversalValue;</span>
+<span class="lineNum">     569 </span><span class="lineCov">       8504 :     in-&gt;level = item-&gt;level;</span>
+<span class="lineNum">     570 </span><span class="lineCov">       8504 :     in-&gt;returnData = so-&gt;want_itup;</span>
+<span class="lineNum">     571 </span><span class="lineCov">       8504 :     in-&gt;allTheSame = innerTuple-&gt;allTheSame;</span>
+<span class="lineNum">     572 </span><span class="lineCov">       8504 :     in-&gt;hasPrefix = (innerTuple-&gt;prefixSize &gt; 0);</span>
+<span class="lineNum">     573 </span><span class="lineCov">       8504 :     in-&gt;prefixDatum = SGITDATUM(innerTuple, &amp;so-&gt;state);</span>
+<span class="lineNum">     574 </span><span class="lineCov">       8504 :     in-&gt;nNodes = innerTuple-&gt;nNodes;</span>
+<span class="lineNum">     575 </span><span class="lineCov">       8504 :     in-&gt;nodeLabels = spgExtractNodeLabels(&amp;so-&gt;state, innerTuple);</span>
+<span class="lineNum">     576 </span><span class="lineCov">       8504 : }</span>
+<a name="577"><span class="lineNum">     577 </span>            : </a>
+<span class="lineNum">     578 </span>            : static SpGistSearchItem *
+<span class="lineNum">     579 </span><span class="lineCov">      33180 : spgMakeInnerItem(SpGistScanOpaque so,</span>
+<span class="lineNum">     580 </span>            :                  SpGistSearchItem *parentItem,
+<span class="lineNum">     581 </span>            :                  SpGistNodeTuple tuple,
+<span class="lineNum">     582 </span>            :                  spgInnerConsistentOut *out, int i, bool isnull,
+<span class="lineNum">     583 </span>            :                  double *distances)
+<span class="lineNum">     584 </span>            : {
+<span class="lineNum">     585 </span><span class="lineCov">      33180 :     SpGistSearchItem *item = spgAllocSearchItem(so, isnull, distances);</span>
+<span class="lineNum">     586 </span>            : 
+<span class="lineNum">     587 </span><span class="lineCov">      33180 :     item-&gt;heapPtr = tuple-&gt;t_tid;</span>
+<span class="lineNum">     588 </span><span class="lineCov">      81716 :     item-&gt;level = out-&gt;levelAdds ? parentItem-&gt;level + out-&gt;levelAdds[i]</span>
+<span class="lineNum">     589 </span><span class="lineCov">      48536 :         : parentItem-&gt;level;</span>
+<span class="lineNum">     590 </span>            : 
+<span class="lineNum">     591 </span>            :     /* Must copy value out of temp context */
+<span class="lineNum">     592 </span><span class="lineCov">      66360 :     item-&gt;value = out-&gt;reconstructedValues</span>
+<span class="lineNum">     593 </span><span class="lineCov">      10992 :         ? datumCopy(out-&gt;reconstructedValues[i],</span>
+<span class="lineNum">     594 </span><span class="lineCov">       5496 :                     so-&gt;state.attLeafType.attbyval,</span>
+<span class="lineNum">     595 </span><span class="lineCov">       5496 :                     so-&gt;state.attLeafType.attlen)</span>
+<span class="lineNum">     596 </span><span class="lineCov">      38676 :         : (Datum) 0;</span>
+<span class="lineNum">     597 </span>            : 
+<span class="lineNum">     598 </span>            :     /*
+<span class="lineNum">     599 </span>            :      * Elements of out.traversalValues should be allocated in
+<span class="lineNum">     600 </span>            :      * in.traversalMemoryContext, which is actually a long lived context of
+<span class="lineNum">     601 </span>            :      * index scan.
+<span class="lineNum">     602 </span>            :      */
+<span class="lineNum">     603 </span><span class="lineCov">      33180 :     item-&gt;traversalValue =</span>
+<span class="lineNum">     604 </span><span class="lineCov">      33180 :         out-&gt;traversalValues ? out-&gt;traversalValues[i] : NULL;</span>
+<span class="lineNum">     605 </span>            : 
+<span class="lineNum">     606 </span><span class="lineCov">      33180 :     item-&gt;isLeaf = false;</span>
+<span class="lineNum">     607 </span><span class="lineCov">      33180 :     item-&gt;recheck = false;</span>
+<span class="lineNum">     608 </span><span class="lineCov">      33180 :     item-&gt;recheckDistances = false;</span>
+<span class="lineNum">     609 </span>            : 
+<span class="lineNum">     610 </span><span class="lineCov">      33180 :     return item;</span>
+<span class="lineNum">     611 </span>            : }
+<a name="612"><span class="lineNum">     612 </span>            : </a>
+<span class="lineNum">     613 </span>            : static void
+<span class="lineNum">     614 </span><span class="lineCov">       8504 : spgInnerTest(SpGistScanOpaque so, SpGistSearchItem *item,</span>
+<span class="lineNum">     615 </span>            :              SpGistInnerTuple innerTuple, bool isnull)
+<span class="lineNum">     616 </span>            : {
+<span class="lineNum">     617 </span><span class="lineCov">       8504 :     MemoryContext oldCxt = MemoryContextSwitchTo(so-&gt;tempCxt);</span>
+<span class="lineNum">     618 </span>            :     spgInnerConsistentOut out;
+<span class="lineNum">     619 </span><span class="lineCov">       8504 :     int         nNodes = innerTuple-&gt;nNodes;</span>
+<span class="lineNum">     620 </span>            :     int         i;
+<span class="lineNum">     621 </span>            : 
+<span class="lineNum">     622 </span><span class="lineCov">       8504 :     memset(&amp;out, 0, sizeof(out));</span>
+<span class="lineNum">     623 </span>            : 
+<span class="lineNum">     624 </span><span class="lineCov">       8504 :     if (!isnull)</span>
+<span class="lineNum">     625 </span>            :     {
+<span class="lineNum">     626 </span>            :         spgInnerConsistentIn in;
+<span class="lineNum">     627 </span>            : 
+<span class="lineNum">     628 </span><span class="lineCov">       8504 :         spgInitInnerConsistentIn(&amp;in, so, item, innerTuple);</span>
+<span class="lineNum">     629 </span>            : 
+<span class="lineNum">     630 </span>            :         /* use user-defined inner consistent method */
+<span class="lineNum">     631 </span><span class="lineCov">       8504 :         FunctionCall2Coll(&amp;so-&gt;innerConsistentFn,</span>
+<span class="lineNum">     632 </span>            :                           so-&gt;indexCollation,
+<span class="lineNum">     633 </span>            :                           PointerGetDatum(&amp;in),
+<span class="lineNum">     634 </span>            :                           PointerGetDatum(&amp;out));
+<span class="lineNum">     635 </span>            :     }
+<span class="lineNum">     636 </span>            :     else
+<span class="lineNum">     637 </span>            :     {
+<span class="lineNum">     638 </span>            :         /* force all children to be visited */
+<span class="lineNum">     639 </span><span class="lineNoCov">          0 :         out.nNodes = nNodes;</span>
+<span class="lineNum">     640 </span><span class="lineNoCov">          0 :         out.nodeNumbers = (int *) palloc(sizeof(int) * nNodes);</span>
+<span class="lineNum">     641 </span><span class="lineNoCov">          0 :         for (i = 0; i &lt; nNodes; i++)</span>
+<span class="lineNum">     642 </span><span class="lineNoCov">          0 :             out.nodeNumbers[i] = i;</span>
+<span class="lineNum">     643 </span>            :     }
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span>            :     /* If allTheSame, they should all or none of them match */
+<span class="lineNum">     646 </span><span class="lineCov">       8504 :     if (innerTuple-&gt;allTheSame &amp;&amp; out.nNodes != 0 &amp;&amp; out.nNodes != nNodes)</span>
+<span class="lineNum">     647 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;inconsistent inner_consistent results for allTheSame inner tuple&quot;);</span>
+<span class="lineNum">     648 </span>            : 
+<span class="lineNum">     649 </span><span class="lineCov">       8504 :     if (out.nNodes)</span>
+<span class="lineNum">     650 </span>            :     {
+<span class="lineNum">     651 </span>            :         /* collect node pointers */
+<span class="lineNum">     652 </span>            :         SpGistNodeTuple node;
+<span class="lineNum">     653 </span><span class="lineCov">       8504 :         SpGistNodeTuple *nodes = (SpGistNodeTuple *) palloc(</span>
+<span class="lineNum">     654 </span>            :                                                             sizeof(SpGistNodeTuple) * nNodes);
+<span class="lineNum">     655 </span>            : 
+<span class="lineNum">     656 </span><span class="lineCov">      77650 :         SGITITERATE(innerTuple, i, node)</span>
+<span class="lineNum">     657 </span>            :         {
+<span class="lineNum">     658 </span><span class="lineCov">      69146 :             nodes[i] = node;</span>
+<span class="lineNum">     659 </span>            :         }
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span><span class="lineCov">       8504 :         MemoryContextSwitchTo(so-&gt;traversalCxt);</span>
+<span class="lineNum">     662 </span>            : 
+<span class="lineNum">     663 </span><span class="lineCov">      64370 :         for (i = 0; i &lt; out.nNodes; i++)</span>
+<span class="lineNum">     664 </span>            :         {
+<span class="lineNum">     665 </span><span class="lineCov">      55866 :             int         nodeN = out.nodeNumbers[i];</span>
+<span class="lineNum">     666 </span>            :             SpGistSearchItem *innerItem;
+<span class="lineNum">     667 </span>            :             double     *distances;
+<span class="lineNum">     668 </span>            : 
+<span class="lineNum">     669 </span><span class="lineCov">      55866 :             Assert(nodeN &gt;= 0 &amp;&amp; nodeN &lt; nNodes);</span>
+<span class="lineNum">     670 </span>            : 
+<span class="lineNum">     671 </span><span class="lineCov">      55866 :             node = nodes[nodeN];</span>
+<span class="lineNum">     672 </span>            : 
+<span class="lineNum">     673 </span><span class="lineCov">      55866 :             if (!ItemPointerIsValid(&amp;node-&gt;t_tid))</span>
+<span class="lineNum">     674 </span><span class="lineCov">      22686 :                 continue;</span>
+<span class="lineNum">     675 </span>            : 
+<span class="lineNum">     676 </span>            :             /*
+<span class="lineNum">     677 </span>            :              * Use infinity distances if innerConsistentFn() failed to return
+<span class="lineNum">     678 </span>            :              * them or if is a NULL item (their distances are really unused).
+<span class="lineNum">     679 </span>            :              */
+<span class="lineNum">     680 </span><span class="lineCov">      33180 :             distances = out.distances ? out.distances[i] : so-&gt;infDistances;</span>
+<span class="lineNum">     681 </span>            : 
+<span class="lineNum">     682 </span><span class="lineCov">      33180 :             innerItem = spgMakeInnerItem(so, item, node, &amp;out, i, isnull,</span>
+<span class="lineNum">     683 </span>            :                                          distances);
+<span class="lineNum">     684 </span>            : 
+<span class="lineNum">     685 </span><span class="lineCov">      33180 :             spgAddSearchItemToQueue(so, innerItem);</span>
+<span class="lineNum">     686 </span>            :         }
+<span class="lineNum">     687 </span>            :     }
+<span class="lineNum">     688 </span>            : 
+<span class="lineNum">     689 </span><span class="lineCov">       8504 :     MemoryContextSwitchTo(oldCxt);</span>
+<span class="lineNum">     690 </span><span class="lineCov">       8504 : }</span>
+<span class="lineNum">     691 </span>            : 
+<a name="692"><span class="lineNum">     692 </span>            : /* Returns a next item in an (ordered) scan or null if the index is exhausted */</a>
+<span class="lineNum">     693 </span>            : static SpGistSearchItem *
+<span class="lineNum">     694 </span><span class="lineCov">     154820 : spgGetNextQueueItem(SpGistScanOpaque so)</span>
+<span class="lineNum">     695 </span>            : {
+<span class="lineNum">     696 </span><span class="lineCov">     154820 :     if (pairingheap_is_empty(so-&gt;scanQueue))</span>
+<span class="lineNum">     697 </span><span class="lineCov">        286 :         return NULL;            /* Done when both heaps are empty */</span>
+<span class="lineNum">     698 </span>            : 
+<span class="lineNum">     699 </span>            :     /* Return item; caller is responsible to pfree it */
+<span class="lineNum">     700 </span><span class="lineCov">     154534 :     return (SpGistSearchItem *) pairingheap_remove_first(so-&gt;scanQueue);</span>
+<span class="lineNum">     701 </span>            : }
+<span class="lineNum">     702 </span>            : 
+<span class="lineNum">     703 </span>            : enum SpGistSpecialOffsetNumbers
+<span class="lineNum">     704 </span>            : {
+<span class="lineNum">     705 </span>            :     SpGistBreakOffsetNumber = InvalidOffsetNumber,
+<span class="lineNum">     706 </span>            :     SpGistRedirectOffsetNumber = MaxOffsetNumber + 1,
+<span class="lineNum">     707 </span>            :     SpGistErrorOffsetNumber = MaxOffsetNumber + 2
+<span class="lineNum">     708 </span>            : };
+<a name="709"><span class="lineNum">     709 </span>            : </a>
+<span class="lineNum">     710 </span>            : static OffsetNumber
+<span class="lineNum">     711 </span><span class="lineCov">     878690 : spgTestLeafTuple(SpGistScanOpaque so,</span>
+<span class="lineNum">     712 </span>            :                  SpGistSearchItem *item,
+<span class="lineNum">     713 </span>            :                  Page page, OffsetNumber offset,
+<span class="lineNum">     714 </span>            :                  bool isnull, bool isroot,
+<span class="lineNum">     715 </span>            :                  bool *reportedSome,
+<span class="lineNum">     716 </span>            :                  storeRes_func storeRes)
+<span class="lineNum">     717 </span>            : {
+<span class="lineNum">     718 </span><span class="lineCov">     878690 :     SpGistLeafTuple leafTuple = (SpGistLeafTuple)</span>
+<span class="lineNum">     719 </span><span class="lineCov">     878690 :     PageGetItem(page, PageGetItemId(page, offset));</span>
+<span class="lineNum">     720 </span>            : 
+<span class="lineNum">     721 </span><span class="lineCov">     878690 :     if (leafTuple-&gt;tupstate != SPGIST_LIVE)</span>
+<span class="lineNum">     722 </span>            :     {
+<span class="lineNum">     723 </span><span class="lineNoCov">          0 :         if (!isroot)            /* all tuples on root should be live */</span>
+<span class="lineNum">     724 </span>            :         {
+<span class="lineNum">     725 </span><span class="lineNoCov">          0 :             if (leafTuple-&gt;tupstate == SPGIST_REDIRECT)</span>
+<span class="lineNum">     726 </span>            :             {
+<span class="lineNum">     727 </span>            :                 /* redirection tuple should be first in chain */
+<span class="lineNum">     728 </span><span class="lineNoCov">          0 :                 Assert(offset == ItemPointerGetOffsetNumber(&amp;item-&gt;heapPtr));</span>
+<span class="lineNum">     729 </span>            :                 /* transfer attention to redirect point */
+<span class="lineNum">     730 </span><span class="lineNoCov">          0 :                 item-&gt;heapPtr = ((SpGistDeadTuple) leafTuple)-&gt;pointer;</span>
+<span class="lineNum">     731 </span><span class="lineNoCov">          0 :                 Assert(ItemPointerGetBlockNumber(&amp;item-&gt;heapPtr) != SPGIST_METAPAGE_BLKNO);</span>
+<span class="lineNum">     732 </span><span class="lineNoCov">          0 :                 return SpGistRedirectOffsetNumber;</span>
+<span class="lineNum">     733 </span>            :             }
+<span class="lineNum">     734 </span>            : 
+<span class="lineNum">     735 </span><span class="lineNoCov">          0 :             if (leafTuple-&gt;tupstate == SPGIST_DEAD)</span>
+<span class="lineNum">     736 </span>            :             {
+<span class="lineNum">     737 </span>            :                 /* dead tuple should be first in chain */
+<span class="lineNum">     738 </span><span class="lineNoCov">          0 :                 Assert(offset == ItemPointerGetOffsetNumber(&amp;item-&gt;heapPtr));</span>
+<span class="lineNum">     739 </span>            :                 /* No live entries on this page */
+<span class="lineNum">     740 </span><span class="lineNoCov">          0 :                 Assert(leafTuple-&gt;nextOffset == InvalidOffsetNumber);</span>
+<span class="lineNum">     741 </span><span class="lineNoCov">          0 :                 return SpGistBreakOffsetNumber;</span>
+<span class="lineNum">     742 </span>            :             }
+<span class="lineNum">     743 </span>            :         }
+<span class="lineNum">     744 </span>            : 
+<span class="lineNum">     745 </span>            :         /* We should not arrive at a placeholder */
+<span class="lineNum">     746 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;unexpected SPGiST tuple state: %d&quot;, leafTuple-&gt;tupstate);</span>
+<span class="lineNum">     747 </span>            :         return SpGistErrorOffsetNumber;
+<span class="lineNum">     748 </span>            :     }
+<span class="lineNum">     749 </span>            : 
+<span class="lineNum">     750 </span><span class="lineCov">     878690 :     Assert(ItemPointerIsValid(&amp;leafTuple-&gt;heapPtr));</span>
+<span class="lineNum">     751 </span>            : 
+<span class="lineNum">     752 </span><span class="lineCov">     878690 :     spgLeafTest(so, item, leafTuple, isnull, reportedSome, storeRes);</span>
+<span class="lineNum">     753 </span>            : 
+<span class="lineNum">     754 </span><span class="lineCov">     878690 :     return leafTuple-&gt;nextOffset;</span>
+<span class="lineNum">     755 </span>            : }
+<span class="lineNum">     756 </span>            : 
+<span class="lineNum">     757 </span>            : /*
+<span class="lineNum">     758 </span>            :  * Walk the tree and report all tuples passing the scan quals to the storeRes
+<span class="lineNum">     759 </span>            :  * subroutine.
+<span class="lineNum">     760 </span>            :  *
+<span class="lineNum">     761 </span>            :  * If scanWholeIndex is true, we'll do just that.  If not, we'll stop at the
+<span class="lineNum">     762 </span>            :  * next page boundary once we have reported at least one tuple.
+<a name="763"><span class="lineNum">     763 </span>            :  */</a>
+<span class="lineNum">     764 </span>            : static void
+<span class="lineNum">     765 </span><span class="lineCov">     125920 : spgWalk(Relation index, SpGistScanOpaque so, bool scanWholeIndex,</span>
+<span class="lineNum">     766 </span>            :         storeRes_func storeRes, Snapshot snapshot)
+<span class="lineNum">     767 </span>            : {
+<span class="lineNum">     768 </span><span class="lineCov">     125920 :     Buffer      buffer = InvalidBuffer;</span>
+<span class="lineNum">     769 </span><span class="lineCov">     125920 :     bool        reportedSome = false;</span>
+<span class="lineNum">     770 </span>            : 
+<span class="lineNum">     771 </span><span class="lineCov">     406374 :     while (scanWholeIndex || !reportedSome)</span>
+<span class="lineNum">     772 </span>            :     {
+<span class="lineNum">     773 </span><span class="lineCov">     154820 :         SpGistSearchItem *item = spgGetNextQueueItem(so);</span>
+<span class="lineNum">     774 </span>            : 
+<span class="lineNum">     775 </span><span class="lineCov">     154820 :         if (item == NULL)</span>
+<span class="lineNum">     776 </span><span class="lineCov">        286 :             break;              /* No more items in queue -&gt; done */</span>
+<span class="lineNum">     777 </span>            : 
+<span class="lineNum">     778 </span>            : redirect:
+<span class="lineNum">     779 </span>            :         /* Check for interrupts, just in case of infinite loop */
+<span class="lineNum">     780 </span><span class="lineCov">     154534 :         CHECK_FOR_INTERRUPTS();</span>
+<span class="lineNum">     781 </span>            : 
+<span class="lineNum">     782 </span><span class="lineCov">     154534 :         if (item-&gt;isLeaf)</span>
+<span class="lineNum">     783 </span>            :         {
+<span class="lineNum">     784 </span>            :             /* We store heap items in the queue only in case of ordered search */
+<span class="lineNum">     785 </span><span class="lineCov">     121098 :             Assert(so-&gt;numberOfNonNullOrderBys &gt; 0);</span>
+<span class="lineNum">     786 </span><span class="lineCov">     242196 :             storeRes(so, &amp;item-&gt;heapPtr, item-&gt;value, item-&gt;isNull,</span>
+<span class="lineNum">     787 </span><span class="lineCov">     242196 :                      item-&gt;recheck, item-&gt;recheckDistances, item-&gt;distances);</span>
+<span class="lineNum">     788 </span><span class="lineCov">     121098 :             reportedSome = true;</span>
+<span class="lineNum">     789 </span>            :         }
+<span class="lineNum">     790 </span>            :         else
+<span class="lineNum">     791 </span>            :         {
+<span class="lineNum">     792 </span><span class="lineCov">      33436 :             BlockNumber blkno = ItemPointerGetBlockNumber(&amp;item-&gt;heapPtr);</span>
+<span class="lineNum">     793 </span><span class="lineCov">      33436 :             OffsetNumber offset = ItemPointerGetOffsetNumber(&amp;item-&gt;heapPtr);</span>
+<span class="lineNum">     794 </span>            :             Page        page;
+<span class="lineNum">     795 </span>            :             bool        isnull;
+<span class="lineNum">     796 </span>            : 
+<span class="lineNum">     797 </span><span class="lineCov">      33436 :             if (buffer == InvalidBuffer)</span>
+<span class="lineNum">     798 </span>            :             {
+<span class="lineNum">     799 </span><span class="lineCov">       6780 :                 buffer = ReadBuffer(index, blkno);</span>
+<span class="lineNum">     800 </span><span class="lineCov">       6780 :                 LockBuffer(buffer, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">     801 </span>            :             }
+<span class="lineNum">     802 </span><span class="lineCov">      26656 :             else if (blkno != BufferGetBlockNumber(buffer))</span>
+<span class="lineNum">     803 </span>            :             {
+<span class="lineNum">     804 </span><span class="lineCov">      18592 :                 UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">     805 </span><span class="lineCov">      18592 :                 buffer = ReadBuffer(index, blkno);</span>
+<span class="lineNum">     806 </span><span class="lineCov">      18592 :                 LockBuffer(buffer, BUFFER_LOCK_SHARE);</span>
+<span class="lineNum">     807 </span>            :             }
+<span class="lineNum">     808 </span>            : 
+<span class="lineNum">     809 </span>            :             /* else new pointer points to the same page, no work needed */
+<span class="lineNum">     810 </span>            : 
+<span class="lineNum">     811 </span><span class="lineCov">      33436 :             page = BufferGetPage(buffer);</span>
+<span class="lineNum">     812 </span><span class="lineCov">      33436 :             TestForOldSnapshot(snapshot, index, page);</span>
+<span class="lineNum">     813 </span>            : 
+<span class="lineNum">     814 </span><span class="lineCov">      33436 :             isnull = SpGistPageStoresNulls(page) ? true : false;</span>
+<span class="lineNum">     815 </span>            : 
+<span class="lineNum">     816 </span><span class="lineCov">      33436 :             if (SpGistPageIsLeaf(page))</span>
+<span class="lineNum">     817 </span>            :             {
+<span class="lineNum">     818 </span>            :                 /* Page is a leaf - that is, all it's tuples are heap items */
+<span class="lineNum">     819 </span><span class="lineCov">      24932 :                 OffsetNumber max = PageGetMaxOffsetNumber(page);</span>
+<span class="lineNum">     820 </span>            : 
+<span class="lineNum">     821 </span><span class="lineCov">      24994 :                 if (SpGistBlockIsRoot(blkno))</span>
+<span class="lineNum">     822 </span>            :                 {
+<span class="lineNum">     823 </span>            :                     /* When root is a leaf, examine all its tuples */
+<span class="lineNum">     824 </span><span class="lineCov">       1830 :                     for (offset = FirstOffsetNumber; offset &lt;= max; offset++)</span>
+<span class="lineNum">     825 </span><span class="lineCov">       1768 :                         (void) spgTestLeafTuple(so, item, page, offset,</span>
+<span class="lineNum">     826 </span>            :                                                 isnull, true,
+<span class="lineNum">     827 </span>            :                                                 &amp;reportedSome, storeRes);
+<span class="lineNum">     828 </span>            :                 }
+<span class="lineNum">     829 </span>            :                 else
+<span class="lineNum">     830 </span>            :                 {
+<span class="lineNum">     831 </span>            :                     /* Normal case: just examine the chain we arrived at */
+<span class="lineNum">     832 </span><span class="lineCov">     926662 :                     while (offset != InvalidOffsetNumber)</span>
+<span class="lineNum">     833 </span>            :                     {
+<span class="lineNum">     834 </span><span class="lineCov">     876922 :                         Assert(offset &gt;= FirstOffsetNumber &amp;&amp; offset &lt;= max);</span>
+<span class="lineNum">     835 </span><span class="lineCov">     876922 :                         offset = spgTestLeafTuple(so, item, page, offset,</span>
+<span class="lineNum">     836 </span>            :                                                   isnull, false,
+<span class="lineNum">     837 </span>            :                                                   &amp;reportedSome, storeRes);
+<span class="lineNum">     838 </span><span class="lineCov">     876922 :                         if (offset == SpGistRedirectOffsetNumber)</span>
+<span class="lineNum">     839 </span><span class="lineNoCov">          0 :                             goto redirect;</span>
+<span class="lineNum">     840 </span>            :                     }
+<span class="lineNum">     841 </span>            :                 }
+<span class="lineNum">     842 </span>            :             }
+<span class="lineNum">     843 </span>            :             else                /* page is inner */
+<span class="lineNum">     844 </span>            :             {
+<span class="lineNum">     845 </span><span class="lineCov">       8504 :                 SpGistInnerTuple innerTuple = (SpGistInnerTuple)</span>
+<span class="lineNum">     846 </span><span class="lineCov">       8504 :                 PageGetItem(page, PageGetItemId(page, offset));</span>
+<span class="lineNum">     847 </span>            : 
+<span class="lineNum">     848 </span><span class="lineCov">       8504 :                 if (innerTuple-&gt;tupstate != SPGIST_LIVE)</span>
+<span class="lineNum">     849 </span>            :                 {
+<span class="lineNum">     850 </span><span class="lineNoCov">          0 :                     if (innerTuple-&gt;tupstate == SPGIST_REDIRECT)</span>
+<span class="lineNum">     851 </span>            :                     {
+<span class="lineNum">     852 </span>            :                         /* transfer attention to redirect point */
+<span class="lineNum">     853 </span><span class="lineNoCov">          0 :                         item-&gt;heapPtr = ((SpGistDeadTuple) innerTuple)-&gt;pointer;</span>
+<span class="lineNum">     854 </span><span class="lineNoCov">          0 :                         Assert(ItemPointerGetBlockNumber(&amp;item-&gt;heapPtr) !=</span>
+<span class="lineNum">     855 </span>            :                                SPGIST_METAPAGE_BLKNO);
+<span class="lineNum">     856 </span><span class="lineNoCov">          0 :                         goto redirect;</span>
+<span class="lineNum">     857 </span>            :                     }
+<span class="lineNum">     858 </span><span class="lineNoCov">          0 :                     elog(ERROR, &quot;unexpected SPGiST tuple state: %d&quot;,</span>
+<span class="lineNum">     859 </span>            :                          innerTuple-&gt;tupstate);
+<span class="lineNum">     860 </span>            :                 }
+<span class="lineNum">     861 </span>            : 
+<span class="lineNum">     862 </span><span class="lineCov">       8504 :                 spgInnerTest(so, item, innerTuple, isnull);</span>
+<span class="lineNum">     863 </span>            :             }
+<span class="lineNum">     864 </span>            :         }
+<span class="lineNum">     865 </span>            : 
+<span class="lineNum">     866 </span>            :         /* done with this scan item */
+<span class="lineNum">     867 </span><span class="lineCov">     154534 :         spgFreeSearchItem(so, item);</span>
+<span class="lineNum">     868 </span>            :         /* clear temp context before proceeding to the next one */
+<span class="lineNum">     869 </span><span class="lineCov">     154534 :         MemoryContextReset(so-&gt;tempCxt);</span>
+<span class="lineNum">     870 </span>            :     }
+<span class="lineNum">     871 </span>            : 
+<span class="lineNum">     872 </span><span class="lineCov">     125920 :     if (buffer != InvalidBuffer)</span>
+<span class="lineNum">     873 </span><span class="lineCov">       6780 :         UnlockReleaseBuffer(buffer);</span>
+<span class="lineNum">     874 </span><span class="lineCov">     125920 : }</span>
+<span class="lineNum">     875 </span>            : 
+<span class="lineNum">     876 </span>            : 
+<a name="877"><span class="lineNum">     877 </span>            : /* storeRes subroutine for getbitmap case */</a>
+<span class="lineNum">     878 </span>            : static void
+<span class="lineNum">     879 </span><span class="lineCov">     350732 : storeBitmap(SpGistScanOpaque so, ItemPointer heapPtr,</span>
+<span class="lineNum">     880 </span>            :             Datum leafValue, bool isnull, bool recheck, bool recheckDistances,
+<span class="lineNum">     881 </span>            :             double *distances)
+<span class="lineNum">     882 </span>            : {
+<span class="lineNum">     883 </span><span class="lineCov">     350732 :     Assert(!recheckDistances &amp;&amp; !distances);</span>
+<span class="lineNum">     884 </span><span class="lineCov">     350732 :     tbm_add_tuples(so-&gt;tbm, heapPtr, 1, recheck);</span>
+<span class="lineNum">     885 </span><span class="lineCov">     350732 :     so-&gt;ntids++;</span>
+<span class="lineNum">     886 </span><span class="lineCov">     350732 : }</span>
+<a name="887"><span class="lineNum">     887 </span>            : </a>
+<span class="lineNum">     888 </span>            : int64
+<span class="lineNum">     889 </span><span class="lineCov">        112 : spggetbitmap(IndexScanDesc scan, TIDBitmap *tbm)</span>
+<span class="lineNum">     890 </span>            : {
+<span class="lineNum">     891 </span><span class="lineCov">        112 :     SpGistScanOpaque so = (SpGistScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     892 </span>            : 
+<span class="lineNum">     893 </span>            :     /* Copy want_itup to *so so we don't need to pass it around separately */
+<span class="lineNum">     894 </span><span class="lineCov">        112 :     so-&gt;want_itup = false;</span>
+<span class="lineNum">     895 </span>            : 
+<span class="lineNum">     896 </span><span class="lineCov">        112 :     so-&gt;tbm = tbm;</span>
+<span class="lineNum">     897 </span><span class="lineCov">        112 :     so-&gt;ntids = 0;</span>
+<span class="lineNum">     898 </span>            : 
+<span class="lineNum">     899 </span><span class="lineCov">        112 :     spgWalk(scan-&gt;indexRelation, so, true, storeBitmap, scan-&gt;xs_snapshot);</span>
+<span class="lineNum">     900 </span>            : 
+<span class="lineNum">     901 </span><span class="lineCov">        112 :     return so-&gt;ntids;</span>
+<span class="lineNum">     902 </span>            : }
+<span class="lineNum">     903 </span>            : 
+<a name="904"><span class="lineNum">     904 </span>            : /* storeRes subroutine for gettuple case */</a>
+<span class="lineNum">     905 </span>            : static void
+<span class="lineNum">     906 </span><span class="lineCov">     335428 : storeGettuple(SpGistScanOpaque so, ItemPointer heapPtr,</span>
+<span class="lineNum">     907 </span>            :               Datum leafValue, bool isnull, bool recheck, bool recheckDistances,
+<span class="lineNum">     908 </span>            :               double *nonNullDistances)
+<span class="lineNum">     909 </span>            : {
+<span class="lineNum">     910 </span><span class="lineCov">     335428 :     Assert(so-&gt;nPtrs &lt; MaxIndexTuplesPerPage);</span>
+<span class="lineNum">     911 </span><span class="lineCov">     335428 :     so-&gt;heapPtrs[so-&gt;nPtrs] = *heapPtr;</span>
+<span class="lineNum">     912 </span><span class="lineCov">     335428 :     so-&gt;recheck[so-&gt;nPtrs] = recheck;</span>
+<span class="lineNum">     913 </span><span class="lineCov">     335428 :     so-&gt;recheckDistances[so-&gt;nPtrs] = recheckDistances;</span>
+<span class="lineNum">     914 </span>            : 
+<span class="lineNum">     915 </span><span class="lineCov">     335428 :     if (so-&gt;numberOfOrderBys &gt; 0)</span>
+<span class="lineNum">     916 </span>            :     {
+<span class="lineNum">     917 </span><span class="lineCov">     121098 :         if (isnull || so-&gt;numberOfNonNullOrderBys &lt;= 0)</span>
+<span class="lineNum">     918 </span><span class="lineCov">         16 :             so-&gt;distances[so-&gt;nPtrs] = NULL;</span>
+<span class="lineNum">     919 </span>            :         else
+<span class="lineNum">     920 </span>            :         {
+<span class="lineNum">     921 </span><span class="lineCov">     121082 :             IndexOrderByDistance *distances =</span>
+<span class="lineNum">     922 </span><span class="lineCov">     121082 :             palloc(sizeof(distances[0]) * so-&gt;numberOfOrderBys);</span>
+<span class="lineNum">     923 </span>            :             int         i;
+<span class="lineNum">     924 </span>            : 
+<span class="lineNum">     925 </span><span class="lineCov">     242170 :             for (i = 0; i &lt; so-&gt;numberOfOrderBys; i++)</span>
+<span class="lineNum">     926 </span>            :             {
+<span class="lineNum">     927 </span><span class="lineCov">     121088 :                 int         offset = so-&gt;nonNullOrderByOffsets[i];</span>
+<span class="lineNum">     928 </span>            : 
+<span class="lineNum">     929 </span><span class="lineCov">     121088 :                 if (offset &gt;= 0)</span>
+<span class="lineNum">     930 </span>            :                 {
+<span class="lineNum">     931 </span>            :                     /* Copy non-NULL distance value */
+<span class="lineNum">     932 </span><span class="lineCov">     121086 :                     distances[i].value = nonNullDistances[offset];</span>
+<span class="lineNum">     933 </span><span class="lineCov">     121086 :                     distances[i].isnull = false;</span>
+<span class="lineNum">     934 </span>            :                 }
+<span class="lineNum">     935 </span>            :                 else
+<span class="lineNum">     936 </span>            :                 {
+<span class="lineNum">     937 </span>            :                     /* Set distance's NULL flag. */
+<span class="lineNum">     938 </span><span class="lineCov">          2 :                     distances[i].value = 0.0;</span>
+<span class="lineNum">     939 </span><span class="lineCov">          2 :                     distances[i].isnull = true;</span>
+<span class="lineNum">     940 </span>            :                 }
+<span class="lineNum">     941 </span>            :             }
+<span class="lineNum">     942 </span>            : 
+<span class="lineNum">     943 </span><span class="lineCov">     121082 :             so-&gt;distances[so-&gt;nPtrs] = distances;</span>
+<span class="lineNum">     944 </span>            :         }
+<span class="lineNum">     945 </span>            :     }
+<span class="lineNum">     946 </span>            : 
+<span class="lineNum">     947 </span><span class="lineCov">     335428 :     if (so-&gt;want_itup)</span>
+<span class="lineNum">     948 </span>            :     {
+<span class="lineNum">     949 </span>            :         /*
+<span class="lineNum">     950 </span>            :          * Reconstruct index data.  We have to copy the datum out of the temp
+<span class="lineNum">     951 </span>            :          * context anyway, so we may as well create the tuple here.
+<span class="lineNum">     952 </span>            :          */
+<span class="lineNum">     953 </span><span class="lineCov">     306438 :         so-&gt;reconTups[so-&gt;nPtrs] = heap_form_tuple(so-&gt;indexTupDesc,</span>
+<span class="lineNum">     954 </span>            :                                                    &amp;leafValue,
+<span class="lineNum">     955 </span>            :                                                    &amp;isnull);
+<span class="lineNum">     956 </span>            :     }
+<span class="lineNum">     957 </span><span class="lineCov">     335428 :     so-&gt;nPtrs++;</span>
+<span class="lineNum">     958 </span><span class="lineCov">     335428 : }</span>
+<a name="959"><span class="lineNum">     959 </span>            : </a>
+<span class="lineNum">     960 </span>            : bool
+<span class="lineNum">     961 </span><span class="lineCov">     335570 : spggettuple(IndexScanDesc scan, ScanDirection dir)</span>
+<span class="lineNum">     962 </span>            : {
+<span class="lineNum">     963 </span><span class="lineCov">     335570 :     SpGistScanOpaque so = (SpGistScanOpaque) scan-&gt;opaque;</span>
+<span class="lineNum">     964 </span>            : 
+<span class="lineNum">     965 </span><span class="lineCov">     335570 :     if (dir != ForwardScanDirection)</span>
+<span class="lineNum">     966 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;SP-GiST only supports forward scan direction&quot;);</span>
+<span class="lineNum">     967 </span>            : 
+<span class="lineNum">     968 </span>            :     /* Copy want_itup to *so so we don't need to pass it around separately */
+<span class="lineNum">     969 </span><span class="lineCov">     335570 :     so-&gt;want_itup = scan-&gt;xs_want_itup;</span>
+<span class="lineNum">     970 </span>            : 
+<span class="lineNum">     971 </span>            :     for (;;)
+<span class="lineNum">     972 </span>            :     {
+<span class="lineNum">     973 </span><span class="lineCov">     461204 :         if (so-&gt;iPtr &lt; so-&gt;nPtrs)</span>
+<span class="lineNum">     974 </span>            :         {
+<span class="lineNum">     975 </span>            :             /* continuing to return reported tuples */
+<span class="lineNum">     976 </span><span class="lineCov">     335396 :             scan-&gt;xs_heaptid = so-&gt;heapPtrs[so-&gt;iPtr];</span>
+<span class="lineNum">     977 </span><span class="lineCov">     335396 :             scan-&gt;xs_recheck = so-&gt;recheck[so-&gt;iPtr];</span>
+<span class="lineNum">     978 </span><span class="lineCov">     335396 :             scan-&gt;xs_hitup = so-&gt;reconTups[so-&gt;iPtr];</span>
+<span class="lineNum">     979 </span>            : 
+<span class="lineNum">     980 </span><span class="lineCov">     335396 :             if (so-&gt;numberOfOrderBys &gt; 0)</span>
+<span class="lineNum">     981 </span><span class="lineCov">     242196 :                 index_store_float8_orderby_distances(scan, so-&gt;orderByTypes,</span>
+<span class="lineNum">     982 </span><span class="lineCov">     121098 :                                                      so-&gt;distances[so-&gt;iPtr],</span>
+<span class="lineNum">     983 </span><span class="lineCov">     121098 :                                                      so-&gt;recheckDistances[so-&gt;iPtr]);</span>
+<span class="lineNum">     984 </span><span class="lineCov">     335396 :             so-&gt;iPtr++;</span>
+<span class="lineNum">     985 </span><span class="lineCov">     335396 :             return true;</span>
+<span class="lineNum">     986 </span>            :         }
+<span class="lineNum">     987 </span>            : 
+<span class="lineNum">     988 </span><span class="lineCov">     125808 :         if (so-&gt;numberOfOrderBys &gt; 0)</span>
+<span class="lineNum">     989 </span>            :         {
+<span class="lineNum">     990 </span>            :             /* Must pfree distances to avoid memory leak */
+<span class="lineNum">     991 </span>            :             int         i;
+<span class="lineNum">     992 </span>            : 
+<span class="lineNum">     993 </span><span class="lineCov">     242208 :             for (i = 0; i &lt; so-&gt;nPtrs; i++)</span>
+<span class="lineNum">     994 </span><span class="lineCov">     121092 :                 if (so-&gt;distances[i])</span>
+<span class="lineNum">     995 </span><span class="lineCov">     121076 :                     pfree(so-&gt;distances[i]);</span>
+<span class="lineNum">     996 </span>            :         }
+<span class="lineNum">     997 </span>            : 
+<span class="lineNum">     998 </span><span class="lineCov">     125808 :         if (so-&gt;want_itup)</span>
+<span class="lineNum">     999 </span>            :         {
+<span class="lineNum">    1000 </span>            :             /* Must pfree reconstructed tuples to avoid memory leak */
+<span class="lineNum">    1001 </span>            :             int         i;
+<span class="lineNum">    1002 </span>            : 
+<span class="lineNum">    1003 </span><span class="lineCov">     403302 :             for (i = 0; i &lt; so-&gt;nPtrs; i++)</span>
+<span class="lineNum">    1004 </span><span class="lineCov">     306394 :                 pfree(so-&gt;reconTups[i]);</span>
+<span class="lineNum">    1005 </span>            :         }
+<span class="lineNum">    1006 </span><span class="lineCov">     125808 :         so-&gt;iPtr = so-&gt;nPtrs = 0;</span>
+<span class="lineNum">    1007 </span>            : 
+<span class="lineNum">    1008 </span><span class="lineCov">     125808 :         spgWalk(scan-&gt;indexRelation, so, false, storeGettuple,</span>
+<span class="lineNum">    1009 </span>            :                 scan-&gt;xs_snapshot);
+<span class="lineNum">    1010 </span>            : 
+<span class="lineNum">    1011 </span><span class="lineCov">     125808 :         if (so-&gt;nPtrs == 0)</span>
+<span class="lineNum">    1012 </span><span class="lineCov">        174 :             break;              /* must have completed scan */</span>
+<span class="lineNum">    1013 </span><span class="lineCov">     125634 :     }</span>
+<span class="lineNum">    1014 </span>            : 
+<span class="lineNum">    1015 </span><span class="lineCov">        174 :     return false;</span>
+<span class="lineNum">    1016 </span>            : }
+<a name="1017"><span class="lineNum">    1017 </span>            : </a>
+<span class="lineNum">    1018 </span>            : bool
+<span class="lineNum">    1019 </span><span class="lineCov">        578 : spgcanreturn(Relation index, int attno)</span>
+<span class="lineNum">    1020 </span>            : {
+<span class="lineNum">    1021 </span>            :     SpGistCache *cache;
+<span class="lineNum">    1022 </span>            : 
+<span class="lineNum">    1023 </span>            :     /* We can do it if the opclass config function says so */
+<span class="lineNum">    1024 </span><span class="lineCov">        578 :     cache = spgGetCache(index);</span>
+<span class="lineNum">    1025 </span>            : 
+<span class="lineNum">    1026 </span><span class="lineCov">        578 :     return cache-&gt;config.canReturnData;</span>
+<span class="lineNum">    1027 </span>            : }
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

@@ -1,0 +1,923 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/common/exec.c</title>
+  <link rel="stylesheet" type="text/css" href="../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../index.html">top level</a> - <a href="index.html">src/common</a> - exec.c<span style="font-size: 80%;"> (source / <a href="exec.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">78</td>
+            <td class="headerCovTableEntry">129</td>
+            <td class="headerCovTableEntryLo">60.5 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntry">7</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * exec.c
+<span class="lineNum">       4 </span>            :  *      Functions for finding and validating executable files
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * IDENTIFICATION
+<span class="lineNum">      12 </span>            :  *    src/common/exec.c
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      15 </span>            :  */
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #ifndef FRONTEND
+<span class="lineNum">      18 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      19 </span>            : #else
+<span class="lineNum">      20 </span>            : #include &quot;postgres_fe.h&quot;
+<span class="lineNum">      21 </span>            : #endif
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : #include &lt;signal.h&gt;
+<span class="lineNum">      24 </span>            : #include &lt;sys/stat.h&gt;
+<span class="lineNum">      25 </span>            : #include &lt;sys/wait.h&gt;
+<span class="lineNum">      26 </span>            : #include &lt;unistd.h&gt;
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : /*
+<span class="lineNum">      29 </span>            :  * Hacky solution to allow expressing both frontend and backend error reports
+<span class="lineNum">      30 </span>            :  * in one macro call.  First argument of log_error is an errcode() call of
+<span class="lineNum">      31 </span>            :  * some sort (ignored if FRONTEND); the rest are errmsg_internal() arguments,
+<span class="lineNum">      32 </span>            :  * i.e. message string and any parameters for it.
+<span class="lineNum">      33 </span>            :  *
+<span class="lineNum">      34 </span>            :  * Caller must provide the gettext wrapper around the message string, if
+<span class="lineNum">      35 </span>            :  * appropriate, so that it gets translated in the FRONTEND case; this
+<span class="lineNum">      36 </span>            :  * motivates using errmsg_internal() not errmsg().  We handle appending a
+<span class="lineNum">      37 </span>            :  * newline, if needed, inside the macro, so that there's only one translatable
+<span class="lineNum">      38 </span>            :  * string per call not two.
+<span class="lineNum">      39 </span>            :  */
+<span class="lineNum">      40 </span>            : #ifndef FRONTEND
+<span class="lineNum">      41 </span>            : #define log_error(errcodefn, ...) \
+<span class="lineNum">      42 </span>            :     ereport(LOG, (errcodefn, errmsg_internal(__VA_ARGS__)))
+<span class="lineNum">      43 </span>            : #else
+<span class="lineNum">      44 </span>            : #define log_error(errcodefn, ...) \
+<span class="lineNum">      45 </span>            :     (fprintf(stderr, __VA_ARGS__), fputc('\n', stderr))
+<span class="lineNum">      46 </span>            : #endif
+<span class="lineNum">      47 </span>            : 
+<span class="lineNum">      48 </span>            : #ifdef _MSC_VER
+<span class="lineNum">      49 </span>            : #define getcwd(cwd,len)  GetCurrentDirectory(len, cwd)
+<span class="lineNum">      50 </span>            : #endif
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            : static int  validate_exec(const char *path);
+<span class="lineNum">      53 </span>            : static int  resolve_symlinks(char *path);
+<span class="lineNum">      54 </span>            : static char *pipe_read_line(char *cmd, char *line, int maxsize);
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : #ifdef WIN32
+<span class="lineNum">      57 </span>            : static BOOL GetTokenUser(HANDLE hToken, PTOKEN_USER *ppTokenUser);
+<span class="lineNum">      58 </span>            : #endif
+<span class="lineNum">      59 </span>            : 
+<span class="lineNum">      60 </span>            : /*
+<span class="lineNum">      61 </span>            :  * validate_exec -- validate &quot;path&quot; as an executable file
+<span class="lineNum">      62 </span>            :  *
+<span class="lineNum">      63 </span>            :  * returns 0 if the file is found and no error is encountered.
+<span class="lineNum">      64 </span>            :  *        -1 if the regular file &quot;path&quot; does not exist or cannot be executed.
+<span class="lineNum">      65 </span>            :  *        -2 if the file is otherwise valid but cannot be read.
+<a name="66"><span class="lineNum">      66 </span>            :  */</a>
+<span class="lineNum">      67 </span>            : static int
+<span class="lineNum">      68 </span><span class="lineCov">       2870 : validate_exec(const char *path)</span>
+<span class="lineNum">      69 </span>            : {
+<span class="lineNum">      70 </span>            :     struct stat buf;
+<span class="lineNum">      71 </span>            :     int         is_r;
+<span class="lineNum">      72 </span>            :     int         is_x;
+<span class="lineNum">      73 </span>            : 
+<span class="lineNum">      74 </span>            : #ifdef WIN32
+<span class="lineNum">      75 </span>            :     char        path_exe[MAXPGPATH + sizeof(&quot;.exe&quot;) - 1];
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span>            :     /* Win32 requires a .exe suffix for stat() */
+<span class="lineNum">      78 </span>            :     if (strlen(path) &gt;= strlen(&quot;.exe&quot;) &amp;&amp;
+<span class="lineNum">      79 </span>            :         pg_strcasecmp(path + strlen(path) - strlen(&quot;.exe&quot;), &quot;.exe&quot;) != 0)
+<span class="lineNum">      80 </span>            :     {
+<span class="lineNum">      81 </span>            :         strlcpy(path_exe, path, sizeof(path_exe) - 4);
+<span class="lineNum">      82 </span>            :         strcat(path_exe, &quot;.exe&quot;);
+<span class="lineNum">      83 </span>            :         path = path_exe;
+<span class="lineNum">      84 </span>            :     }
+<span class="lineNum">      85 </span>            : #endif
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            :     /*
+<span class="lineNum">      88 </span>            :      * Ensure that the file exists and is a regular file.
+<span class="lineNum">      89 </span>            :      *
+<span class="lineNum">      90 </span>            :      * XXX if you have a broken system where stat() looks at the symlink
+<span class="lineNum">      91 </span>            :      * instead of the underlying file, you lose.
+<span class="lineNum">      92 </span>            :      */
+<span class="lineNum">      93 </span><span class="lineCov">       2870 :     if (stat(path, &amp;buf) &lt; 0)</span>
+<span class="lineNum">      94 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">      95 </span>            : 
+<span class="lineNum">      96 </span><span class="lineCov">       2870 :     if (!S_ISREG(buf.st_mode))</span>
+<span class="lineNum">      97 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">      98 </span>            : 
+<span class="lineNum">      99 </span>            :     /*
+<span class="lineNum">     100 </span>            :      * Ensure that the file is both executable and readable (required for
+<span class="lineNum">     101 </span>            :      * dynamic loading).
+<span class="lineNum">     102 </span>            :      */
+<span class="lineNum">     103 </span>            : #ifndef WIN32
+<span class="lineNum">     104 </span><span class="lineCov">       2870 :     is_r = (access(path, R_OK) == 0);</span>
+<span class="lineNum">     105 </span><span class="lineCov">       2870 :     is_x = (access(path, X_OK) == 0);</span>
+<span class="lineNum">     106 </span>            : #else
+<span class="lineNum">     107 </span>            :     is_r = buf.st_mode &amp; S_IRUSR;
+<span class="lineNum">     108 </span>            :     is_x = buf.st_mode &amp; S_IXUSR;
+<span class="lineNum">     109 </span>            : #endif
+<span class="lineNum">     110 </span><span class="lineCov">       2870 :     return is_x ? (is_r ? 0 : -2) : -1;</span>
+<span class="lineNum">     111 </span>            : }
+<span class="lineNum">     112 </span>            : 
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span>            : /*
+<span class="lineNum">     115 </span>            :  * find_my_exec -- find an absolute path to a valid executable
+<span class="lineNum">     116 </span>            :  *
+<span class="lineNum">     117 </span>            :  *  argv0 is the name passed on the command line
+<span class="lineNum">     118 </span>            :  *  retpath is the output area (must be of size MAXPGPATH)
+<span class="lineNum">     119 </span>            :  *  Returns 0 if OK, -1 if error.
+<span class="lineNum">     120 </span>            :  *
+<span class="lineNum">     121 </span>            :  * The reason we have to work so hard to find an absolute path is that
+<span class="lineNum">     122 </span>            :  * on some platforms we can't do dynamic loading unless we know the
+<span class="lineNum">     123 </span>            :  * executable's location.  Also, we need a full path not a relative
+<span class="lineNum">     124 </span>            :  * path because we will later change working directory.  Finally, we want
+<span class="lineNum">     125 </span>            :  * a true path not a symlink location, so that we can locate other files
+<span class="lineNum">     126 </span>            :  * that are part of our installation relative to the executable.
+<a name="127"><span class="lineNum">     127 </span>            :  */</a>
+<span class="lineNum">     128 </span>            : int
+<span class="lineNum">     129 </span><span class="lineCov">       2868 : find_my_exec(const char *argv0, char *retpath)</span>
+<span class="lineNum">     130 </span>            : {
+<span class="lineNum">     131 </span>            :     char        cwd[MAXPGPATH],
+<span class="lineNum">     132 </span>            :                 test_path[MAXPGPATH];
+<span class="lineNum">     133 </span>            :     char       *path;
+<span class="lineNum">     134 </span>            : 
+<span class="lineNum">     135 </span><span class="lineCov">       2868 :     if (!getcwd(cwd, MAXPGPATH))</span>
+<span class="lineNum">     136 </span>            :     {
+<span class="lineNum">     137 </span><span class="lineNoCov">          0 :         log_error(errcode_for_file_access(),</span>
+<span class="lineNum">     138 </span>            :                   _(&quot;could not identify current directory: %m&quot;));
+<span class="lineNum">     139 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     140 </span>            :     }
+<span class="lineNum">     141 </span>            : 
+<span class="lineNum">     142 </span>            :     /*
+<span class="lineNum">     143 </span>            :      * If argv0 contains a separator, then PATH wasn't used.
+<span class="lineNum">     144 </span>            :      */
+<span class="lineNum">     145 </span><span class="lineCov">       2868 :     if (first_dir_separator(argv0) != NULL)</span>
+<span class="lineNum">     146 </span>            :     {
+<span class="lineNum">     147 </span><span class="lineCov">         20 :         if (is_absolute_path(argv0))</span>
+<span class="lineNum">     148 </span><span class="lineCov">         18 :             StrNCpy(retpath, argv0, MAXPGPATH);</span>
+<span class="lineNum">     149 </span>            :         else
+<span class="lineNum">     150 </span><span class="lineCov">          2 :             join_path_components(retpath, cwd, argv0);</span>
+<span class="lineNum">     151 </span><span class="lineCov">         20 :         canonicalize_path(retpath);</span>
+<span class="lineNum">     152 </span>            : 
+<span class="lineNum">     153 </span><span class="lineCov">         20 :         if (validate_exec(retpath) == 0)</span>
+<span class="lineNum">     154 </span><span class="lineCov">         20 :             return resolve_symlinks(retpath);</span>
+<span class="lineNum">     155 </span>            : 
+<span class="lineNum">     156 </span><span class="lineNoCov">          0 :         log_error(errcode(ERRCODE_WRONG_OBJECT_TYPE),</span>
+<span class="lineNum">     157 </span>            :                   _(&quot;invalid binary \&quot;%s\&quot;&quot;), retpath);
+<span class="lineNum">     158 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     159 </span>            :     }
+<span class="lineNum">     160 </span>            : 
+<span class="lineNum">     161 </span>            : #ifdef WIN32
+<span class="lineNum">     162 </span>            :     /* Win32 checks the current directory first for names without slashes */
+<span class="lineNum">     163 </span>            :     join_path_components(retpath, cwd, argv0);
+<span class="lineNum">     164 </span>            :     if (validate_exec(retpath) == 0)
+<span class="lineNum">     165 </span>            :         return resolve_symlinks(retpath);
+<span class="lineNum">     166 </span>            : #endif
+<span class="lineNum">     167 </span>            : 
+<span class="lineNum">     168 </span>            :     /*
+<span class="lineNum">     169 </span>            :      * Since no explicit path was supplied, the user must have been relying on
+<span class="lineNum">     170 </span>            :      * PATH.  We'll search the same PATH.
+<span class="lineNum">     171 </span>            :      */
+<span class="lineNum">     172 </span><span class="lineCov">       2848 :     if ((path = getenv(&quot;PATH&quot;)) &amp;&amp; *path)</span>
+<span class="lineNum">     173 </span>            :     {
+<span class="lineNum">     174 </span><span class="lineCov">       2848 :         char       *startp = NULL,</span>
+<span class="lineNum">     175 </span><span class="lineCov">       2848 :                    *endp = NULL;</span>
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span>            :         do
+<span class="lineNum">     178 </span>            :         {
+<span class="lineNum">     179 </span><span class="lineCov">       2848 :             if (!startp)</span>
+<span class="lineNum">     180 </span><span class="lineCov">       2848 :                 startp = path;</span>
+<span class="lineNum">     181 </span>            :             else
+<span class="lineNum">     182 </span><span class="lineNoCov">          0 :                 startp = endp + 1;</span>
+<span class="lineNum">     183 </span>            : 
+<span class="lineNum">     184 </span><span class="lineCov">       2848 :             endp = first_path_var_separator(startp);</span>
+<span class="lineNum">     185 </span><span class="lineCov">       2848 :             if (!endp)</span>
+<span class="lineNum">     186 </span><span class="lineNoCov">          0 :                 endp = startp + strlen(startp); /* point to end */</span>
+<span class="lineNum">     187 </span>            : 
+<span class="lineNum">     188 </span><span class="lineCov">       2848 :             StrNCpy(test_path, startp, Min(endp - startp + 1, MAXPGPATH));</span>
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span><span class="lineCov">       2848 :             if (is_absolute_path(test_path))</span>
+<span class="lineNum">     191 </span><span class="lineCov">       2848 :                 join_path_components(retpath, test_path, argv0);</span>
+<span class="lineNum">     192 </span>            :             else
+<span class="lineNum">     193 </span>            :             {
+<span class="lineNum">     194 </span><span class="lineNoCov">          0 :                 join_path_components(retpath, cwd, test_path);</span>
+<span class="lineNum">     195 </span><span class="lineNoCov">          0 :                 join_path_components(retpath, retpath, argv0);</span>
+<span class="lineNum">     196 </span>            :             }
+<span class="lineNum">     197 </span><span class="lineCov">       2848 :             canonicalize_path(retpath);</span>
+<span class="lineNum">     198 </span>            : 
+<span class="lineNum">     199 </span><span class="lineCov">       2848 :             switch (validate_exec(retpath))</span>
+<span class="lineNum">     200 </span>            :             {
+<span class="lineNum">     201 </span>            :                 case 0:         /* found ok */
+<span class="lineNum">     202 </span><span class="lineCov">       2848 :                     return resolve_symlinks(retpath);</span>
+<span class="lineNum">     203 </span>            :                 case -1:        /* wasn't even a candidate, keep looking */
+<span class="lineNum">     204 </span><span class="lineNoCov">          0 :                     break;</span>
+<span class="lineNum">     205 </span>            :                 case -2:        /* found but disqualified */
+<span class="lineNum">     206 </span><span class="lineNoCov">          0 :                     log_error(errcode(ERRCODE_WRONG_OBJECT_TYPE),</span>
+<span class="lineNum">     207 </span>            :                               _(&quot;could not read binary \&quot;%s\&quot;&quot;),
+<span class="lineNum">     208 </span>            :                               retpath);
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :                     break;</span>
+<span class="lineNum">     210 </span>            :             }
+<span class="lineNum">     211 </span><span class="lineNoCov">          0 :         } while (*endp);</span>
+<span class="lineNum">     212 </span>            :     }
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 :     log_error(errcode(ERRCODE_UNDEFINED_FILE),</span>
+<span class="lineNum">     215 </span>            :               _(&quot;could not find a \&quot;%s\&quot; to execute&quot;), argv0);
+<span class="lineNum">     216 </span><span class="lineNoCov">          0 :     return -1;</span>
+<span class="lineNum">     217 </span>            : }
+<span class="lineNum">     218 </span>            : 
+<span class="lineNum">     219 </span>            : 
+<span class="lineNum">     220 </span>            : /*
+<span class="lineNum">     221 </span>            :  * resolve_symlinks - resolve symlinks to the underlying file
+<span class="lineNum">     222 </span>            :  *
+<span class="lineNum">     223 </span>            :  * Replace &quot;path&quot; by the absolute path to the referenced file.
+<span class="lineNum">     224 </span>            :  *
+<span class="lineNum">     225 </span>            :  * Returns 0 if OK, -1 if error.
+<span class="lineNum">     226 </span>            :  *
+<span class="lineNum">     227 </span>            :  * Note: we are not particularly tense about producing nice error messages
+<span class="lineNum">     228 </span>            :  * because we are not really expecting error here; we just determined that
+<span class="lineNum">     229 </span>            :  * the symlink does point to a valid executable.
+<a name="230"><span class="lineNum">     230 </span>            :  */</a>
+<span class="lineNum">     231 </span>            : static int
+<span class="lineNum">     232 </span><span class="lineCov">       2868 : resolve_symlinks(char *path)</span>
+<span class="lineNum">     233 </span>            : {
+<span class="lineNum">     234 </span>            : #ifdef HAVE_READLINK
+<span class="lineNum">     235 </span>            :     struct stat buf;
+<span class="lineNum">     236 </span>            :     char        orig_wd[MAXPGPATH],
+<span class="lineNum">     237 </span>            :                 link_buf[MAXPGPATH];
+<span class="lineNum">     238 </span>            :     char       *fname;
+<span class="lineNum">     239 </span>            : 
+<span class="lineNum">     240 </span>            :     /*
+<span class="lineNum">     241 </span>            :      * To resolve a symlink properly, we have to chdir into its directory and
+<span class="lineNum">     242 </span>            :      * then chdir to where the symlink points; otherwise we may fail to
+<span class="lineNum">     243 </span>            :      * resolve relative links correctly (consider cases involving mount
+<span class="lineNum">     244 </span>            :      * points, for example).  After following the final symlink, we use
+<span class="lineNum">     245 </span>            :      * getcwd() to figure out where the heck we're at.
+<span class="lineNum">     246 </span>            :      *
+<span class="lineNum">     247 </span>            :      * One might think we could skip all this if path doesn't point to a
+<span class="lineNum">     248 </span>            :      * symlink to start with, but that's wrong.  We also want to get rid of
+<span class="lineNum">     249 </span>            :      * any directory symlinks that are present in the given path. We expect
+<span class="lineNum">     250 </span>            :      * getcwd() to give us an accurate, symlink-free path.
+<span class="lineNum">     251 </span>            :      */
+<span class="lineNum">     252 </span><span class="lineCov">       2868 :     if (!getcwd(orig_wd, MAXPGPATH))</span>
+<span class="lineNum">     253 </span>            :     {
+<span class="lineNum">     254 </span><span class="lineNoCov">          0 :         log_error(errcode_for_file_access(),</span>
+<span class="lineNum">     255 </span>            :                   _(&quot;could not identify current directory: %m&quot;));
+<span class="lineNum">     256 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     257 </span>            :     }
+<span class="lineNum">     258 </span>            : 
+<span class="lineNum">     259 </span>            :     for (;;)
+<span class="lineNum">     260 </span>            :     {
+<span class="lineNum">     261 </span>            :         char       *lsep;
+<span class="lineNum">     262 </span>            :         int         rllen;
+<span class="lineNum">     263 </span>            : 
+<span class="lineNum">     264 </span><span class="lineCov">       2868 :         lsep = last_dir_separator(path);</span>
+<span class="lineNum">     265 </span><span class="lineCov">       2868 :         if (lsep)</span>
+<span class="lineNum">     266 </span>            :         {
+<span class="lineNum">     267 </span><span class="lineCov">       2868 :             *lsep = '\0';</span>
+<span class="lineNum">     268 </span><span class="lineCov">       2868 :             if (chdir(path) == -1)</span>
+<span class="lineNum">     269 </span>            :             {
+<span class="lineNum">     270 </span><span class="lineNoCov">          0 :                 log_error(errcode_for_file_access(),</span>
+<span class="lineNum">     271 </span>            :                           _(&quot;could not change directory to \&quot;%s\&quot;: %m&quot;), path);
+<span class="lineNum">     272 </span><span class="lineNoCov">          0 :                 return -1;</span>
+<span class="lineNum">     273 </span>            :             }
+<span class="lineNum">     274 </span><span class="lineCov">       2868 :             fname = lsep + 1;</span>
+<span class="lineNum">     275 </span>            :         }
+<span class="lineNum">     276 </span>            :         else
+<span class="lineNum">     277 </span><span class="lineNoCov">          0 :             fname = path;</span>
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span><span class="lineCov">       5736 :         if (lstat(fname, &amp;buf) &lt; 0 ||</span>
+<span class="lineNum">     280 </span><span class="lineCov">       2868 :             !S_ISLNK(buf.st_mode))</span>
+<span class="lineNum">     281 </span>            :             break;
+<span class="lineNum">     282 </span>            : 
+<span class="lineNum">     283 </span><span class="lineNoCov">          0 :         errno = 0;</span>
+<span class="lineNum">     284 </span><span class="lineNoCov">          0 :         rllen = readlink(fname, link_buf, sizeof(link_buf));</span>
+<span class="lineNum">     285 </span><span class="lineNoCov">          0 :         if (rllen &lt; 0 || rllen &gt;= sizeof(link_buf))</span>
+<span class="lineNum">     286 </span>            :         {
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :             log_error(errcode_for_file_access(),</span>
+<span class="lineNum">     288 </span>            :                       _(&quot;could not read symbolic link \&quot;%s\&quot;: %m&quot;), fname);
+<span class="lineNum">     289 </span><span class="lineNoCov">          0 :             return -1;</span>
+<span class="lineNum">     290 </span>            :         }
+<span class="lineNum">     291 </span><span class="lineNoCov">          0 :         link_buf[rllen] = '\0';</span>
+<span class="lineNum">     292 </span><span class="lineNoCov">          0 :         strcpy(path, link_buf);</span>
+<span class="lineNum">     293 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     294 </span>            : 
+<span class="lineNum">     295 </span>            :     /* must copy final component out of 'path' temporarily */
+<span class="lineNum">     296 </span><span class="lineCov">       2868 :     strlcpy(link_buf, fname, sizeof(link_buf));</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span><span class="lineCov">       2868 :     if (!getcwd(path, MAXPGPATH))</span>
+<span class="lineNum">     299 </span>            :     {
+<span class="lineNum">     300 </span><span class="lineNoCov">          0 :         log_error(errcode_for_file_access(),</span>
+<span class="lineNum">     301 </span>            :                   _(&quot;could not identify current directory: %m&quot;));
+<span class="lineNum">     302 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     303 </span>            :     }
+<span class="lineNum">     304 </span><span class="lineCov">       2868 :     join_path_components(path, path, link_buf);</span>
+<span class="lineNum">     305 </span><span class="lineCov">       2868 :     canonicalize_path(path);</span>
+<span class="lineNum">     306 </span>            : 
+<span class="lineNum">     307 </span><span class="lineCov">       2868 :     if (chdir(orig_wd) == -1)</span>
+<span class="lineNum">     308 </span>            :     {
+<span class="lineNum">     309 </span><span class="lineNoCov">          0 :         log_error(errcode_for_file_access(),</span>
+<span class="lineNum">     310 </span>            :                   _(&quot;could not change directory to \&quot;%s\&quot;: %m&quot;), orig_wd);
+<span class="lineNum">     311 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     312 </span>            :     }
+<span class="lineNum">     313 </span>            : #endif                          /* HAVE_READLINK */
+<span class="lineNum">     314 </span>            : 
+<span class="lineNum">     315 </span><span class="lineCov">       2868 :     return 0;</span>
+<span class="lineNum">     316 </span>            : }
+<span class="lineNum">     317 </span>            : 
+<span class="lineNum">     318 </span>            : 
+<span class="lineNum">     319 </span>            : /*
+<span class="lineNum">     320 </span>            :  * Find another program in our binary's directory,
+<span class="lineNum">     321 </span>            :  * then make sure it is the proper version.
+<a name="322"><span class="lineNum">     322 </span>            :  */</a>
+<span class="lineNum">     323 </span>            : int
+<span class="lineNum">     324 </span><span class="lineCov">          2 : find_other_exec(const char *argv0, const char *target,</span>
+<span class="lineNum">     325 </span>            :                 const char *versionstr, char *retpath)
+<span class="lineNum">     326 </span>            : {
+<span class="lineNum">     327 </span>            :     char        cmd[MAXPGPATH];
+<span class="lineNum">     328 </span>            :     char        line[MAXPGPATH];
+<span class="lineNum">     329 </span>            : 
+<span class="lineNum">     330 </span><span class="lineCov">          2 :     if (find_my_exec(argv0, retpath) &lt; 0)</span>
+<span class="lineNum">     331 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span>            :     /* Trim off program name and keep just directory */
+<span class="lineNum">     334 </span><span class="lineCov">          2 :     *last_dir_separator(retpath) = '\0';</span>
+<span class="lineNum">     335 </span><span class="lineCov">          2 :     canonicalize_path(retpath);</span>
+<span class="lineNum">     336 </span>            : 
+<span class="lineNum">     337 </span>            :     /* Now append the other program's name */
+<span class="lineNum">     338 </span><span class="lineCov">          2 :     snprintf(retpath + strlen(retpath), MAXPGPATH - strlen(retpath),</span>
+<span class="lineNum">     339 </span>            :              &quot;/%s%s&quot;, target, EXE);
+<span class="lineNum">     340 </span>            : 
+<span class="lineNum">     341 </span><span class="lineCov">          2 :     if (validate_exec(retpath) != 0)</span>
+<span class="lineNum">     342 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     343 </span>            : 
+<span class="lineNum">     344 </span><span class="lineCov">          2 :     snprintf(cmd, sizeof(cmd), &quot;\&quot;%s\&quot; -V&quot;, retpath);</span>
+<span class="lineNum">     345 </span>            : 
+<span class="lineNum">     346 </span><span class="lineCov">          2 :     if (!pipe_read_line(cmd, line, sizeof(line)))</span>
+<span class="lineNum">     347 </span><span class="lineNoCov">          0 :         return -1;</span>
+<span class="lineNum">     348 </span>            : 
+<span class="lineNum">     349 </span><span class="lineCov">          2 :     if (strcmp(line, versionstr) != 0)</span>
+<span class="lineNum">     350 </span><span class="lineNoCov">          0 :         return -2;</span>
+<span class="lineNum">     351 </span>            : 
+<span class="lineNum">     352 </span><span class="lineCov">          2 :     return 0;</span>
+<span class="lineNum">     353 </span>            : }
+<span class="lineNum">     354 </span>            : 
+<span class="lineNum">     355 </span>            : 
+<span class="lineNum">     356 </span>            : /*
+<span class="lineNum">     357 </span>            :  * The runtime library's popen() on win32 does not work when being
+<span class="lineNum">     358 </span>            :  * called from a service when running on windows &lt;= 2000, because
+<span class="lineNum">     359 </span>            :  * there is no stdin/stdout/stderr.
+<span class="lineNum">     360 </span>            :  *
+<span class="lineNum">     361 </span>            :  * Executing a command in a pipe and reading the first line from it
+<span class="lineNum">     362 </span>            :  * is all we need.
+<a name="363"><span class="lineNum">     363 </span>            :  */</a>
+<span class="lineNum">     364 </span>            : static char *
+<span class="lineNum">     365 </span><span class="lineCov">          2 : pipe_read_line(char *cmd, char *line, int maxsize)</span>
+<span class="lineNum">     366 </span>            : {
+<span class="lineNum">     367 </span>            : #ifndef WIN32
+<span class="lineNum">     368 </span>            :     FILE       *pgver;
+<span class="lineNum">     369 </span>            : 
+<span class="lineNum">     370 </span>            :     /* flush output buffers in case popen does not... */
+<span class="lineNum">     371 </span><span class="lineCov">          2 :     fflush(stdout);</span>
+<span class="lineNum">     372 </span><span class="lineCov">          2 :     fflush(stderr);</span>
+<span class="lineNum">     373 </span>            : 
+<span class="lineNum">     374 </span><span class="lineCov">          2 :     errno = 0;</span>
+<span class="lineNum">     375 </span><span class="lineCov">          2 :     if ((pgver = popen(cmd, &quot;r&quot;)) == NULL)</span>
+<span class="lineNum">     376 </span>            :     {
+<span class="lineNum">     377 </span><span class="lineNoCov">          0 :         perror(&quot;popen failure&quot;);</span>
+<span class="lineNum">     378 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     379 </span>            :     }
+<span class="lineNum">     380 </span>            : 
+<span class="lineNum">     381 </span><span class="lineCov">          2 :     errno = 0;</span>
+<span class="lineNum">     382 </span><span class="lineCov">          2 :     if (fgets(line, maxsize, pgver) == NULL)</span>
+<span class="lineNum">     383 </span>            :     {
+<span class="lineNum">     384 </span><span class="lineNoCov">          0 :         if (feof(pgver))</span>
+<span class="lineNum">     385 </span><span class="lineNoCov">          0 :             fprintf(stderr, &quot;no data was returned by command \&quot;%s\&quot;\n&quot;, cmd);</span>
+<span class="lineNum">     386 </span>            :         else
+<span class="lineNum">     387 </span><span class="lineNoCov">          0 :             perror(&quot;fgets failure&quot;);</span>
+<span class="lineNum">     388 </span><span class="lineNoCov">          0 :         pclose(pgver);          /* no error checking */</span>
+<span class="lineNum">     389 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     390 </span>            :     }
+<span class="lineNum">     391 </span>            : 
+<span class="lineNum">     392 </span><span class="lineCov">          2 :     if (pclose_check(pgver))</span>
+<span class="lineNum">     393 </span><span class="lineNoCov">          0 :         return NULL;</span>
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span><span class="lineCov">          2 :     return line;</span>
+<span class="lineNum">     396 </span>            : #else                           /* WIN32 */
+<span class="lineNum">     397 </span>            : 
+<span class="lineNum">     398 </span>            :     SECURITY_ATTRIBUTES sattr;
+<span class="lineNum">     399 </span>            :     HANDLE      childstdoutrd,
+<span class="lineNum">     400 </span>            :                 childstdoutwr,
+<span class="lineNum">     401 </span>            :                 childstdoutrddup;
+<span class="lineNum">     402 </span>            :     PROCESS_INFORMATION pi;
+<span class="lineNum">     403 </span>            :     STARTUPINFO si;
+<span class="lineNum">     404 </span>            :     char       *retval = NULL;
+<span class="lineNum">     405 </span>            : 
+<span class="lineNum">     406 </span>            :     sattr.nLength = sizeof(SECURITY_ATTRIBUTES);
+<span class="lineNum">     407 </span>            :     sattr.bInheritHandle = TRUE;
+<span class="lineNum">     408 </span>            :     sattr.lpSecurityDescriptor = NULL;
+<span class="lineNum">     409 </span>            : 
+<span class="lineNum">     410 </span>            :     if (!CreatePipe(&amp;childstdoutrd, &amp;childstdoutwr, &amp;sattr, 0))
+<span class="lineNum">     411 </span>            :         return NULL;
+<span class="lineNum">     412 </span>            : 
+<span class="lineNum">     413 </span>            :     if (!DuplicateHandle(GetCurrentProcess(),
+<span class="lineNum">     414 </span>            :                          childstdoutrd,
+<span class="lineNum">     415 </span>            :                          GetCurrentProcess(),
+<span class="lineNum">     416 </span>            :                          &amp;childstdoutrddup,
+<span class="lineNum">     417 </span>            :                          0,
+<span class="lineNum">     418 </span>            :                          FALSE,
+<span class="lineNum">     419 </span>            :                          DUPLICATE_SAME_ACCESS))
+<span class="lineNum">     420 </span>            :     {
+<span class="lineNum">     421 </span>            :         CloseHandle(childstdoutrd);
+<span class="lineNum">     422 </span>            :         CloseHandle(childstdoutwr);
+<span class="lineNum">     423 </span>            :         return NULL;
+<span class="lineNum">     424 </span>            :     }
+<span class="lineNum">     425 </span>            : 
+<span class="lineNum">     426 </span>            :     CloseHandle(childstdoutrd);
+<span class="lineNum">     427 </span>            : 
+<span class="lineNum">     428 </span>            :     ZeroMemory(&amp;pi, sizeof(pi));
+<span class="lineNum">     429 </span>            :     ZeroMemory(&amp;si, sizeof(si));
+<span class="lineNum">     430 </span>            :     si.cb = sizeof(si);
+<span class="lineNum">     431 </span>            :     si.dwFlags = STARTF_USESTDHANDLES;
+<span class="lineNum">     432 </span>            :     si.hStdError = childstdoutwr;
+<span class="lineNum">     433 </span>            :     si.hStdOutput = childstdoutwr;
+<span class="lineNum">     434 </span>            :     si.hStdInput = INVALID_HANDLE_VALUE;
+<span class="lineNum">     435 </span>            : 
+<span class="lineNum">     436 </span>            :     if (CreateProcess(NULL,
+<span class="lineNum">     437 </span>            :                       cmd,
+<span class="lineNum">     438 </span>            :                       NULL,
+<span class="lineNum">     439 </span>            :                       NULL,
+<span class="lineNum">     440 </span>            :                       TRUE,
+<span class="lineNum">     441 </span>            :                       0,
+<span class="lineNum">     442 </span>            :                       NULL,
+<span class="lineNum">     443 </span>            :                       NULL,
+<span class="lineNum">     444 </span>            :                       &amp;si,
+<span class="lineNum">     445 </span>            :                       &amp;pi))
+<span class="lineNum">     446 </span>            :     {
+<span class="lineNum">     447 </span>            :         /* Successfully started the process */
+<span class="lineNum">     448 </span>            :         char       *lineptr;
+<span class="lineNum">     449 </span>            : 
+<span class="lineNum">     450 </span>            :         ZeroMemory(line, maxsize);
+<span class="lineNum">     451 </span>            : 
+<span class="lineNum">     452 </span>            :         /* Try to read at least one line from the pipe */
+<span class="lineNum">     453 </span>            :         /* This may require more than one wait/read attempt */
+<span class="lineNum">     454 </span>            :         for (lineptr = line; lineptr &lt; line + maxsize - 1;)
+<span class="lineNum">     455 </span>            :         {
+<span class="lineNum">     456 </span>            :             DWORD       bytesread = 0;
+<span class="lineNum">     457 </span>            : 
+<span class="lineNum">     458 </span>            :             /* Let's see if we can read */
+<span class="lineNum">     459 </span>            :             if (WaitForSingleObject(childstdoutrddup, 10000) != WAIT_OBJECT_0)
+<span class="lineNum">     460 </span>            :                 break;          /* Timeout, but perhaps we got a line already */
+<span class="lineNum">     461 </span>            : 
+<span class="lineNum">     462 </span>            :             if (!ReadFile(childstdoutrddup, lineptr, maxsize - (lineptr - line),
+<span class="lineNum">     463 </span>            :                           &amp;bytesread, NULL))
+<span class="lineNum">     464 </span>            :                 break;          /* Error, but perhaps we got a line already */
+<span class="lineNum">     465 </span>            : 
+<span class="lineNum">     466 </span>            :             lineptr += strlen(lineptr);
+<span class="lineNum">     467 </span>            : 
+<span class="lineNum">     468 </span>            :             if (!bytesread)
+<span class="lineNum">     469 </span>            :                 break;          /* EOF */
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span>            :             if (strchr(line, '\n'))
+<span class="lineNum">     472 </span>            :                 break;          /* One or more lines read */
+<span class="lineNum">     473 </span>            :         }
+<span class="lineNum">     474 </span>            : 
+<span class="lineNum">     475 </span>            :         if (lineptr != line)
+<span class="lineNum">     476 </span>            :         {
+<span class="lineNum">     477 </span>            :             /* OK, we read some data */
+<span class="lineNum">     478 </span>            :             int         len;
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span>            :             /* If we got more than one line, cut off after the first \n */
+<span class="lineNum">     481 </span>            :             lineptr = strchr(line, '\n');
+<span class="lineNum">     482 </span>            :             if (lineptr)
+<span class="lineNum">     483 </span>            :                 *(lineptr + 1) = '\0';
+<span class="lineNum">     484 </span>            : 
+<span class="lineNum">     485 </span>            :             len = strlen(line);
+<span class="lineNum">     486 </span>            : 
+<span class="lineNum">     487 </span>            :             /*
+<span class="lineNum">     488 </span>            :              * If EOL is \r\n, convert to just \n. Because stdout is a
+<span class="lineNum">     489 </span>            :              * text-mode stream, the \n output by the child process is
+<span class="lineNum">     490 </span>            :              * received as \r\n, so we convert it to \n.  The server main.c
+<span class="lineNum">     491 </span>            :              * sets setvbuf(stdout, NULL, _IONBF, 0) which has the effect of
+<span class="lineNum">     492 </span>            :              * disabling \n to \r\n expansion for stdout.
+<span class="lineNum">     493 </span>            :              */
+<span class="lineNum">     494 </span>            :             if (len &gt;= 2 &amp;&amp; line[len - 2] == '\r' &amp;&amp; line[len - 1] == '\n')
+<span class="lineNum">     495 </span>            :             {
+<span class="lineNum">     496 </span>            :                 line[len - 2] = '\n';
+<span class="lineNum">     497 </span>            :                 line[len - 1] = '\0';
+<span class="lineNum">     498 </span>            :                 len--;
+<span class="lineNum">     499 </span>            :             }
+<span class="lineNum">     500 </span>            : 
+<span class="lineNum">     501 </span>            :             /*
+<span class="lineNum">     502 </span>            :              * We emulate fgets() behaviour. So if there is no newline at the
+<span class="lineNum">     503 </span>            :              * end, we add one...
+<span class="lineNum">     504 </span>            :              */
+<span class="lineNum">     505 </span>            :             if (len == 0 || line[len - 1] != '\n')
+<span class="lineNum">     506 </span>            :                 strcat(line, &quot;\n&quot;);
+<span class="lineNum">     507 </span>            : 
+<span class="lineNum">     508 </span>            :             retval = line;
+<span class="lineNum">     509 </span>            :         }
+<span class="lineNum">     510 </span>            : 
+<span class="lineNum">     511 </span>            :         CloseHandle(pi.hProcess);
+<span class="lineNum">     512 </span>            :         CloseHandle(pi.hThread);
+<span class="lineNum">     513 </span>            :     }
+<span class="lineNum">     514 </span>            : 
+<span class="lineNum">     515 </span>            :     CloseHandle(childstdoutwr);
+<span class="lineNum">     516 </span>            :     CloseHandle(childstdoutrddup);
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span>            :     return retval;
+<span class="lineNum">     519 </span>            : #endif                          /* WIN32 */
+<span class="lineNum">     520 </span>            : }
+<span class="lineNum">     521 </span>            : 
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span>            : /*
+<span class="lineNum">     524 </span>            :  * pclose() plus useful error reporting
+<a name="525"><span class="lineNum">     525 </span>            :  */</a>
+<span class="lineNum">     526 </span>            : int
+<span class="lineNum">     527 </span><span class="lineCov">          6 : pclose_check(FILE *stream)</span>
+<span class="lineNum">     528 </span>            : {
+<span class="lineNum">     529 </span>            :     int         exitstatus;
+<span class="lineNum">     530 </span>            :     char       *reason;
+<span class="lineNum">     531 </span>            : 
+<span class="lineNum">     532 </span><span class="lineCov">          6 :     exitstatus = pclose(stream);</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span><span class="lineCov">          6 :     if (exitstatus == 0)</span>
+<span class="lineNum">     535 </span><span class="lineCov">          6 :         return 0;               /* all is well */</span>
+<span class="lineNum">     536 </span>            : 
+<span class="lineNum">     537 </span><span class="lineNoCov">          0 :     if (exitstatus == -1)</span>
+<span class="lineNum">     538 </span>            :     {
+<span class="lineNum">     539 </span>            :         /* pclose() itself failed, and hopefully set errno */
+<span class="lineNum">     540 </span><span class="lineNoCov">          0 :         log_error(errcode(ERRCODE_SYSTEM_ERROR),</span>
+<span class="lineNum">     541 </span>            :                   _(&quot;pclose failed: %m&quot;));
+<span class="lineNum">     542 </span>            :     }
+<span class="lineNum">     543 </span>            :     else
+<span class="lineNum">     544 </span>            :     {
+<span class="lineNum">     545 </span><span class="lineNoCov">          0 :         reason = wait_result_to_str(exitstatus);</span>
+<span class="lineNum">     546 </span><span class="lineNoCov">          0 :         log_error(errcode(ERRCODE_SYSTEM_ERROR),</span>
+<span class="lineNum">     547 </span>            :                   &quot;%s&quot;, reason);
+<span class="lineNum">     548 </span><span class="lineNoCov">          0 :         pfree(reason);</span>
+<span class="lineNum">     549 </span>            :     }
+<span class="lineNum">     550 </span><span class="lineNoCov">          0 :     return exitstatus;</span>
+<span class="lineNum">     551 </span>            : }
+<span class="lineNum">     552 </span>            : 
+<span class="lineNum">     553 </span>            : /*
+<span class="lineNum">     554 </span>            :  *  set_pglocale_pgservice
+<span class="lineNum">     555 </span>            :  *
+<span class="lineNum">     556 </span>            :  *  Set application-specific locale and service directory
+<span class="lineNum">     557 </span>            :  *
+<span class="lineNum">     558 </span>            :  *  This function takes the value of argv[0] rather than a full path.
+<span class="lineNum">     559 </span>            :  *
+<span class="lineNum">     560 </span>            :  * (You may be wondering why this is in exec.c.  It requires this module's
+<span class="lineNum">     561 </span>            :  * services and doesn't introduce any new dependencies, so this seems as
+<span class="lineNum">     562 </span>            :  * good as anyplace.)
+<a name="563"><span class="lineNum">     563 </span>            :  */</a>
+<span class="lineNum">     564 </span>            : void
+<span class="lineNum">     565 </span><span class="lineCov">       1638 : set_pglocale_pgservice(const char *argv0, const char *app)</span>
+<span class="lineNum">     566 </span>            : {
+<span class="lineNum">     567 </span>            :     char        path[MAXPGPATH];
+<span class="lineNum">     568 </span>            :     char        my_exec_path[MAXPGPATH];
+<span class="lineNum">     569 </span>            :     char        env_path[MAXPGPATH + sizeof(&quot;PGSYSCONFDIR=&quot;)];    /* longer than
+<span class="lineNum">     570 </span>            :                                                                  * PGLOCALEDIR */
+<span class="lineNum">     571 </span>            :     char       *dup_path;
+<span class="lineNum">     572 </span>            : 
+<span class="lineNum">     573 </span>            :     /* don't set LC_ALL in the backend */
+<span class="lineNum">     574 </span><span class="lineCov">       1638 :     if (strcmp(app, PG_TEXTDOMAIN(&quot;postgres&quot;)) != 0)</span>
+<span class="lineNum">     575 </span>            :     {
+<span class="lineNum">     576 </span><span class="lineCov">        408 :         setlocale(LC_ALL, &quot;&quot;);</span>
+<span class="lineNum">     577 </span>            : 
+<span class="lineNum">     578 </span>            :         /*
+<span class="lineNum">     579 </span>            :          * One could make a case for reproducing here PostmasterMain()'s test
+<span class="lineNum">     580 </span>            :          * for whether the process is multithreaded.  Unlike the postmaster,
+<span class="lineNum">     581 </span>            :          * no frontend program calls sigprocmask() or otherwise provides for
+<span class="lineNum">     582 </span>            :          * mutual exclusion between signal handlers.  While frontends using
+<span class="lineNum">     583 </span>            :          * fork(), if multithreaded, are formally exposed to undefined
+<span class="lineNum">     584 </span>            :          * behavior, we have not witnessed a concrete bug.  Therefore,
+<span class="lineNum">     585 </span>            :          * complaining about multithreading here may be mere pedantry.
+<span class="lineNum">     586 </span>            :          */
+<span class="lineNum">     587 </span>            :     }
+<span class="lineNum">     588 </span>            : 
+<span class="lineNum">     589 </span><span class="lineCov">       1638 :     if (find_my_exec(argv0, my_exec_path) &lt; 0)</span>
+<span class="lineNum">     590 </span><span class="lineCov">       1638 :         return;</span>
+<span class="lineNum">     591 </span>            : 
+<span class="lineNum">     592 </span>            : #ifdef ENABLE_NLS
+<span class="lineNum">     593 </span>            :     get_locale_path(my_exec_path, path);
+<span class="lineNum">     594 </span>            :     bindtextdomain(app, path);
+<span class="lineNum">     595 </span>            :     textdomain(app);
+<span class="lineNum">     596 </span>            : 
+<span class="lineNum">     597 </span>            :     if (getenv(&quot;PGLOCALEDIR&quot;) == NULL)
+<span class="lineNum">     598 </span>            :     {
+<span class="lineNum">     599 </span>            :         /* set for libpq to use */
+<span class="lineNum">     600 </span>            :         snprintf(env_path, sizeof(env_path), &quot;PGLOCALEDIR=%s&quot;, path);
+<span class="lineNum">     601 </span>            :         canonicalize_path(env_path + 12);
+<span class="lineNum">     602 </span>            :         dup_path = strdup(env_path);
+<span class="lineNum">     603 </span>            :         if (dup_path)
+<span class="lineNum">     604 </span>            :             putenv(dup_path);
+<span class="lineNum">     605 </span>            :     }
+<span class="lineNum">     606 </span>            : #endif
+<span class="lineNum">     607 </span>            : 
+<span class="lineNum">     608 </span><span class="lineCov">       1638 :     if (getenv(&quot;PGSYSCONFDIR&quot;) == NULL)</span>
+<span class="lineNum">     609 </span>            :     {
+<span class="lineNum">     610 </span><span class="lineCov">          2 :         get_etc_path(my_exec_path, path);</span>
+<span class="lineNum">     611 </span>            : 
+<span class="lineNum">     612 </span>            :         /* set for libpq to use */
+<span class="lineNum">     613 </span><span class="lineCov">          2 :         snprintf(env_path, sizeof(env_path), &quot;PGSYSCONFDIR=%s&quot;, path);</span>
+<span class="lineNum">     614 </span><span class="lineCov">          2 :         canonicalize_path(env_path + 13);</span>
+<span class="lineNum">     615 </span><span class="lineCov">          2 :         dup_path = strdup(env_path);</span>
+<span class="lineNum">     616 </span><span class="lineCov">          2 :         if (dup_path)</span>
+<span class="lineNum">     617 </span><span class="lineCov">          2 :             putenv(dup_path);</span>
+<span class="lineNum">     618 </span>            :     }
+<span class="lineNum">     619 </span>            : }
+<span class="lineNum">     620 </span>            : 
+<span class="lineNum">     621 </span>            : #ifdef WIN32
+<span class="lineNum">     622 </span>            : 
+<span class="lineNum">     623 </span>            : /*
+<span class="lineNum">     624 </span>            :  * AddUserToTokenDacl(HANDLE hToken)
+<span class="lineNum">     625 </span>            :  *
+<span class="lineNum">     626 </span>            :  * This function adds the current user account to the restricted
+<span class="lineNum">     627 </span>            :  * token used when we create a restricted process.
+<span class="lineNum">     628 </span>            :  *
+<span class="lineNum">     629 </span>            :  * This is required because of some security changes in Windows
+<span class="lineNum">     630 </span>            :  * that appeared in patches to XP/2K3 and in Vista/2008.
+<span class="lineNum">     631 </span>            :  *
+<span class="lineNum">     632 </span>            :  * On these machines, the Administrator account is not included in
+<span class="lineNum">     633 </span>            :  * the default DACL - you just get Administrators + System. For
+<span class="lineNum">     634 </span>            :  * regular users you get User + System. Because we strip Administrators
+<span class="lineNum">     635 </span>            :  * when we create the restricted token, we are left with only System
+<span class="lineNum">     636 </span>            :  * in the DACL which leads to access denied errors for later CreatePipe()
+<span class="lineNum">     637 </span>            :  * and CreateProcess() calls when running as Administrator.
+<span class="lineNum">     638 </span>            :  *
+<span class="lineNum">     639 </span>            :  * This function fixes this problem by modifying the DACL of the
+<span class="lineNum">     640 </span>            :  * token the process will use, and explicitly re-adding the current
+<span class="lineNum">     641 </span>            :  * user account.  This is still secure because the Administrator account
+<span class="lineNum">     642 </span>            :  * inherits its privileges from the Administrators group - it doesn't
+<span class="lineNum">     643 </span>            :  * have any of its own.
+<span class="lineNum">     644 </span>            :  */
+<span class="lineNum">     645 </span>            : BOOL
+<span class="lineNum">     646 </span>            : AddUserToTokenDacl(HANDLE hToken)
+<span class="lineNum">     647 </span>            : {
+<span class="lineNum">     648 </span>            :     int         i;
+<span class="lineNum">     649 </span>            :     ACL_SIZE_INFORMATION asi;
+<span class="lineNum">     650 </span>            :     ACCESS_ALLOWED_ACE *pace;
+<span class="lineNum">     651 </span>            :     DWORD       dwNewAclSize;
+<span class="lineNum">     652 </span>            :     DWORD       dwSize = 0;
+<span class="lineNum">     653 </span>            :     DWORD       dwTokenInfoLength = 0;
+<span class="lineNum">     654 </span>            :     PACL        pacl = NULL;
+<span class="lineNum">     655 </span>            :     PTOKEN_USER pTokenUser = NULL;
+<span class="lineNum">     656 </span>            :     TOKEN_DEFAULT_DACL tddNew;
+<span class="lineNum">     657 </span>            :     TOKEN_DEFAULT_DACL *ptdd = NULL;
+<span class="lineNum">     658 </span>            :     TOKEN_INFORMATION_CLASS tic = TokenDefaultDacl;
+<span class="lineNum">     659 </span>            :     BOOL        ret = FALSE;
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span>            :     /* Figure out the buffer size for the DACL info */
+<span class="lineNum">     662 </span>            :     if (!GetTokenInformation(hToken, tic, (LPVOID) NULL, dwTokenInfoLength, &amp;dwSize))
+<span class="lineNum">     663 </span>            :     {
+<span class="lineNum">     664 </span>            :         if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+<span class="lineNum">     665 </span>            :         {
+<span class="lineNum">     666 </span>            :             ptdd = (TOKEN_DEFAULT_DACL *) LocalAlloc(LPTR, dwSize);
+<span class="lineNum">     667 </span>            :             if (ptdd == NULL)
+<span class="lineNum">     668 </span>            :             {
+<span class="lineNum">     669 </span>            :                 log_error(errcode(ERRCODE_OUT_OF_MEMORY),
+<span class="lineNum">     670 </span>            :                           _(&quot;out of memory&quot;));
+<span class="lineNum">     671 </span>            :                 goto cleanup;
+<span class="lineNum">     672 </span>            :             }
+<span class="lineNum">     673 </span>            : 
+<span class="lineNum">     674 </span>            :             if (!GetTokenInformation(hToken, tic, (LPVOID) ptdd, dwSize, &amp;dwSize))
+<span class="lineNum">     675 </span>            :             {
+<span class="lineNum">     676 </span>            :                 log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     677 </span>            :                           &quot;could not get token information: error code %lu&quot;,
+<span class="lineNum">     678 </span>            :                           GetLastError());
+<span class="lineNum">     679 </span>            :                 goto cleanup;
+<span class="lineNum">     680 </span>            :             }
+<span class="lineNum">     681 </span>            :         }
+<span class="lineNum">     682 </span>            :         else
+<span class="lineNum">     683 </span>            :         {
+<span class="lineNum">     684 </span>            :             log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     685 </span>            :                       &quot;could not get token information buffer size: error code %lu&quot;,
+<span class="lineNum">     686 </span>            :                       GetLastError());
+<span class="lineNum">     687 </span>            :             goto cleanup;
+<span class="lineNum">     688 </span>            :         }
+<span class="lineNum">     689 </span>            :     }
+<span class="lineNum">     690 </span>            : 
+<span class="lineNum">     691 </span>            :     /* Get the ACL info */
+<span class="lineNum">     692 </span>            :     if (!GetAclInformation(ptdd-&gt;DefaultDacl, (LPVOID) &amp;asi,
+<span class="lineNum">     693 </span>            :                            (DWORD) sizeof(ACL_SIZE_INFORMATION),
+<span class="lineNum">     694 </span>            :                            AclSizeInformation))
+<span class="lineNum">     695 </span>            :     {
+<span class="lineNum">     696 </span>            :         log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     697 </span>            :                   &quot;could not get ACL information: error code %lu&quot;,
+<span class="lineNum">     698 </span>            :                   GetLastError());
+<span class="lineNum">     699 </span>            :         goto cleanup;
+<span class="lineNum">     700 </span>            :     }
+<span class="lineNum">     701 </span>            : 
+<span class="lineNum">     702 </span>            :     /* Get the current user SID */
+<span class="lineNum">     703 </span>            :     if (!GetTokenUser(hToken, &amp;pTokenUser))
+<span class="lineNum">     704 </span>            :         goto cleanup;           /* callee printed a message */
+<span class="lineNum">     705 </span>            : 
+<span class="lineNum">     706 </span>            :     /* Figure out the size of the new ACL */
+<span class="lineNum">     707 </span>            :     dwNewAclSize = asi.AclBytesInUse + sizeof(ACCESS_ALLOWED_ACE) +
+<span class="lineNum">     708 </span>            :         GetLengthSid(pTokenUser-&gt;User.Sid) - sizeof(DWORD);
+<span class="lineNum">     709 </span>            : 
+<span class="lineNum">     710 </span>            :     /* Allocate the ACL buffer &amp; initialize it */
+<span class="lineNum">     711 </span>            :     pacl = (PACL) LocalAlloc(LPTR, dwNewAclSize);
+<span class="lineNum">     712 </span>            :     if (pacl == NULL)
+<span class="lineNum">     713 </span>            :     {
+<span class="lineNum">     714 </span>            :         log_error(errcode(ERRCODE_OUT_OF_MEMORY),
+<span class="lineNum">     715 </span>            :                   _(&quot;out of memory&quot;));
+<span class="lineNum">     716 </span>            :         goto cleanup;
+<span class="lineNum">     717 </span>            :     }
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span>            :     if (!InitializeAcl(pacl, dwNewAclSize, ACL_REVISION))
+<span class="lineNum">     720 </span>            :     {
+<span class="lineNum">     721 </span>            :         log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     722 </span>            :                   &quot;could not initialize ACL: error code %lu&quot;, GetLastError());
+<span class="lineNum">     723 </span>            :         goto cleanup;
+<span class="lineNum">     724 </span>            :     }
+<span class="lineNum">     725 </span>            : 
+<span class="lineNum">     726 </span>            :     /* Loop through the existing ACEs, and build the new ACL */
+<span class="lineNum">     727 </span>            :     for (i = 0; i &lt; (int) asi.AceCount; i++)
+<span class="lineNum">     728 </span>            :     {
+<span class="lineNum">     729 </span>            :         if (!GetAce(ptdd-&gt;DefaultDacl, i, (LPVOID *) &amp;pace))
+<span class="lineNum">     730 </span>            :         {
+<span class="lineNum">     731 </span>            :             log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     732 </span>            :                       &quot;could not get ACE: error code %lu&quot;, GetLastError());
+<span class="lineNum">     733 </span>            :             goto cleanup;
+<span class="lineNum">     734 </span>            :         }
+<span class="lineNum">     735 </span>            : 
+<span class="lineNum">     736 </span>            :         if (!AddAce(pacl, ACL_REVISION, MAXDWORD, pace, ((PACE_HEADER) pace)-&gt;AceSize))
+<span class="lineNum">     737 </span>            :         {
+<span class="lineNum">     738 </span>            :             log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     739 </span>            :                       &quot;could not add ACE: error code %lu&quot;, GetLastError());
+<span class="lineNum">     740 </span>            :             goto cleanup;
+<span class="lineNum">     741 </span>            :         }
+<span class="lineNum">     742 </span>            :     }
+<span class="lineNum">     743 </span>            : 
+<span class="lineNum">     744 </span>            :     /* Add the new ACE for the current user */
+<span class="lineNum">     745 </span>            :     if (!AddAccessAllowedAceEx(pacl, ACL_REVISION, OBJECT_INHERIT_ACE, GENERIC_ALL, pTokenUser-&gt;User.Sid))
+<span class="lineNum">     746 </span>            :     {
+<span class="lineNum">     747 </span>            :         log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     748 </span>            :                   &quot;could not add access allowed ACE: error code %lu&quot;,
+<span class="lineNum">     749 </span>            :                   GetLastError());
+<span class="lineNum">     750 </span>            :         goto cleanup;
+<span class="lineNum">     751 </span>            :     }
+<span class="lineNum">     752 </span>            : 
+<span class="lineNum">     753 </span>            :     /* Set the new DACL in the token */
+<span class="lineNum">     754 </span>            :     tddNew.DefaultDacl = pacl;
+<span class="lineNum">     755 </span>            : 
+<span class="lineNum">     756 </span>            :     if (!SetTokenInformation(hToken, tic, (LPVOID) &amp;tddNew, dwNewAclSize))
+<span class="lineNum">     757 </span>            :     {
+<span class="lineNum">     758 </span>            :         log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     759 </span>            :                   &quot;could not set token information: error code %lu&quot;,
+<span class="lineNum">     760 </span>            :                   GetLastError());
+<span class="lineNum">     761 </span>            :         goto cleanup;
+<span class="lineNum">     762 </span>            :     }
+<span class="lineNum">     763 </span>            : 
+<span class="lineNum">     764 </span>            :     ret = TRUE;
+<span class="lineNum">     765 </span>            : 
+<span class="lineNum">     766 </span>            : cleanup:
+<span class="lineNum">     767 </span>            :     if (pTokenUser)
+<span class="lineNum">     768 </span>            :         LocalFree((HLOCAL) pTokenUser);
+<span class="lineNum">     769 </span>            : 
+<span class="lineNum">     770 </span>            :     if (pacl)
+<span class="lineNum">     771 </span>            :         LocalFree((HLOCAL) pacl);
+<span class="lineNum">     772 </span>            : 
+<span class="lineNum">     773 </span>            :     if (ptdd)
+<span class="lineNum">     774 </span>            :         LocalFree((HLOCAL) ptdd);
+<span class="lineNum">     775 </span>            : 
+<span class="lineNum">     776 </span>            :     return ret;
+<span class="lineNum">     777 </span>            : }
+<span class="lineNum">     778 </span>            : 
+<span class="lineNum">     779 </span>            : /*
+<span class="lineNum">     780 </span>            :  * GetTokenUser(HANDLE hToken, PTOKEN_USER *ppTokenUser)
+<span class="lineNum">     781 </span>            :  *
+<span class="lineNum">     782 </span>            :  * Get the users token information from a process token.
+<span class="lineNum">     783 </span>            :  *
+<span class="lineNum">     784 </span>            :  * The caller of this function is responsible for calling LocalFree() on the
+<span class="lineNum">     785 </span>            :  * returned TOKEN_USER memory.
+<span class="lineNum">     786 </span>            :  */
+<span class="lineNum">     787 </span>            : static BOOL
+<span class="lineNum">     788 </span>            : GetTokenUser(HANDLE hToken, PTOKEN_USER *ppTokenUser)
+<span class="lineNum">     789 </span>            : {
+<span class="lineNum">     790 </span>            :     DWORD       dwLength;
+<span class="lineNum">     791 </span>            : 
+<span class="lineNum">     792 </span>            :     *ppTokenUser = NULL;
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span>            :     if (!GetTokenInformation(hToken,
+<span class="lineNum">     795 </span>            :                              TokenUser,
+<span class="lineNum">     796 </span>            :                              NULL,
+<span class="lineNum">     797 </span>            :                              0,
+<span class="lineNum">     798 </span>            :                              &amp;dwLength))
+<span class="lineNum">     799 </span>            :     {
+<span class="lineNum">     800 </span>            :         if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+<span class="lineNum">     801 </span>            :         {
+<span class="lineNum">     802 </span>            :             *ppTokenUser = (PTOKEN_USER) LocalAlloc(LPTR, dwLength);
+<span class="lineNum">     803 </span>            : 
+<span class="lineNum">     804 </span>            :             if (*ppTokenUser == NULL)
+<span class="lineNum">     805 </span>            :             {
+<span class="lineNum">     806 </span>            :                 log_error(errcode(ERRCODE_OUT_OF_MEMORY),
+<span class="lineNum">     807 </span>            :                           _(&quot;out of memory&quot;));
+<span class="lineNum">     808 </span>            :                 return FALSE;
+<span class="lineNum">     809 </span>            :             }
+<span class="lineNum">     810 </span>            :         }
+<span class="lineNum">     811 </span>            :         else
+<span class="lineNum">     812 </span>            :         {
+<span class="lineNum">     813 </span>            :             log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     814 </span>            :                       &quot;could not get token information buffer size: error code %lu&quot;,
+<span class="lineNum">     815 </span>            :                       GetLastError());
+<span class="lineNum">     816 </span>            :             return FALSE;
+<span class="lineNum">     817 </span>            :         }
+<span class="lineNum">     818 </span>            :     }
+<span class="lineNum">     819 </span>            : 
+<span class="lineNum">     820 </span>            :     if (!GetTokenInformation(hToken,
+<span class="lineNum">     821 </span>            :                              TokenUser,
+<span class="lineNum">     822 </span>            :                              *ppTokenUser,
+<span class="lineNum">     823 </span>            :                              dwLength,
+<span class="lineNum">     824 </span>            :                              &amp;dwLength))
+<span class="lineNum">     825 </span>            :     {
+<span class="lineNum">     826 </span>            :         LocalFree(*ppTokenUser);
+<span class="lineNum">     827 </span>            :         *ppTokenUser = NULL;
+<span class="lineNum">     828 </span>            : 
+<span class="lineNum">     829 </span>            :         log_error(errcode(ERRCODE_SYSTEM_ERROR),
+<span class="lineNum">     830 </span>            :                   &quot;could not get token information: error code %lu&quot;,
+<span class="lineNum">     831 </span>            :                   GetLastError());
+<span class="lineNum">     832 </span>            :         return FALSE;
+<span class="lineNum">     833 </span>            :     }
+<span class="lineNum">     834 </span>            : 
+<span class="lineNum">     835 </span>            :     /* Memory in *ppTokenUser is LocalFree():d by the caller */
+<span class="lineNum">     836 </span>            :     return TRUE;
+<span class="lineNum">     837 </span>            : }
+<span class="lineNum">     838 </span>            : 
+<span class="lineNum">     839 </span>            : #endif
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

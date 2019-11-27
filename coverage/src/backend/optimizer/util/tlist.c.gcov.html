@@ -1,0 +1,1347 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/optimizer/util/tlist.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/optimizer/util</a> - tlist.c<span style="font-size: 80%;"> (source / <a href="tlist.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">351</td>
+            <td class="headerCovTableEntry">376</td>
+            <td class="headerCovTableEntryHi">93.4 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">32</td>
+            <td class="headerCovTableEntry">33</td>
+            <td class="headerCovTableEntryHi">97.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * tlist.c
+<span class="lineNum">       4 </span>            :  *    Target list manipulation routines
+<span class="lineNum">       5 </span>            :  *
+<span class="lineNum">       6 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1994, Regents of the University of California
+<span class="lineNum">       8 </span>            :  *
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  * IDENTIFICATION
+<span class="lineNum">      11 </span>            :  *    src/backend/optimizer/util/tlist.c
+<span class="lineNum">      12 </span>            :  *
+<span class="lineNum">      13 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      14 </span>            :  */
+<span class="lineNum">      15 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      16 </span>            : 
+<span class="lineNum">      17 </span>            : #include &quot;nodes/makefuncs.h&quot;
+<span class="lineNum">      18 </span>            : #include &quot;nodes/nodeFuncs.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;optimizer/cost.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;optimizer/optimizer.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;optimizer/tlist.h&quot;
+<span class="lineNum">      22 </span>            : 
+<span class="lineNum">      23 </span>            : 
+<span class="lineNum">      24 </span>            : /* Test if an expression node represents a SRF call.  Beware multiple eval! */
+<span class="lineNum">      25 </span>            : #define IS_SRF_CALL(node) \
+<span class="lineNum">      26 </span>            :     ((IsA(node, FuncExpr) &amp;&amp; ((FuncExpr *) (node))-&gt;funcretset) || \
+<span class="lineNum">      27 </span>            :      (IsA(node, OpExpr) &amp;&amp; ((OpExpr *) (node))-&gt;opretset))
+<span class="lineNum">      28 </span>            : 
+<span class="lineNum">      29 </span>            : /*
+<span class="lineNum">      30 </span>            :  * Data structures for split_pathtarget_at_srfs().  To preserve the identity
+<span class="lineNum">      31 </span>            :  * of sortgroupref items even if they are textually equal(), what we track is
+<span class="lineNum">      32 </span>            :  * not just bare expressions but expressions plus their sortgroupref indexes.
+<span class="lineNum">      33 </span>            :  */
+<span class="lineNum">      34 </span>            : typedef struct
+<span class="lineNum">      35 </span>            : {
+<span class="lineNum">      36 </span>            :     Node       *expr;           /* some subexpression of a PathTarget */
+<span class="lineNum">      37 </span>            :     Index       sortgroupref;   /* its sortgroupref, or 0 if none */
+<span class="lineNum">      38 </span>            : } split_pathtarget_item;
+<span class="lineNum">      39 </span>            : 
+<span class="lineNum">      40 </span>            : typedef struct
+<span class="lineNum">      41 </span>            : {
+<span class="lineNum">      42 </span>            :     /* This is a List of bare expressions: */
+<span class="lineNum">      43 </span>            :     List       *input_target_exprs; /* exprs available from input */
+<span class="lineNum">      44 </span>            :     /* These are Lists of Lists of split_pathtarget_items: */
+<span class="lineNum">      45 </span>            :     List       *level_srfs;     /* SRF exprs to evaluate at each level */
+<span class="lineNum">      46 </span>            :     List       *level_input_vars;   /* input vars needed at each level */
+<span class="lineNum">      47 </span>            :     List       *level_input_srfs;   /* input SRFs needed at each level */
+<span class="lineNum">      48 </span>            :     /* These are Lists of split_pathtarget_items: */
+<span class="lineNum">      49 </span>            :     List       *current_input_vars; /* vars needed in current subexpr */
+<span class="lineNum">      50 </span>            :     List       *current_input_srfs; /* SRFs needed in current subexpr */
+<span class="lineNum">      51 </span>            :     /* Auxiliary data for current split_pathtarget_walker traversal: */
+<span class="lineNum">      52 </span>            :     int         current_depth;  /* max SRF depth in current subexpr */
+<span class="lineNum">      53 </span>            :     Index       current_sgref;  /* current subexpr's sortgroupref, or 0 */
+<span class="lineNum">      54 </span>            : } split_pathtarget_context;
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : static bool split_pathtarget_walker(Node *node,
+<span class="lineNum">      57 </span>            :                                     split_pathtarget_context *context);
+<span class="lineNum">      58 </span>            : static void add_sp_item_to_pathtarget(PathTarget *target,
+<span class="lineNum">      59 </span>            :                                       split_pathtarget_item *item);
+<span class="lineNum">      60 </span>            : static void add_sp_items_to_pathtarget(PathTarget *target, List *items);
+<span class="lineNum">      61 </span>            : 
+<span class="lineNum">      62 </span>            : 
+<span class="lineNum">      63 </span>            : /*****************************************************************************
+<span class="lineNum">      64 </span>            :  *      Target list creation and searching utilities
+<span class="lineNum">      65 </span>            :  *****************************************************************************/
+<span class="lineNum">      66 </span>            : 
+<span class="lineNum">      67 </span>            : /*
+<span class="lineNum">      68 </span>            :  * tlist_member
+<span class="lineNum">      69 </span>            :  *    Finds the (first) member of the given tlist whose expression is
+<span class="lineNum">      70 </span>            :  *    equal() to the given expression.  Result is NULL if no such member.
+<a name="71"><span class="lineNum">      71 </span>            :  */</a>
+<span class="lineNum">      72 </span>            : TargetEntry *
+<span class="lineNum">      73 </span><span class="lineCov">       6740 : tlist_member(Expr *node, List *targetlist)</span>
+<span class="lineNum">      74 </span>            : {
+<span class="lineNum">      75 </span>            :     ListCell   *temp;
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span><span class="lineCov">      33150 :     foreach(temp, targetlist)</span>
+<span class="lineNum">      78 </span>            :     {
+<span class="lineNum">      79 </span><span class="lineCov">      28422 :         TargetEntry *tlentry = (TargetEntry *) lfirst(temp);</span>
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span><span class="lineCov">      28422 :         if (equal(node, tlentry-&gt;expr))</span>
+<span class="lineNum">      82 </span><span class="lineCov">       2012 :             return tlentry;</span>
+<span class="lineNum">      83 </span>            :     }
+<span class="lineNum">      84 </span><span class="lineCov">       4728 :     return NULL;</span>
+<span class="lineNum">      85 </span>            : }
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            : /*
+<span class="lineNum">      88 </span>            :  * tlist_member_ignore_relabel
+<span class="lineNum">      89 </span>            :  *    Same as above, except that we ignore top-level RelabelType nodes
+<span class="lineNum">      90 </span>            :  *    while checking for a match.  This is needed for some scenarios
+<span class="lineNum">      91 </span>            :  *    involving binary-compatible sort operations.
+<a name="92"><span class="lineNum">      92 </span>            :  */</a>
+<span class="lineNum">      93 </span>            : TargetEntry *
+<span class="lineNum">      94 </span><span class="lineCov">        200 : tlist_member_ignore_relabel(Expr *node, List *targetlist)</span>
+<span class="lineNum">      95 </span>            : {
+<span class="lineNum">      96 </span>            :     ListCell   *temp;
+<span class="lineNum">      97 </span>            : 
+<span class="lineNum">      98 </span><span class="lineCov">        400 :     while (node &amp;&amp; IsA(node, RelabelType))</span>
+<span class="lineNum">      99 </span><span class="lineNoCov">          0 :         node = ((RelabelType *) node)-&gt;arg;</span>
+<span class="lineNum">     100 </span>            : 
+<span class="lineNum">     101 </span><span class="lineCov">        422 :     foreach(temp, targetlist)</span>
+<span class="lineNum">     102 </span>            :     {
+<span class="lineNum">     103 </span><span class="lineCov">        336 :         TargetEntry *tlentry = (TargetEntry *) lfirst(temp);</span>
+<span class="lineNum">     104 </span><span class="lineCov">        336 :         Expr       *tlexpr = tlentry-&gt;expr;</span>
+<span class="lineNum">     105 </span>            : 
+<span class="lineNum">     106 </span><span class="lineCov">        672 :         while (tlexpr &amp;&amp; IsA(tlexpr, RelabelType))</span>
+<span class="lineNum">     107 </span><span class="lineNoCov">          0 :             tlexpr = ((RelabelType *) tlexpr)-&gt;arg;</span>
+<span class="lineNum">     108 </span>            : 
+<span class="lineNum">     109 </span><span class="lineCov">        336 :         if (equal(node, tlexpr))</span>
+<span class="lineNum">     110 </span><span class="lineCov">        114 :             return tlentry;</span>
+<span class="lineNum">     111 </span>            :     }
+<span class="lineNum">     112 </span><span class="lineCov">         86 :     return NULL;</span>
+<span class="lineNum">     113 </span>            : }
+<span class="lineNum">     114 </span>            : 
+<span class="lineNum">     115 </span>            : /*
+<span class="lineNum">     116 </span>            :  * tlist_member_match_var
+<span class="lineNum">     117 </span>            :  *    Same as above, except that we match the provided Var on the basis
+<span class="lineNum">     118 </span>            :  *    of varno/varattno/varlevelsup/vartype only, rather than full equal().
+<span class="lineNum">     119 </span>            :  *
+<span class="lineNum">     120 </span>            :  * This is needed in some cases where we can't be sure of an exact typmod
+<span class="lineNum">     121 </span>            :  * match.  For safety, though, we insist on vartype match.
+<a name="122"><span class="lineNum">     122 </span>            :  */</a>
+<span class="lineNum">     123 </span>            : static TargetEntry *
+<span class="lineNum">     124 </span><span class="lineCov">        524 : tlist_member_match_var(Var *var, List *targetlist)</span>
+<span class="lineNum">     125 </span>            : {
+<span class="lineNum">     126 </span>            :     ListCell   *temp;
+<span class="lineNum">     127 </span>            : 
+<span class="lineNum">     128 </span><span class="lineCov">       1616 :     foreach(temp, targetlist)</span>
+<span class="lineNum">     129 </span>            :     {
+<span class="lineNum">     130 </span><span class="lineCov">       1616 :         TargetEntry *tlentry = (TargetEntry *) lfirst(temp);</span>
+<span class="lineNum">     131 </span><span class="lineCov">       1616 :         Var        *tlvar = (Var *) tlentry-&gt;expr;</span>
+<span class="lineNum">     132 </span>            : 
+<span class="lineNum">     133 </span><span class="lineCov">       1616 :         if (!tlvar || !IsA(tlvar, Var))</span>
+<span class="lineNum">     134 </span><span class="lineNoCov">          0 :             continue;</span>
+<span class="lineNum">     135 </span><span class="lineCov">       3232 :         if (var-&gt;varno == tlvar-&gt;varno &amp;&amp;</span>
+<span class="lineNum">     136 </span><span class="lineCov">       2140 :             var-&gt;varattno == tlvar-&gt;varattno &amp;&amp;</span>
+<span class="lineNum">     137 </span><span class="lineCov">       1048 :             var-&gt;varlevelsup == tlvar-&gt;varlevelsup &amp;&amp;</span>
+<span class="lineNum">     138 </span><span class="lineCov">        524 :             var-&gt;vartype == tlvar-&gt;vartype)</span>
+<span class="lineNum">     139 </span><span class="lineCov">        524 :             return tlentry;</span>
+<span class="lineNum">     140 </span>            :     }
+<span class="lineNum">     141 </span><span class="lineNoCov">          0 :     return NULL;</span>
+<span class="lineNum">     142 </span>            : }
+<span class="lineNum">     143 </span>            : 
+<span class="lineNum">     144 </span>            : /*
+<span class="lineNum">     145 </span>            :  * add_to_flat_tlist
+<span class="lineNum">     146 </span>            :  *      Add more items to a flattened tlist (if they're not already in it)
+<span class="lineNum">     147 </span>            :  *
+<span class="lineNum">     148 </span>            :  * 'tlist' is the flattened tlist
+<span class="lineNum">     149 </span>            :  * 'exprs' is a list of expressions (usually, but not necessarily, Vars)
+<span class="lineNum">     150 </span>            :  *
+<span class="lineNum">     151 </span>            :  * Returns the extended tlist.
+<a name="152"><span class="lineNum">     152 </span>            :  */</a>
+<span class="lineNum">     153 </span>            : List *
+<span class="lineNum">     154 </span><span class="lineNoCov">          0 : add_to_flat_tlist(List *tlist, List *exprs)</span>
+<span class="lineNum">     155 </span>            : {
+<span class="lineNum">     156 </span><span class="lineNoCov">          0 :     int         next_resno = list_length(tlist) + 1;</span>
+<span class="lineNum">     157 </span>            :     ListCell   *lc;
+<span class="lineNum">     158 </span>            : 
+<span class="lineNum">     159 </span><span class="lineNoCov">          0 :     foreach(lc, exprs)</span>
+<span class="lineNum">     160 </span>            :     {
+<span class="lineNum">     161 </span><span class="lineNoCov">          0 :         Expr       *expr = (Expr *) lfirst(lc);</span>
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span><span class="lineNoCov">          0 :         if (!tlist_member(expr, tlist))</span>
+<span class="lineNum">     164 </span>            :         {
+<span class="lineNum">     165 </span>            :             TargetEntry *tle;
+<span class="lineNum">     166 </span>            : 
+<span class="lineNum">     167 </span><span class="lineNoCov">          0 :             tle = makeTargetEntry(copyObject(expr), /* copy needed?? */</span>
+<span class="lineNum">     168 </span><span class="lineNoCov">          0 :                                   next_resno++,</span>
+<span class="lineNum">     169 </span>            :                                   NULL,
+<span class="lineNum">     170 </span>            :                                   false);
+<span class="lineNum">     171 </span><span class="lineNoCov">          0 :             tlist = lappend(tlist, tle);</span>
+<span class="lineNum">     172 </span>            :         }
+<span class="lineNum">     173 </span>            :     }
+<span class="lineNum">     174 </span><span class="lineNoCov">          0 :     return tlist;</span>
+<span class="lineNum">     175 </span>            : }
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span>            : 
+<span class="lineNum">     178 </span>            : /*
+<span class="lineNum">     179 </span>            :  * get_tlist_exprs
+<span class="lineNum">     180 </span>            :  *      Get just the expression subtrees of a tlist
+<span class="lineNum">     181 </span>            :  *
+<span class="lineNum">     182 </span>            :  * Resjunk columns are ignored unless includeJunk is true
+<a name="183"><span class="lineNum">     183 </span>            :  */</a>
+<span class="lineNum">     184 </span>            : List *
+<span class="lineNum">     185 </span><span class="lineCov">       2016 : get_tlist_exprs(List *tlist, bool includeJunk)</span>
+<span class="lineNum">     186 </span>            : {
+<span class="lineNum">     187 </span><span class="lineCov">       2016 :     List       *result = NIL;</span>
+<span class="lineNum">     188 </span>            :     ListCell   *l;
+<span class="lineNum">     189 </span>            : 
+<span class="lineNum">     190 </span><span class="lineCov">       9238 :     foreach(l, tlist)</span>
+<span class="lineNum">     191 </span>            :     {
+<span class="lineNum">     192 </span><span class="lineCov">       7222 :         TargetEntry *tle = (TargetEntry *) lfirst(l);</span>
+<span class="lineNum">     193 </span>            : 
+<span class="lineNum">     194 </span><span class="lineCov">       7222 :         if (tle-&gt;resjunk &amp;&amp; !includeJunk)</span>
+<span class="lineNum">     195 </span><span class="lineCov">          6 :             continue;</span>
+<span class="lineNum">     196 </span>            : 
+<span class="lineNum">     197 </span><span class="lineCov">       7216 :         result = lappend(result, tle-&gt;expr);</span>
+<span class="lineNum">     198 </span>            :     }
+<span class="lineNum">     199 </span><span class="lineCov">       2016 :     return result;</span>
+<span class="lineNum">     200 </span>            : }
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span>            : 
+<span class="lineNum">     203 </span>            : /*
+<span class="lineNum">     204 </span>            :  * count_nonjunk_tlist_entries
+<span class="lineNum">     205 </span>            :  *      What it says ...
+<a name="206"><span class="lineNum">     206 </span>            :  */</a>
+<span class="lineNum">     207 </span>            : int
+<span class="lineNum">     208 </span><span class="lineCov">       3868 : count_nonjunk_tlist_entries(List *tlist)</span>
+<span class="lineNum">     209 </span>            : {
+<span class="lineNum">     210 </span><span class="lineCov">       3868 :     int         len = 0;</span>
+<span class="lineNum">     211 </span>            :     ListCell   *l;
+<span class="lineNum">     212 </span>            : 
+<span class="lineNum">     213 </span><span class="lineCov">       7862 :     foreach(l, tlist)</span>
+<span class="lineNum">     214 </span>            :     {
+<span class="lineNum">     215 </span><span class="lineCov">       3994 :         TargetEntry *tle = (TargetEntry *) lfirst(l);</span>
+<span class="lineNum">     216 </span>            : 
+<span class="lineNum">     217 </span><span class="lineCov">       3994 :         if (!tle-&gt;resjunk)</span>
+<span class="lineNum">     218 </span><span class="lineCov">       3894 :             len++;</span>
+<span class="lineNum">     219 </span>            :     }
+<span class="lineNum">     220 </span><span class="lineCov">       3868 :     return len;</span>
+<span class="lineNum">     221 </span>            : }
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span>            : 
+<span class="lineNum">     224 </span>            : /*
+<span class="lineNum">     225 </span>            :  * tlist_same_exprs
+<span class="lineNum">     226 </span>            :  *      Check whether two target lists contain the same expressions
+<span class="lineNum">     227 </span>            :  *
+<span class="lineNum">     228 </span>            :  * Note: this function is used to decide whether it's safe to jam a new tlist
+<span class="lineNum">     229 </span>            :  * into a non-projection-capable plan node.  Obviously we can't do that unless
+<span class="lineNum">     230 </span>            :  * the node's tlist shows it already returns the column values we want.
+<span class="lineNum">     231 </span>            :  * However, we can ignore the TargetEntry attributes resname, ressortgroupref,
+<span class="lineNum">     232 </span>            :  * resorigtbl, resorigcol, and resjunk, because those are only labelings that
+<span class="lineNum">     233 </span>            :  * don't affect the row values computed by the node.  (Moreover, if we didn't
+<span class="lineNum">     234 </span>            :  * ignore them, we'd frequently fail to make the desired optimization, since
+<span class="lineNum">     235 </span>            :  * the planner tends to not bother to make resname etc. valid in intermediate
+<span class="lineNum">     236 </span>            :  * plan nodes.)  Note that on success, the caller must still jam the desired
+<span class="lineNum">     237 </span>            :  * tlist into the plan node, else it won't have the desired labeling fields.
+<a name="238"><span class="lineNum">     238 </span>            :  */</a>
+<span class="lineNum">     239 </span>            : bool
+<span class="lineNum">     240 </span><span class="lineCov">       2408 : tlist_same_exprs(List *tlist1, List *tlist2)</span>
+<span class="lineNum">     241 </span>            : {
+<span class="lineNum">     242 </span>            :     ListCell   *lc1,
+<span class="lineNum">     243 </span>            :                *lc2;
+<span class="lineNum">     244 </span>            : 
+<span class="lineNum">     245 </span><span class="lineCov">       2408 :     if (list_length(tlist1) != list_length(tlist2))</span>
+<span class="lineNum">     246 </span><span class="lineCov">         94 :         return false;           /* not same length, so can't match */</span>
+<span class="lineNum">     247 </span>            : 
+<span class="lineNum">     248 </span><span class="lineCov">       7976 :     forboth(lc1, tlist1, lc2, tlist2)</span>
+<span class="lineNum">     249 </span>            :     {
+<span class="lineNum">     250 </span><span class="lineCov">       5760 :         TargetEntry *tle1 = (TargetEntry *) lfirst(lc1);</span>
+<span class="lineNum">     251 </span><span class="lineCov">       5760 :         TargetEntry *tle2 = (TargetEntry *) lfirst(lc2);</span>
+<span class="lineNum">     252 </span>            : 
+<span class="lineNum">     253 </span><span class="lineCov">       5760 :         if (!equal(tle1-&gt;expr, tle2-&gt;expr))</span>
+<span class="lineNum">     254 </span><span class="lineCov">         98 :             return false;</span>
+<span class="lineNum">     255 </span>            :     }
+<span class="lineNum">     256 </span>            : 
+<span class="lineNum">     257 </span><span class="lineCov">       2216 :     return true;</span>
+<span class="lineNum">     258 </span>            : }
+<span class="lineNum">     259 </span>            : 
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span>            : /*
+<span class="lineNum">     262 </span>            :  * Does tlist have same output datatypes as listed in colTypes?
+<span class="lineNum">     263 </span>            :  *
+<span class="lineNum">     264 </span>            :  * Resjunk columns are ignored if junkOK is true; otherwise presence of
+<span class="lineNum">     265 </span>            :  * a resjunk column will always cause a 'false' result.
+<span class="lineNum">     266 </span>            :  *
+<span class="lineNum">     267 </span>            :  * Note: currently no callers care about comparing typmods.
+<a name="268"><span class="lineNum">     268 </span>            :  */</a>
+<span class="lineNum">     269 </span>            : bool
+<span class="lineNum">     270 </span><span class="lineCov">       4074 : tlist_same_datatypes(List *tlist, List *colTypes, bool junkOK)</span>
+<span class="lineNum">     271 </span>            : {
+<span class="lineNum">     272 </span>            :     ListCell   *l;
+<span class="lineNum">     273 </span><span class="lineCov">       4074 :     ListCell   *curColType = list_head(colTypes);</span>
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span><span class="lineCov">      15336 :     foreach(l, tlist)</span>
+<span class="lineNum">     276 </span>            :     {
+<span class="lineNum">     277 </span><span class="lineCov">      11282 :         TargetEntry *tle = (TargetEntry *) lfirst(l);</span>
+<span class="lineNum">     278 </span>            : 
+<span class="lineNum">     279 </span><span class="lineCov">      11282 :         if (tle-&gt;resjunk)</span>
+<span class="lineNum">     280 </span>            :         {
+<span class="lineNum">     281 </span><span class="lineCov">       1014 :             if (!junkOK)</span>
+<span class="lineNum">     282 </span><span class="lineCov">         22 :                 return false;</span>
+<span class="lineNum">     283 </span>            :         }
+<span class="lineNum">     284 </span>            :         else
+<span class="lineNum">     285 </span>            :         {
+<span class="lineNum">     286 </span><span class="lineCov">      10268 :             if (curColType == NULL)</span>
+<span class="lineNum">     287 </span><span class="lineNoCov">          0 :                 return false;   /* tlist longer than colTypes */</span>
+<span class="lineNum">     288 </span><span class="lineCov">      10268 :             if (exprType((Node *) tle-&gt;expr) != lfirst_oid(curColType))</span>
+<span class="lineNum">     289 </span><span class="lineCov">         18 :                 return false;</span>
+<span class="lineNum">     290 </span><span class="lineCov">      10250 :             curColType = lnext(colTypes, curColType);</span>
+<span class="lineNum">     291 </span>            :         }
+<span class="lineNum">     292 </span>            :     }
+<span class="lineNum">     293 </span><span class="lineCov">       4054 :     if (curColType != NULL)</span>
+<span class="lineNum">     294 </span><span class="lineNoCov">          0 :         return false;           /* tlist shorter than colTypes */</span>
+<span class="lineNum">     295 </span><span class="lineCov">       4054 :     return true;</span>
+<span class="lineNum">     296 </span>            : }
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span>            : /*
+<span class="lineNum">     299 </span>            :  * Does tlist have same exposed collations as listed in colCollations?
+<span class="lineNum">     300 </span>            :  *
+<span class="lineNum">     301 </span>            :  * Identical logic to the above, but for collations.
+<a name="302"><span class="lineNum">     302 </span>            :  */</a>
+<span class="lineNum">     303 </span>            : bool
+<span class="lineNum">     304 </span><span class="lineCov">       1138 : tlist_same_collations(List *tlist, List *colCollations, bool junkOK)</span>
+<span class="lineNum">     305 </span>            : {
+<span class="lineNum">     306 </span>            :     ListCell   *l;
+<span class="lineNum">     307 </span><span class="lineCov">       1138 :     ListCell   *curColColl = list_head(colCollations);</span>
+<span class="lineNum">     308 </span>            : 
+<span class="lineNum">     309 </span><span class="lineCov">       5922 :     foreach(l, tlist)</span>
+<span class="lineNum">     310 </span>            :     {
+<span class="lineNum">     311 </span><span class="lineCov">       4784 :         TargetEntry *tle = (TargetEntry *) lfirst(l);</span>
+<span class="lineNum">     312 </span>            : 
+<span class="lineNum">     313 </span><span class="lineCov">       4784 :         if (tle-&gt;resjunk)</span>
+<span class="lineNum">     314 </span>            :         {
+<span class="lineNum">     315 </span><span class="lineCov">       1012 :             if (!junkOK)</span>
+<span class="lineNum">     316 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">     317 </span>            :         }
+<span class="lineNum">     318 </span>            :         else
+<span class="lineNum">     319 </span>            :         {
+<span class="lineNum">     320 </span><span class="lineCov">       3772 :             if (curColColl == NULL)</span>
+<span class="lineNum">     321 </span><span class="lineNoCov">          0 :                 return false;   /* tlist longer than colCollations */</span>
+<span class="lineNum">     322 </span><span class="lineCov">       3772 :             if (exprCollation((Node *) tle-&gt;expr) != lfirst_oid(curColColl))</span>
+<span class="lineNum">     323 </span><span class="lineNoCov">          0 :                 return false;</span>
+<span class="lineNum">     324 </span><span class="lineCov">       3772 :             curColColl = lnext(colCollations, curColColl);</span>
+<span class="lineNum">     325 </span>            :         }
+<span class="lineNum">     326 </span>            :     }
+<span class="lineNum">     327 </span><span class="lineCov">       1138 :     if (curColColl != NULL)</span>
+<span class="lineNum">     328 </span><span class="lineNoCov">          0 :         return false;           /* tlist shorter than colCollations */</span>
+<span class="lineNum">     329 </span><span class="lineCov">       1138 :     return true;</span>
+<span class="lineNum">     330 </span>            : }
+<span class="lineNum">     331 </span>            : 
+<span class="lineNum">     332 </span>            : /*
+<span class="lineNum">     333 </span>            :  * apply_tlist_labeling
+<span class="lineNum">     334 </span>            :  *      Apply the TargetEntry labeling attributes of src_tlist to dest_tlist
+<span class="lineNum">     335 </span>            :  *
+<span class="lineNum">     336 </span>            :  * This is useful for reattaching column names etc to a plan's final output
+<span class="lineNum">     337 </span>            :  * targetlist.
+<a name="338"><span class="lineNum">     338 </span>            :  */</a>
+<span class="lineNum">     339 </span>            : void
+<span class="lineNum">     340 </span><span class="lineCov">      74458 : apply_tlist_labeling(List *dest_tlist, List *src_tlist)</span>
+<span class="lineNum">     341 </span>            : {
+<span class="lineNum">     342 </span>            :     ListCell   *ld,
+<span class="lineNum">     343 </span>            :                *ls;
+<span class="lineNum">     344 </span>            : 
+<span class="lineNum">     345 </span><span class="lineCov">      74458 :     Assert(list_length(dest_tlist) == list_length(src_tlist));</span>
+<span class="lineNum">     346 </span><span class="lineCov">     262392 :     forboth(ld, dest_tlist, ls, src_tlist)</span>
+<span class="lineNum">     347 </span>            :     {
+<span class="lineNum">     348 </span><span class="lineCov">     187934 :         TargetEntry *dest_tle = (TargetEntry *) lfirst(ld);</span>
+<span class="lineNum">     349 </span><span class="lineCov">     187934 :         TargetEntry *src_tle = (TargetEntry *) lfirst(ls);</span>
+<span class="lineNum">     350 </span>            : 
+<span class="lineNum">     351 </span><span class="lineCov">     187934 :         Assert(dest_tle-&gt;resno == src_tle-&gt;resno);</span>
+<span class="lineNum">     352 </span><span class="lineCov">     187934 :         dest_tle-&gt;resname = src_tle-&gt;resname;</span>
+<span class="lineNum">     353 </span><span class="lineCov">     187934 :         dest_tle-&gt;ressortgroupref = src_tle-&gt;ressortgroupref;</span>
+<span class="lineNum">     354 </span><span class="lineCov">     187934 :         dest_tle-&gt;resorigtbl = src_tle-&gt;resorigtbl;</span>
+<span class="lineNum">     355 </span><span class="lineCov">     187934 :         dest_tle-&gt;resorigcol = src_tle-&gt;resorigcol;</span>
+<span class="lineNum">     356 </span><span class="lineCov">     187934 :         dest_tle-&gt;resjunk = src_tle-&gt;resjunk;</span>
+<span class="lineNum">     357 </span>            :     }
+<span class="lineNum">     358 </span><span class="lineCov">      74458 : }</span>
+<span class="lineNum">     359 </span>            : 
+<span class="lineNum">     360 </span>            : 
+<span class="lineNum">     361 </span>            : /*
+<span class="lineNum">     362 </span>            :  * get_sortgroupref_tle
+<span class="lineNum">     363 </span>            :  *      Find the targetlist entry matching the given SortGroupRef index,
+<span class="lineNum">     364 </span>            :  *      and return it.
+<a name="365"><span class="lineNum">     365 </span>            :  */</a>
+<span class="lineNum">     366 </span>            : TargetEntry *
+<span class="lineNum">     367 </span><span class="lineCov">      49070 : get_sortgroupref_tle(Index sortref, List *targetList)</span>
+<span class="lineNum">     368 </span>            : {
+<span class="lineNum">     369 </span>            :     ListCell   *l;
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineCov">     112474 :     foreach(l, targetList)</span>
+<span class="lineNum">     372 </span>            :     {
+<span class="lineNum">     373 </span><span class="lineCov">     112474 :         TargetEntry *tle = (TargetEntry *) lfirst(l);</span>
+<span class="lineNum">     374 </span>            : 
+<span class="lineNum">     375 </span><span class="lineCov">     112474 :         if (tle-&gt;ressortgroupref == sortref)</span>
+<span class="lineNum">     376 </span><span class="lineCov">      49070 :             return tle;</span>
+<span class="lineNum">     377 </span>            :     }
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span><span class="lineNoCov">          0 :     elog(ERROR, &quot;ORDER/GROUP BY expression not found in targetlist&quot;);</span>
+<span class="lineNum">     380 </span>            :     return NULL;                /* keep compiler quiet */
+<span class="lineNum">     381 </span>            : }
+<span class="lineNum">     382 </span>            : 
+<span class="lineNum">     383 </span>            : /*
+<span class="lineNum">     384 </span>            :  * get_sortgroupclause_tle
+<span class="lineNum">     385 </span>            :  *      Find the targetlist entry matching the given SortGroupClause
+<span class="lineNum">     386 </span>            :  *      by ressortgroupref, and return it.
+<a name="387"><span class="lineNum">     387 </span>            :  */</a>
+<span class="lineNum">     388 </span>            : TargetEntry *
+<span class="lineNum">     389 </span><span class="lineCov">      48924 : get_sortgroupclause_tle(SortGroupClause *sgClause,</span>
+<span class="lineNum">     390 </span>            :                         List *targetList)
+<span class="lineNum">     391 </span>            : {
+<span class="lineNum">     392 </span><span class="lineCov">      48924 :     return get_sortgroupref_tle(sgClause-&gt;tleSortGroupRef, targetList);</span>
+<span class="lineNum">     393 </span>            : }
+<span class="lineNum">     394 </span>            : 
+<span class="lineNum">     395 </span>            : /*
+<span class="lineNum">     396 </span>            :  * get_sortgroupclause_expr
+<span class="lineNum">     397 </span>            :  *      Find the targetlist entry matching the given SortGroupClause
+<span class="lineNum">     398 </span>            :  *      by ressortgroupref, and return its expression.
+<a name="399"><span class="lineNum">     399 </span>            :  */</a>
+<span class="lineNum">     400 </span>            : Node *
+<span class="lineNum">     401 </span><span class="lineCov">      28340 : get_sortgroupclause_expr(SortGroupClause *sgClause, List *targetList)</span>
+<span class="lineNum">     402 </span>            : {
+<span class="lineNum">     403 </span><span class="lineCov">      28340 :     TargetEntry *tle = get_sortgroupclause_tle(sgClause, targetList);</span>
+<span class="lineNum">     404 </span>            : 
+<span class="lineNum">     405 </span><span class="lineCov">      28340 :     return (Node *) tle-&gt;expr;</span>
+<span class="lineNum">     406 </span>            : }
+<span class="lineNum">     407 </span>            : 
+<span class="lineNum">     408 </span>            : /*
+<span class="lineNum">     409 </span>            :  * get_sortgrouplist_exprs
+<span class="lineNum">     410 </span>            :  *      Given a list of SortGroupClauses, build a list
+<span class="lineNum">     411 </span>            :  *      of the referenced targetlist expressions.
+<a name="412"><span class="lineNum">     412 </span>            :  */</a>
+<span class="lineNum">     413 </span>            : List *
+<span class="lineNum">     414 </span><span class="lineCov">       3034 : get_sortgrouplist_exprs(List *sgClauses, List *targetList)</span>
+<span class="lineNum">     415 </span>            : {
+<span class="lineNum">     416 </span><span class="lineCov">       3034 :     List       *result = NIL;</span>
+<span class="lineNum">     417 </span>            :     ListCell   *l;
+<span class="lineNum">     418 </span>            : 
+<span class="lineNum">     419 </span><span class="lineCov">       9274 :     foreach(l, sgClauses)</span>
+<span class="lineNum">     420 </span>            :     {
+<span class="lineNum">     421 </span><span class="lineCov">       6240 :         SortGroupClause *sortcl = (SortGroupClause *) lfirst(l);</span>
+<span class="lineNum">     422 </span>            :         Node       *sortexpr;
+<span class="lineNum">     423 </span>            : 
+<span class="lineNum">     424 </span><span class="lineCov">       6240 :         sortexpr = get_sortgroupclause_expr(sortcl, targetList);</span>
+<span class="lineNum">     425 </span><span class="lineCov">       6240 :         result = lappend(result, sortexpr);</span>
+<span class="lineNum">     426 </span>            :     }
+<span class="lineNum">     427 </span><span class="lineCov">       3034 :     return result;</span>
+<span class="lineNum">     428 </span>            : }
+<span class="lineNum">     429 </span>            : 
+<span class="lineNum">     430 </span>            : 
+<span class="lineNum">     431 </span>            : /*****************************************************************************
+<span class="lineNum">     432 </span>            :  *      Functions to extract data from a list of SortGroupClauses
+<span class="lineNum">     433 </span>            :  *
+<span class="lineNum">     434 </span>            :  * These don't really belong in tlist.c, but they are sort of related to the
+<span class="lineNum">     435 </span>            :  * functions just above, and they don't seem to deserve their own file.
+<span class="lineNum">     436 </span>            :  *****************************************************************************/
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span>            : /*
+<span class="lineNum">     439 </span>            :  * get_sortgroupref_clause
+<span class="lineNum">     440 </span>            :  *      Find the SortGroupClause matching the given SortGroupRef index,
+<span class="lineNum">     441 </span>            :  *      and return it.
+<a name="442"><span class="lineNum">     442 </span>            :  */</a>
+<span class="lineNum">     443 </span>            : SortGroupClause *
+<span class="lineNum">     444 </span><span class="lineCov">       1286 : get_sortgroupref_clause(Index sortref, List *clauses)</span>
+<span class="lineNum">     445 </span>            : {
+<span class="lineNum">     446 </span>            :     ListCell   *l;
+<span class="lineNum">     447 </span>            : 
+<span class="lineNum">     448 </span><span class="lineCov">       2562 :     foreach(l, clauses)</span>
+<span class="lineNum">     449 </span>            :     {
+<span class="lineNum">     450 </span><span class="lineCov">       2562 :         SortGroupClause *cl = (SortGroupClause *) lfirst(l);</span>
+<span class="lineNum">     451 </span>            : 
+<span class="lineNum">     452 </span><span class="lineCov">       2562 :         if (cl-&gt;tleSortGroupRef == sortref)</span>
+<span class="lineNum">     453 </span><span class="lineCov">       1286 :             return cl;</span>
+<span class="lineNum">     454 </span>            :     }
+<span class="lineNum">     455 </span>            : 
+<span class="lineNum">     456 </span><span class="lineNoCov">          0 :     elog(ERROR, &quot;ORDER/GROUP BY expression not found in list&quot;);</span>
+<span class="lineNum">     457 </span>            :     return NULL;                /* keep compiler quiet */
+<span class="lineNum">     458 </span>            : }
+<span class="lineNum">     459 </span>            : 
+<span class="lineNum">     460 </span>            : /*
+<span class="lineNum">     461 </span>            :  * get_sortgroupref_clause_noerr
+<span class="lineNum">     462 </span>            :  *      As above, but return NULL rather than throwing an error if not found.
+<a name="463"><span class="lineNum">     463 </span>            :  */</a>
+<span class="lineNum">     464 </span>            : SortGroupClause *
+<span class="lineNum">     465 </span><span class="lineCov">       5498 : get_sortgroupref_clause_noerr(Index sortref, List *clauses)</span>
+<span class="lineNum">     466 </span>            : {
+<span class="lineNum">     467 </span>            :     ListCell   *l;
+<span class="lineNum">     468 </span>            : 
+<span class="lineNum">     469 </span><span class="lineCov">      11356 :     foreach(l, clauses)</span>
+<span class="lineNum">     470 </span>            :     {
+<span class="lineNum">     471 </span><span class="lineCov">      10368 :         SortGroupClause *cl = (SortGroupClause *) lfirst(l);</span>
+<span class="lineNum">     472 </span>            : 
+<span class="lineNum">     473 </span><span class="lineCov">      10368 :         if (cl-&gt;tleSortGroupRef == sortref)</span>
+<span class="lineNum">     474 </span><span class="lineCov">       4510 :             return cl;</span>
+<span class="lineNum">     475 </span>            :     }
+<span class="lineNum">     476 </span>            : 
+<span class="lineNum">     477 </span><span class="lineCov">        988 :     return NULL;</span>
+<span class="lineNum">     478 </span>            : }
+<span class="lineNum">     479 </span>            : 
+<span class="lineNum">     480 </span>            : /*
+<span class="lineNum">     481 </span>            :  * extract_grouping_ops - make an array of the equality operator OIDs
+<span class="lineNum">     482 </span>            :  *      for a SortGroupClause list
+<a name="483"><span class="lineNum">     483 </span>            :  */</a>
+<span class="lineNum">     484 </span>            : Oid *
+<span class="lineNum">     485 </span><span class="lineCov">       7854 : extract_grouping_ops(List *groupClause)</span>
+<span class="lineNum">     486 </span>            : {
+<span class="lineNum">     487 </span><span class="lineCov">       7854 :     int         numCols = list_length(groupClause);</span>
+<span class="lineNum">     488 </span><span class="lineCov">       7854 :     int         colno = 0;</span>
+<span class="lineNum">     489 </span>            :     Oid        *groupOperators;
+<span class="lineNum">     490 </span>            :     ListCell   *glitem;
+<span class="lineNum">     491 </span>            : 
+<span class="lineNum">     492 </span><span class="lineCov">       7854 :     groupOperators = (Oid *) palloc(sizeof(Oid) * numCols);</span>
+<span class="lineNum">     493 </span>            : 
+<span class="lineNum">     494 </span><span class="lineCov">      12734 :     foreach(glitem, groupClause)</span>
+<span class="lineNum">     495 </span>            :     {
+<span class="lineNum">     496 </span><span class="lineCov">       4880 :         SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);</span>
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span><span class="lineCov">       4880 :         groupOperators[colno] = groupcl-&gt;eqop;</span>
+<span class="lineNum">     499 </span><span class="lineCov">       4880 :         Assert(OidIsValid(groupOperators[colno]));</span>
+<span class="lineNum">     500 </span><span class="lineCov">       4880 :         colno++;</span>
+<span class="lineNum">     501 </span>            :     }
+<span class="lineNum">     502 </span>            : 
+<span class="lineNum">     503 </span><span class="lineCov">       7854 :     return groupOperators;</span>
+<span class="lineNum">     504 </span>            : }
+<span class="lineNum">     505 </span>            : 
+<span class="lineNum">     506 </span>            : /*
+<span class="lineNum">     507 </span>            :  * extract_grouping_collations - make an array of the grouping column collations
+<span class="lineNum">     508 </span>            :  *      for a SortGroupClause list
+<a name="509"><span class="lineNum">     509 </span>            :  */</a>
+<span class="lineNum">     510 </span>            : Oid *
+<span class="lineNum">     511 </span><span class="lineCov">       7854 : extract_grouping_collations(List *groupClause, List *tlist)</span>
+<span class="lineNum">     512 </span>            : {
+<span class="lineNum">     513 </span><span class="lineCov">       7854 :     int         numCols = list_length(groupClause);</span>
+<span class="lineNum">     514 </span><span class="lineCov">       7854 :     int         colno = 0;</span>
+<span class="lineNum">     515 </span>            :     Oid        *grpCollations;
+<span class="lineNum">     516 </span>            :     ListCell   *glitem;
+<span class="lineNum">     517 </span>            : 
+<span class="lineNum">     518 </span><span class="lineCov">       7854 :     grpCollations = (Oid *) palloc(sizeof(Oid) * numCols);</span>
+<span class="lineNum">     519 </span>            : 
+<span class="lineNum">     520 </span><span class="lineCov">      12734 :     foreach(glitem, groupClause)</span>
+<span class="lineNum">     521 </span>            :     {
+<span class="lineNum">     522 </span><span class="lineCov">       4880 :         SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);</span>
+<span class="lineNum">     523 </span><span class="lineCov">       4880 :         TargetEntry *tle = get_sortgroupclause_tle(groupcl, tlist);</span>
+<span class="lineNum">     524 </span>            : 
+<span class="lineNum">     525 </span><span class="lineCov">       4880 :         grpCollations[colno++] = exprCollation((Node *) tle-&gt;expr);</span>
+<span class="lineNum">     526 </span>            :     }
+<span class="lineNum">     527 </span>            : 
+<span class="lineNum">     528 </span><span class="lineCov">       7854 :     return grpCollations;</span>
+<span class="lineNum">     529 </span>            : }
+<span class="lineNum">     530 </span>            : 
+<span class="lineNum">     531 </span>            : /*
+<span class="lineNum">     532 </span>            :  * extract_grouping_cols - make an array of the grouping column resnos
+<span class="lineNum">     533 </span>            :  *      for a SortGroupClause list
+<a name="534"><span class="lineNum">     534 </span>            :  */</a>
+<span class="lineNum">     535 </span>            : AttrNumber *
+<span class="lineNum">     536 </span><span class="lineCov">       7456 : extract_grouping_cols(List *groupClause, List *tlist)</span>
+<span class="lineNum">     537 </span>            : {
+<span class="lineNum">     538 </span>            :     AttrNumber *grpColIdx;
+<span class="lineNum">     539 </span><span class="lineCov">       7456 :     int         numCols = list_length(groupClause);</span>
+<span class="lineNum">     540 </span><span class="lineCov">       7456 :     int         colno = 0;</span>
+<span class="lineNum">     541 </span>            :     ListCell   *glitem;
+<span class="lineNum">     542 </span>            : 
+<span class="lineNum">     543 </span><span class="lineCov">       7456 :     grpColIdx = (AttrNumber *) palloc(sizeof(AttrNumber) * numCols);</span>
+<span class="lineNum">     544 </span>            : 
+<span class="lineNum">     545 </span><span class="lineCov">      11802 :     foreach(glitem, groupClause)</span>
+<span class="lineNum">     546 </span>            :     {
+<span class="lineNum">     547 </span><span class="lineCov">       4346 :         SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);</span>
+<span class="lineNum">     548 </span><span class="lineCov">       4346 :         TargetEntry *tle = get_sortgroupclause_tle(groupcl, tlist);</span>
+<span class="lineNum">     549 </span>            : 
+<span class="lineNum">     550 </span><span class="lineCov">       4346 :         grpColIdx[colno++] = tle-&gt;resno;</span>
+<span class="lineNum">     551 </span>            :     }
+<span class="lineNum">     552 </span>            : 
+<span class="lineNum">     553 </span><span class="lineCov">       7456 :     return grpColIdx;</span>
+<span class="lineNum">     554 </span>            : }
+<span class="lineNum">     555 </span>            : 
+<span class="lineNum">     556 </span>            : /*
+<span class="lineNum">     557 </span>            :  * grouping_is_sortable - is it possible to implement grouping list by sorting?
+<span class="lineNum">     558 </span>            :  *
+<span class="lineNum">     559 </span>            :  * This is easy since the parser will have included a sortop if one exists.
+<a name="560"><span class="lineNum">     560 </span>            :  */</a>
+<span class="lineNum">     561 </span>            : bool
+<span class="lineNum">     562 </span><span class="lineCov">      14612 : grouping_is_sortable(List *groupClause)</span>
+<span class="lineNum">     563 </span>            : {
+<span class="lineNum">     564 </span>            :     ListCell   *glitem;
+<span class="lineNum">     565 </span>            : 
+<span class="lineNum">     566 </span><span class="lineCov">      28898 :     foreach(glitem, groupClause)</span>
+<span class="lineNum">     567 </span>            :     {
+<span class="lineNum">     568 </span><span class="lineCov">      14294 :         SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);</span>
+<span class="lineNum">     569 </span>            : 
+<span class="lineNum">     570 </span><span class="lineCov">      14294 :         if (!OidIsValid(groupcl-&gt;sortop))</span>
+<span class="lineNum">     571 </span><span class="lineCov">          8 :             return false;</span>
+<span class="lineNum">     572 </span>            :     }
+<span class="lineNum">     573 </span><span class="lineCov">      14604 :     return true;</span>
+<span class="lineNum">     574 </span>            : }
+<span class="lineNum">     575 </span>            : 
+<span class="lineNum">     576 </span>            : /*
+<span class="lineNum">     577 </span>            :  * grouping_is_hashable - is it possible to implement grouping list by hashing?
+<span class="lineNum">     578 </span>            :  *
+<span class="lineNum">     579 </span>            :  * We rely on the parser to have set the hashable flag correctly.
+<a name="580"><span class="lineNum">     580 </span>            :  */</a>
+<span class="lineNum">     581 </span>            : bool
+<span class="lineNum">     582 </span><span class="lineCov">       2398 : grouping_is_hashable(List *groupClause)</span>
+<span class="lineNum">     583 </span>            : {
+<span class="lineNum">     584 </span>            :     ListCell   *glitem;
+<span class="lineNum">     585 </span>            : 
+<span class="lineNum">     586 </span><span class="lineCov">       8736 :     foreach(glitem, groupClause)</span>
+<span class="lineNum">     587 </span>            :     {
+<span class="lineNum">     588 </span><span class="lineCov">       6340 :         SortGroupClause *groupcl = (SortGroupClause *) lfirst(glitem);</span>
+<span class="lineNum">     589 </span>            : 
+<span class="lineNum">     590 </span><span class="lineCov">       6340 :         if (!groupcl-&gt;hashable)</span>
+<span class="lineNum">     591 </span><span class="lineCov">          2 :             return false;</span>
+<span class="lineNum">     592 </span>            :     }
+<span class="lineNum">     593 </span><span class="lineCov">       2396 :     return true;</span>
+<span class="lineNum">     594 </span>            : }
+<span class="lineNum">     595 </span>            : 
+<span class="lineNum">     596 </span>            : 
+<span class="lineNum">     597 </span>            : /*****************************************************************************
+<span class="lineNum">     598 </span>            :  *      PathTarget manipulation functions
+<span class="lineNum">     599 </span>            :  *
+<span class="lineNum">     600 </span>            :  * PathTarget is a somewhat stripped-down version of a full targetlist; it
+<span class="lineNum">     601 </span>            :  * omits all the TargetEntry decoration except (optionally) sortgroupref data,
+<span class="lineNum">     602 </span>            :  * and it adds evaluation cost and output data width info.
+<span class="lineNum">     603 </span>            :  *****************************************************************************/
+<span class="lineNum">     604 </span>            : 
+<span class="lineNum">     605 </span>            : /*
+<span class="lineNum">     606 </span>            :  * make_pathtarget_from_tlist
+<span class="lineNum">     607 </span>            :  *    Construct a PathTarget equivalent to the given targetlist.
+<span class="lineNum">     608 </span>            :  *
+<span class="lineNum">     609 </span>            :  * This leaves the cost and width fields as zeroes.  Most callers will want
+<span class="lineNum">     610 </span>            :  * to use create_pathtarget(), so as to get those set.
+<a name="611"><span class="lineNum">     611 </span>            :  */</a>
+<span class="lineNum">     612 </span>            : PathTarget *
+<span class="lineNum">     613 </span><span class="lineCov">      74670 : make_pathtarget_from_tlist(List *tlist)</span>
+<span class="lineNum">     614 </span>            : {
+<span class="lineNum">     615 </span><span class="lineCov">      74670 :     PathTarget *target = makeNode(PathTarget);</span>
+<span class="lineNum">     616 </span>            :     int         i;
+<span class="lineNum">     617 </span>            :     ListCell   *lc;
+<span class="lineNum">     618 </span>            : 
+<span class="lineNum">     619 </span><span class="lineCov">      74670 :     target-&gt;sortgrouprefs = (Index *) palloc(list_length(tlist) * sizeof(Index));</span>
+<span class="lineNum">     620 </span>            : 
+<span class="lineNum">     621 </span><span class="lineCov">      74670 :     i = 0;</span>
+<span class="lineNum">     622 </span><span class="lineCov">     268360 :     foreach(lc, tlist)</span>
+<span class="lineNum">     623 </span>            :     {
+<span class="lineNum">     624 </span><span class="lineCov">     193690 :         TargetEntry *tle = (TargetEntry *) lfirst(lc);</span>
+<span class="lineNum">     625 </span>            : 
+<span class="lineNum">     626 </span><span class="lineCov">     193690 :         target-&gt;exprs = lappend(target-&gt;exprs, tle-&gt;expr);</span>
+<span class="lineNum">     627 </span><span class="lineCov">     193690 :         target-&gt;sortgrouprefs[i] = tle-&gt;ressortgroupref;</span>
+<span class="lineNum">     628 </span><span class="lineCov">     193690 :         i++;</span>
+<span class="lineNum">     629 </span>            :     }
+<span class="lineNum">     630 </span>            : 
+<span class="lineNum">     631 </span><span class="lineCov">      74670 :     return target;</span>
+<span class="lineNum">     632 </span>            : }
+<span class="lineNum">     633 </span>            : 
+<span class="lineNum">     634 </span>            : /*
+<span class="lineNum">     635 </span>            :  * make_tlist_from_pathtarget
+<span class="lineNum">     636 </span>            :  *    Construct a targetlist from a PathTarget.
+<a name="637"><span class="lineNum">     637 </span>            :  */</a>
+<span class="lineNum">     638 </span>            : List *
+<span class="lineNum">     639 </span><span class="lineCov">       4270 : make_tlist_from_pathtarget(PathTarget *target)</span>
+<span class="lineNum">     640 </span>            : {
+<span class="lineNum">     641 </span><span class="lineCov">       4270 :     List       *tlist = NIL;</span>
+<span class="lineNum">     642 </span>            :     int         i;
+<span class="lineNum">     643 </span>            :     ListCell   *lc;
+<span class="lineNum">     644 </span>            : 
+<span class="lineNum">     645 </span><span class="lineCov">       4270 :     i = 0;</span>
+<span class="lineNum">     646 </span><span class="lineCov">      16258 :     foreach(lc, target-&gt;exprs)</span>
+<span class="lineNum">     647 </span>            :     {
+<span class="lineNum">     648 </span><span class="lineCov">      11988 :         Expr       *expr = (Expr *) lfirst(lc);</span>
+<span class="lineNum">     649 </span>            :         TargetEntry *tle;
+<span class="lineNum">     650 </span>            : 
+<span class="lineNum">     651 </span><span class="lineCov">      11988 :         tle = makeTargetEntry(expr,</span>
+<span class="lineNum">     652 </span>            :                               i + 1,
+<span class="lineNum">     653 </span>            :                               NULL,
+<span class="lineNum">     654 </span>            :                               false);
+<span class="lineNum">     655 </span><span class="lineCov">      11988 :         if (target-&gt;sortgrouprefs)</span>
+<span class="lineNum">     656 </span><span class="lineCov">      11988 :             tle-&gt;ressortgroupref = target-&gt;sortgrouprefs[i];</span>
+<span class="lineNum">     657 </span><span class="lineCov">      11988 :         tlist = lappend(tlist, tle);</span>
+<span class="lineNum">     658 </span><span class="lineCov">      11988 :         i++;</span>
+<span class="lineNum">     659 </span>            :     }
+<span class="lineNum">     660 </span>            : 
+<span class="lineNum">     661 </span><span class="lineCov">       4270 :     return tlist;</span>
+<span class="lineNum">     662 </span>            : }
+<span class="lineNum">     663 </span>            : 
+<span class="lineNum">     664 </span>            : /*
+<span class="lineNum">     665 </span>            :  * copy_pathtarget
+<span class="lineNum">     666 </span>            :  *    Copy a PathTarget.
+<span class="lineNum">     667 </span>            :  *
+<span class="lineNum">     668 </span>            :  * The new PathTarget has its own exprs List, but shares the underlying
+<span class="lineNum">     669 </span>            :  * target expression trees with the old one.
+<a name="670"><span class="lineNum">     670 </span>            :  */</a>
+<span class="lineNum">     671 </span>            : PathTarget *
+<span class="lineNum">     672 </span><span class="lineCov">       4882 : copy_pathtarget(PathTarget *src)</span>
+<span class="lineNum">     673 </span>            : {
+<span class="lineNum">     674 </span><span class="lineCov">       4882 :     PathTarget *dst = makeNode(PathTarget);</span>
+<span class="lineNum">     675 </span>            : 
+<span class="lineNum">     676 </span>            :     /* Copy scalar fields */
+<span class="lineNum">     677 </span><span class="lineCov">       4882 :     memcpy(dst, src, sizeof(PathTarget));</span>
+<span class="lineNum">     678 </span>            :     /* Shallow-copy the expression list */
+<span class="lineNum">     679 </span><span class="lineCov">       4882 :     dst-&gt;exprs = list_copy(src-&gt;exprs);</span>
+<span class="lineNum">     680 </span>            :     /* Duplicate sortgrouprefs if any (if not, the memcpy handled this) */
+<span class="lineNum">     681 </span><span class="lineCov">       4882 :     if (src-&gt;sortgrouprefs)</span>
+<span class="lineNum">     682 </span>            :     {
+<span class="lineNum">     683 </span><span class="lineCov">       4388 :         Size        nbytes = list_length(src-&gt;exprs) * sizeof(Index);</span>
+<span class="lineNum">     684 </span>            : 
+<span class="lineNum">     685 </span><span class="lineCov">       4388 :         dst-&gt;sortgrouprefs = (Index *) palloc(nbytes);</span>
+<span class="lineNum">     686 </span><span class="lineCov">       4388 :         memcpy(dst-&gt;sortgrouprefs, src-&gt;sortgrouprefs, nbytes);</span>
+<span class="lineNum">     687 </span>            :     }
+<span class="lineNum">     688 </span><span class="lineCov">       4882 :     return dst;</span>
+<span class="lineNum">     689 </span>            : }
+<span class="lineNum">     690 </span>            : 
+<span class="lineNum">     691 </span>            : /*
+<span class="lineNum">     692 </span>            :  * create_empty_pathtarget
+<span class="lineNum">     693 </span>            :  *    Create an empty (zero columns, zero cost) PathTarget.
+<a name="694"><span class="lineNum">     694 </span>            :  */</a>
+<span class="lineNum">     695 </span>            : PathTarget *
+<span class="lineNum">     696 </span><span class="lineCov">     234864 : create_empty_pathtarget(void)</span>
+<span class="lineNum">     697 </span>            : {
+<span class="lineNum">     698 </span>            :     /* This is easy, but we don't want callers to hard-wire this ... */
+<span class="lineNum">     699 </span><span class="lineCov">     234864 :     return makeNode(PathTarget);</span>
+<span class="lineNum">     700 </span>            : }
+<span class="lineNum">     701 </span>            : 
+<span class="lineNum">     702 </span>            : /*
+<span class="lineNum">     703 </span>            :  * add_column_to_pathtarget
+<span class="lineNum">     704 </span>            :  *      Append a target column to the PathTarget.
+<span class="lineNum">     705 </span>            :  *
+<span class="lineNum">     706 </span>            :  * As with make_pathtarget_from_tlist, we leave it to the caller to update
+<span class="lineNum">     707 </span>            :  * the cost and width fields.
+<a name="708"><span class="lineNum">     708 </span>            :  */</a>
+<span class="lineNum">     709 </span>            : void
+<span class="lineNum">     710 </span><span class="lineCov">      14336 : add_column_to_pathtarget(PathTarget *target, Expr *expr, Index sortgroupref)</span>
+<span class="lineNum">     711 </span>            : {
+<span class="lineNum">     712 </span>            :     /* Updating the exprs list is easy ... */
+<span class="lineNum">     713 </span><span class="lineCov">      14336 :     target-&gt;exprs = lappend(target-&gt;exprs, expr);</span>
+<span class="lineNum">     714 </span>            :     /* ... the sortgroupref data, a bit less so */
+<span class="lineNum">     715 </span><span class="lineCov">      14336 :     if (target-&gt;sortgrouprefs)</span>
+<span class="lineNum">     716 </span>            :     {
+<span class="lineNum">     717 </span><span class="lineCov">       6290 :         int         nexprs = list_length(target-&gt;exprs);</span>
+<span class="lineNum">     718 </span>            : 
+<span class="lineNum">     719 </span>            :         /* This might look inefficient, but actually it's usually cheap */
+<span class="lineNum">     720 </span><span class="lineCov">       6290 :         target-&gt;sortgrouprefs = (Index *)</span>
+<span class="lineNum">     721 </span><span class="lineCov">       6290 :             repalloc(target-&gt;sortgrouprefs, nexprs * sizeof(Index));</span>
+<span class="lineNum">     722 </span><span class="lineCov">       6290 :         target-&gt;sortgrouprefs[nexprs - 1] = sortgroupref;</span>
+<span class="lineNum">     723 </span>            :     }
+<span class="lineNum">     724 </span><span class="lineCov">       8046 :     else if (sortgroupref)</span>
+<span class="lineNum">     725 </span>            :     {
+<span class="lineNum">     726 </span>            :         /* Adding sortgroupref labeling to a previously unlabeled target */
+<span class="lineNum">     727 </span><span class="lineCov">       2660 :         int         nexprs = list_length(target-&gt;exprs);</span>
+<span class="lineNum">     728 </span>            : 
+<span class="lineNum">     729 </span><span class="lineCov">       2660 :         target-&gt;sortgrouprefs = (Index *) palloc0(nexprs * sizeof(Index));</span>
+<span class="lineNum">     730 </span><span class="lineCov">       2660 :         target-&gt;sortgrouprefs[nexprs - 1] = sortgroupref;</span>
+<span class="lineNum">     731 </span>            :     }
+<span class="lineNum">     732 </span><span class="lineCov">      14336 : }</span>
+<span class="lineNum">     733 </span>            : 
+<span class="lineNum">     734 </span>            : /*
+<span class="lineNum">     735 </span>            :  * add_new_column_to_pathtarget
+<span class="lineNum">     736 </span>            :  *      Append a target column to the PathTarget, but only if it's not
+<span class="lineNum">     737 </span>            :  *      equal() to any pre-existing target expression.
+<span class="lineNum">     738 </span>            :  *
+<span class="lineNum">     739 </span>            :  * The caller cannot specify a sortgroupref, since it would be unclear how
+<span class="lineNum">     740 </span>            :  * to merge that with a pre-existing column.
+<span class="lineNum">     741 </span>            :  *
+<span class="lineNum">     742 </span>            :  * As with make_pathtarget_from_tlist, we leave it to the caller to update
+<span class="lineNum">     743 </span>            :  * the cost and width fields.
+<a name="744"><span class="lineNum">     744 </span>            :  */</a>
+<span class="lineNum">     745 </span>            : void
+<span class="lineNum">     746 </span><span class="lineCov">       9814 : add_new_column_to_pathtarget(PathTarget *target, Expr *expr)</span>
+<span class="lineNum">     747 </span>            : {
+<span class="lineNum">     748 </span><span class="lineCov">       9814 :     if (!list_member(target-&gt;exprs, expr))</span>
+<span class="lineNum">     749 </span><span class="lineCov">       8224 :         add_column_to_pathtarget(target, expr, 0);</span>
+<span class="lineNum">     750 </span><span class="lineCov">       9814 : }</span>
+<span class="lineNum">     751 </span>            : 
+<span class="lineNum">     752 </span>            : /*
+<span class="lineNum">     753 </span>            :  * add_new_columns_to_pathtarget
+<span class="lineNum">     754 </span>            :  *      Apply add_new_column_to_pathtarget() for each element of the list.
+<a name="755"><span class="lineNum">     755 </span>            :  */</a>
+<span class="lineNum">     756 </span>            : void
+<span class="lineNum">     757 </span><span class="lineCov">       8826 : add_new_columns_to_pathtarget(PathTarget *target, List *exprs)</span>
+<span class="lineNum">     758 </span>            : {
+<span class="lineNum">     759 </span>            :     ListCell   *lc;
+<span class="lineNum">     760 </span>            : 
+<span class="lineNum">     761 </span><span class="lineCov">      18640 :     foreach(lc, exprs)</span>
+<span class="lineNum">     762 </span>            :     {
+<span class="lineNum">     763 </span><span class="lineCov">       9814 :         Expr       *expr = (Expr *) lfirst(lc);</span>
+<span class="lineNum">     764 </span>            : 
+<span class="lineNum">     765 </span><span class="lineCov">       9814 :         add_new_column_to_pathtarget(target, expr);</span>
+<span class="lineNum">     766 </span>            :     }
+<span class="lineNum">     767 </span><span class="lineCov">       8826 : }</span>
+<span class="lineNum">     768 </span>            : 
+<span class="lineNum">     769 </span>            : /*
+<span class="lineNum">     770 </span>            :  * apply_pathtarget_labeling_to_tlist
+<span class="lineNum">     771 </span>            :  *      Apply any sortgrouprefs in the PathTarget to matching tlist entries
+<span class="lineNum">     772 </span>            :  *
+<span class="lineNum">     773 </span>            :  * Here, we do not assume that the tlist entries are one-for-one with the
+<span class="lineNum">     774 </span>            :  * PathTarget.  The intended use of this function is to deal with cases
+<span class="lineNum">     775 </span>            :  * where createplan.c has decided to use some other tlist and we have
+<span class="lineNum">     776 </span>            :  * to identify what matches exist.
+<a name="777"><span class="lineNum">     777 </span>            :  */</a>
+<span class="lineNum">     778 </span>            : void
+<span class="lineNum">     779 </span><span class="lineCov">       1806 : apply_pathtarget_labeling_to_tlist(List *tlist, PathTarget *target)</span>
+<span class="lineNum">     780 </span>            : {
+<span class="lineNum">     781 </span>            :     int         i;
+<span class="lineNum">     782 </span>            :     ListCell   *lc;
+<span class="lineNum">     783 </span>            : 
+<span class="lineNum">     784 </span>            :     /* Nothing to do if PathTarget has no sortgrouprefs data */
+<span class="lineNum">     785 </span><span class="lineCov">       1806 :     if (target-&gt;sortgrouprefs == NULL)</span>
+<span class="lineNum">     786 </span><span class="lineCov">       3272 :         return;</span>
+<span class="lineNum">     787 </span>            : 
+<span class="lineNum">     788 </span><span class="lineCov">        340 :     i = 0;</span>
+<span class="lineNum">     789 </span><span class="lineCov">       1058 :     foreach(lc, target-&gt;exprs)</span>
+<span class="lineNum">     790 </span>            :     {
+<span class="lineNum">     791 </span><span class="lineCov">        718 :         Expr       *expr = (Expr *) lfirst(lc);</span>
+<span class="lineNum">     792 </span>            :         TargetEntry *tle;
+<span class="lineNum">     793 </span>            : 
+<span class="lineNum">     794 </span><span class="lineCov">        718 :         if (target-&gt;sortgrouprefs[i])</span>
+<span class="lineNum">     795 </span>            :         {
+<span class="lineNum">     796 </span>            :             /*
+<span class="lineNum">     797 </span>            :              * For Vars, use tlist_member_match_var's weakened matching rule;
+<span class="lineNum">     798 </span>            :              * this allows us to deal with some cases where a set-returning
+<span class="lineNum">     799 </span>            :              * function has been inlined, so that we now have more knowledge
+<span class="lineNum">     800 </span>            :              * about what it returns than we did when the original Var was
+<span class="lineNum">     801 </span>            :              * created.  Otherwise, use regular equal() to find the matching
+<span class="lineNum">     802 </span>            :              * TLE.  (In current usage, only the Var case is actually needed;
+<span class="lineNum">     803 </span>            :              * but it seems best to have sane behavior here for non-Vars too.)
+<span class="lineNum">     804 </span>            :              */
+<span class="lineNum">     805 </span><span class="lineCov">        524 :             if (expr &amp;&amp; IsA(expr, Var))</span>
+<span class="lineNum">     806 </span><span class="lineCov">        524 :                 tle = tlist_member_match_var((Var *) expr, tlist);</span>
+<span class="lineNum">     807 </span>            :             else
+<span class="lineNum">     808 </span><span class="lineNoCov">          0 :                 tle = tlist_member(expr, tlist);</span>
+<span class="lineNum">     809 </span>            : 
+<span class="lineNum">     810 </span>            :             /*
+<span class="lineNum">     811 </span>            :              * Complain if noplace for the sortgrouprefs label, or if we'd
+<span class="lineNum">     812 </span>            :              * have to label a column twice.  (The case where it already has
+<span class="lineNum">     813 </span>            :              * the desired label probably can't happen, but we may as well
+<span class="lineNum">     814 </span>            :              * allow for it.)
+<span class="lineNum">     815 </span>            :              */
+<span class="lineNum">     816 </span><span class="lineCov">        524 :             if (!tle)</span>
+<span class="lineNum">     817 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;ORDER/GROUP BY expression not found in targetlist&quot;);</span>
+<span class="lineNum">     818 </span><span class="lineCov">        524 :             if (tle-&gt;ressortgroupref != 0 &amp;&amp;</span>
+<span class="lineNum">     819 </span><span class="lineNoCov">          0 :                 tle-&gt;ressortgroupref != target-&gt;sortgrouprefs[i])</span>
+<span class="lineNum">     820 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;targetlist item has multiple sortgroupref labels&quot;);</span>
+<span class="lineNum">     821 </span>            : 
+<span class="lineNum">     822 </span><span class="lineCov">        524 :             tle-&gt;ressortgroupref = target-&gt;sortgrouprefs[i];</span>
+<span class="lineNum">     823 </span>            :         }
+<span class="lineNum">     824 </span><span class="lineCov">        718 :         i++;</span>
+<span class="lineNum">     825 </span>            :     }
+<span class="lineNum">     826 </span>            : }
+<span class="lineNum">     827 </span>            : 
+<span class="lineNum">     828 </span>            : /*
+<span class="lineNum">     829 </span>            :  * split_pathtarget_at_srfs
+<span class="lineNum">     830 </span>            :  *      Split given PathTarget into multiple levels to position SRFs safely
+<span class="lineNum">     831 </span>            :  *
+<span class="lineNum">     832 </span>            :  * The executor can only handle set-returning functions that appear at the
+<span class="lineNum">     833 </span>            :  * top level of the targetlist of a ProjectSet plan node.  If we have any SRFs
+<span class="lineNum">     834 </span>            :  * that are not at top level, we need to split up the evaluation into multiple
+<span class="lineNum">     835 </span>            :  * plan levels in which each level satisfies this constraint.  This function
+<span class="lineNum">     836 </span>            :  * creates appropriate PathTarget(s) for each level.
+<span class="lineNum">     837 </span>            :  *
+<span class="lineNum">     838 </span>            :  * As an example, consider the tlist expression
+<span class="lineNum">     839 </span>            :  *      x + srf1(srf2(y + z))
+<span class="lineNum">     840 </span>            :  * This expression should appear as-is in the top PathTarget, but below that
+<span class="lineNum">     841 </span>            :  * we must have a PathTarget containing
+<span class="lineNum">     842 </span>            :  *      x, srf1(srf2(y + z))
+<span class="lineNum">     843 </span>            :  * and below that, another PathTarget containing
+<span class="lineNum">     844 </span>            :  *      x, srf2(y + z)
+<span class="lineNum">     845 </span>            :  * and below that, another PathTarget containing
+<span class="lineNum">     846 </span>            :  *      x, y, z
+<span class="lineNum">     847 </span>            :  * When these tlists are processed by setrefs.c, subexpressions that match
+<span class="lineNum">     848 </span>            :  * output expressions of the next lower tlist will be replaced by Vars,
+<span class="lineNum">     849 </span>            :  * so that what the executor gets are tlists looking like
+<span class="lineNum">     850 </span>            :  *      Var1 + Var2
+<span class="lineNum">     851 </span>            :  *      Var1, srf1(Var2)
+<span class="lineNum">     852 </span>            :  *      Var1, srf2(Var2 + Var3)
+<span class="lineNum">     853 </span>            :  *      x, y, z
+<span class="lineNum">     854 </span>            :  * which satisfy the desired property.
+<span class="lineNum">     855 </span>            :  *
+<span class="lineNum">     856 </span>            :  * Another example is
+<span class="lineNum">     857 </span>            :  *      srf1(x), srf2(srf3(y))
+<span class="lineNum">     858 </span>            :  * That must appear as-is in the top PathTarget, but below that we need
+<span class="lineNum">     859 </span>            :  *      srf1(x), srf3(y)
+<span class="lineNum">     860 </span>            :  * That is, each SRF must be computed at a level corresponding to the nesting
+<span class="lineNum">     861 </span>            :  * depth of SRFs within its arguments.
+<span class="lineNum">     862 </span>            :  *
+<span class="lineNum">     863 </span>            :  * In some cases, a SRF has already been evaluated in some previous plan level
+<span class="lineNum">     864 </span>            :  * and we shouldn't expand it again (that is, what we see in the target is
+<span class="lineNum">     865 </span>            :  * already meant as a reference to a lower subexpression).  So, don't expand
+<span class="lineNum">     866 </span>            :  * any tlist expressions that appear in input_target, if that's not NULL.
+<span class="lineNum">     867 </span>            :  *
+<span class="lineNum">     868 </span>            :  * It's also important that we preserve any sortgroupref annotation appearing
+<span class="lineNum">     869 </span>            :  * in the given target, especially on expressions matching input_target items.
+<span class="lineNum">     870 </span>            :  *
+<span class="lineNum">     871 </span>            :  * The outputs of this function are two parallel lists, one a list of
+<span class="lineNum">     872 </span>            :  * PathTargets and the other an integer list of bool flags indicating
+<span class="lineNum">     873 </span>            :  * whether the corresponding PathTarget contains any evaluatable SRFs.
+<span class="lineNum">     874 </span>            :  * The lists are given in the order they'd need to be evaluated in, with
+<span class="lineNum">     875 </span>            :  * the &quot;lowest&quot; PathTarget first.  So the last list entry is always the
+<span class="lineNum">     876 </span>            :  * originally given PathTarget, and any entries before it indicate evaluation
+<span class="lineNum">     877 </span>            :  * levels that must be inserted below it.  The first list entry must not
+<span class="lineNum">     878 </span>            :  * contain any SRFs (other than ones duplicating input_target entries), since
+<span class="lineNum">     879 </span>            :  * it will typically be attached to a plan node that cannot evaluate SRFs.
+<span class="lineNum">     880 </span>            :  *
+<span class="lineNum">     881 </span>            :  * Note: using a list for the flags may seem like overkill, since there
+<span class="lineNum">     882 </span>            :  * are only a few possible patterns for which levels contain SRFs.
+<span class="lineNum">     883 </span>            :  * But this representation decouples callers from that knowledge.
+<a name="884"><span class="lineNum">     884 </span>            :  */</a>
+<span class="lineNum">     885 </span>            : void
+<span class="lineNum">     886 </span><span class="lineCov">       4848 : split_pathtarget_at_srfs(PlannerInfo *root,</span>
+<span class="lineNum">     887 </span>            :                          PathTarget *target, PathTarget *input_target,
+<span class="lineNum">     888 </span>            :                          List **targets, List **targets_contain_srfs)
+<span class="lineNum">     889 </span>            : {
+<span class="lineNum">     890 </span>            :     split_pathtarget_context context;
+<span class="lineNum">     891 </span>            :     int         max_depth;
+<span class="lineNum">     892 </span>            :     bool        need_extra_projection;
+<span class="lineNum">     893 </span>            :     List       *prev_level_tlist;
+<span class="lineNum">     894 </span>            :     int         lci;
+<span class="lineNum">     895 </span>            :     ListCell   *lc,
+<span class="lineNum">     896 </span>            :                *lc1,
+<span class="lineNum">     897 </span>            :                *lc2,
+<span class="lineNum">     898 </span>            :                *lc3;
+<span class="lineNum">     899 </span>            : 
+<span class="lineNum">     900 </span>            :     /*
+<span class="lineNum">     901 </span>            :      * It's not unusual for planner.c to pass us two physically identical
+<span class="lineNum">     902 </span>            :      * targets, in which case we can conclude without further ado that all
+<span class="lineNum">     903 </span>            :      * expressions are available from the input.  (The logic below would
+<span class="lineNum">     904 </span>            :      * arrive at the same conclusion, but much more tediously.)
+<span class="lineNum">     905 </span>            :      */
+<span class="lineNum">     906 </span><span class="lineCov">       4848 :     if (target == input_target)</span>
+<span class="lineNum">     907 </span>            :     {
+<span class="lineNum">     908 </span><span class="lineCov">       3570 :         *targets = list_make1(target);</span>
+<span class="lineNum">     909 </span><span class="lineCov">       3570 :         *targets_contain_srfs = list_make1_int(false);</span>
+<span class="lineNum">     910 </span><span class="lineCov">       7206 :         return;</span>
+<span class="lineNum">     911 </span>            :     }
+<span class="lineNum">     912 </span>            : 
+<span class="lineNum">     913 </span>            :     /* Pass any input_target exprs down to split_pathtarget_walker() */
+<span class="lineNum">     914 </span><span class="lineCov">       1278 :     context.input_target_exprs = input_target ? input_target-&gt;exprs : NIL;</span>
+<span class="lineNum">     915 </span>            : 
+<span class="lineNum">     916 </span>            :     /*
+<span class="lineNum">     917 </span>            :      * Initialize with empty level-zero lists, and no levels after that.
+<span class="lineNum">     918 </span>            :      * (Note: we could dispense with representing level zero explicitly, since
+<span class="lineNum">     919 </span>            :      * it will never receive any SRFs, but then we'd have to special-case that
+<span class="lineNum">     920 </span>            :      * level when we get to building result PathTargets.  Level zero describes
+<span class="lineNum">     921 </span>            :      * the SRF-free PathTarget that will be given to the input plan node.)
+<span class="lineNum">     922 </span>            :      */
+<span class="lineNum">     923 </span><span class="lineCov">       1278 :     context.level_srfs = list_make1(NIL);</span>
+<span class="lineNum">     924 </span><span class="lineCov">       1278 :     context.level_input_vars = list_make1(NIL);</span>
+<span class="lineNum">     925 </span><span class="lineCov">       1278 :     context.level_input_srfs = list_make1(NIL);</span>
+<span class="lineNum">     926 </span>            : 
+<span class="lineNum">     927 </span>            :     /* Initialize data we'll accumulate across all the target expressions */
+<span class="lineNum">     928 </span><span class="lineCov">       1278 :     context.current_input_vars = NIL;</span>
+<span class="lineNum">     929 </span><span class="lineCov">       1278 :     context.current_input_srfs = NIL;</span>
+<span class="lineNum">     930 </span><span class="lineCov">       1278 :     max_depth = 0;</span>
+<span class="lineNum">     931 </span><span class="lineCov">       1278 :     need_extra_projection = false;</span>
+<span class="lineNum">     932 </span>            : 
+<span class="lineNum">     933 </span>            :     /* Scan each expression in the PathTarget looking for SRFs */
+<span class="lineNum">     934 </span><span class="lineCov">       1278 :     lci = 0;</span>
+<span class="lineNum">     935 </span><span class="lineCov">       3188 :     foreach(lc, target-&gt;exprs)</span>
+<span class="lineNum">     936 </span>            :     {
+<span class="lineNum">     937 </span><span class="lineCov">       1910 :         Node       *node = (Node *) lfirst(lc);</span>
+<span class="lineNum">     938 </span>            : 
+<span class="lineNum">     939 </span>            :         /* Tell split_pathtarget_walker about this expr's sortgroupref */
+<span class="lineNum">     940 </span><span class="lineCov">       1910 :         context.current_sgref = get_pathtarget_sortgroupref(target, lci);</span>
+<span class="lineNum">     941 </span><span class="lineCov">       1910 :         lci++;</span>
+<span class="lineNum">     942 </span>            : 
+<span class="lineNum">     943 </span>            :         /*
+<span class="lineNum">     944 </span>            :          * Find all SRFs and Vars (and Var-like nodes) in this expression, and
+<span class="lineNum">     945 </span>            :          * enter them into appropriate lists within the context struct.
+<span class="lineNum">     946 </span>            :          */
+<span class="lineNum">     947 </span><span class="lineCov">       1910 :         context.current_depth = 0;</span>
+<span class="lineNum">     948 </span><span class="lineCov">       1910 :         split_pathtarget_walker(node, &amp;context);</span>
+<span class="lineNum">     949 </span>            : 
+<span class="lineNum">     950 </span>            :         /* An expression containing no SRFs is of no further interest */
+<span class="lineNum">     951 </span><span class="lineCov">       1910 :         if (context.current_depth == 0)</span>
+<span class="lineNum">     952 </span><span class="lineCov">        528 :             continue;</span>
+<span class="lineNum">     953 </span>            : 
+<span class="lineNum">     954 </span>            :         /*
+<span class="lineNum">     955 </span>            :          * Track max SRF nesting depth over the whole PathTarget.  Also, if
+<span class="lineNum">     956 </span>            :          * this expression establishes a new max depth, we no longer care
+<span class="lineNum">     957 </span>            :          * whether previous expressions contained nested SRFs; we can handle
+<span class="lineNum">     958 </span>            :          * any required projection for them in the final ProjectSet node.
+<span class="lineNum">     959 </span>            :          */
+<span class="lineNum">     960 </span><span class="lineCov">       1382 :         if (max_depth &lt; context.current_depth)</span>
+<span class="lineNum">     961 </span>            :         {
+<span class="lineNum">     962 </span><span class="lineCov">       1216 :             max_depth = context.current_depth;</span>
+<span class="lineNum">     963 </span><span class="lineCov">       1216 :             need_extra_projection = false;</span>
+<span class="lineNum">     964 </span>            :         }
+<span class="lineNum">     965 </span>            : 
+<span class="lineNum">     966 </span>            :         /*
+<span class="lineNum">     967 </span>            :          * If any maximum-depth SRF is not at the top level of its expression,
+<span class="lineNum">     968 </span>            :          * we'll need an extra Result node to compute the top-level scalar
+<span class="lineNum">     969 </span>            :          * expression.
+<span class="lineNum">     970 </span>            :          */
+<span class="lineNum">     971 </span><span class="lineCov">       1382 :         if (max_depth == context.current_depth &amp;&amp; !IS_SRF_CALL(node))</span>
+<span class="lineNum">     972 </span><span class="lineCov">        240 :             need_extra_projection = true;</span>
+<span class="lineNum">     973 </span>            :     }
+<span class="lineNum">     974 </span>            : 
+<span class="lineNum">     975 </span>            :     /*
+<span class="lineNum">     976 </span>            :      * If we found no SRFs needing evaluation (maybe they were all present in
+<span class="lineNum">     977 </span>            :      * input_target, or maybe they were all removed by const-simplification),
+<span class="lineNum">     978 </span>            :      * then no ProjectSet is needed; fall out.
+<span class="lineNum">     979 </span>            :      */
+<span class="lineNum">     980 </span><span class="lineCov">       1278 :     if (max_depth == 0)</span>
+<span class="lineNum">     981 </span>            :     {
+<span class="lineNum">     982 </span><span class="lineCov">         66 :         *targets = list_make1(target);</span>
+<span class="lineNum">     983 </span><span class="lineCov">         66 :         *targets_contain_srfs = list_make1_int(false);</span>
+<span class="lineNum">     984 </span><span class="lineCov">         66 :         return;</span>
+<span class="lineNum">     985 </span>            :     }
+<span class="lineNum">     986 </span>            : 
+<span class="lineNum">     987 </span>            :     /*
+<span class="lineNum">     988 </span>            :      * The Vars and SRF outputs needed at top level can be added to the last
+<span class="lineNum">     989 </span>            :      * level_input lists if we don't need an extra projection step.  If we do
+<span class="lineNum">     990 </span>            :      * need one, add a SRF-free level to the lists.
+<span class="lineNum">     991 </span>            :      */
+<span class="lineNum">     992 </span><span class="lineCov">       1212 :     if (need_extra_projection)</span>
+<span class="lineNum">     993 </span>            :     {
+<span class="lineNum">     994 </span><span class="lineCov">        116 :         context.level_srfs = lappend(context.level_srfs, NIL);</span>
+<span class="lineNum">     995 </span><span class="lineCov">        116 :         context.level_input_vars = lappend(context.level_input_vars,</span>
+<span class="lineNum">     996 </span><span class="lineCov">        116 :                                            context.current_input_vars);</span>
+<span class="lineNum">     997 </span><span class="lineCov">        116 :         context.level_input_srfs = lappend(context.level_input_srfs,</span>
+<span class="lineNum">     998 </span><span class="lineCov">        116 :                                            context.current_input_srfs);</span>
+<span class="lineNum">     999 </span>            :     }
+<span class="lineNum">    1000 </span>            :     else
+<span class="lineNum">    1001 </span>            :     {
+<span class="lineNum">    1002 </span><span class="lineCov">       1096 :         lc = list_nth_cell(context.level_input_vars, max_depth);</span>
+<span class="lineNum">    1003 </span><span class="lineCov">       1096 :         lfirst(lc) = list_concat(lfirst(lc), context.current_input_vars);</span>
+<span class="lineNum">    1004 </span><span class="lineCov">       1096 :         lc = list_nth_cell(context.level_input_srfs, max_depth);</span>
+<span class="lineNum">    1005 </span><span class="lineCov">       1096 :         lfirst(lc) = list_concat(lfirst(lc), context.current_input_srfs);</span>
+<span class="lineNum">    1006 </span>            :     }
+<span class="lineNum">    1007 </span>            : 
+<span class="lineNum">    1008 </span>            :     /*
+<span class="lineNum">    1009 </span>            :      * Now construct the output PathTargets.  The original target can be used
+<span class="lineNum">    1010 </span>            :      * as-is for the last one, but we need to construct a new SRF-free target
+<span class="lineNum">    1011 </span>            :      * representing what the preceding plan node has to emit, as well as a
+<span class="lineNum">    1012 </span>            :      * target for each intermediate ProjectSet node.
+<span class="lineNum">    1013 </span>            :      */
+<span class="lineNum">    1014 </span><span class="lineCov">       1212 :     *targets = *targets_contain_srfs = NIL;</span>
+<span class="lineNum">    1015 </span><span class="lineCov">       1212 :     prev_level_tlist = NIL;</span>
+<span class="lineNum">    1016 </span>            : 
+<span class="lineNum">    1017 </span><span class="lineCov">       3772 :     forthree(lc1, context.level_srfs,</span>
+<span class="lineNum">    1018 </span>            :              lc2, context.level_input_vars,
+<span class="lineNum">    1019 </span>            :              lc3, context.level_input_srfs)
+<span class="lineNum">    1020 </span>            :     {
+<span class="lineNum">    1021 </span><span class="lineCov">       2560 :         List       *level_srfs = (List *) lfirst(lc1);</span>
+<span class="lineNum">    1022 </span>            :         PathTarget *ntarget;
+<span class="lineNum">    1023 </span>            : 
+<span class="lineNum">    1024 </span><span class="lineCov">       2560 :         if (lnext(context.level_srfs, lc1) == NULL)</span>
+<span class="lineNum">    1025 </span>            :         {
+<span class="lineNum">    1026 </span><span class="lineCov">       1212 :             ntarget = target;</span>
+<span class="lineNum">    1027 </span>            :         }
+<span class="lineNum">    1028 </span>            :         else
+<span class="lineNum">    1029 </span>            :         {
+<span class="lineNum">    1030 </span><span class="lineCov">       1348 :             ntarget = create_empty_pathtarget();</span>
+<span class="lineNum">    1031 </span>            : 
+<span class="lineNum">    1032 </span>            :             /*
+<span class="lineNum">    1033 </span>            :              * This target should actually evaluate any SRFs of the current
+<span class="lineNum">    1034 </span>            :              * level, and it needs to propagate forward any Vars needed by
+<span class="lineNum">    1035 </span>            :              * later levels, as well as SRFs computed earlier and needed by
+<span class="lineNum">    1036 </span>            :              * later levels.
+<span class="lineNum">    1037 </span>            :              */
+<span class="lineNum">    1038 </span><span class="lineCov">       1348 :             add_sp_items_to_pathtarget(ntarget, level_srfs);</span>
+<span class="lineNum">    1039 </span><span class="lineCov">       2844 :             for_each_cell(lc, context.level_input_vars,</span>
+<span class="lineNum">    1040 </span>            :                           lnext(context.level_input_vars, lc2))
+<span class="lineNum">    1041 </span>            :             {
+<span class="lineNum">    1042 </span><span class="lineCov">       1496 :                 List       *input_vars = (List *) lfirst(lc);</span>
+<span class="lineNum">    1043 </span>            : 
+<span class="lineNum">    1044 </span><span class="lineCov">       1496 :                 add_sp_items_to_pathtarget(ntarget, input_vars);</span>
+<span class="lineNum">    1045 </span>            :             }
+<span class="lineNum">    1046 </span><span class="lineCov">       2844 :             for_each_cell(lc, context.level_input_srfs,</span>
+<span class="lineNum">    1047 </span>            :                           lnext(context.level_input_srfs, lc3))
+<span class="lineNum">    1048 </span>            :             {
+<span class="lineNum">    1049 </span><span class="lineCov">       1496 :                 List       *input_srfs = (List *) lfirst(lc);</span>
+<span class="lineNum">    1050 </span>            :                 ListCell   *lcx;
+<span class="lineNum">    1051 </span>            : 
+<span class="lineNum">    1052 </span><span class="lineCov">       3218 :                 foreach(lcx, input_srfs)</span>
+<span class="lineNum">    1053 </span>            :                 {
+<span class="lineNum">    1054 </span><span class="lineCov">       1722 :                     split_pathtarget_item *item = lfirst(lcx);</span>
+<span class="lineNum">    1055 </span>            : 
+<span class="lineNum">    1056 </span><span class="lineCov">       1722 :                     if (list_member(prev_level_tlist, item-&gt;expr))</span>
+<span class="lineNum">    1057 </span><span class="lineCov">         12 :                         add_sp_item_to_pathtarget(ntarget, item);</span>
+<span class="lineNum">    1058 </span>            :                 }
+<span class="lineNum">    1059 </span>            :             }
+<span class="lineNum">    1060 </span><span class="lineCov">       1348 :             set_pathtarget_cost_width(root, ntarget);</span>
+<span class="lineNum">    1061 </span>            :         }
+<span class="lineNum">    1062 </span>            : 
+<span class="lineNum">    1063 </span>            :         /*
+<span class="lineNum">    1064 </span>            :          * Add current target and does-it-compute-SRFs flag to output lists.
+<span class="lineNum">    1065 </span>            :          */
+<span class="lineNum">    1066 </span><span class="lineCov">       2560 :         *targets = lappend(*targets, ntarget);</span>
+<span class="lineNum">    1067 </span><span class="lineCov">       2560 :         *targets_contain_srfs = lappend_int(*targets_contain_srfs,</span>
+<span class="lineNum">    1068 </span>            :                                             (level_srfs != NIL));
+<span class="lineNum">    1069 </span>            : 
+<span class="lineNum">    1070 </span>            :         /* Remember this level's output for next pass */
+<span class="lineNum">    1071 </span><span class="lineCov">       2560 :         prev_level_tlist = ntarget-&gt;exprs;</span>
+<span class="lineNum">    1072 </span>            :     }
+<span class="lineNum">    1073 </span>            : }
+<span class="lineNum">    1074 </span>            : 
+<span class="lineNum">    1075 </span>            : /*
+<span class="lineNum">    1076 </span>            :  * Recursively examine expressions for split_pathtarget_at_srfs.
+<span class="lineNum">    1077 </span>            :  *
+<span class="lineNum">    1078 </span>            :  * Note we make no effort here to prevent duplicate entries in the output
+<span class="lineNum">    1079 </span>            :  * lists.  Duplicates will be gotten rid of later.
+<a name="1080"><span class="lineNum">    1080 </span>            :  */</a>
+<span class="lineNum">    1081 </span>            : static bool
+<span class="lineNum">    1082 </span><span class="lineCov">       6460 : split_pathtarget_walker(Node *node, split_pathtarget_context *context)</span>
+<span class="lineNum">    1083 </span>            : {
+<span class="lineNum">    1084 </span><span class="lineCov">       6460 :     if (node == NULL)</span>
+<span class="lineNum">    1085 </span><span class="lineCov">          2 :         return false;</span>
+<span class="lineNum">    1086 </span>            : 
+<span class="lineNum">    1087 </span>            :     /*
+<span class="lineNum">    1088 </span>            :      * A subexpression that matches an expression already computed in
+<span class="lineNum">    1089 </span>            :      * input_target can be treated like a Var (which indeed it will be after
+<span class="lineNum">    1090 </span>            :      * setrefs.c gets done with it), even if it's actually a SRF.  Record it
+<span class="lineNum">    1091 </span>            :      * as being needed for the current expression, and ignore any
+<span class="lineNum">    1092 </span>            :      * substructure.  (Note in particular that this preserves the identity of
+<span class="lineNum">    1093 </span>            :      * any expressions that appear as sortgrouprefs in input_target.)
+<span class="lineNum">    1094 </span>            :      */
+<span class="lineNum">    1095 </span><span class="lineCov">       6458 :     if (list_member(context-&gt;input_target_exprs, node))</span>
+<span class="lineNum">    1096 </span>            :     {
+<span class="lineNum">    1097 </span><span class="lineCov">        110 :         split_pathtarget_item *item = palloc(sizeof(split_pathtarget_item));</span>
+<span class="lineNum">    1098 </span>            : 
+<span class="lineNum">    1099 </span><span class="lineCov">        110 :         item-&gt;expr = node;</span>
+<span class="lineNum">    1100 </span><span class="lineCov">        110 :         item-&gt;sortgroupref = context-&gt;current_sgref;</span>
+<span class="lineNum">    1101 </span><span class="lineCov">        110 :         context-&gt;current_input_vars = lappend(context-&gt;current_input_vars,</span>
+<span class="lineNum">    1102 </span>            :                                               item);
+<span class="lineNum">    1103 </span><span class="lineCov">        110 :         return false;</span>
+<span class="lineNum">    1104 </span>            :     }
+<span class="lineNum">    1105 </span>            : 
+<span class="lineNum">    1106 </span>            :     /*
+<span class="lineNum">    1107 </span>            :      * Vars and Var-like constructs are expected to be gotten from the input,
+<span class="lineNum">    1108 </span>            :      * too.  We assume that these constructs cannot contain any SRFs (if one
+<span class="lineNum">    1109 </span>            :      * does, there will be an executor failure from a misplaced SRF).
+<span class="lineNum">    1110 </span>            :      */
+<span class="lineNum">    1111 </span><span class="lineCov">      12056 :     if (IsA(node, Var) ||</span>
+<span class="lineNum">    1112 </span><span class="lineCov">      11416 :         IsA(node, PlaceHolderVar) ||</span>
+<span class="lineNum">    1113 </span><span class="lineCov">      11362 :         IsA(node, Aggref) ||</span>
+<span class="lineNum">    1114 </span><span class="lineCov">      11308 :         IsA(node, GroupingFunc) ||</span>
+<span class="lineNum">    1115 </span><span class="lineCov">       5654 :         IsA(node, WindowFunc))</span>
+<span class="lineNum">    1116 </span>            :     {
+<span class="lineNum">    1117 </span><span class="lineCov">        700 :         split_pathtarget_item *item = palloc(sizeof(split_pathtarget_item));</span>
+<span class="lineNum">    1118 </span>            : 
+<span class="lineNum">    1119 </span><span class="lineCov">        700 :         item-&gt;expr = node;</span>
+<span class="lineNum">    1120 </span><span class="lineCov">        700 :         item-&gt;sortgroupref = context-&gt;current_sgref;</span>
+<span class="lineNum">    1121 </span><span class="lineCov">        700 :         context-&gt;current_input_vars = lappend(context-&gt;current_input_vars,</span>
+<span class="lineNum">    1122 </span>            :                                               item);
+<span class="lineNum">    1123 </span><span class="lineCov">        700 :         return false;</span>
+<span class="lineNum">    1124 </span>            :     }
+<span class="lineNum">    1125 </span>            : 
+<span class="lineNum">    1126 </span>            :     /*
+<span class="lineNum">    1127 </span>            :      * If it's a SRF, recursively examine its inputs, determine its level, and
+<span class="lineNum">    1128 </span>            :      * make appropriate entries in the output lists.
+<span class="lineNum">    1129 </span>            :      */
+<span class="lineNum">    1130 </span><span class="lineCov">       5648 :     if (IS_SRF_CALL(node))</span>
+<span class="lineNum">    1131 </span>            :     {
+<span class="lineNum">    1132 </span><span class="lineCov">       1404 :         split_pathtarget_item *item = palloc(sizeof(split_pathtarget_item));</span>
+<span class="lineNum">    1133 </span><span class="lineCov">       1404 :         List       *save_input_vars = context-&gt;current_input_vars;</span>
+<span class="lineNum">    1134 </span><span class="lineCov">       1404 :         List       *save_input_srfs = context-&gt;current_input_srfs;</span>
+<span class="lineNum">    1135 </span><span class="lineCov">       1404 :         int         save_current_depth = context-&gt;current_depth;</span>
+<span class="lineNum">    1136 </span>            :         int         srf_depth;
+<span class="lineNum">    1137 </span>            :         ListCell   *lc;
+<span class="lineNum">    1138 </span>            : 
+<span class="lineNum">    1139 </span><span class="lineCov">       1404 :         item-&gt;expr = node;</span>
+<span class="lineNum">    1140 </span><span class="lineCov">       1404 :         item-&gt;sortgroupref = context-&gt;current_sgref;</span>
+<span class="lineNum">    1141 </span>            : 
+<span class="lineNum">    1142 </span><span class="lineCov">       1404 :         context-&gt;current_input_vars = NIL;</span>
+<span class="lineNum">    1143 </span><span class="lineCov">       1404 :         context-&gt;current_input_srfs = NIL;</span>
+<span class="lineNum">    1144 </span><span class="lineCov">       1404 :         context-&gt;current_depth = 0;</span>
+<span class="lineNum">    1145 </span><span class="lineCov">       1404 :         context-&gt;current_sgref = 0; /* subexpressions are not sortgroup items */</span>
+<span class="lineNum">    1146 </span>            : 
+<span class="lineNum">    1147 </span><span class="lineCov">       1404 :         (void) expression_tree_walker(node, split_pathtarget_walker,</span>
+<span class="lineNum">    1148 </span>            :                                       (void *) context);
+<span class="lineNum">    1149 </span>            : 
+<span class="lineNum">    1150 </span>            :         /* Depth is one more than any SRF below it */
+<span class="lineNum">    1151 </span><span class="lineCov">       1404 :         srf_depth = context-&gt;current_depth + 1;</span>
+<span class="lineNum">    1152 </span>            : 
+<span class="lineNum">    1153 </span>            :         /* If new record depth, initialize another level of output lists */
+<span class="lineNum">    1154 </span><span class="lineCov">       1404 :         if (srf_depth &gt;= list_length(context-&gt;level_srfs))</span>
+<span class="lineNum">    1155 </span>            :         {
+<span class="lineNum">    1156 </span><span class="lineCov">       1232 :             context-&gt;level_srfs = lappend(context-&gt;level_srfs, NIL);</span>
+<span class="lineNum">    1157 </span><span class="lineCov">       1232 :             context-&gt;level_input_vars = lappend(context-&gt;level_input_vars, NIL);</span>
+<span class="lineNum">    1158 </span><span class="lineCov">       1232 :             context-&gt;level_input_srfs = lappend(context-&gt;level_input_srfs, NIL);</span>
+<span class="lineNum">    1159 </span>            :         }
+<span class="lineNum">    1160 </span>            : 
+<span class="lineNum">    1161 </span>            :         /* Record this SRF as needing to be evaluated at appropriate level */
+<span class="lineNum">    1162 </span><span class="lineCov">       1404 :         lc = list_nth_cell(context-&gt;level_srfs, srf_depth);</span>
+<span class="lineNum">    1163 </span><span class="lineCov">       1404 :         lfirst(lc) = lappend(lfirst(lc), item);</span>
+<span class="lineNum">    1164 </span>            : 
+<span class="lineNum">    1165 </span>            :         /* Record its inputs as being needed at the same level */
+<span class="lineNum">    1166 </span><span class="lineCov">       1404 :         lc = list_nth_cell(context-&gt;level_input_vars, srf_depth);</span>
+<span class="lineNum">    1167 </span><span class="lineCov">       1404 :         lfirst(lc) = list_concat(lfirst(lc), context-&gt;current_input_vars);</span>
+<span class="lineNum">    1168 </span><span class="lineCov">       1404 :         lc = list_nth_cell(context-&gt;level_input_srfs, srf_depth);</span>
+<span class="lineNum">    1169 </span><span class="lineCov">       1404 :         lfirst(lc) = list_concat(lfirst(lc), context-&gt;current_input_srfs);</span>
+<span class="lineNum">    1170 </span>            : 
+<span class="lineNum">    1171 </span>            :         /*
+<span class="lineNum">    1172 </span>            :          * Restore caller-level state and update it for presence of this SRF.
+<span class="lineNum">    1173 </span>            :          * Notice we report the SRF itself as being needed for evaluation of
+<span class="lineNum">    1174 </span>            :          * surrounding expression.
+<span class="lineNum">    1175 </span>            :          */
+<span class="lineNum">    1176 </span><span class="lineCov">       1404 :         context-&gt;current_input_vars = save_input_vars;</span>
+<span class="lineNum">    1177 </span><span class="lineCov">       1404 :         context-&gt;current_input_srfs = lappend(save_input_srfs, item);</span>
+<span class="lineNum">    1178 </span><span class="lineCov">       1404 :         context-&gt;current_depth = Max(save_current_depth, srf_depth);</span>
+<span class="lineNum">    1179 </span>            : 
+<span class="lineNum">    1180 </span>            :         /* We're done here */
+<span class="lineNum">    1181 </span><span class="lineCov">       1404 :         return false;</span>
+<span class="lineNum">    1182 </span>            :     }
+<span class="lineNum">    1183 </span>            : 
+<span class="lineNum">    1184 </span>            :     /*
+<span class="lineNum">    1185 </span>            :      * Otherwise, the node is a scalar (non-set) expression, so recurse to
+<span class="lineNum">    1186 </span>            :      * examine its inputs.
+<span class="lineNum">    1187 </span>            :      */
+<span class="lineNum">    1188 </span><span class="lineCov">       4244 :     context-&gt;current_sgref = 0; /* subexpressions are not sortgroup items */</span>
+<span class="lineNum">    1189 </span><span class="lineCov">       4244 :     return expression_tree_walker(node, split_pathtarget_walker,</span>
+<span class="lineNum">    1190 </span>            :                                   (void *) context);
+<span class="lineNum">    1191 </span>            : }
+<span class="lineNum">    1192 </span>            : 
+<span class="lineNum">    1193 </span>            : /*
+<span class="lineNum">    1194 </span>            :  * Add a split_pathtarget_item to the PathTarget, unless a matching item is
+<span class="lineNum">    1195 </span>            :  * already present.  This is like add_new_column_to_pathtarget, but allows
+<span class="lineNum">    1196 </span>            :  * for sortgrouprefs to be handled.  An item having zero sortgroupref can
+<span class="lineNum">    1197 </span>            :  * be merged with one that has a sortgroupref, acquiring the latter's
+<span class="lineNum">    1198 </span>            :  * sortgroupref.
+<span class="lineNum">    1199 </span>            :  *
+<span class="lineNum">    1200 </span>            :  * Note that we don't worry about possibly adding duplicate sortgrouprefs
+<span class="lineNum">    1201 </span>            :  * to the PathTarget.  That would be bad, but it should be impossible unless
+<span class="lineNum">    1202 </span>            :  * the target passed to split_pathtarget_at_srfs already had duplicates.
+<span class="lineNum">    1203 </span>            :  * As long as it didn't, we can have at most one split_pathtarget_item with
+<span class="lineNum">    1204 </span>            :  * any particular nonzero sortgroupref.
+<a name="1205"><span class="lineNum">    1205 </span>            :  */</a>
+<span class="lineNum">    1206 </span>            : static void
+<span class="lineNum">    1207 </span><span class="lineCov">       1086 : add_sp_item_to_pathtarget(PathTarget *target, split_pathtarget_item *item)</span>
+<span class="lineNum">    1208 </span>            : {
+<span class="lineNum">    1209 </span>            :     int         lci;
+<span class="lineNum">    1210 </span>            :     ListCell   *lc;
+<span class="lineNum">    1211 </span>            : 
+<span class="lineNum">    1212 </span>            :     /*
+<span class="lineNum">    1213 </span>            :      * Look for a pre-existing entry that is equal() and does not have a
+<span class="lineNum">    1214 </span>            :      * conflicting sortgroupref already.
+<span class="lineNum">    1215 </span>            :      */
+<span class="lineNum">    1216 </span><span class="lineCov">       1086 :     lci = 0;</span>
+<span class="lineNum">    1217 </span><span class="lineCov">       1762 :     foreach(lc, target-&gt;exprs)</span>
+<span class="lineNum">    1218 </span>            :     {
+<span class="lineNum">    1219 </span><span class="lineCov">       1074 :         Node       *node = (Node *) lfirst(lc);</span>
+<span class="lineNum">    1220 </span><span class="lineCov">       1074 :         Index       sgref = get_pathtarget_sortgroupref(target, lci);</span>
+<span class="lineNum">    1221 </span>            : 
+<span class="lineNum">    1222 </span><span class="lineCov">       1158 :         if ((item-&gt;sortgroupref == sgref ||</span>
+<span class="lineNum">    1223 </span><span class="lineCov">        136 :              item-&gt;sortgroupref == 0 ||</span>
+<span class="lineNum">    1224 </span><span class="lineCov">       1056 :              sgref == 0) &amp;&amp;</span>
+<span class="lineNum">    1225 </span><span class="lineCov">       1056 :             equal(item-&gt;expr, node))</span>
+<span class="lineNum">    1226 </span>            :         {
+<span class="lineNum">    1227 </span>            :             /* Found a match.  Assign item's sortgroupref if it has one. */
+<span class="lineNum">    1228 </span><span class="lineCov">        398 :             if (item-&gt;sortgroupref)</span>
+<span class="lineNum">    1229 </span>            :             {
+<span class="lineNum">    1230 </span><span class="lineCov">          4 :                 if (target-&gt;sortgrouprefs == NULL)</span>
+<span class="lineNum">    1231 </span>            :                 {
+<span class="lineNum">    1232 </span><span class="lineCov">          4 :                     target-&gt;sortgrouprefs = (Index *)</span>
+<span class="lineNum">    1233 </span><span class="lineCov">          4 :                         palloc0(list_length(target-&gt;exprs) * sizeof(Index));</span>
+<span class="lineNum">    1234 </span>            :                 }
+<span class="lineNum">    1235 </span><span class="lineCov">          4 :                 target-&gt;sortgrouprefs[lci] = item-&gt;sortgroupref;</span>
+<span class="lineNum">    1236 </span>            :             }
+<span class="lineNum">    1237 </span><span class="lineCov">        796 :             return;</span>
+<span class="lineNum">    1238 </span>            :         }
+<span class="lineNum">    1239 </span><span class="lineCov">        676 :         lci++;</span>
+<span class="lineNum">    1240 </span>            :     }
+<span class="lineNum">    1241 </span>            : 
+<span class="lineNum">    1242 </span>            :     /*
+<span class="lineNum">    1243 </span>            :      * No match, so add item to PathTarget.  Copy the expr for safety.
+<span class="lineNum">    1244 </span>            :      */
+<span class="lineNum">    1245 </span><span class="lineCov">        688 :     add_column_to_pathtarget(target, (Expr *) copyObject(item-&gt;expr),</span>
+<span class="lineNum">    1246 </span>            :                              item-&gt;sortgroupref);
+<span class="lineNum">    1247 </span>            : }
+<span class="lineNum">    1248 </span>            : 
+<span class="lineNum">    1249 </span>            : /*
+<span class="lineNum">    1250 </span>            :  * Apply add_sp_item_to_pathtarget to each element of list.
+<a name="1251"><span class="lineNum">    1251 </span>            :  */</a>
+<span class="lineNum">    1252 </span>            : static void
+<span class="lineNum">    1253 </span><span class="lineCov">       2844 : add_sp_items_to_pathtarget(PathTarget *target, List *items)</span>
+<span class="lineNum">    1254 </span>            : {
+<span class="lineNum">    1255 </span>            :     ListCell   *lc;
+<span class="lineNum">    1256 </span>            : 
+<span class="lineNum">    1257 </span><span class="lineCov">       3918 :     foreach(lc, items)</span>
+<span class="lineNum">    1258 </span>            :     {
+<span class="lineNum">    1259 </span><span class="lineCov">       1074 :         split_pathtarget_item *item = lfirst(lc);</span>
+<span class="lineNum">    1260 </span>            : 
+<span class="lineNum">    1261 </span><span class="lineCov">       1074 :         add_sp_item_to_pathtarget(target, item);</span>
+<span class="lineNum">    1262 </span>            :     }
+<span class="lineNum">    1263 </span><span class="lineCov">       2844 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>

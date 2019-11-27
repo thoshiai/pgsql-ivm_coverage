@@ -1,0 +1,675 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html lang="en">
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <title>LCOV - PostgreSQL 13devel - src/backend/storage/buffer/localbuf.c</title>
+  <link rel="stylesheet" type="text/css" href="../../../../gcov.css">
+</head>
+
+<body>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="title">LCOV - code coverage report</td></tr>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+
+    <tr>
+      <td width="100%">
+        <table cellpadding=1 border=0 width="100%">
+          <tr>
+            <td width="10%" class="headerItem">Current view:</td>
+            <td width="35%" class="headerValue"><a href="../../../../index.html">top level</a> - <a href="index.html">src/backend/storage/buffer</a> - localbuf.c<span style="font-size: 80%;"> (source / <a href="localbuf.c.func-sort-c.html">functions</a>)</span></td>
+            <td width="5%"></td>
+            <td width="15%"></td>
+            <td width="10%" class="headerCovTableHead">Hit</td>
+            <td width="10%" class="headerCovTableHead">Total</td>
+            <td width="15%" class="headerCovTableHead">Coverage</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Test:</td>
+            <td class="headerValue">PostgreSQL 13devel</td>
+            <td></td>
+            <td class="headerItem">Lines:</td>
+            <td class="headerCovTableEntry">146</td>
+            <td class="headerCovTableEntry">181</td>
+            <td class="headerCovTableEntryMed">80.7 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Date:</td>
+            <td class="headerValue">2019-11-27 09:34:56</td>
+            <td></td>
+            <td class="headerItem">Functions:</td>
+            <td class="headerCovTableEntry">10</td>
+            <td class="headerCovTableEntry">10</td>
+            <td class="headerCovTableEntryHi">100.0 %</td>
+          </tr>
+          <tr>
+            <td class="headerItem">Legend:</td>
+            <td class="headerValueLeg">            Lines:
+            <span class="coverLegendCov">hit</span>
+            <span class="coverLegendNoCov">not hit</span>
+</td>
+            <td></td>
+          </tr>
+          <tr><td><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+        </table>
+      </td>
+    </tr>
+
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+  </table>
+
+  <table cellpadding=0 cellspacing=0 border=0>
+    <tr>
+      <td><br></td>
+    </tr>
+    <tr>
+      <td>
+<pre class="sourceHeading">          Line data    Source code</pre>
+<pre class="source">
+<a name="1"><span class="lineNum">       1 </span>            : /*-------------------------------------------------------------------------</a>
+<span class="lineNum">       2 </span>            :  *
+<span class="lineNum">       3 </span>            :  * localbuf.c
+<span class="lineNum">       4 </span>            :  *    local buffer manager. Fast buffer manager for temporary tables,
+<span class="lineNum">       5 </span>            :  *    which never need to be WAL-logged or checkpointed, etc.
+<span class="lineNum">       6 </span>            :  *
+<span class="lineNum">       7 </span>            :  * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
+<span class="lineNum">       8 </span>            :  * Portions Copyright (c) 1994-5, Regents of the University of California
+<span class="lineNum">       9 </span>            :  *
+<span class="lineNum">      10 </span>            :  *
+<span class="lineNum">      11 </span>            :  * IDENTIFICATION
+<span class="lineNum">      12 </span>            :  *    src/backend/storage/buffer/localbuf.c
+<span class="lineNum">      13 </span>            :  *
+<span class="lineNum">      14 </span>            :  *-------------------------------------------------------------------------
+<span class="lineNum">      15 </span>            :  */
+<span class="lineNum">      16 </span>            : #include &quot;postgres.h&quot;
+<span class="lineNum">      17 </span>            : 
+<span class="lineNum">      18 </span>            : #include &quot;access/parallel.h&quot;
+<span class="lineNum">      19 </span>            : #include &quot;catalog/catalog.h&quot;
+<span class="lineNum">      20 </span>            : #include &quot;executor/instrument.h&quot;
+<span class="lineNum">      21 </span>            : #include &quot;storage/buf_internals.h&quot;
+<span class="lineNum">      22 </span>            : #include &quot;storage/bufmgr.h&quot;
+<span class="lineNum">      23 </span>            : #include &quot;utils/guc.h&quot;
+<span class="lineNum">      24 </span>            : #include &quot;utils/memutils.h&quot;
+<span class="lineNum">      25 </span>            : #include &quot;utils/resowner_private.h&quot;
+<span class="lineNum">      26 </span>            : 
+<span class="lineNum">      27 </span>            : 
+<span class="lineNum">      28 </span>            : /*#define LBDEBUG*/
+<span class="lineNum">      29 </span>            : 
+<span class="lineNum">      30 </span>            : /* entry for buffer lookup hashtable */
+<span class="lineNum">      31 </span>            : typedef struct
+<span class="lineNum">      32 </span>            : {
+<span class="lineNum">      33 </span>            :     BufferTag   key;            /* Tag of a disk page */
+<span class="lineNum">      34 </span>            :     int         id;             /* Associated local buffer's index */
+<span class="lineNum">      35 </span>            : } LocalBufferLookupEnt;
+<span class="lineNum">      36 </span>            : 
+<span class="lineNum">      37 </span>            : /* Note: this macro only works on local buffers, not shared ones! */
+<span class="lineNum">      38 </span>            : #define LocalBufHdrGetBlock(bufHdr) \
+<span class="lineNum">      39 </span>            :     LocalBufferBlockPointers[-((bufHdr)-&gt;buf_id + 2)]
+<span class="lineNum">      40 </span>            : 
+<span class="lineNum">      41 </span>            : int         NLocBuffer = 0;     /* until buffers are initialized */
+<span class="lineNum">      42 </span>            : 
+<span class="lineNum">      43 </span>            : BufferDesc *LocalBufferDescriptors = NULL;
+<span class="lineNum">      44 </span>            : Block      *LocalBufferBlockPointers = NULL;
+<span class="lineNum">      45 </span>            : int32      *LocalRefCount = NULL;
+<span class="lineNum">      46 </span>            : 
+<span class="lineNum">      47 </span>            : static int  nextFreeLocalBuf = 0;
+<span class="lineNum">      48 </span>            : 
+<span class="lineNum">      49 </span>            : static HTAB *LocalBufHash = NULL;
+<span class="lineNum">      50 </span>            : 
+<span class="lineNum">      51 </span>            : 
+<span class="lineNum">      52 </span>            : static void InitLocalBuffers(void);
+<span class="lineNum">      53 </span>            : static Block GetLocalBufferStorage(void);
+<span class="lineNum">      54 </span>            : 
+<span class="lineNum">      55 </span>            : 
+<span class="lineNum">      56 </span>            : /*
+<span class="lineNum">      57 </span>            :  * LocalPrefetchBuffer -
+<span class="lineNum">      58 </span>            :  *    initiate asynchronous read of a block of a relation
+<span class="lineNum">      59 </span>            :  *
+<span class="lineNum">      60 </span>            :  * Do PrefetchBuffer's work for temporary relations.
+<span class="lineNum">      61 </span>            :  * No-op if prefetching isn't compiled in.
+<a name="62"><span class="lineNum">      62 </span>            :  */</a>
+<span class="lineNum">      63 </span>            : void
+<span class="lineNum">      64 </span><span class="lineCov">         10 : LocalPrefetchBuffer(SMgrRelation smgr, ForkNumber forkNum,</span>
+<span class="lineNum">      65 </span>            :                     BlockNumber blockNum)
+<span class="lineNum">      66 </span>            : {
+<span class="lineNum">      67 </span>            : #ifdef USE_PREFETCH
+<span class="lineNum">      68 </span>            :     BufferTag   newTag;         /* identity of requested block */
+<span class="lineNum">      69 </span>            :     LocalBufferLookupEnt *hresult;
+<span class="lineNum">      70 </span>            : 
+<span class="lineNum">      71 </span><span class="lineCov">         10 :     INIT_BUFFERTAG(newTag, smgr-&gt;smgr_rnode.node, forkNum, blockNum);</span>
+<span class="lineNum">      72 </span>            : 
+<span class="lineNum">      73 </span>            :     /* Initialize local buffers if first request in this session */
+<span class="lineNum">      74 </span><span class="lineCov">         10 :     if (LocalBufHash == NULL)</span>
+<span class="lineNum">      75 </span><span class="lineNoCov">          0 :         InitLocalBuffers();</span>
+<span class="lineNum">      76 </span>            : 
+<span class="lineNum">      77 </span>            :     /* See if the desired buffer already exists */
+<span class="lineNum">      78 </span><span class="lineCov">         10 :     hresult = (LocalBufferLookupEnt *)</span>
+<span class="lineNum">      79 </span><span class="lineCov">         10 :         hash_search(LocalBufHash, (void *) &amp;newTag, HASH_FIND, NULL);</span>
+<span class="lineNum">      80 </span>            : 
+<span class="lineNum">      81 </span><span class="lineCov">         10 :     if (hresult)</span>
+<span class="lineNum">      82 </span>            :     {
+<span class="lineNum">      83 </span>            :         /* Yes, so nothing to do */
+<span class="lineNum">      84 </span><span class="lineCov">         20 :         return;</span>
+<span class="lineNum">      85 </span>            :     }
+<span class="lineNum">      86 </span>            : 
+<span class="lineNum">      87 </span>            :     /* Not in buffers, so initiate prefetch */
+<span class="lineNum">      88 </span><span class="lineNoCov">          0 :     smgrprefetch(smgr, forkNum, blockNum);</span>
+<span class="lineNum">      89 </span>            : #endif                          /* USE_PREFETCH */
+<span class="lineNum">      90 </span>            : }
+<span class="lineNum">      91 </span>            : 
+<span class="lineNum">      92 </span>            : 
+<span class="lineNum">      93 </span>            : /*
+<span class="lineNum">      94 </span>            :  * LocalBufferAlloc -
+<span class="lineNum">      95 </span>            :  *    Find or create a local buffer for the given page of the given relation.
+<span class="lineNum">      96 </span>            :  *
+<span class="lineNum">      97 </span>            :  * API is similar to bufmgr.c's BufferAlloc, except that we do not need
+<span class="lineNum">      98 </span>            :  * to do any locking since this is all local.   Also, IO_IN_PROGRESS
+<span class="lineNum">      99 </span>            :  * does not get set.  Lastly, we support only default access strategy
+<span class="lineNum">     100 </span>            :  * (hence, usage_count is always advanced).
+<a name="101"><span class="lineNum">     101 </span>            :  */</a>
+<span class="lineNum">     102 </span>            : BufferDesc *
+<span class="lineNum">     103 </span><span class="lineCov">      80486 : LocalBufferAlloc(SMgrRelation smgr, ForkNumber forkNum, BlockNumber blockNum,</span>
+<span class="lineNum">     104 </span>            :                  bool *foundPtr)
+<span class="lineNum">     105 </span>            : {
+<span class="lineNum">     106 </span>            :     BufferTag   newTag;         /* identity of requested block */
+<span class="lineNum">     107 </span>            :     LocalBufferLookupEnt *hresult;
+<span class="lineNum">     108 </span>            :     BufferDesc *bufHdr;
+<span class="lineNum">     109 </span>            :     int         b;
+<span class="lineNum">     110 </span>            :     int         trycounter;
+<span class="lineNum">     111 </span>            :     bool        found;
+<span class="lineNum">     112 </span>            :     uint32      buf_state;
+<span class="lineNum">     113 </span>            : 
+<span class="lineNum">     114 </span><span class="lineCov">      80486 :     INIT_BUFFERTAG(newTag, smgr-&gt;smgr_rnode.node, forkNum, blockNum);</span>
+<span class="lineNum">     115 </span>            : 
+<span class="lineNum">     116 </span>            :     /* Initialize local buffers if first request in this session */
+<span class="lineNum">     117 </span><span class="lineCov">      80486 :     if (LocalBufHash == NULL)</span>
+<span class="lineNum">     118 </span><span class="lineCov">        112 :         InitLocalBuffers();</span>
+<span class="lineNum">     119 </span>            : 
+<span class="lineNum">     120 </span>            :     /* See if the desired buffer already exists */
+<span class="lineNum">     121 </span><span class="lineCov">      80486 :     hresult = (LocalBufferLookupEnt *)</span>
+<span class="lineNum">     122 </span><span class="lineCov">      80486 :         hash_search(LocalBufHash, (void *) &amp;newTag, HASH_FIND, NULL);</span>
+<span class="lineNum">     123 </span>            : 
+<span class="lineNum">     124 </span><span class="lineCov">      80486 :     if (hresult)</span>
+<span class="lineNum">     125 </span>            :     {
+<span class="lineNum">     126 </span><span class="lineCov">      75934 :         b = hresult-&gt;id;</span>
+<span class="lineNum">     127 </span><span class="lineCov">      75934 :         bufHdr = GetLocalBufferDescriptor(b);</span>
+<span class="lineNum">     128 </span><span class="lineCov">      75934 :         Assert(BUFFERTAGS_EQUAL(bufHdr-&gt;tag, newTag));</span>
+<span class="lineNum">     129 </span>            : #ifdef LBDEBUG
+<span class="lineNum">     130 </span>            :         fprintf(stderr, &quot;LB ALLOC (%u,%d,%d) %d\n&quot;,
+<span class="lineNum">     131 </span>            :                 smgr-&gt;smgr_rnode.node.relNode, forkNum, blockNum, -b - 1);
+<span class="lineNum">     132 </span>            : #endif
+<span class="lineNum">     133 </span><span class="lineCov">      75934 :         buf_state = pg_atomic_read_u32(&amp;bufHdr-&gt;state);</span>
+<span class="lineNum">     134 </span>            : 
+<span class="lineNum">     135 </span>            :         /* this part is equivalent to PinBuffer for a shared buffer */
+<span class="lineNum">     136 </span><span class="lineCov">      75934 :         if (LocalRefCount[b] == 0)</span>
+<span class="lineNum">     137 </span>            :         {
+<span class="lineNum">     138 </span><span class="lineCov">      73702 :             if (BUF_STATE_GET_USAGECOUNT(buf_state) &lt; BM_MAX_USAGE_COUNT)</span>
+<span class="lineNum">     139 </span>            :             {
+<span class="lineNum">     140 </span><span class="lineCov">      12274 :                 buf_state += BUF_USAGECOUNT_ONE;</span>
+<span class="lineNum">     141 </span><span class="lineCov">      12274 :                 pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     142 </span>            :             }
+<span class="lineNum">     143 </span>            :         }
+<span class="lineNum">     144 </span><span class="lineCov">      75934 :         LocalRefCount[b]++;</span>
+<span class="lineNum">     145 </span><span class="lineCov">      75934 :         ResourceOwnerRememberBuffer(CurrentResourceOwner,</span>
+<span class="lineNum">     146 </span><span class="lineCov">      75934 :                                     BufferDescriptorGetBuffer(bufHdr));</span>
+<span class="lineNum">     147 </span><span class="lineCov">      75934 :         if (buf_state &amp; BM_VALID)</span>
+<span class="lineNum">     148 </span><span class="lineCov">      75934 :             *foundPtr = true;</span>
+<span class="lineNum">     149 </span>            :         else
+<span class="lineNum">     150 </span>            :         {
+<span class="lineNum">     151 </span>            :             /* Previous read attempt must have failed; try again */
+<span class="lineNum">     152 </span><span class="lineNoCov">          0 :             *foundPtr = false;</span>
+<span class="lineNum">     153 </span>            :         }
+<span class="lineNum">     154 </span><span class="lineCov">      75934 :         return bufHdr;</span>
+<span class="lineNum">     155 </span>            :     }
+<span class="lineNum">     156 </span>            : 
+<span class="lineNum">     157 </span>            : #ifdef LBDEBUG
+<span class="lineNum">     158 </span>            :     fprintf(stderr, &quot;LB ALLOC (%u,%d,%d) %d\n&quot;,
+<span class="lineNum">     159 </span>            :             smgr-&gt;smgr_rnode.node.relNode, forkNum, blockNum,
+<span class="lineNum">     160 </span>            :             -nextFreeLocalBuf - 1);
+<span class="lineNum">     161 </span>            : #endif
+<span class="lineNum">     162 </span>            : 
+<span class="lineNum">     163 </span>            :     /*
+<span class="lineNum">     164 </span>            :      * Need to get a new buffer.  We use a clock sweep algorithm (essentially
+<span class="lineNum">     165 </span>            :      * the same as what freelist.c does now...)
+<span class="lineNum">     166 </span>            :      */
+<span class="lineNum">     167 </span><span class="lineCov">       4552 :     trycounter = NLocBuffer;</span>
+<span class="lineNum">     168 </span>            :     for (;;)
+<span class="lineNum">     169 </span>            :     {
+<span class="lineNum">     170 </span><span class="lineCov">       4552 :         b = nextFreeLocalBuf;</span>
+<span class="lineNum">     171 </span>            : 
+<span class="lineNum">     172 </span><span class="lineCov">       4552 :         if (++nextFreeLocalBuf &gt;= NLocBuffer)</span>
+<span class="lineNum">     173 </span><span class="lineNoCov">          0 :             nextFreeLocalBuf = 0;</span>
+<span class="lineNum">     174 </span>            : 
+<span class="lineNum">     175 </span><span class="lineCov">       4552 :         bufHdr = GetLocalBufferDescriptor(b);</span>
+<span class="lineNum">     176 </span>            : 
+<span class="lineNum">     177 </span><span class="lineCov">       4552 :         if (LocalRefCount[b] == 0)</span>
+<span class="lineNum">     178 </span>            :         {
+<span class="lineNum">     179 </span><span class="lineCov">       4552 :             buf_state = pg_atomic_read_u32(&amp;bufHdr-&gt;state);</span>
+<span class="lineNum">     180 </span>            : 
+<span class="lineNum">     181 </span><span class="lineCov">       4552 :             if (BUF_STATE_GET_USAGECOUNT(buf_state) &gt; 0)</span>
+<span class="lineNum">     182 </span>            :             {
+<span class="lineNum">     183 </span><span class="lineNoCov">          0 :                 buf_state -= BUF_USAGECOUNT_ONE;</span>
+<span class="lineNum">     184 </span><span class="lineNoCov">          0 :                 pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     185 </span><span class="lineNoCov">          0 :                 trycounter = NLocBuffer;</span>
+<span class="lineNum">     186 </span>            :             }
+<span class="lineNum">     187 </span>            :             else
+<span class="lineNum">     188 </span>            :             {
+<span class="lineNum">     189 </span>            :                 /* Found a usable buffer */
+<span class="lineNum">     190 </span><span class="lineCov">       4552 :                 LocalRefCount[b]++;</span>
+<span class="lineNum">     191 </span><span class="lineCov">       4552 :                 ResourceOwnerRememberBuffer(CurrentResourceOwner,</span>
+<span class="lineNum">     192 </span><span class="lineCov">       4552 :                                             BufferDescriptorGetBuffer(bufHdr));</span>
+<span class="lineNum">     193 </span><span class="lineCov">       4552 :                 break;</span>
+<span class="lineNum">     194 </span>            :             }
+<span class="lineNum">     195 </span>            :         }
+<span class="lineNum">     196 </span><span class="lineNoCov">          0 :         else if (--trycounter == 0)</span>
+<span class="lineNum">     197 </span><span class="lineNoCov">          0 :             ereport(ERROR,</span>
+<span class="lineNum">     198 </span>            :                     (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+<span class="lineNum">     199 </span>            :                      errmsg(&quot;no empty local buffer available&quot;)));
+<span class="lineNum">     200 </span><span class="lineNoCov">          0 :     }</span>
+<span class="lineNum">     201 </span>            : 
+<span class="lineNum">     202 </span>            :     /*
+<span class="lineNum">     203 </span>            :      * this buffer is not referenced but it might still be dirty. if that's
+<span class="lineNum">     204 </span>            :      * the case, write it out before reusing it!
+<span class="lineNum">     205 </span>            :      */
+<span class="lineNum">     206 </span><span class="lineCov">       4552 :     if (buf_state &amp; BM_DIRTY)</span>
+<span class="lineNum">     207 </span>            :     {
+<span class="lineNum">     208 </span>            :         SMgrRelation oreln;
+<span class="lineNum">     209 </span><span class="lineNoCov">          0 :         Page        localpage = (char *) LocalBufHdrGetBlock(bufHdr);</span>
+<span class="lineNum">     210 </span>            : 
+<span class="lineNum">     211 </span>            :         /* Find smgr relation for buffer */
+<span class="lineNum">     212 </span><span class="lineNoCov">          0 :         oreln = smgropen(bufHdr-&gt;tag.rnode, MyBackendId);</span>
+<span class="lineNum">     213 </span>            : 
+<span class="lineNum">     214 </span><span class="lineNoCov">          0 :         PageSetChecksumInplace(localpage, bufHdr-&gt;tag.blockNum);</span>
+<span class="lineNum">     215 </span>            : 
+<span class="lineNum">     216 </span>            :         /* And write... */
+<span class="lineNum">     217 </span><span class="lineNoCov">          0 :         smgrwrite(oreln,</span>
+<span class="lineNum">     218 </span>            :                   bufHdr-&gt;tag.forkNum,
+<span class="lineNum">     219 </span>            :                   bufHdr-&gt;tag.blockNum,
+<span class="lineNum">     220 </span>            :                   localpage,
+<span class="lineNum">     221 </span>            :                   false);
+<span class="lineNum">     222 </span>            : 
+<span class="lineNum">     223 </span>            :         /* Mark not-dirty now in case we error out below */
+<span class="lineNum">     224 </span><span class="lineNoCov">          0 :         buf_state &amp;= ~BM_DIRTY;</span>
+<span class="lineNum">     225 </span><span class="lineNoCov">          0 :         pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     226 </span>            : 
+<span class="lineNum">     227 </span><span class="lineNoCov">          0 :         pgBufferUsage.local_blks_written++;</span>
+<span class="lineNum">     228 </span>            :     }
+<span class="lineNum">     229 </span>            : 
+<span class="lineNum">     230 </span>            :     /*
+<span class="lineNum">     231 </span>            :      * lazy memory allocation: allocate space on first use of a buffer.
+<span class="lineNum">     232 </span>            :      */
+<span class="lineNum">     233 </span><span class="lineCov">       4552 :     if (LocalBufHdrGetBlock(bufHdr) == NULL)</span>
+<span class="lineNum">     234 </span>            :     {
+<span class="lineNum">     235 </span>            :         /* Set pointer for use by BufferGetBlock() macro */
+<span class="lineNum">     236 </span><span class="lineCov">       4552 :         LocalBufHdrGetBlock(bufHdr) = GetLocalBufferStorage();</span>
+<span class="lineNum">     237 </span>            :     }
+<span class="lineNum">     238 </span>            : 
+<span class="lineNum">     239 </span>            :     /*
+<span class="lineNum">     240 </span>            :      * Update the hash table: remove old entry, if any, and make new one.
+<span class="lineNum">     241 </span>            :      */
+<span class="lineNum">     242 </span><span class="lineCov">       4552 :     if (buf_state &amp; BM_TAG_VALID)</span>
+<span class="lineNum">     243 </span>            :     {
+<span class="lineNum">     244 </span><span class="lineNoCov">          0 :         hresult = (LocalBufferLookupEnt *)</span>
+<span class="lineNum">     245 </span><span class="lineNoCov">          0 :             hash_search(LocalBufHash, (void *) &amp;bufHdr-&gt;tag,</span>
+<span class="lineNum">     246 </span>            :                         HASH_REMOVE, NULL);
+<span class="lineNum">     247 </span><span class="lineNoCov">          0 :         if (!hresult)           /* shouldn't happen */</span>
+<span class="lineNum">     248 </span><span class="lineNoCov">          0 :             elog(ERROR, &quot;local buffer hash table corrupted&quot;);</span>
+<span class="lineNum">     249 </span>            :         /* mark buffer invalid just in case hash insert fails */
+<span class="lineNum">     250 </span><span class="lineNoCov">          0 :         CLEAR_BUFFERTAG(bufHdr-&gt;tag);</span>
+<span class="lineNum">     251 </span><span class="lineNoCov">          0 :         buf_state &amp;= ~(BM_VALID | BM_TAG_VALID);</span>
+<span class="lineNum">     252 </span><span class="lineNoCov">          0 :         pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     253 </span>            :     }
+<span class="lineNum">     254 </span>            : 
+<span class="lineNum">     255 </span><span class="lineCov">       4552 :     hresult = (LocalBufferLookupEnt *)</span>
+<span class="lineNum">     256 </span><span class="lineCov">       4552 :         hash_search(LocalBufHash, (void *) &amp;newTag, HASH_ENTER, &amp;found);</span>
+<span class="lineNum">     257 </span><span class="lineCov">       4552 :     if (found)                  /* shouldn't happen */</span>
+<span class="lineNum">     258 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;local buffer hash table corrupted&quot;);</span>
+<span class="lineNum">     259 </span><span class="lineCov">       4552 :     hresult-&gt;id = b;</span>
+<span class="lineNum">     260 </span>            : 
+<span class="lineNum">     261 </span>            :     /*
+<span class="lineNum">     262 </span>            :      * it's all ours now.
+<span class="lineNum">     263 </span>            :      */
+<span class="lineNum">     264 </span><span class="lineCov">       4552 :     bufHdr-&gt;tag = newTag;</span>
+<span class="lineNum">     265 </span><span class="lineCov">       4552 :     buf_state &amp;= ~(BM_VALID | BM_DIRTY | BM_JUST_DIRTIED | BM_IO_ERROR);</span>
+<span class="lineNum">     266 </span><span class="lineCov">       4552 :     buf_state |= BM_TAG_VALID;</span>
+<span class="lineNum">     267 </span><span class="lineCov">       4552 :     buf_state &amp;= ~BUF_USAGECOUNT_MASK;</span>
+<span class="lineNum">     268 </span><span class="lineCov">       4552 :     buf_state += BUF_USAGECOUNT_ONE;</span>
+<span class="lineNum">     269 </span><span class="lineCov">       4552 :     pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     270 </span>            : 
+<span class="lineNum">     271 </span><span class="lineCov">       4552 :     *foundPtr = false;</span>
+<span class="lineNum">     272 </span><span class="lineCov">       4552 :     return bufHdr;</span>
+<span class="lineNum">     273 </span>            : }
+<span class="lineNum">     274 </span>            : 
+<span class="lineNum">     275 </span>            : /*
+<span class="lineNum">     276 </span>            :  * MarkLocalBufferDirty -
+<span class="lineNum">     277 </span>            :  *    mark a local buffer dirty
+<a name="278"><span class="lineNum">     278 </span>            :  */</a>
+<span class="lineNum">     279 </span>            : void
+<span class="lineNum">     280 </span><span class="lineCov">     467274 : MarkLocalBufferDirty(Buffer buffer)</span>
+<span class="lineNum">     281 </span>            : {
+<span class="lineNum">     282 </span>            :     int         bufid;
+<span class="lineNum">     283 </span>            :     BufferDesc *bufHdr;
+<span class="lineNum">     284 </span>            :     uint32      buf_state;
+<span class="lineNum">     285 </span>            : 
+<span class="lineNum">     286 </span><span class="lineCov">     467274 :     Assert(BufferIsLocal(buffer));</span>
+<span class="lineNum">     287 </span>            : 
+<span class="lineNum">     288 </span>            : #ifdef LBDEBUG
+<span class="lineNum">     289 </span>            :     fprintf(stderr, &quot;LB DIRTY %d\n&quot;, buffer);
+<span class="lineNum">     290 </span>            : #endif
+<span class="lineNum">     291 </span>            : 
+<span class="lineNum">     292 </span><span class="lineCov">     467274 :     bufid = -(buffer + 1);</span>
+<span class="lineNum">     293 </span>            : 
+<span class="lineNum">     294 </span><span class="lineCov">     467274 :     Assert(LocalRefCount[bufid] &gt; 0);</span>
+<span class="lineNum">     295 </span>            : 
+<span class="lineNum">     296 </span><span class="lineCov">     467274 :     bufHdr = GetLocalBufferDescriptor(bufid);</span>
+<span class="lineNum">     297 </span>            : 
+<span class="lineNum">     298 </span><span class="lineCov">     467274 :     buf_state = pg_atomic_read_u32(&amp;bufHdr-&gt;state);</span>
+<span class="lineNum">     299 </span>            : 
+<span class="lineNum">     300 </span><span class="lineCov">     467274 :     if (!(buf_state &amp; BM_DIRTY))</span>
+<span class="lineNum">     301 </span><span class="lineCov">       4386 :         pgBufferUsage.local_blks_dirtied++;</span>
+<span class="lineNum">     302 </span>            : 
+<span class="lineNum">     303 </span><span class="lineCov">     467274 :     buf_state |= BM_DIRTY;</span>
+<span class="lineNum">     304 </span>            : 
+<span class="lineNum">     305 </span><span class="lineCov">     467274 :     pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     306 </span><span class="lineCov">     467274 : }</span>
+<span class="lineNum">     307 </span>            : 
+<span class="lineNum">     308 </span>            : /*
+<span class="lineNum">     309 </span>            :  * DropRelFileNodeLocalBuffers
+<span class="lineNum">     310 </span>            :  *      This function removes from the buffer pool all the pages of the
+<span class="lineNum">     311 </span>            :  *      specified relation that have block numbers &gt;= firstDelBlock.
+<span class="lineNum">     312 </span>            :  *      (In particular, with firstDelBlock = 0, all pages are removed.)
+<span class="lineNum">     313 </span>            :  *      Dirty pages are simply dropped, without bothering to write them
+<span class="lineNum">     314 </span>            :  *      out first.  Therefore, this is NOT rollback-able, and so should be
+<span class="lineNum">     315 </span>            :  *      used only with extreme caution!
+<span class="lineNum">     316 </span>            :  *
+<span class="lineNum">     317 </span>            :  *      See DropRelFileNodeBuffers in bufmgr.c for more notes.
+<a name="318"><span class="lineNum">     318 </span>            :  */</a>
+<span class="lineNum">     319 </span>            : void
+<span class="lineNum">     320 </span><span class="lineCov">       1766 : DropRelFileNodeLocalBuffers(RelFileNode rnode, ForkNumber forkNum,</span>
+<span class="lineNum">     321 </span>            :                             BlockNumber firstDelBlock)
+<span class="lineNum">     322 </span>            : {
+<span class="lineNum">     323 </span>            :     int         i;
+<span class="lineNum">     324 </span>            : 
+<span class="lineNum">     325 </span><span class="lineCov">    1795814 :     for (i = 0; i &lt; NLocBuffer; i++)</span>
+<span class="lineNum">     326 </span>            :     {
+<span class="lineNum">     327 </span><span class="lineCov">    1794048 :         BufferDesc *bufHdr = GetLocalBufferDescriptor(i);</span>
+<span class="lineNum">     328 </span>            :         LocalBufferLookupEnt *hresult;
+<span class="lineNum">     329 </span>            :         uint32      buf_state;
+<span class="lineNum">     330 </span>            : 
+<span class="lineNum">     331 </span><span class="lineCov">    1794048 :         buf_state = pg_atomic_read_u32(&amp;bufHdr-&gt;state);</span>
+<span class="lineNum">     332 </span>            : 
+<span class="lineNum">     333 </span><span class="lineCov">    1794994 :         if ((buf_state &amp; BM_TAG_VALID) &amp;&amp;</span>
+<span class="lineNum">     334 </span><span class="lineCov">       2110 :             RelFileNodeEquals(bufHdr-&gt;tag.rnode, rnode) &amp;&amp;</span>
+<span class="lineNum">     335 </span><span class="lineCov">       1164 :             bufHdr-&gt;tag.forkNum == forkNum &amp;&amp;</span>
+<span class="lineNum">     336 </span><span class="lineCov">        582 :             bufHdr-&gt;tag.blockNum &gt;= firstDelBlock)</span>
+<span class="lineNum">     337 </span>            :         {
+<span class="lineNum">     338 </span><span class="lineCov">        582 :             if (LocalRefCount[i] != 0)</span>
+<span class="lineNum">     339 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;block %u of %s is still referenced (local %u)&quot;,</span>
+<span class="lineNum">     340 </span>            :                      bufHdr-&gt;tag.blockNum,
+<span class="lineNum">     341 </span>            :                      relpathbackend(bufHdr-&gt;tag.rnode, MyBackendId,
+<span class="lineNum">     342 </span>            :                                     bufHdr-&gt;tag.forkNum),
+<span class="lineNum">     343 </span>            :                      LocalRefCount[i]);
+<span class="lineNum">     344 </span>            :             /* Remove entry from hashtable */
+<span class="lineNum">     345 </span><span class="lineCov">        582 :             hresult = (LocalBufferLookupEnt *)</span>
+<span class="lineNum">     346 </span><span class="lineCov">        582 :                 hash_search(LocalBufHash, (void *) &amp;bufHdr-&gt;tag,</span>
+<span class="lineNum">     347 </span>            :                             HASH_REMOVE, NULL);
+<span class="lineNum">     348 </span><span class="lineCov">        582 :             if (!hresult)       /* shouldn't happen */</span>
+<span class="lineNum">     349 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;local buffer hash table corrupted&quot;);</span>
+<span class="lineNum">     350 </span>            :             /* Mark buffer invalid */
+<span class="lineNum">     351 </span><span class="lineCov">        582 :             CLEAR_BUFFERTAG(bufHdr-&gt;tag);</span>
+<span class="lineNum">     352 </span><span class="lineCov">        582 :             buf_state &amp;= ~BUF_FLAG_MASK;</span>
+<span class="lineNum">     353 </span><span class="lineCov">        582 :             buf_state &amp;= ~BUF_USAGECOUNT_MASK;</span>
+<span class="lineNum">     354 </span><span class="lineCov">        582 :             pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     355 </span>            :         }
+<span class="lineNum">     356 </span>            :     }
+<span class="lineNum">     357 </span><span class="lineCov">       1766 : }</span>
+<span class="lineNum">     358 </span>            : 
+<span class="lineNum">     359 </span>            : /*
+<span class="lineNum">     360 </span>            :  * DropRelFileNodeAllLocalBuffers
+<span class="lineNum">     361 </span>            :  *      This function removes from the buffer pool all pages of all forks
+<span class="lineNum">     362 </span>            :  *      of the specified relation.
+<span class="lineNum">     363 </span>            :  *
+<span class="lineNum">     364 </span>            :  *      See DropRelFileNodesAllBuffers in bufmgr.c for more notes.
+<a name="365"><span class="lineNum">     365 </span>            :  */</a>
+<span class="lineNum">     366 </span>            : void
+<span class="lineNum">     367 </span><span class="lineCov">       2948 : DropRelFileNodeAllLocalBuffers(RelFileNode rnode)</span>
+<span class="lineNum">     368 </span>            : {
+<span class="lineNum">     369 </span>            :     int         i;
+<span class="lineNum">     370 </span>            : 
+<span class="lineNum">     371 </span><span class="lineCov">    2952068 :     for (i = 0; i &lt; NLocBuffer; i++)</span>
+<span class="lineNum">     372 </span>            :     {
+<span class="lineNum">     373 </span><span class="lineCov">    2949120 :         BufferDesc *bufHdr = GetLocalBufferDescriptor(i);</span>
+<span class="lineNum">     374 </span>            :         LocalBufferLookupEnt *hresult;
+<span class="lineNum">     375 </span>            :         uint32      buf_state;
+<span class="lineNum">     376 </span>            : 
+<span class="lineNum">     377 </span><span class="lineCov">    2949120 :         buf_state = pg_atomic_read_u32(&amp;bufHdr-&gt;state);</span>
+<span class="lineNum">     378 </span>            : 
+<span class="lineNum">     379 </span><span class="lineCov">    3018334 :         if ((buf_state &amp; BM_TAG_VALID) &amp;&amp;</span>
+<span class="lineNum">     380 </span><span class="lineCov">      73184 :             RelFileNodeEquals(bufHdr-&gt;tag.rnode, rnode))</span>
+<span class="lineNum">     381 </span>            :         {
+<span class="lineNum">     382 </span><span class="lineCov">       3970 :             if (LocalRefCount[i] != 0)</span>
+<span class="lineNum">     383 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;block %u of %s is still referenced (local %u)&quot;,</span>
+<span class="lineNum">     384 </span>            :                      bufHdr-&gt;tag.blockNum,
+<span class="lineNum">     385 </span>            :                      relpathbackend(bufHdr-&gt;tag.rnode, MyBackendId,
+<span class="lineNum">     386 </span>            :                                     bufHdr-&gt;tag.forkNum),
+<span class="lineNum">     387 </span>            :                      LocalRefCount[i]);
+<span class="lineNum">     388 </span>            :             /* Remove entry from hashtable */
+<span class="lineNum">     389 </span><span class="lineCov">       3970 :             hresult = (LocalBufferLookupEnt *)</span>
+<span class="lineNum">     390 </span><span class="lineCov">       3970 :                 hash_search(LocalBufHash, (void *) &amp;bufHdr-&gt;tag,</span>
+<span class="lineNum">     391 </span>            :                             HASH_REMOVE, NULL);
+<span class="lineNum">     392 </span><span class="lineCov">       3970 :             if (!hresult)       /* shouldn't happen */</span>
+<span class="lineNum">     393 </span><span class="lineNoCov">          0 :                 elog(ERROR, &quot;local buffer hash table corrupted&quot;);</span>
+<span class="lineNum">     394 </span>            :             /* Mark buffer invalid */
+<span class="lineNum">     395 </span><span class="lineCov">       3970 :             CLEAR_BUFFERTAG(bufHdr-&gt;tag);</span>
+<span class="lineNum">     396 </span><span class="lineCov">       3970 :             buf_state &amp;= ~BUF_FLAG_MASK;</span>
+<span class="lineNum">     397 </span><span class="lineCov">       3970 :             buf_state &amp;= ~BUF_USAGECOUNT_MASK;</span>
+<span class="lineNum">     398 </span><span class="lineCov">       3970 :             pg_atomic_unlocked_write_u32(&amp;bufHdr-&gt;state, buf_state);</span>
+<span class="lineNum">     399 </span>            :         }
+<span class="lineNum">     400 </span>            :     }
+<span class="lineNum">     401 </span><span class="lineCov">       2948 : }</span>
+<span class="lineNum">     402 </span>            : 
+<span class="lineNum">     403 </span>            : /*
+<span class="lineNum">     404 </span>            :  * InitLocalBuffers -
+<span class="lineNum">     405 </span>            :  *    init the local buffer cache. Since most queries (esp. multi-user ones)
+<span class="lineNum">     406 </span>            :  *    don't involve local buffers, we delay allocating actual memory for the
+<span class="lineNum">     407 </span>            :  *    buffers until we need them; just make the buffer headers here.
+<a name="408"><span class="lineNum">     408 </span>            :  */</a>
+<span class="lineNum">     409 </span>            : static void
+<span class="lineNum">     410 </span><span class="lineCov">        112 : InitLocalBuffers(void)</span>
+<span class="lineNum">     411 </span>            : {
+<span class="lineNum">     412 </span><span class="lineCov">        112 :     int         nbufs = num_temp_buffers;</span>
+<span class="lineNum">     413 </span>            :     HASHCTL     info;
+<span class="lineNum">     414 </span>            :     int         i;
+<span class="lineNum">     415 </span>            : 
+<span class="lineNum">     416 </span>            :     /*
+<span class="lineNum">     417 </span>            :      * Parallel workers can't access data in temporary tables, because they
+<span class="lineNum">     418 </span>            :      * have no visibility into the local buffers of their leader.  This is a
+<span class="lineNum">     419 </span>            :      * convenient, low-cost place to provide a backstop check for that.  Note
+<span class="lineNum">     420 </span>            :      * that we don't wish to prevent a parallel worker from accessing catalog
+<span class="lineNum">     421 </span>            :      * metadata about a temp table, so checks at higher levels would be
+<span class="lineNum">     422 </span>            :      * inappropriate.
+<span class="lineNum">     423 </span>            :      */
+<span class="lineNum">     424 </span><span class="lineCov">        112 :     if (IsParallelWorker())</span>
+<span class="lineNum">     425 </span><span class="lineNoCov">          0 :         ereport(ERROR,</span>
+<span class="lineNum">     426 </span>            :                 (errcode(ERRCODE_INVALID_TRANSACTION_STATE),
+<span class="lineNum">     427 </span>            :                  errmsg(&quot;cannot access temporary tables during a parallel operation&quot;)));
+<span class="lineNum">     428 </span>            : 
+<span class="lineNum">     429 </span>            :     /* Allocate and zero buffer headers and auxiliary arrays */
+<span class="lineNum">     430 </span><span class="lineCov">        112 :     LocalBufferDescriptors = (BufferDesc *) calloc(nbufs, sizeof(BufferDesc));</span>
+<span class="lineNum">     431 </span><span class="lineCov">        112 :     LocalBufferBlockPointers = (Block *) calloc(nbufs, sizeof(Block));</span>
+<span class="lineNum">     432 </span><span class="lineCov">        112 :     LocalRefCount = (int32 *) calloc(nbufs, sizeof(int32));</span>
+<span class="lineNum">     433 </span><span class="lineCov">        112 :     if (!LocalBufferDescriptors || !LocalBufferBlockPointers || !LocalRefCount)</span>
+<span class="lineNum">     434 </span><span class="lineNoCov">          0 :         ereport(FATAL,</span>
+<span class="lineNum">     435 </span>            :                 (errcode(ERRCODE_OUT_OF_MEMORY),
+<span class="lineNum">     436 </span>            :                  errmsg(&quot;out of memory&quot;)));
+<span class="lineNum">     437 </span>            : 
+<span class="lineNum">     438 </span><span class="lineCov">        112 :     nextFreeLocalBuf = 0;</span>
+<span class="lineNum">     439 </span>            : 
+<span class="lineNum">     440 </span>            :     /* initialize fields that need to start off nonzero */
+<span class="lineNum">     441 </span><span class="lineCov">     114800 :     for (i = 0; i &lt; nbufs; i++)</span>
+<span class="lineNum">     442 </span>            :     {
+<span class="lineNum">     443 </span><span class="lineCov">     114688 :         BufferDesc *buf = GetLocalBufferDescriptor(i);</span>
+<span class="lineNum">     444 </span>            : 
+<span class="lineNum">     445 </span>            :         /*
+<span class="lineNum">     446 </span>            :          * negative to indicate local buffer. This is tricky: shared buffers
+<span class="lineNum">     447 </span>            :          * start with 0. We have to start with -2. (Note that the routine
+<span class="lineNum">     448 </span>            :          * BufferDescriptorGetBuffer adds 1 to buf_id so our first buffer id
+<span class="lineNum">     449 </span>            :          * is -1.)
+<span class="lineNum">     450 </span>            :          */
+<span class="lineNum">     451 </span><span class="lineCov">     114688 :         buf-&gt;buf_id = -i - 2;</span>
+<span class="lineNum">     452 </span>            : 
+<span class="lineNum">     453 </span>            :         /*
+<span class="lineNum">     454 </span>            :          * Intentionally do not initialize the buffer's atomic variable
+<span class="lineNum">     455 </span>            :          * (besides zeroing the underlying memory above). That way we get
+<span class="lineNum">     456 </span>            :          * errors on platforms without atomics, if somebody (re-)introduces
+<span class="lineNum">     457 </span>            :          * atomic operations for local buffers.
+<span class="lineNum">     458 </span>            :          */
+<span class="lineNum">     459 </span>            :     }
+<span class="lineNum">     460 </span>            : 
+<span class="lineNum">     461 </span>            :     /* Create the lookup hash table */
+<span class="lineNum">     462 </span><span class="lineCov">        112 :     MemSet(&amp;info, 0, sizeof(info));</span>
+<span class="lineNum">     463 </span><span class="lineCov">        112 :     info.keysize = sizeof(BufferTag);</span>
+<span class="lineNum">     464 </span><span class="lineCov">        112 :     info.entrysize = sizeof(LocalBufferLookupEnt);</span>
+<span class="lineNum">     465 </span>            : 
+<span class="lineNum">     466 </span><span class="lineCov">        112 :     LocalBufHash = hash_create(&quot;Local Buffer Lookup Table&quot;,</span>
+<span class="lineNum">     467 </span>            :                                nbufs,
+<span class="lineNum">     468 </span>            :                                &amp;info,
+<span class="lineNum">     469 </span>            :                                HASH_ELEM | HASH_BLOBS);
+<span class="lineNum">     470 </span>            : 
+<span class="lineNum">     471 </span><span class="lineCov">        112 :     if (!LocalBufHash)</span>
+<span class="lineNum">     472 </span><span class="lineNoCov">          0 :         elog(ERROR, &quot;could not initialize local buffer hash table&quot;);</span>
+<span class="lineNum">     473 </span>            : 
+<span class="lineNum">     474 </span>            :     /* Initialization done, mark buffers allocated */
+<span class="lineNum">     475 </span><span class="lineCov">        112 :     NLocBuffer = nbufs;</span>
+<span class="lineNum">     476 </span><span class="lineCov">        112 : }</span>
+<span class="lineNum">     477 </span>            : 
+<span class="lineNum">     478 </span>            : /*
+<span class="lineNum">     479 </span>            :  * GetLocalBufferStorage - allocate memory for a local buffer
+<span class="lineNum">     480 </span>            :  *
+<span class="lineNum">     481 </span>            :  * The idea of this function is to aggregate our requests for storage
+<span class="lineNum">     482 </span>            :  * so that the memory manager doesn't see a whole lot of relatively small
+<span class="lineNum">     483 </span>            :  * requests.  Since we'll never give back a local buffer once it's created
+<span class="lineNum">     484 </span>            :  * within a particular process, no point in burdening memmgr with separately
+<span class="lineNum">     485 </span>            :  * managed chunks.
+<a name="486"><span class="lineNum">     486 </span>            :  */</a>
+<span class="lineNum">     487 </span>            : static Block
+<span class="lineNum">     488 </span><span class="lineCov">       4552 : GetLocalBufferStorage(void)</span>
+<span class="lineNum">     489 </span>            : {
+<span class="lineNum">     490 </span>            :     static char *cur_block = NULL;
+<span class="lineNum">     491 </span>            :     static int  next_buf_in_block = 0;
+<span class="lineNum">     492 </span>            :     static int  num_bufs_in_block = 0;
+<span class="lineNum">     493 </span>            :     static int  total_bufs_allocated = 0;
+<span class="lineNum">     494 </span>            :     static MemoryContext LocalBufferContext = NULL;
+<span class="lineNum">     495 </span>            : 
+<span class="lineNum">     496 </span>            :     char       *this_buf;
+<span class="lineNum">     497 </span>            : 
+<span class="lineNum">     498 </span><span class="lineCov">       4552 :     Assert(total_bufs_allocated &lt; NLocBuffer);</span>
+<span class="lineNum">     499 </span>            : 
+<span class="lineNum">     500 </span><span class="lineCov">       4552 :     if (next_buf_in_block &gt;= num_bufs_in_block)</span>
+<span class="lineNum">     501 </span>            :     {
+<span class="lineNum">     502 </span>            :         /* Need to make a new request to memmgr */
+<span class="lineNum">     503 </span>            :         int         num_bufs;
+<span class="lineNum">     504 </span>            : 
+<span class="lineNum">     505 </span>            :         /*
+<span class="lineNum">     506 </span>            :          * We allocate local buffers in a context of their own, so that the
+<span class="lineNum">     507 </span>            :          * space eaten for them is easily recognizable in MemoryContextStats
+<span class="lineNum">     508 </span>            :          * output.  Create the context on first use.
+<span class="lineNum">     509 </span>            :          */
+<span class="lineNum">     510 </span><span class="lineCov">        174 :         if (LocalBufferContext == NULL)</span>
+<span class="lineNum">     511 </span><span class="lineCov">        112 :             LocalBufferContext =</span>
+<span class="lineNum">     512 </span><span class="lineCov">        112 :                 AllocSetContextCreate(TopMemoryContext,</span>
+<span class="lineNum">     513 </span>            :                                       &quot;LocalBufferContext&quot;,
+<span class="lineNum">     514 </span>            :                                       ALLOCSET_DEFAULT_SIZES);
+<span class="lineNum">     515 </span>            : 
+<span class="lineNum">     516 </span>            :         /* Start with a 16-buffer request; subsequent ones double each time */
+<span class="lineNum">     517 </span><span class="lineCov">        174 :         num_bufs = Max(num_bufs_in_block * 2, 16);</span>
+<span class="lineNum">     518 </span>            :         /* But not more than what we need for all remaining local bufs */
+<span class="lineNum">     519 </span><span class="lineCov">        174 :         num_bufs = Min(num_bufs, NLocBuffer - total_bufs_allocated);</span>
+<span class="lineNum">     520 </span>            :         /* And don't overflow MaxAllocSize, either */
+<span class="lineNum">     521 </span><span class="lineCov">        174 :         num_bufs = Min(num_bufs, MaxAllocSize / BLCKSZ);</span>
+<span class="lineNum">     522 </span>            : 
+<span class="lineNum">     523 </span><span class="lineCov">        174 :         cur_block = (char *) MemoryContextAlloc(LocalBufferContext,</span>
+<span class="lineNum">     524 </span><span class="lineCov">        174 :                                                 num_bufs * BLCKSZ);</span>
+<span class="lineNum">     525 </span><span class="lineCov">        174 :         next_buf_in_block = 0;</span>
+<span class="lineNum">     526 </span><span class="lineCov">        174 :         num_bufs_in_block = num_bufs;</span>
+<span class="lineNum">     527 </span>            :     }
+<span class="lineNum">     528 </span>            : 
+<span class="lineNum">     529 </span>            :     /* Allocate next buffer in current memory block */
+<span class="lineNum">     530 </span><span class="lineCov">       4552 :     this_buf = cur_block + next_buf_in_block * BLCKSZ;</span>
+<span class="lineNum">     531 </span><span class="lineCov">       4552 :     next_buf_in_block++;</span>
+<span class="lineNum">     532 </span><span class="lineCov">       4552 :     total_bufs_allocated++;</span>
+<span class="lineNum">     533 </span>            : 
+<span class="lineNum">     534 </span><span class="lineCov">       4552 :     return (Block) this_buf;</span>
+<span class="lineNum">     535 </span>            : }
+<span class="lineNum">     536 </span>            : 
+<span class="lineNum">     537 </span>            : /*
+<span class="lineNum">     538 </span>            :  * CheckForLocalBufferLeaks - ensure this backend holds no local buffer pins
+<span class="lineNum">     539 </span>            :  *
+<span class="lineNum">     540 </span>            :  * This is just like CheckForBufferLeaks(), but for local buffers.
+<a name="541"><span class="lineNum">     541 </span>            :  */</a>
+<span class="lineNum">     542 </span>            : static void
+<span class="lineNum">     543 </span><span class="lineCov">      72536 : CheckForLocalBufferLeaks(void)</span>
+<span class="lineNum">     544 </span>            : {
+<span class="lineNum">     545 </span>            : #ifdef USE_ASSERT_CHECKING
+<span class="lineNum">     546 </span><span class="lineCov">      72536 :     if (LocalRefCount)</span>
+<span class="lineNum">     547 </span>            :     {
+<span class="lineNum">     548 </span><span class="lineCov">      21902 :         int         RefCountErrors = 0;</span>
+<span class="lineNum">     549 </span>            :         int         i;
+<span class="lineNum">     550 </span>            : 
+<span class="lineNum">     551 </span><span class="lineCov">   22449550 :         for (i = 0; i &lt; NLocBuffer; i++)</span>
+<span class="lineNum">     552 </span>            :         {
+<span class="lineNum">     553 </span><span class="lineCov">   22427648 :             if (LocalRefCount[i] != 0)</span>
+<span class="lineNum">     554 </span>            :             {
+<span class="lineNum">     555 </span><span class="lineNoCov">          0 :                 Buffer      b = -i - 1;</span>
+<span class="lineNum">     556 </span>            : 
+<span class="lineNum">     557 </span><span class="lineNoCov">          0 :                 PrintBufferLeakWarning(b);</span>
+<span class="lineNum">     558 </span><span class="lineNoCov">          0 :                 RefCountErrors++;</span>
+<span class="lineNum">     559 </span>            :             }
+<span class="lineNum">     560 </span>            :         }
+<span class="lineNum">     561 </span><span class="lineCov">      21902 :         Assert(RefCountErrors == 0);</span>
+<span class="lineNum">     562 </span>            :     }
+<span class="lineNum">     563 </span>            : #endif
+<span class="lineNum">     564 </span><span class="lineCov">      72536 : }</span>
+<span class="lineNum">     565 </span>            : 
+<span class="lineNum">     566 </span>            : /*
+<span class="lineNum">     567 </span>            :  * AtEOXact_LocalBuffers - clean up at end of transaction.
+<span class="lineNum">     568 </span>            :  *
+<span class="lineNum">     569 </span>            :  * This is just like AtEOXact_Buffers, but for local buffers.
+<a name="570"><span class="lineNum">     570 </span>            :  */</a>
+<span class="lineNum">     571 </span>            : void
+<span class="lineNum">     572 </span><span class="lineCov">      71316 : AtEOXact_LocalBuffers(bool isCommit)</span>
+<span class="lineNum">     573 </span>            : {
+<span class="lineNum">     574 </span><span class="lineCov">      71316 :     CheckForLocalBufferLeaks();</span>
+<span class="lineNum">     575 </span><span class="lineCov">      71316 : }</span>
+<span class="lineNum">     576 </span>            : 
+<span class="lineNum">     577 </span>            : /*
+<span class="lineNum">     578 </span>            :  * AtProcExit_LocalBuffers - ensure we have dropped pins during backend exit.
+<span class="lineNum">     579 </span>            :  *
+<span class="lineNum">     580 </span>            :  * This is just like AtProcExit_Buffers, but for local buffers.
+<a name="581"><span class="lineNum">     581 </span>            :  */</a>
+<span class="lineNum">     582 </span>            : void
+<span class="lineNum">     583 </span><span class="lineCov">       1220 : AtProcExit_LocalBuffers(void)</span>
+<span class="lineNum">     584 </span>            : {
+<span class="lineNum">     585 </span>            :     /*
+<span class="lineNum">     586 </span>            :      * We shouldn't be holding any remaining pins; if we are, and assertions
+<span class="lineNum">     587 </span>            :      * aren't enabled, we'll fail later in DropRelFileNodeBuffers while trying
+<span class="lineNum">     588 </span>            :      * to drop the temp rels.
+<span class="lineNum">     589 </span>            :      */
+<span class="lineNum">     590 </span><span class="lineCov">       1220 :     CheckForLocalBufferLeaks();</span>
+<span class="lineNum">     591 </span><span class="lineCov">       1220 : }</span>
+</pre>
+      </td>
+    </tr>
+  </table>
+  <br>
+
+  <table width="100%" border=0 cellspacing=0 cellpadding=0>
+    <tr><td class="ruler"><img src="../../../../glass.png" width=3 height=3 alt=""></td></tr>
+    <tr><td class="versionInfo">Generated by: <a href="http://ltp.sourceforge.net/coverage/lcov.php" target="_parent">LCOV version 1.13</a></td></tr>
+  </table>
+  <br>
+
+</body>
+</html>
